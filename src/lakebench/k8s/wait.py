@@ -500,7 +500,7 @@ def wait_for_deployment_ready(
 
     Fails fast when a pod enters a terminal Waiting state (ImagePullBackOff,
     CrashLoopBackOff, ...), rather than polling `ready_replicas` for the full
-    timeout and returning a bare "not ready" (LB-070 shape: a Helm crash loop
+    timeout and returning a bare "not ready" (a Helm crash loop
     was masked as an SCC rollout timeout for 10 minutes because the only
     signal was `ready >= desired`). On timeout, the message names each pod's
     state so the caller can act.
@@ -567,7 +567,7 @@ def wait_for_statefulset_ready(
 ) -> WaitResult:
     """Wait for a StatefulSet to have all replicas ready.
 
-    Same LB-070 shape as ``wait_for_deployment_ready`` -- Postgres and
+    Same shape as ``wait_for_deployment_ready`` -- Postgres and
     Trino workers both run as StatefulSets, and a bad image tag or
     misconfigured probe used to burn the full timeout with a bare
     "not ready" message. Terminal-Waiting fast-fail and per-pod

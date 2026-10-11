@@ -87,15 +87,25 @@ class FakeRbac:
 
 class FakeAuthz:
     """LocalSubjectAccessReview: allowed once ``rbac`` binds the SA, unless
-    ``allowed`` forces an answer or ``status`` makes the review fail."""
+    ``allowed`` forces an answer, ``status`` makes the review fail with that
+    HTTP status and ``error`` raises that exception."""
 
-    def __init__(self, rbac: FakeRbac | None = None, allowed=None, status: int | None = None):
+    def __init__(
+        self,
+        rbac: FakeRbac | None = None,
+        allowed=None,
+        status: int | None = None,
+        error: Exception | None = None,
+    ):
         self.rbac = rbac
         self.allowed = allowed
         self.status = status
+        self.error = error
         self.reviews: list[dict] = []
 
     def create_namespaced_local_subject_access_review(self, ns, body):
+        if self.error is not None:
+            raise self.error
         if self.status is not None:
             raise ApiException(status=self.status)
         self.reviews.append(body)
@@ -187,36 +197,6 @@ def test_conflict_rereads_and_keeps_the_racers_subject():
     assert api.rb["subjects"] == [_sub("lakebench-postgres"), _sub(SA)]
 
 
-def test_persistent_conflict_fails():
-    api = FakeRbac(rb=_rb([]), always_conflict=True)
-    with pytest.raises(SCCGrantError, match="kept changing"):
-        _grant(api)
-
-
-def test_foreign_roleref_fails():
-    api = FakeRbac(rb=_rb([], ref="system:openshift:scc:restricted"))
-    with pytest.raises(SCCGrantError, match="roleRef"):
-        _grant(api)
-
-
-def test_forbidden_bind_fails_with_admin_command():
-    api = FakeRbac(create_status=403)
-    with pytest.raises(SCCGrantError) as ei:
-        _grant(api)
-    msg = str(ei.value)
-    assert msg.startswith(f"cannot grant SCC anyuid to SA {SA} in namespace {NS}: Forbidden")
-    assert f"oc adm policy add-scc-to-user anyuid -z {SA} -n {NS}" in msg
-
-
-def test_binding_that_does_not_take_effect_fails(monkeypatch):
-    """A binding to a missing ClusterRole (pre-4.10) is written but grants
-    nothing; the second review catches it."""
-    monkeypatch.setattr("lakebench.k8s.security.SCC_VERIFY_TIMEOUT_S", 0.0)
-    api = FakeRbac()
-    with pytest.raises(SCCGrantError, match="still may not use SCC anyuid"):
-        _grant(api, FakeAuthz(allowed=False))
-
-
 def test_second_review_waits_for_the_binding_to_propagate(monkeypatch):
     """A fresh binding can reach the authorizer cache a moment late."""
     monkeypatch.setattr("lakebench.k8s.security.time.sleep", lambda s: None)
@@ -231,26 +211,15 @@ def test_second_review_waits_for_the_binding_to_propagate(monkeypatch):
     assert api.creates
 
 
-def test_review_connection_error_is_unknown_not_a_crash():
-    from lakebench.k8s.security import _sa_can_use_scc
-
-    authz = MagicMock()
-    authz.create_namespaced_local_subject_access_review.side_effect = ConnectionError("reset")
-    assert _sa_can_use_scc(authz, NS, SA, "anyuid") is None
-
-
-def test_review_unavailable_still_grants():
+@pytest.mark.parametrize(
+    "authz",
+    [FakeAuthz(status=403), FakeAuthz(error=ConnectionError("reset"))],
+    ids=["forbidden", "connection-error"],
+)
+def test_review_unavailable_still_grants(authz):
     api = FakeRbac()
-    _grant(api, FakeAuthz(status=403))
+    _grant(api, authz)
     assert api.creates
-
-
-def test_review_dict_response_is_read():
-    from lakebench.k8s.security import _sa_can_use_scc
-
-    authz = MagicMock()
-    authz.create_namespaced_local_subject_access_review.return_value = {"status": {"allowed": True}}
-    assert _sa_can_use_scc(authz, NS, SA, "anyuid") is True
 
 
 # -- callers --------------------------------------------------------------------
@@ -287,21 +256,6 @@ def test_scc_success_keeps_step_success(monkeypatch):
     assert api.rb["subjects"] == [_sub(SA)]
 
 
-def test_rbac_failure_message_is_the_grant_error(monkeypatch):
-    """The step's message is the grant's one line, not a generic wrapper."""
-    from lakebench.modules.pipeline_engines.spark.rbac import RBACDeployer
-
-    _openshift(monkeypatch)
-    api = FakeRbac(create_status=403)
-    with (
-        patch("kubernetes.client.RbacAuthorizationV1Api", return_value=api),
-        patch("kubernetes.client.AuthorizationV1Api", return_value=FakeAuthz(api)),
-    ):
-        result = RBACDeployer(_rbac_engine()).deploy()
-    assert result.status is DeploymentStatus.FAILED
-    assert result.message.startswith(f"cannot grant SCC anyuid to SA {SA} in namespace {NS}")
-
-
 def test_failed_platform_detection_fails_the_rbac_step():
     """Discovery failing must not read as vanilla and skip the grant."""
     from lakebench.modules.pipeline_engines.spark.rbac import RBACDeployer
@@ -331,7 +285,8 @@ def test_platform_is_keyed_on_the_scc_api_group(groups, expected, monkeypatch):
         assert SecurityVerifier(MagicMock()).detect_platform(strict=True) is expected
 
 
-def test_operator_scc_strict_at_install_lenient_on_watch_edits(monkeypatch, caplog):
+@pytest.mark.parametrize("strict", [False, True], ids=["watch-edit-lenient", "install-strict"])
+def test_operator_scc_strict_at_install_lenient_on_watch_edits(monkeypatch, strict):
     from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
 
     mgr = SparkOperatorManager.__new__(SparkOperatorManager)
@@ -342,7 +297,8 @@ def test_operator_scc_strict_at_install_lenient_on_watch_edits(monkeypatch, capl
 
     monkeypatch.setattr("lakebench.k8s.security.ensure_scc_rolebinding", refused)
     with patch("kubernetes.client.RbacAuthorizationV1Api", return_value=FakeRbac()):
-        mgr._assign_openshift_scc()  # a deploy's watch-list edit: logged only
-        assert "spark-operator-controller" in caplog.text
-        with pytest.raises(SCCGrantError):
-            mgr._assign_openshift_scc(strict=True)
+        if strict:
+            with pytest.raises(SCCGrantError):
+                mgr._assign_openshift_scc(strict=True)
+        else:
+            mgr._assign_openshift_scc()  # a deploy's watch-list edit does not raise

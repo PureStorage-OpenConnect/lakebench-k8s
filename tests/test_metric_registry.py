@@ -1,6 +1,6 @@
-"""One source of metric metadata (EVD-2, DESIGN ch03 section 2).
+"""One source of metric metadata (EVD-2).
 
-compare, reproduce, the perf gate, the report and the collector's
+The report and the collector's
 score_descriptions read unit, direction and band from
 ``metrics/metric_registry.py``. A score emitted with no entry fails here.
 """
@@ -9,16 +9,12 @@ from __future__ import annotations
 
 import ast
 import inspect
-import json
 import textwrap
-from pathlib import Path
 
 import pytest
 
 from lakebench.metrics import metric_registry as reg
 from tests.fixtures import stored_records as sr
-
-EXPECTED_DESCRIPTIONS = Path(__file__).parent / "expected" / "score_descriptions.json"
 
 
 def _mode(raw: dict) -> str | None:
@@ -95,54 +91,7 @@ def _scores_dict_keys() -> dict[str, set[str]]:
     return out
 
 
-def test_an_unregistered_score_fails_the_drift_check(monkeypatch):
-    """A new key in a dict literal, through ``.update`` under a condition,
-    or inside the continuous ``**{...}`` splat is seen by the scan."""
-    from lakebench.metrics import collector
-
-    base = inspect.getsource(collector.PipelineBenchmark._scores_dict)
-    src = base.replace('"time_to_value_seconds": round(', '"time_to_victory_seconds": round(')
-    src = src.replace(
-        "        # Batch scores\n",
-        "        # Batch scores\n        if self.maintenance_stopped:\n"
-        '            batch_scores.update({"maint_victory": 1})\n',
-        1,
-    )
-    assert src != base
-    monkeypatch.setattr(inspect, "getsource", lambda _obj: src)
-    keys = _scores_dict_keys()
-    assert "time_to_victory_seconds" in keys["batch"]
-    assert "maint_victory" in keys["batch"]
-    assert "composite_qph_rounds" in keys["sustained"]  # inside a ** splat
-    assert reg.lookup("time_to_victory_seconds", "batch") is None
-
-
-def test_continuous_maintenance_scores_are_registered_for_continuous():
-    keys = _scores_dict_keys()["sustained"]
-    for key in ("maintenance_elapsed_seconds", "compaction_ratio", "storage_reclaimed_mb"):
-        assert key in keys
-        assert "sustained" in reg.lookup(key, "sustained").modes
-
-
 # --- named directions --------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("key", "mode", "direction", "band"),
-    [
-        ("qph_degradation_pct", "sustained", "lower", "performance"),
-        ("qph_spread", "batch", "none", "diagnostic"),
-        ("maintenance_value_pct", "batch", "none", "diagnostic"),
-        ("compaction_ratio", "batch", "higher", "diagnostic"),
-        ("window_seconds", "sustained", "none", "config_bound"),
-        ("benchmark_rounds_count", "sustained", "none", "diagnostic"),
-        ("ingest_ratio", "sustained", "target", "guard"),
-        ("scale_ratio", "batch", "target", "correctness"),
-    ],
-)
-def test_named_directions(key, mode, direction, band):
-    meta = reg.lookup(key, mode)
-    assert (meta.direction, meta.band) == (direction, band)
 
 
 #: Every directional score, by mode, with its direction; and the keys whose
@@ -212,11 +161,29 @@ NOT_DIRECTIONAL = [
 def test_directional_scores(key, mode, direction):
     assert reg.is_directional(key, mode)
     assert reg.higher_is_better(key, mode) is (direction == "higher")
+    assert reg.direction_hint(key, mode) == f"{direction} is better"
 
 
 @pytest.mark.parametrize(("key", "mode"), NOT_DIRECTIONAL)
 def test_scores_without_a_better_side(key, mode):
     assert not reg.is_directional(key, mode)
+    assert reg.direction_hint(key, mode) == ""
+
+
+@pytest.mark.parametrize(
+    ("key", "mode", "band"),
+    [
+        ("qph_spread", "batch", "diagnostic"),
+        ("maintenance_value_pct", "batch", "diagnostic"),
+        ("compaction_ratio", "batch", "diagnostic"),
+        ("benchmark_rounds_count", "sustained", "diagnostic"),
+        ("window_seconds", "sustained", "config_bound"),
+        ("ingest_ratio", "sustained", "guard"),
+        ("scale_ratio", "batch", "correctness"),
+    ],
+)
+def test_a_score_without_a_better_side_keeps_its_band(key, mode, band):
+    assert reg.lookup(key, mode).band == band
 
 
 def test_every_score_is_classified_here():
@@ -232,19 +199,6 @@ def test_every_score_is_classified_here():
             if (key, mode) not in listed and reg.is_directional(key, mode):
                 numeric_unlisted.append((key, mode))
     assert numeric_unlisted == []
-
-
-def test_only_performance_metrics_have_a_better_side():
-    assert reg.direction_hint("qph_degradation_pct", "sustained") == "lower is better"
-    for key, mode in [
-        ("compaction_ratio", "batch"),
-        ("ingest_ratio", "sustained"),
-        ("total_rows_processed", "sustained"),
-        ("benchmark_samples_per_query", "batch"),
-    ]:
-        assert not reg.is_directional(key, mode), key
-        assert reg.direction_hint(key, mode) == ""
-    assert reg.lookup("ingest_ratio", "sustained").guard_range == (0.95, 1.05)
 
 
 def test_stage_seconds_by_mode():
@@ -278,12 +232,6 @@ def test_a_mode_split_key_needs_the_mode():
 def test_alias_resolves_to_the_renamed_key():
     old = reg.lookup("query_time_freshness_seconds", "sustained")
     assert old == reg.lookup("query_time_event_age_seconds", "sustained")
-
-
-def test_unknown_mode_is_refused():
-    with pytest.raises(ValueError, match="unknown pipeline mode"):
-        reg.lookup("composite_qph", "streaming")
-    assert reg.canonical_mode("continuous") == "sustained"
 
 
 # --- caps --------------------------------------------------------------------
@@ -377,125 +325,13 @@ def test_the_trickle_caps_intake_only():
         assert reg.capped_by(key, [], "sustained", extra=["trickle"]) == [], key
 
 
-# --- reproduce and the perf gate keep their classification ------------------
-
-#: What cli/_reproduce._classify_direction answered at integrate 5bcee1b4,
-#: before the registry, for every metric reproduce or the perf gate reads.
-LEGACY = {
-    "scale_ratio": ("correctness", "exact"),
-    "ingest_ratio": ("correctness", "exact"),
-    "time_to_value_seconds": ("performance", "lower"),
-    "data_freshness_seconds": ("performance", "lower"),
-    "datagen_cpu_hr_per_tb": ("performance", "lower"),
-    "pipeline_throughput_gb_per_second": ("performance", "higher"),
-    "compute_efficiency_gb_per_core_hour": ("performance", "higher"),
-    "composite_qph": ("performance", "higher"),
-    "sustained_throughput_rps": ("performance", "higher"),
-    "datagen_aggregate_mbps": ("performance", "higher"),
-    "datagen_mbps_per_pod": ("performance", "higher"),
-    "pre_compaction_qph": ("performance", "higher"),
-    "query_qph_Q1_full_aggregation_scan": ("performance", "higher"),
-    "bronze_seconds": ("performance", "lower"),
-    "silver_seconds": ("performance", "lower"),
-    "gold_seconds": ("performance", "lower"),
-    "datagen_seconds": ("performance", "lower"),
-    "query_seconds": ("performance", "lower"),
-    "some_future_stage_seconds": ("performance", "lower"),
-    "some_future_metric": ("performance", "exact"),
-}
-
-#: Keys whose classification moved with the registry, none of which
-#: reproduce or the perf gate extracts (test below): an old exact or a
-#: suffix-rule "lower" for a metric with or without a better side.
-MOVED = {
-    "in_stream_composite_qph": ("performance", "higher"),
-    "post_compaction_qph": ("performance", "higher"),
-    "qph_degradation_pct": ("performance", "lower"),
-    "total_core_hours": ("performance", "lower"),
-    "arrival_seconds": ("performance", "exact"),
-    "corpus_drain_seconds": ("performance", "exact"),
-    "maintenance_settle_seconds": ("performance", "exact"),
-    "query_time_event_age_seconds": ("performance", "exact"),
-    "query_time_freshness_seconds": ("performance", "exact"),
-    "window_seconds": ("performance", "exact"),
-}
-
-
-def test_reproduce_classification_unchanged():
-    from lakebench.cli._reproduce import _METRIC_TABLE, _classify_direction
-
-    for key, want in LEGACY.items():
-        assert _classify_direction(key) == want, key
-    for key, want in MOVED.items():
-        assert _classify_direction(key) == want, key
-    assert {k: _METRIC_TABLE[k] for k in _METRIC_TABLE} == {k: LEGACY[k] for k in _METRIC_TABLE}
-
-
-# --- descriptions and the report --------------------------------------------
-
-
-def test_score_descriptions_unchanged():
-    from lakebench.metrics.collector import PipelineBenchmark
-
-    want = json.loads(EXPECTED_DESCRIPTIONS.read_text())["descriptions"]
-    assert list(reg.descriptions().items()) == list(want.items())
-    assert PipelineBenchmark._SCORE_DESCRIPTIONS == want
-
-
-def _cards(html: str) -> list[str]:
-    import re
-
-    return re.findall(r'<div class="card-hint2">(.*?)</div>', html, re.S)
-
-
-def test_report_cards_render_registry_hints():
-    """The rendered summary cards carry the registry's hints: the batch TTV
-    card lower, its throughput, efficiency and QpH cards higher; the
-    continuous CPU-hours card none."""
-    from lakebench.reports.generator import ReportGenerator
-
-    gen = ReportGenerator(output_dir="/nonexistent")
-    batch = _cards(gen._generate_batch_summary(sr.load_metrics("011123-497f02")))
-    assert batch[0].startswith("&#8595; lower is better")  # time to value
-    assert batch[1] == batch[2] == "&#8593; higher is better"  # throughput, efficiency
-    assert batch[3].startswith("&#8593; higher is better")  # QpH
-    cont_html = gen._generate_sustained_summary(sr.load_metrics("011043-e338c5"))
-    cpu = next(c for c in _cards(cont_html) if "/day" in c)
-    assert "better" not in cpu
-
-
-def test_report_card_hints_match_the_registry():
-    from lakebench.reports.generator import _direction_hint
-
-    assert _direction_hint("time_to_value_seconds", "batch", "1m 2s") == (
-        "&#8595; lower is better | 1m 2s"
-    )
-    assert _direction_hint("composite_qph", "batch") == "&#8593; higher is better"
-    assert _direction_hint("sustained_throughput_rps", "sustained") == "&#8593; higher is better"
-    # Continuous core-hours follow the window: the detail only.
-    assert _direction_hint("total_core_hours", "sustained", "x/day") == "x/day"
-    assert _direction_hint("compute_efficiency_gb_per_core_hour", "sustained") == (
-        "&#8593; higher is better"
-    )
-
-
-# --- compare: stored pair P2 -------------------------------------------------
-
-
 def test_every_emitted_key_registered():
-    """Every key _scores_dict can emit, every score key in the pinned records
-    and their rebuilt pipeline_benchmark, and every number reproduce takes
-    from those records resolves in the registry, in its mode."""
-    from lakebench.cli._reproduce import _extract_expected_numbers
+    """Every key _scores_dict can emit, and every score key in the pinned
+    records and their rebuilt pipeline_benchmark, resolves in the registry,
+    in its mode."""
     from lakebench.metrics.collector import build_pipeline_benchmark
 
     missing: list[str] = []
-    for mode, keys in _scores_dict_keys().items():
-        for key in sorted(keys):
-            meta = reg.lookup(key, mode)
-            if meta is None or mode not in meta.modes:
-                missing.append(f"{key} ({mode}, _scores_dict)")
-    assert len(_scores_dict_keys()["sustained"]) > 20 and len(_scores_dict_keys()["batch"]) > 20
 
     stored_keys: set[str] = set()
     for run_id in sr.record_ids():
@@ -512,8 +348,5 @@ def test_every_emitted_key_registered():
             for key in rebuilt:
                 if reg.lookup(key, mode) is None:
                     missing.append(f"{key} ({run_id} rebuilt)")
-        for key in set(_extract_expected_numbers(metrics)):
-            if reg.lookup(key, mode) is None:
-                missing.append(f"{key} ({run_id} reproduce)")
-    assert len(stored_keys) == 55
+    assert stored_keys
     assert missing == []

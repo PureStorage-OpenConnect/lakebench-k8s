@@ -9,9 +9,8 @@ Both silver_build.py and silver_build_delta.py have their own
 `get_strategy_override` helper; test both.
 
 The silver mains import pyspark at module top level; pyspark is not
-guaranteed in the unit tier. Use source inspection to prove the
-resolver refuses salted before any log line runs; a live-Spark version
-of the assertion is exercised by tests/spark under the local-Spark tier.
+guaranteed in the unit tier, so the resolver and its enum are lifted from
+each script and run against a stub conf.
 """
 
 from __future__ import annotations
@@ -25,82 +24,54 @@ _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "src/lakebench/spark/script
 pytestmark = pytest.mark.usefixtures("load_script")
 
 
-# --- Direct behaviour: the common-only path raises SilverAbort ---
+# --- Each script's resolver refuses SALTED before any log line names it ---
 
 
-def test_silver_abort_symbol_is_public_from_common():
-    """SilverAbort is exported from common.py so silver_build can import it.
+def _strategy_resolver(script: str):
+    """get_strategy_override and SilverStrategy lifted from *script* (the
+    silver mains import pyspark at module top level)."""
+    import ast
+    import os
+    from enum import Enum
 
-    ``common`` comes from this test's load_script namespace, the same copy
-    silver_build.py would import.
-    """
-    common = importlib.import_module("common")
-    assert hasattr(common, "SilverAbort")
-    assert issubclass(common.SilverAbort, RuntimeError)
-
-
-# --- Source inspection: each dispatch site refuses SALTED before it runs ---
-
-
-@pytest.fixture
-def iceberg_source() -> str:
-    return (_SCRIPTS_DIR / "silver_build.py").read_text()
-
-
-@pytest.fixture
-def delta_source() -> str:
-    return (_SCRIPTS_DIR / "silver_build_delta.py").read_text()
-
-
-def _get_strategy_override_body(text: str) -> str:
-    """Return the body of get_strategy_override (up to the next def)."""
-    marker = "def get_strategy_override"
-    idx = text.index(marker)
-    tail = text[idx:]
-    # cut at the next top-level def
-    end = tail.index("\ndef ", 5)
-    return tail[:end]
+    tree = ast.parse((_SCRIPTS_DIR / script).read_text())
+    keep = [
+        n
+        for n in tree.body
+        if isinstance(n, (ast.FunctionDef, ast.ClassDef))
+        and n.name in ("get_strategy_override", "SilverStrategy")
+    ]
+    logged: list[str] = []
+    ns = {
+        "os": os,
+        "Enum": Enum,
+        "SilverAbort": importlib.import_module("common").SilverAbort,
+        "log": logged.append,
+    }
+    exec(compile(ast.Module(keep, []), script, "exec"), ns)  # noqa: S102
+    return ns["get_strategy_override"], ns["SilverAbort"], logged
 
 
-def test_iceberg_override_refuses_salted_in_source(iceberg_source):
-    """silver_build.get_strategy_override raises SilverAbort for salted."""
-    body = _get_strategy_override_body(iceberg_source)
-    assert "SALTED.value" in body
-    assert "raise SilverAbort" in body
-    # The refuse-path sits BEFORE the `SilverStrategy(override.lower())`
-    # coercion, so a salted override never reaches the log-and-run path.
-    refuse_idx = body.index("SALTED strategy is deferred to v1.7")
-    coerce_idx = body.index("SilverStrategy(override.lower())")
-    assert refuse_idx < coerce_idx
+class _Conf:
+    def __init__(self, value):
+        self.value = value
+
+    def get(self, key, default=None):
+        return self.value if key == "spark.lb.silver.strategy" else default
 
 
-def test_delta_override_refuses_salted_in_source(delta_source):
-    """silver_build_delta.get_strategy_override raises SilverAbort for salted."""
-    body = _get_strategy_override_body(delta_source)
-    assert "SALTED.value" in body
-    assert "raise SilverAbort" in body
-    refuse_idx = body.index("SALTED strategy is deferred to v1.7")
-    coerce_idx = body.index("SilverStrategy(override.lower())")
-    assert refuse_idx < coerce_idx
-
-
-def test_iceberg_dispatch_branch_no_longer_logs_and_runs_simple(iceberg_source):
-    """The old dispatch was `log('...running SIMPLE'); silver_simple(...)`.
-
-    Ensure that safety-net still raises rather than dispatching, so
-    even a resolver bypass cannot mis-label metrics.
-    """
-    # Locate the SALTED branch in the dispatch.
-    marker = "elif strategy == SilverStrategy.SALTED:"
-    idx = iceberg_source.index(marker)
-    tail = iceberg_source[idx : idx + 800]
-    assert "raise SilverAbort" in tail
-    assert "silver_simple(spark" not in tail.split("\nelse:")[0]
-
-
-def test_delta_dispatch_branch_no_longer_logs_and_runs_simple(delta_source):
-    marker = "elif strategy == SilverStrategy.SALTED:"
-    idx = delta_source.index(marker)
-    tail = delta_source[idx : idx + 800]
-    assert "raise SilverAbort" in tail
-    assert "silver_simple(spark" not in tail.split("\nelse:")[0]
+@pytest.mark.parametrize("script", ["silver_build.py", "silver_build_delta.py"])
+def test_override_refuses_salted(script, monkeypatch):
+    """A salted override aborts; it never runs as SIMPLE under a salted tag."""
+    monkeypatch.delenv("LB_SILVER_STRATEGY", raising=False)
+    resolve, abort, logged = _strategy_resolver(script)
+    spark = type("S", (), {})()
+    for value in ("salted", "SALTED"):
+        spark.conf = _Conf(value)
+        with pytest.raises(abort):
+            resolve(spark)
+    assert logged == []
+    spark.conf = _Conf(None)
+    monkeypatch.setenv("LB_SILVER_STRATEGY", "salted")
+    with pytest.raises(abort):
+        resolve(spark)

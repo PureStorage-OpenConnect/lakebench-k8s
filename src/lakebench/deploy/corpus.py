@@ -1,6 +1,6 @@
 """The corpus series marker: what a generate wrote under the datagen prefix.
 
-``<bronze>/<datagen prefix>/_corpus/series.json`` (DESIGN ch05 section 7.1)
+``<bronze>/<datagen prefix>/_corpus/series.json``
 records the generate that made the corpus: the cycle count, the cycles whose
 datagen Job completed, every cycle's event-time window and the generation
 parameters (``generation``), with the image digest the datagen pods ran.
@@ -182,6 +182,16 @@ def _where(cfg: Any) -> tuple[str, str]:
 
     bucket = cfg.platform.storage.s3.buckets.bronze
     return bucket, bronze_datagen_prefix(cfg)
+
+
+def bronze_holds_data(cfg: Any, s3: Any) -> bool | None:
+    """Whether the datagen prefix in bronze holds any object of the corpus
+    (Lakebench's own keys aside); None when it cannot be listed."""
+    bucket, prefix = _where(cfg)
+    try:
+        return bool(s3.bucket_exists(bucket) and s3.has_user_objects(bucket, prefix))
+    except Exception:  # noqa: BLE001 -- the caller then reuses as before
+        return None
 
 
 def read_series(cfg: Any, s3: Any) -> SeriesRead:

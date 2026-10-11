@@ -26,9 +26,19 @@ pytest.importorskip("pyspark")
 pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
 
+# Net movement per iban over the three batches, debits negative:
+# GB01: -100 -50 -25 +5; US02: +100 -10 -3; DE03: +50 +10; FR04: +25 -5 +3.
+NET_MOVEMENT = {"GB01": -170.0, "US02": 87.0, "DE03": 60.0, "FR04": 23.0}
+
+
 def test_current_balance_matches_last_statement_in_a_fresh_jvm(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
+    # The latest statements are the opening balance plus the hand-computed
+    # net movement; the table under test is not its own oracle.
+    assert set(out["expected_map"]) == set(NET_MOVEMENT), out
+    for iban, net in NET_MOVEMENT.items():
+        assert out["expected_map"][iban] == out["opening"][iban] + net, (iban, out)
     # Every touched iban's current_balance matches its latest statement.
     assert out["mismatches"] == [], out
     # Untouched iban keeps its NULL current_balance -- the MERGE never
@@ -75,6 +85,17 @@ def _run(jars):
             seed_account(spark, iban)
 
         ss = bind_stream_module(spark)
+        from common import aml_opening_balance
+        from pyspark.sql.functions import lit, xxhash64
+
+        opening = {
+            iban: float(
+                spark.range(1)
+                .select(aml_opening_balance(xxhash64(lit(iban))).alias("o"))
+                .first()["o"]
+            )
+            for iban in ("GB01", "US02", "DE03", "FR04")
+        }
         spark.sparkContext.setJobGroup("stream-run-1", "test")
 
         for bid, rows in enumerate(batches):
@@ -108,6 +129,7 @@ def _run(jars):
         untouched = actual_map.get("IT99")
         out = {
             "expected_map": expected_map,
+            "opening": opening,
             "actual_map": actual_map,
             "mismatches": mismatches,
             "untouched_current_balance_is_null": untouched is None,

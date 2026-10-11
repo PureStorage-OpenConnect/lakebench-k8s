@@ -46,7 +46,7 @@ spec:
       {% endif %}
       containers:
         - name: datagen
-          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04') }}
+          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:5d7ce61a@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc') }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           args:
             - "--schema"
@@ -56,7 +56,7 @@ spec:
                drives the c360 customer id space. Rendering both on c360 made
                --scale silently dead there and dropped `scale` from provenance.
                Now schema-gated: financial gets --scale only, c360 gets
-               --customer-id-max only. LB-191 companion fix, 2026-09-28. #}
+               --customer-id-max only (2026-09-28). #}
             {% if datagen_scale_factor is defined and datagen_schema | default('customer360') == 'financial' %}
             - "--scale"
             - "{{ datagen_scale_factor }}"
@@ -78,7 +78,7 @@ spec:
             - "{{ datagen_mode | default('continuous') }}"
             - "--file-size-mb"
             - "{{ datagen_file_size_mb | default(64) }}"
-            {# --payload-kb dropped 2026-09-28 (LB-191 companion). Rust hardcodes 2 KiB.
+            {# --payload-kb dropped 2026-09-28. Rust hardcodes 2 KiB.
                No shipped template ever used anything else; a future variable payload
                comes back with per-payload bytes/row calibration. #}
             - "--bucket"
@@ -108,6 +108,14 @@ spec:
             - "--timestamp-end"
             - "{{ datagen_timestamp_end }}"
             {% endif %}
+            {% if datagen_deliver_until is defined %}
+            - "--deliver-until"
+            - "{{ datagen_deliver_until }}"
+            {% endif %}
+            {% if datagen_corpus_months is defined and datagen_corpus_months %}
+            - "--corpus-months"
+            - "{{ datagen_corpus_months }}"
+            {% endif %}
             {% if datagen_cycles is defined and datagen_cycles > 1 %}
             - "--cycle"
             - "{{ datagen_cycle }}"
@@ -120,7 +128,7 @@ spec:
             {# --duration removed 2026-09-28 (Wave 2 D8). The Rust binary never
                parsed it; deploy/datagen.py no longer populates the context
                var. Continuous pipelines get their arrival window from the
-               pipeline-side trickle-read (LB-156). #}
+               pipeline-side trickle-read. #}
           env:
             # JOB_COMPLETION_INDEX is automatically set by Kubernetes (0, 1, 2, ...)
             # Used as default --node-id in generate.py
@@ -130,7 +138,7 @@ spec:
               value: "{{ s3_region }}"
             # The Rust S3 sink reads AWS_REGION (object_store); without it,
             # PUTs are signed for us-east-1, which region-strict backends
-            # (Garage, AWS) reject. Same class as LB-052 on the Spark side.
+            # (Garage, AWS) reject. Same class as fs.s3a.endpoint.region on the Spark side.
             - name: AWS_REGION
               value: "{{ s3_region }}"
             - name: S3_PATH_STYLE
@@ -173,6 +181,10 @@ spec:
             {% if heldout %}
             - name: LB_HELDOUT_HASHES
               value: "{{ datagen_heldout_dir }}/heldout_hashes.json"
+            {% endif %}
+            {% if datagen_threads is defined %}
+            - name: CPU_LIMIT
+              value: "{{ datagen_threads }}"
             {% endif %}
             - name: LB_POD_CPU_REQUEST_MILLI
               valueFrom:

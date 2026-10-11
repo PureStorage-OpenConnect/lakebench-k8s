@@ -1,164 +1,93 @@
-# Component Reference: DuckDB
+# DuckDB
 
-## Overview
+Reference: configure the single-pod DuckDB query engine: config keys, query translation, limits and deploy behaviour.
 
-DuckDB is a lightweight, single-pod query engine option for Lakebench. It
-runs the benchmark query suite against Iceberg tables without requiring a
-distributed query cluster. DuckDB is best for small-scale runs, development,
-and environments where deploying Trino workers is impractical.
+## What it does
 
-When `architecture.query_engine.type` is set to `duckdb`, Lakebench deploys
-a DuckDB pod during `lakebench deploy` and tears it down during
-`lakebench destroy`. DuckDB cannot drop catalog tables, so destroy does not
-drop them on a DuckDB recipe: the catalog database goes with the namespace
-(when lakebench created it) and the table files go with the bucket cleanup of
-buckets the deployment owns.
+DuckDB is a single-pod query engine. It runs the benchmark query suite against Iceberg tables without a distributed query cluster. Use it for small runs, development, and where Trino workers are impractical.
 
-DuckDB reads Iceberg only. DuckDB with Delta is rejected at config load: its
-delta extension ignores DuckDB's S3 settings and cannot reach non-AWS S3.
+- Set `architecture.query_engine.type: duckdb`.
+- DuckDB reads Iceberg only. DuckDB with Delta is rejected at config load: its delta extension ignores DuckDB's S3 settings and cannot reach non-AWS S3.
+- Recipes: `hive-iceberg-spark-duckdb`, `polaris-iceberg-spark-duckdb` ([Recipes](recipes.md)).
 
-## Architecture
+## Version and image
 
-Lakebench deploys DuckDB as a single Kubernetes resource:
+`images.duckdb` sets the pod image; `duckdb.version` pins DuckDB. Defaults: [version matrix](compatibility-matrix.md#component-version-matrix).
 
-- **Deployment** -- `lakebench-duckdb` (1 replica). Runs a Python 3.11
-  container with the `duckdb` module installed at startup. The pod sleeps
-  indefinitely and serves as a query execution target.
-- **Service** -- `lakebench-duckdb` (headless). Used for pod discovery.
+## Configuration keys
 
-DuckDB has no coordinator/worker split, no external JDBC port, and no
-persistent state. Each benchmark query is executed via `kubectl exec` into
-the pod, which creates a fresh DuckDB connection, runs the SQL, and returns
-results as JSON.
+Defaults from `DuckDBConfig` in `config/schema.py`.
 
-### Extension installation
-
-The DuckDB wheel (`duckdb.version`, default 1.5.5) and the `httpfs`,
-`iceberg` and `avro` extensions are part of the deployment's dependency set:
-the deploy resolves them once onto the `lb-deps` server, and the DuckDB
-pod's init container copies them from there, checking every file's sha256
-(`pip install --no-index --require-hashes`, and `lb_deps.py fetch` for the
-extensions). Queries run with `autoinstall_known_extensions=false`, so a
-missing extension fails instead of downloading. The startup probe verifies
-both extensions load before the pod is marked ready. The pod needs no
-internet access; only the deploy-time resolve does (or a mirror, see
-`platform.deps`).
-
-### Iceberg table access
-
-DuckDB does not connect to the Hive Metastore or Polaris catalog. Instead,
-it reads Iceberg tables directly from S3 using `iceberg_scan()`:
-
-```sql
-SELECT * FROM iceberg_scan('s3://bucket/warehouse/namespace.db/table',
-                           allow_moved_paths := true)
-```
-
-The `adapt_query()` method in `DuckDBExecutor` rewrites catalog references
-(e.g., `lakehouse.silver.customer_interactions_enriched`) to `iceberg_scan()`
-calls with the correct S3 warehouse path. Hive Metastore uses the
-`namespace.db/` directory convention for warehouse layout.
-
-### SQL dialect translation
-
-Benchmark queries are written in Trino SQL (the canonical dialect). DuckDB's
-`adapt_query()` rewrites Trino-specific functions:
-
-- `date_add('month', N, expr)` -> `(expr + INTERVAL N MONTH)`
-- `date_diff(...)` -> `datediff(...)`
-- `cardinality(array)` -> `len(array)` (outside string literals, quoted
-  identifiers and comments)
-
-Catalog-qualified table names become `iceberg_scan()` (or `delta_scan()`)
-calls on the table's S3 path. The auxiliary AML tables (`silver_entities`,
-`gold_alerts` and the others) resolve to the bucket of the layer that
-writes them.
-
-Other Trino functions (COUNT, SUM, AVG, LAG, window frames) work unchanged
-in DuckDB.
-
-### Health checks
-
-- **Startup**: exec probe verifying `import duckdb; c=duckdb.connect(); c.load_extension('iceberg'); c.load_extension('httpfs')`
-- **Readiness/Liveness**: exec probe running `python -c "import duckdb; print('ok')"`
-
-### Cache behavior
-
-Each query creates a fresh DuckDB connection. There is no metadata cache
-to flush between queries -- every query reads Iceberg metadata from scratch.
-The `flush_cache()` operation is a no-op.
-
-## YAML Configuration
-
-DuckDB settings live under `architecture.query_engine` in the config file.
-
-```yaml
-architecture:
-  query_engine:
-    type: duckdb
-    duckdb:
-      cores: 2                       # CPU request and limit
-      memory: "4g"                   # Memory request and limit
-      catalog_name: "lakehouse"      # Iceberg catalog name in queries
-      version: "1.5.5"               # Pinned duckdb Python package version
-```
-
-### Field reference
-
-| Field | Default | Description |
+| Key | Default | Effect |
 |---|---|---|
-| `query_engine.type` | `trino` | Set to `duckdb` to deploy DuckDB instead of Trino. |
-| `duckdb.cores` | `2` | CPU request and limit for the DuckDB pod. |
-| `duckdb.memory` | `"4g"` | Memory request and limit for the DuckDB pod. |
-| `duckdb.catalog_name` | `"lakehouse"` | The catalog name used in SQL queries (e.g. `SELECT ... FROM lakehouse.silver.table`). Must match the catalog registered in Hive or Polaris. |
-| `duckdb.version` | `"1.5.5"` | Version of the `duckdb` Python package installed in the pod. Pinned so runs weeks apart use the same engine. |
+| `query_engine.type` | `trino` | `duckdb` deploys DuckDB instead of Trino. |
+| `duckdb.cores` | `2` | CPU request and limit. DuckDB parallelizes across all cores in one process. |
+| `duckdb.memory` | `"4g"` | Memory request and limit; a query over it fails with OOM. On the financial schema, an unset memory becomes `16g`; on a node under 24 GiB allocatable, node minus 8 GiB (floor 4g). |
+| `duckdb.catalog_name` | `"lakehouse"` | Catalog prefix in SQL (`lakehouse.silver.table`). Must match the catalog registered in Hive or Polaris. |
+| `duckdb.version` | [matrix](compatibility-matrix.md#component-version-matrix) | `duckdb` Python package version. Pinned so runs weeks apart use the same engine. |
 
-### What the overrides do
+## Sizing
 
-| Override | Effect | When to change |
-|---|---|---|
-| `duckdb.cores` | Controls CPU available for query execution. DuckDB parallelizes within a single process using all available cores. | Increase to `4` at scale 50+ where queries scan larger tables. |
-| `duckdb.memory` | Limits total memory for the DuckDB process. Queries that exceed this fail with OOM. | Increase to `8g` or `16g` at scale 50+ for analytics queries (Q5, Q6) that build large intermediate results. |
-| `duckdb.catalog_name` | Changes the catalog prefix in SQL. | Only change if you registered the catalog under a different name. |
+At large scale Trino is much faster through distributed execution.
+
+| Scale factor | Cores | Memory | Notes |
+|---|---|---|---|
+| 1-10 | 2 | 4g | Defaults work |
+| 10-50 | 4 | 8g | More memory for analytics queries (Q5, Q6) with large intermediate results |
+| 50+ | -- | -- | Consider Trino; if staying on DuckDB, 4 cores and 8g or 16g |
+
+## How queries run
+
+- Each query runs through `kubectl exec` into the pod, which opens a fresh DuckDB connection, runs the SQL and returns JSON. The round-trip adds ~1-2 s per query.
+- DuckDB does not connect to Hive or Polaris. It reads Iceberg tables from S3 with `iceberg_scan()`:
+
+  ```sql
+  SELECT * FROM iceberg_scan('s3://bucket/warehouse/namespace.db/table',
+                             allow_moved_paths := true)
+  ```
+
+- `adapt_query()` in `DuckDBExecutor` rewrites catalog-qualified names (e.g. `lakehouse.silver.customer_interactions_enriched`) to `iceberg_scan()` calls on the table's S3 path. Hive uses the `namespace.db/` warehouse layout. The auxiliary AML tables (`silver_entities`, `gold_alerts` and the others) resolve to the bucket of the layer that writes them.
+- Queries are written in Trino SQL. `adapt_query()` rewrites Trino functions:
+  - `date_add('month', N, expr)` -> `(expr + INTERVAL N MONTH)`
+  - `date_diff(...)` -> `datediff(...)`
+  - `cardinality(array)` -> `len(array)` (outside string literals, quoted identifiers and comments)
+- COUNT, SUM, AVG, LAG and window frames work unchanged.
+- No metadata cache: every query reads Iceberg metadata from S3. `flush_cache()` is a no-op.
 
 ## Limitations
 
-- **Single pod.** No horizontal scaling. All query work runs in one process.
-- **No concurrent query support.** Benchmark queries run serially. Throughput
-  mode (concurrent streams) is not practical.
-- **No persistent cache.** Each query re-reads Iceberg metadata from S3.
-  At large scales this adds latency compared to Trino's cached metadata.
-- **No Iceberg maintenance.** DuckDB is read-only for Iceberg tables.
-  `expire_snapshots`, `remove_orphan_files`, and compaction are never run on
-  a DuckDB recipe; the run's maintenance record marks them `not_supported`.
-  Table health probing still works.
-- **kubectl exec overhead.** Each query invocation has ~1-2s overhead from
-  the kubectl exec round-trip.
+- **Single pod.** No horizontal scaling.
+- **Serial queries.** Throughput mode (concurrent streams) is not practical.
+- **No cache.** At large scale, re-reading metadata adds latency against Trino's cached metadata.
+- **No Iceberg maintenance.** DuckDB is read-only. `expire_snapshots`, `remove_orphan_files` and compaction never run on a DuckDB recipe; the run's maintenance record marks them `not_supported`. Table health probing still works.
 
-## Sizing Guidance
+## Deploy and destroy
 
-DuckDB is designed for small to mid-scale runs. At large scales, Trino is
-significantly faster due to distributed execution.
+`lakebench deploy` creates:
 
-| Scale factor | Recommended cores | Recommended memory | Notes |
-|---|---|---|---|
-| 1--10 | 2 | 4g | Default config works |
-| 10--50 | 4 | 8g | Increase memory for analytics queries |
-| 50+ | -- | -- | Consider switching to Trino |
+- **Deployment** `lakebench-duckdb` (1 replica). The main container sleeps and serves as the query target.
+- **Service** `lakebench-duckdb` (headless), for pod discovery.
 
-## Recipes
+No coordinator/worker split, no JDBC port, no persistent state.
 
-DuckDB is used by these recipes:
+Extensions and wheel:
 
-- `hive-iceberg-spark-duckdb`
-- `polaris-iceberg-spark-duckdb`
+- The DuckDB wheel and the `httpfs`, `iceberg` and `avro` extensions are part of the deployment's dependency set. Deploy resolves them once onto the `lb-deps` server.
+- The `lb-deps-fetch` init container copies them, checking every file's sha256 (`pip install --no-index --require-hashes`, and `lb_deps.py fetch` for the extensions).
+- Queries run with `autoinstall_known_extensions=false`, so a missing extension fails instead of downloading.
+- The pod needs no internet access; only the deploy-time resolve does, or a mirror (`platform.deps`).
 
-See the [Recipes Guide](recipes.md) for all combinations.
+Probes:
 
-## See Also
+- **Startup:** `import duckdb; c=duckdb.connect(); c.execute('SET autoinstall_known_extensions=false'); c.load_extension('iceberg'); c.load_extension('httpfs')`.
+- **Readiness and liveness:** `python -c "import duckdb; print('ok')"`.
 
-- [Trino](component-trino.md) -- distributed query engine (recommended for production)
-- [Spark Thrift Server](component-spark-thrift.md) -- Spark-native query engine
-- [Scoring and Benchmarking](benchmarking.md) -- query engine benchmark methodology
-- [Recipes](recipes.md) -- all supported component combinations
-- [Configuration](configuration.md) -- full YAML schema reference
+Destroy: DuckDB cannot drop catalog tables, so destroy does not drop them on a DuckDB recipe. The catalog database goes with the namespace (when Lakebench created it). Table files go with the cleanup of buckets the deployment owns.
+
+## Troubleshooting
+
+- [DuckDB pod never becomes ready](troubleshooting.md#duckdb-pod-never-becomes-ready)
+
+## See also
+
+[Trino](component-trino.md), [Spark Thrift Server](component-spark-thrift.md), [Benchmarking](benchmarking.md), [Configuration](configuration.md).

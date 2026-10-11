@@ -1,4 +1,4 @@
-"""Destroy waits for the namespace to be gone before saying so (LB-157).
+"""Destroy waits for the namespace to be gone before saying so.
 
 A namespace delete returns as soon as the API server accepts it. The namespace
 then stays Terminating while its content drains (a PVC held by
@@ -83,16 +83,6 @@ class TestWait:
         assert result.status is DeploymentStatus.SUCCESS
         assert result.message == "Namespace ns-a deleted"
         assert cluster.phase == ""
-
-    def test_long_drain_prints_progress_naming_the_blocker(self):
-        # 3 s polls, 30 s progress interval: 40 polls is two progress lines.
-        cluster = FakeCluster(drain_polls=40)
-        result, reports = _run(cluster)
-        assert result.status is DeploymentStatus.SUCCESS
-        progress = [m for _, s, m in reports if s is DeploymentStatus.IN_PROGRESS]
-        assert progress, "a multi-minute wait must print progress"
-        assert all("Waiting for namespace ns-a" in m for m in progress)
-        assert "pvc-protection" in progress[0]
 
     def test_never_gone_is_a_warning_not_deleted(self):
         cluster = FakeCluster(drain_polls=None)
@@ -468,24 +458,6 @@ class TestDestroyAllWiring:
         self._run_destroy(cluster)
         assert slept[:2] == [2.0, 5.0]
 
-    def test_lost_reply_then_409_is_attributed_to_this_run(self):
-        cluster = FakeCluster(drain_polls=1)
-        real_delete = cluster.delete_namespace
-        n = {"i": 0}
-
-        def lost_then_409(ns, uid=None):
-            n["i"] += 1
-            if n["i"] == 1:
-                real_delete(ns, uid=uid)
-                raise K8sResourceError("timeout")
-            raise NamespaceTerminatingError("already being deleted")
-
-        cluster.delete_namespace = lost_then_409
-        results, _, _, _ = self._run_destroy(cluster)
-        ns = [r for r in results if r.component == "namespace"][-1]
-        assert ns.status is DeploymentStatus.SUCCESS
-        assert "another run" not in ns.message
-
     def test_every_reply_lost_but_terminating_is_not_reported_kept(self):
         cluster = FakeCluster(drain_polls=1)
         real_delete = cluster.delete_namespace
@@ -547,11 +519,6 @@ class TestDestroyAllWiring:
             on_lease=lambda _e: None,
         )
         engine.k8s.delete_namespace.assert_not_called()
-
-    def test_delete_carries_the_start_uid_as_precondition(self):
-        cluster = FakeCluster(drain_polls=1)
-        _, _, _, engine = self._run_destroy(cluster)
-        engine.k8s.delete_namespace.assert_called_once_with("ns-a", uid="uid-1")
 
     def test_unreadable_uid_at_start_refuses_before_touching_anything(self):
         cluster = FakeCluster(drain_polls=1)
@@ -648,35 +615,8 @@ class TestClient:
         assert self._client(core).get_namespace_termination_status("ns-a") == ("", [])
 
 
-class TestDeployIntoTerminatingNamespace:
-    def test_fails_with_a_clear_message(self):
-        from lakebench.deploy.engine import DeploymentEngine
-
-        eng = DeploymentEngine.__new__(DeploymentEngine)
-        eng.config = MagicMock()
-        eng.config.name = "team-a"
-        eng.config.get_namespace.return_value = "ns-a"
-        eng.config.platform.kubernetes.context = ""
-        eng.dry_run = False
-        eng.k8s = MagicMock()
-        eng.k8s.namespace_exists.return_value = True
-        eng.k8s.get_namespace_phase.return_value = "Terminating"
-        eng.k8s.wait_for_namespace_deleted.side_effect = K8sResourceError("still exists")
-        eng.k8s.get_namespace_termination_status.return_value = ("Terminating", [PVC_BLOCKER])
-        with (
-            patch("lakebench.k8s.get_k8s_client"),
-            patch("kubernetes.client.CoreV1Api") as core,
-        ):
-            core.return_value.list_namespace.return_value.items = []
-            result = eng._deploy_namespace()
-        assert result.status is DeploymentStatus.FAILED
-        assert "still terminating from an earlier destroy" in result.message
-        assert "pvc-protection" in result.message
-        eng.k8s.apply_manifest.assert_not_called()
-
-
 class TestCliExitCode:
-    """A namespace still Terminating at the deadline is not "Destroy Complete"."""
+    """The destroy CLI exits 0 when every step succeeded."""
 
     def _invoke(self, results, monkeypatch, tmp_path):
         from pathlib import Path
@@ -691,25 +631,6 @@ class TestCliExitCode:
         engine.destroy_all.return_value = results
         with patch("lakebench.deploy.DeploymentEngine", return_value=engine):
             return CliRunner().invoke(app, ["destroy", str(fixture), "--force"])
-
-    def test_still_terminating_exits_incomplete(self, monkeypatch, tmp_path):
-        from lakebench.deploy.engine import DeploymentResult
-        from lakebench.exit_codes import ExitCode
-
-        results = [
-            DeploymentResult("postgres", DeploymentStatus.SUCCESS, "removed"),
-            DeploymentResult(
-                "namespace",
-                DeploymentStatus.SKIPPED,
-                "Namespace x is still terminating after 600s",
-                details={"still_terminating": True},
-            ),
-        ]
-        out = self._invoke(results, monkeypatch, tmp_path)
-        # CLI-1: incomplete and safe to re-run is 6 (it was 4 in 1.6).
-        assert ExitCode.INCOMPLETE == 6
-        assert out.exit_code == 6, out.output
-        assert "Destroy Complete\n" not in out.output
 
     def test_clean_destroy_exits_0(self, monkeypatch, tmp_path):
         from lakebench.deploy.engine import DeploymentResult

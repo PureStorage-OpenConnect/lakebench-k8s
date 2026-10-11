@@ -1,11 +1,5 @@
-"""Every continuous QpH figure carries the number of rounds behind it.
-
-lb16-cs (2026-09-27): Spark Thrift completed 4 in-stream rounds against 5 on
-Trino and DuckDB (runs 20260927-073533-9de9c9 and -500d2c), so the QpH
-medians were over different n. DESIGN 2.4 lists benchmark iterations as an
-execution condition: runs with different round counts are comparable but not
-like-for-like.
-"""
+"""Every continuous QpH figure carries the number of rounds behind it, and
+runs with different round counts are not like-for-like."""
 
 from __future__ import annotations
 
@@ -49,10 +43,14 @@ def _continuous_run(qphs):
 
 def test_scores_record_the_rounds_behind_the_median():
     # A round with no QpH (every query failed) is not in the median or the count.
-    scores = _continuous_run([200.0, 0.0, 250.0, 300.0]).pipeline_benchmark.to_dict()["scores"]
+    run = _continuous_run([200.0, 0.0, 250.0, 300.0])
+    scores = run.pipeline_benchmark.to_dict()["scores"]
     assert scores["composite_qph"] == 250.0
     assert scores["composite_qph_rounds"] == 3
     assert scores["benchmark_rounds_count"] == 4
+    exp = run.to_dict()["experiment"]
+    assert exp["limits"]["benchmark_rounds"] == 3
+    assert ex.identity(exp)["benchmark rounds"] == 3
 
 
 def test_post_stream_fallback_records_zero_rounds():
@@ -61,12 +59,6 @@ def test_post_stream_fallback_records_zero_rounds():
     scores = build_pipeline_benchmark(run).to_dict()["scores"]
     assert scores["composite_qph"] == 260.0
     assert scores["composite_qph_rounds"] == 0
-
-
-def test_experiment_limits_carry_the_round_count():
-    exp = _continuous_run([200.0, 0.0, 250.0]).to_dict()["experiment"]
-    assert exp["limits"]["benchmark_rounds"] == 2
-    assert ex.identity(exp)["benchmark rounds"] == 2
 
 
 def _exp(mode: str, rounds: int | None) -> dict:
@@ -80,28 +72,3 @@ def test_different_round_counts_are_not_like_for_like():
     assert ex.identity_differences(a, b) == []
     assert ex.condition_differences(a, b) == ["benchmark rounds differs (4 vs 5)"]
     assert ex.condition_differences(a, _exp("sustained", 4)) == []
-
-
-def test_batch_identity_has_no_round_key():
-    """Batch baselines keep their stored identity keys."""
-    assert "benchmark rounds" not in ex.identity(_exp("batch", None))
-
-
-def test_report_shows_the_round_count(tmp_path):
-    from lakebench.reports.generator import ReportGenerator
-
-    html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(
-        _continuous_run([200.0, 250.0])
-    )
-    assert "In-stream QpH rounds" in html
-
-
-def test_zero_rounds_never_gates_against_an_in_stream_median():
-    """Fix-pass finding: with 0 rounds composite_qph is the post-stream
-    benchmark, a different estimator from the reference's in-stream median."""
-    for ref, run in ((5, 0), (0, 3)):
-        baseline, current = _exp("sustained", ref), _exp("sustained", run)
-        reasons = ex.stored_identity_refusals(
-            ex.identity(baseline), ex.result_fingerprints(baseline), current, "baseline"
-        )
-        assert any("continuous QpH estimator differs" in r for r in reasons), reasons

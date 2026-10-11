@@ -8,6 +8,8 @@ import pytest
 
 pytest.importorskip("pyspark")
 
+from lakebench.metrics.stage_profile import parse_stage_profile
+
 # A store that keeps only 3 jobs and 3 stages, so eviction is reachable.
 pytestmark = pytest.mark.spark_static_conf(
     {
@@ -41,10 +43,11 @@ def test_profile_of_one_job(spark_session, load_script, capsys):
     )
     assert isinstance(mark["jobs"], int) and mark["dropped"] == 0, mark
     assert rows and rows[0]["tasks"] >= 1 and rows[0]["max_task_s"] is not None, rows
-    out = capsys.readouterr().out
-    assert "[stage-profile] rule=WX group=g-one stage=" in out
-    assert "truncated=false complete=true lossy=false profile_s=" in out
-    assert "status=COMPLETE" in out
+    parsed, unavailable, _cost = parse_stage_profile(capsys.readouterr().out)
+    assert not unavailable, unavailable
+    stages = parsed["WX"]
+    assert stages and stages[0]["tasks"] >= 1, stages
+    assert all(not r["truncated"] and r["complete"] and not r["lossy"] for r in stages), stages
 
 
 def test_evicted_jobs_mark_the_profile_truncated(spark_session, load_script, capsys):
@@ -56,18 +59,6 @@ def test_evicted_jobs_mark_the_profile_truncated(spark_session, load_script, cap
 
     _, rows = _profile(spark_session, common, "g-many", many_jobs)
     assert rows, rows
-    out = capsys.readouterr().out
-    assert "truncated=true" in out and "truncated=false" not in out, out
-
-
-def test_store_jobs_order(spark_session, load_script):
-    """_store_jobs reads oldest first by default and newest first on request
-    (the early stops in rule_stage_profile rely on it)."""
-    common = load_script("common")
-    for _ in range(2):
-        spark_session.range(3).collect()
-    store = spark_session.sparkContext._jsc.sc().statusStore()
-    spark_session.sparkContext._jsc.sc().listenerBus().waitUntilEmpty(5000)
-    oldest = [j[0] for j in common._store_jobs(store)]
-    newest = [j[0] for j in common._store_jobs(store, newest_first=True)]
-    assert oldest == sorted(oldest) and newest == sorted(newest, reverse=True)
+    parsed, unavailable, _cost = parse_stage_profile(capsys.readouterr().out)
+    stages = parsed.get("WX") or []
+    assert stages and all(r["truncated"] for r in stages), (parsed, unavailable)

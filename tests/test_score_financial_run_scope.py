@@ -28,18 +28,16 @@ def check():
     return ns["check_status_run"]
 
 
-def test_main_checks_the_status_run():
-    src = _SCRIPT.read_text()
-    assert 'check_status_run(current_run_id, os.environ.get("LB_RUN_ID", "").strip())' in src
-
-
-def test_the_runs_own_status_is_accepted(check):
-    check("20261002-101010-abcdef", "20261002-101010-abcdef")
-
-
-def test_a_batch_cycle_of_this_run_is_accepted(check):
-    """Batch gold jobs run per cycle as <run>-c<n>; the score runs as <run>."""
-    check("20261002-101010-abcdef-c3", "20261002-101010-abcdef")
+@pytest.mark.parametrize(
+    ("status_run", "run_id"),
+    [
+        ("20261002-101010-abcdef", "20261002-101010-abcdef"),  # the run's own status
+        ("20261002-101010-abcdef-c3", "20261002-101010-abcdef"),  # a batch cycle <run>-c<n>
+        ("20261001-090909-123456", ""),  # outside a run, gold's status decides
+    ],
+)
+def test_status_of_this_run_is_accepted(check, status_run, run_id):
+    check(status_run, run_id)
 
 
 @pytest.mark.parametrize(
@@ -49,8 +47,3 @@ def test_a_batch_cycle_of_this_run_is_accepted(check):
 def test_another_runs_status_is_refused(check, status_run):
     with pytest.raises(SystemExit, match="not this run"):
         check(status_run, "20261002-101010-abcdef")
-
-
-def test_without_a_run_id_the_status_decides(check):
-    """`lakebench financial score` outside a run scores what gold holds."""
-    check("20261001-090909-123456", "")

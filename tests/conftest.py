@@ -5,12 +5,8 @@ from __future__ import annotations
 import os
 import tempfile
 
-# Hermetic kube config. Code under test loads kube config before making
-# (mocked) API calls; on a developer machine that silently used the real
-# ~/.kube/config while CI has none, so tests passed locally and failed in CI.
-# The kubernetes client reads KUBECONFIG when it is imported, so this must run
-# at conftest import time, before anything imports kubernetes. Nothing
-# listens on the fake server.
+# Hermetic kube config: tests never read the real ~/.kube/config. The client
+# reads KUBECONFIG at import, so this runs first. Nothing listens on the server.
 _FAKE_KUBECONFIG = os.path.join(tempfile.mkdtemp(prefix="lb-test-kube-"), "config")
 with open(_FAKE_KUBECONFIG, "w") as _f:
     _f.write(
@@ -31,10 +27,8 @@ with open(_FAKE_KUBECONFIG, "w") as _f:
     )
 os.environ["KUBECONFIG"] = _FAKE_KUBECONFIG
 
-# Unit tests must never run real cluster CLIs. Before this guard, destroy
-# tests ran `helm get values` (and could reach `helm upgrade`) against the
-# developer's live cluster. These stubs shadow helm/kubectl/oc on PATH and
-# fail loudly; tests that exercise those calls mock subprocess.run.
+# Unit tests never run real cluster CLIs: these stubs shadow helm/kubectl/oc on
+# PATH and fail loudly; tests that exercise those calls mock subprocess.run.
 _CLI_GUARD_DIR = tempfile.mkdtemp(prefix="lb-test-cli-guard-")
 for _tool in ("helm", "kubectl", "oc"):
     _path = os.path.join(_CLI_GUARD_DIR, _tool)
@@ -47,9 +41,7 @@ for _tool in ("helm", "kubectl", "oc"):
     os.chmod(_path, 0o755)
 os.environ["PATH"] = _CLI_GUARD_DIR + os.pathsep + os.environ.get("PATH", "")
 
-# Rich forces coloured output under GitHub Actions; ANSI codes then split
-# words in captured CLI help (e.g. "--force-legacy") and assertions that pass
-# locally fail in CI. Plain text everywhere.
+# Plain text everywhere: ANSI codes split words in captured CLI help.
 os.environ["NO_COLOR"] = "1"
 os.environ.pop("FORCE_COLOR", None)
 # Typer forces a terminal when GITHUB_ACTIONS is set (read at import time);
@@ -72,7 +64,6 @@ from collections.abc import Callable, Iterator  # noqa: E402
 from pathlib import Path  # noqa: E402
 from types import ModuleType  # noqa: E402
 from typing import Any  # noqa: E402
-from unittest.mock import MagicMock, patch  # noqa: E402
 
 import pytest  # noqa: E402
 
@@ -82,23 +73,16 @@ import pytest  # noqa: E402
 import lakebench.reports.generator  # noqa: E402, F401
 from lakebench.config import LakebenchConfig  # noqa: E402
 
-# SAF-4 / DEP-3 oracle (SD-9): `recording_k8s` is available to every test.
+# The recording_k8s destroy-safety oracle is available to every test.
 from tests.fixtures.recording_k8s import recording_k8s  # noqa: E402, F401
 
 # ---------------------------------------------------------------------------
-# Spark script loader (QA-2). The Spark scripts import each other by plain
-# name (``from common import ...``), as they do in the driver pod, where the
-# scripts ConfigMap is one flat directory. Tests used to put the scripts
-# directory on sys.path and import them, so every test in the process shared
-# one ``common``: a monkeypatch or a ``sys.modules.pop("common")`` in one test
-# changed what a later test saw. ``load_script`` gives each test (or each test
-# module, with ``load_script_module``) its own private copy of the scripts it
-# loads, ``common`` included, and puts sys.modules back afterwards.
-# Two guards keep it that way: tests/test_script_loader_static.py fails on
-# the usual hand-made loads (sys.path edits, sys.modules pops), and the
-# pytest_runtest_teardown hook fails any test that leaves the scripts
-# directory on sys.path or a script module in sys.modules outside a namespace,
-# whatever code did it.
+# Spark script loader. The scripts import each other by plain name (``from
+# common import ...``), as in the driver pod's flat ConfigMap directory.
+# ``load_script`` gives each test (``load_script_module``: each module) a private
+# copy of the scripts it loads, ``common`` included, and restores sys.modules.
+# The pytest_runtest_teardown hook fails any test that leaves the scripts
+# directory on sys.path or a script module in sys.modules outside a namespace.
 # ---------------------------------------------------------------------------
 
 _SRC = Path(__file__).resolve().parents[1] / "src" / "lakebench"
@@ -295,13 +279,9 @@ def load_script_module(request: pytest.FixtureRequest) -> Iterator[Callable[...,
 
 @pytest.fixture(autouse=True)
 def _offline_deps_set(request, monkeypatch):
-    """Spark job manifests need the deployment's verified dependency set,
-    which `run`, `continuous` and `financial` load from the cluster before
-    any submit (deps.runtime.load_handle). A unit test that builds a manifest
-    gets the offline placeholder set instead. A test marked ``real_deps``
-    keeps the production default (no set) and proves the guard; the static
-    and CLI tests in test_job_deps.py prove every production path loads one.
-    """
+    """Spark job manifests need the deployment's dependency set. Unit tests
+    get the offline placeholder set; a test marked ``real_deps`` keeps the
+    production default (no set) and proves the guard."""
     if request.node.get_closest_marker("real_deps"):
         return
     from lakebench.deps import runtime
@@ -320,10 +300,7 @@ def _offline_deps_set(request, monkeypatch):
     def init(self, *a, **k):
         real(self, *a, **k)
         if self.deps is None:
-            try:
-                self.deps = placeholder_handle(self.config)
-            except Exception:  # noqa: BLE001 -- a config the request cannot serve
-                pass
+            self.deps = placeholder_handle(self.config)
 
     monkeypatch.setattr(job.SparkJobManager, "__init__", init)
 
@@ -351,12 +328,9 @@ def _journal_in_tmp(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _signal_handlers_do_not_leak(request):
-    """Each test starts with the SIGINT and SIGTERM handlers the process had
-    before any test, and gets them back after. A run that installs its
-    interrupt handler and skips restore() (on purpose in some tests) would
-    otherwise hand it to whatever test runs next in the same process; under
-    xdist that order changes, and a later test saw a SIGTERM caught that it
-    expected to reach its own handler (CI run 37014056878, worker gw3)."""
+    """Each test starts and ends with the SIGINT and SIGTERM handlers the
+    process had before any test, so a run that skips restore() cannot hand its
+    handler to a later test."""
     import signal
     import threading
 
@@ -388,10 +362,7 @@ _BASE_SIGNAL_HANDLERS = _base_signal_handlers()
 
 @pytest.fixture(autouse=True)
 def _reset_cluster_target():
-    """A process pins one cluster context (SAF-7, ``k8s/target.py``); the
-    suite is one process, so each test starts with no active target. The
-    hermetic kubeconfig above stays the default; tests that need other
-    contexts write one with ``write_kubeconfig``."""
+    """Each test starts with no pinned cluster context (``k8s/target.py``)."""
     from kubernetes import client as kclient
 
     from lakebench.k8s import target
@@ -405,12 +376,8 @@ def _reset_cluster_target():
 
 @pytest.fixture(autouse=True)
 def _no_implicit_tool_pin(request, monkeypatch):
-    """``cli_args()`` pins the kubeconfig's current context on a tool call
-    made before any API client (SAF-7). Here that would be the hermetic
-    ``test`` context, which CI may or may not see depending on import order,
-    so tests that build a tool argv with no configured context get the
-    no-kubeconfig answer (no flag). Tests of the pin itself are marked
-    ``tool_pin`` and see the real behaviour."""
+    """Tool argv built with no configured context gets no context flag. Tests
+    of the pin itself are marked ``tool_pin``."""
     if request.node.get_closest_marker("tool_pin"):
         return
     from lakebench.k8s import target
@@ -458,7 +425,7 @@ def write_kubeconfig(path, servers: dict[str, str], current: str) -> None:
 
 @pytest.fixture(autouse=True)
 def _fake_destroy_namespace_clock(monkeypatch):
-    """Destroy waits (bounded) for the namespace to be NotFound (LB-157).
+    """Destroy waits (bounded) for the namespace to be NotFound.
 
     Unit tests drive destroy with mocked clients, so run that wait on a fake
     clock: sleeping advances time instantly instead of blocking the suite.
@@ -480,10 +447,10 @@ def make_config(**overrides) -> LakebenchConfig:
     This is the canonical config factory for tests. Prefer this over
     hand-building dicts so that new required fields are handled in one place.
 
-    LB-090: when the resulting config selects Polaris and no explicit
+    When the resulting config selects Polaris and no explicit
     ``client_secret`` was supplied, fill in a test-only value, so unrelated
     tests that build Spark job manifests never look for the Secret that
-    deploy stores (SAF-8) on a cluster they do not have.
+    deploy stores on a cluster they do not have.
     """
     from lakebench.config.schema import CatalogType
 
@@ -509,72 +476,21 @@ def make_config(**overrides) -> LakebenchConfig:
     return cfg
 
 
-@pytest.fixture
-def default_config() -> LakebenchConfig:
-    """A default LakebenchConfig for tests that don't care about specifics."""
-    return make_config()
-
-
-@pytest.fixture
-def duckdb_config() -> LakebenchConfig:
-    """Config with DuckDB engine selected."""
-    return make_config(recipe="hive-iceberg-spark-duckdb")
-
-
-@pytest.fixture
-def trino_config() -> LakebenchConfig:
-    """Config with Trino engine selected."""
-    return make_config(recipe="hive-iceberg-spark-trino")
-
-
-@pytest.fixture
-def mock_subprocess():
-    """Mock subprocess.run for tests that exercise kubectl/helm calls."""
-    with patch("subprocess.run") as m:
-        m.return_value = MagicMock(
-            returncode=0,
-            stdout="",
-            stderr="",
-        )
-        yield m
-
-
-@pytest.fixture
-def mock_k8s_client():
-    """Pre-configured mock K8sClient for unit tests."""
-    client = MagicMock()
-    client.namespace = "test-ns"
-    client.namespace_exists.return_value = True
-    client.apply_manifest.return_value = True
-    client.test_connectivity.return_value = (True, "Connected")
-    return client
-
-
 def stub_experiment(
     query_names=(),
     *,
     mode: str = "batch",
-    failed=(),
     **identity_over,
 ) -> dict:
     """A minimal metrics.json ``experiment`` block (metrics/experiment.py) for
     fixtures that hand-build run records: one fixed experiment identity and
-    a usable result fingerprint per query in *query_names* (None for the
-    names in *failed*, as the runner records a failed query). Keyword
-    overrides replace identity fields (seed=..., scale=...)."""
-    from lakebench.benchmark.fingerprint import fingerprint_rows
+    the query set id of *query_names*. Keyword overrides replace identity
+    fields (seed=..., scale=...)."""
+    from lakebench.benchmark.queries import query_set_id
     from lakebench.metrics.experiment import EXPERIMENT_SCHEMA_V1
     from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 
-    results: dict = {
-        "query_set_id": None,
-        "fingerprints": {
-            n: (None if n in failed else fingerprint_rows([(n, 1)], adapted_sql=n))
-            for n in query_names
-        },
-    }
-    # A continuous run carries the fingerprints of its end-of-run result
-    # check (metrics/experiment.py _continuous_results), like a batch run.
+    results: dict = {"query_set_id": query_set_id(query_names) if query_names else None}
     return {
         "schema": EXPERIMENT_SCHEMA_V1,
         "workload": {"name": "customer360", "version": "c360-1", "parameters_id": "p"},
@@ -597,24 +513,17 @@ def stub_experiment(
 
 @pytest.fixture(autouse=True)
 def _continuous_namespace_reads_answered(monkeypatch):
-    """The continuous runner reads its namespace through the real
-    kubernetes client (cli/_sustained.NamespaceWatch). Tests that drive
-    _run_sustained with no CoreV1Api fake would reach for a real API server
-    and, after three failed reads, stop as "namespace unreadable"; answer
-    them with a healthy namespace. A test that fakes CoreV1Api (the QA-9
-    harness, tests/test_run_namespace_gone.py) gets its fake."""
-    try:
-        import kubernetes.client
-        from kubernetes.client.api.core_v1_api import CoreV1Api as real_core_v1
-
-        from lakebench.cli import _sustained
-    except Exception:  # noqa: BLE001
-        return
+    """Tests driving _run_sustained with no CoreV1Api fake get a healthy
+    namespace from NamespaceWatch instead of reaching a real API server. A
+    test that fakes CoreV1Api gets its fake."""
     from types import SimpleNamespace
 
-    watch = getattr(_sustained, "NamespaceWatch", None)
-    if watch is None:  # a tree from before the watch (a fix-reverted run)
-        return
+    import kubernetes.client
+    from kubernetes.client.api.core_v1_api import CoreV1Api as real_core_v1
+
+    from lakebench.cli import _sustained
+
+    watch = _sustained.NamespaceWatch
     real_read = watch._read
 
     def read(self):
@@ -635,8 +544,6 @@ def _continuous_short_window_check_off(request, monkeypatch):
     is tested in tests/test_continuous_window.py, where it stays on."""
     if request.module.__name__.endswith("test_continuous_window"):
         return
-    try:
-        from lakebench.cli import _sustained
-    except Exception:  # noqa: BLE001
-        return
+    from lakebench.cli import _sustained
+
     monkeypatch.setattr(_sustained, "short_window_problem", lambda cfg, run_duration: None)

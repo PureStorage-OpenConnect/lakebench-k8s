@@ -16,7 +16,7 @@ re-renders each case's argv from the current tree; a case whose rendered argv
 differs from the recorded one fails, because production would then run
 different arguments from the ones compared.
 
-The cases (design ch05 section 4.1):
+The cases:
 
     F0  financial, seed 43, scale 1, 4 nodes
     F1  F0 plus --robustness-perturbation (seed 43 is a development seed)

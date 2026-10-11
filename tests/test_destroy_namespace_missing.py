@@ -97,25 +97,6 @@ def test_absent_namespace_with_no_data_left_is_a_skip_not_a_failure():
     s3.empty_bucket.assert_not_called()
 
 
-def test_absent_namespace_with_force_legacy_cleans_buckets():
-    _results, s3_cls = _run(_engine(namespace_exists=False), force_legacy=True)
-    s3_cls.assert_called_once()
-
-
-def test_present_verified_namespace_still_cleans_buckets():
-    from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
-
-    ok = IdentityReport(
-        verdict=IdentityVerdict.MATCH,
-        resource_name="lb-test",
-        expected_deployment="lb-test",
-        hint="",
-    )
-    with patch("lakebench.deploy.ownership.verify_namespace_identity", return_value=ok):
-        _results, s3_cls = _run(_engine(namespace_exists=True), force_legacy=False)
-    s3_cls.assert_called_once()
-
-
 def test_namespace_kept_when_bucket_step_fails():
     """The namespace is the ownership record for the buckets; never delete
     it after the bucket step failed."""

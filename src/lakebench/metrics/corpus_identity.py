@@ -4,8 +4,7 @@
 recomputed, so stored ids do not move. Corpus id v2 is taken from what the
 generator itself received: each datagen node writes a marker
 ``<scope>_corpus/c{cycle:03}-node-{node:04}.json`` whose
-``corpus_args_sha256`` hashes the resolved generator arguments (ch05
-section 3.1 is the one definition), and ``lakebench.corpus_digest`` folds
+``corpus_args_sha256`` hashes the resolved generator arguments, and ``lakebench.corpus_digest`` folds
 the per-cycle hashes into ``corpus_series_sha256``. A config edited after
 generation therefore changes nothing about the id.
 
@@ -22,8 +21,7 @@ The flow, per run:
    block the series persists as ``experiment_inputs.inherited_corpus``). Nothing
    here reads S3 at build time, so a later build sees what the run saw.
 
-``corpus_v2_fields`` applies ch03 section 6 "Series corpus identity" in
-order: the inherited block is accepted only when both listing digests are
+``corpus_v2_fields`` applies the series corpus identity rule in order: the inherited block is accepted only when both listing digests are
 observed and equal (else the corpus problem "bronze changed during this
 repetition" or "not observed"); node markers win over the inherited block;
 the inherited block is copied verbatim only when there are no markers;
@@ -109,11 +107,11 @@ INHERITED_FORMAT = 1
 LINEAGE_FILE = Path(__file__).resolve().parents[1] / "config" / "datagen_lineage.yaml"
 
 #: Where the datagen byte-compare result for an image lives, relative to the repo root
-#: (ch05 section 4.1). Not shipped in the wheel: only the CI test opens it.
+#: Not shipped in the wheel: only the CI test opens it.
 EVIDENCE_PATTERN = "tests/fixtures/datagen_reference/compare-{digest12}.json"
 
 #: The five byte-compare cases and the public development seed each runs on
-#: (ch05 section 4.1: 43 financial, 42 Customer 360; never a held-out seed).
+#: (43 financial, 42 Customer 360; never a held-out seed).
 COMPARE_CASES: dict[str, int] = {"F0": 43, "F1": 43, "F2": 43, "C0": 42, "C2": 42}
 
 NOT_OBSERVED = "corpus not observed at run end (no corpus observation in this record)"
@@ -145,7 +143,7 @@ def _distinct(values: Sequence[Any]) -> list[Any]:
 
 
 def observe_corpus(cfg: Any, s3: Any, *, lineage_path: Path | None = None) -> dict[str, Any]:
-    """The run-end corpus observation (ch03 section 0.1), as persisted in
+    """The run-end corpus observation, as persisted in
     ``experiment_inputs.corpus_observation``: the marker set, series.json,
     the listing digest and the lineage resolved now, against the lineage
     table this Lakebench ships. Resolving it here and persisting it keeps
@@ -438,7 +436,7 @@ def _dev_seed_refs(case: str) -> set[str]:
 
 
 def validate_compare_file(data: Any, digest: str, canonical: str) -> list[str]:
-    """Why *data* (a parsed ``compare-<digest12>.json``, ch05 section 4.1)
+    """Why *data* (a parsed ``compare-<digest12>.json``)
     is not evidence that *digest* writes the same bytes as *canonical*:
     format 1, ``image_a`` the canonical and ``image_b`` the digest, exactly
     the cases F0, F1, C0, F2, C2 once each, and per case ``equal: true``,
@@ -515,7 +513,7 @@ def check_lineage_evidence(table: Mapping[str, LineageRow], root: Path) -> list[
 def resolve_lineage(
     obs: Mapping[str, Any], *, config_image: str | None, path: Path | None = None
 ) -> dict[str, Any]:
-    """The lineage of the corpus in *obs* (ch03 section 6 "Lineage"), as
+    """The lineage of the corpus in *obs*, as
     persisted in the observation: ``{value, observed, digest, tag,
     problems, notes}``.
 
@@ -761,7 +759,7 @@ def corpus_v2_fields(
     fleet_digest: str | None = None,
     fleet: Mapping[str, Any] | None = None,
 ) -> CorpusV2 | None:
-    """ch03 section 6 "Series corpus identity" steps 3 and 4, from persisted
+    """Series corpus identity steps 3 and 4, from persisted
     inputs only.
 
     *declared* is the config's corpus block (``experiment_inputs.corpus``);

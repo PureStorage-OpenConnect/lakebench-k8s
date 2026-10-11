@@ -7,8 +7,8 @@
 # The Financial pipeline (bronze_verify_financial -> silver_build_financial
 # -> gold_finalize_financial) reads pacs.008 payloads emitted by the
 # FinancialGenerator (dispatched via --schema financial in the datagen
-# CLI). Detection workloads W1-W11 run under `lakebench financial replay`
-# and `lakebench financial reproduce`.
+# CLI). gold_finalize_financial runs the detection rules, and `lakebench run`
+# scores their recall.
 #
 # Scale advisory: this recipe supports scale >= 1. For developer sanity
 # testing at scale <= 1 without graph workloads, use
@@ -78,7 +78,7 @@ architecture:
 
 workload:
   schema: financial              # <-- routes datagen + pipeline scripts
-  retention_workload: true       # <-- preserves snapshots for W8/W10
+  retention_workload: true       # <-- keeps snapshot history through maintenance
   retention_months: 60
   datagen:
     scale: 1                     # ~10 GB pacs.008 baseline

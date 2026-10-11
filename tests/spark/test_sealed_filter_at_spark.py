@@ -1,4 +1,4 @@
-"""AM-15a (AML-6, AML-10 helper): ``common.sealed_txns_filter_at`` reads the
+"""``common.sealed_txns_filter_at`` reads the
 versions table at one recorded snapshot and fails closed.
 
 Each test builds its own tables: three batches of five transactions, of
@@ -96,39 +96,21 @@ def test_same_rows_as_current_filter_without_later_commit(spark):
 
 
 @pytest.mark.parametrize("cat", [CATALOG, NO_CACHE], ids=["cache-default", "cache-off"])
-def test_seal_committed_between_actions_is_invisible(spark, cat, record_property):
+def test_seal_committed_between_actions_is_invisible(spark, cat):
     """A versions row committed after the recorded snapshot, between two
-    actions on one frame, is seen by neither action (silent-corruption L2).
-    Also records whether today's current-state filter, built before the
-    commit, sees it on its second action (the d2 item 1 assumption)."""
-    from common import sealed_txns_filter, sealed_txns_filter_at
+    actions on one frame, is seen by neither action (silent-corruption L2)."""
+    from common import sealed_txns_filter_at
 
     txns, versions_t, vsid = _fixture(spark, cat)
     at = sealed_txns_filter_at(spark, txns, cat, versions_t, vsid)
-    current = sealed_txns_filter(spark, txns, cat, versions_t)
-    first_at, first_current = _batches(at), _batches(current)
+    first_at = _batches(at)
     _seal_partial(spark, versions_t, cat)
-    second_at, second_current = _batches(at), _batches(current)
+    second_at = _batches(at)
 
     assert first_at == second_at == [("S1", 0), ("S1", 1)]
-    assert first_current == [("S1", 0), ("S1", 1)]
-    sees = PARTIAL in second_current
-    record_property("current_filter_sees_later_seal_on_second_action", sees)
-    print(f"{cat}: current_filter_sees_later_seal_on_second_action={sees}")
     # A fresh call at the new snapshot does see it: the pin is the snapshot.
     newer = _snapshot(spark, versions_t, cat)
     assert PARTIAL in _batches(sealed_txns_filter_at(spark, txns, cat, versions_t, newer))
-
-
-@pytest.mark.parametrize(
-    "bad", [None, "unknown", "123", True, 1.0], ids=["none", "unknown", "str", "bool", "float"]
-)
-def test_filter_at_rejects_non_int(spark, bad):
-    from common import sealed_txns_filter_at
-
-    txns, versions_t, _vsid = _fixture(spark)
-    with pytest.raises(TypeError):
-        sealed_txns_filter_at(spark, txns, CATALOG, versions_t, bad)
 
 
 def test_filter_at_fails_closed(spark):

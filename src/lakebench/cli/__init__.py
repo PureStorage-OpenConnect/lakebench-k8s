@@ -74,7 +74,7 @@ app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="rich",
     context_settings={"help_option_names": ["-h", "--help"]},
-    epilog="[dim]Workflow: init -> run -> results -> destroy[/dim]",
+    epilog="[dim]Workflow: init -> deploy -> run -> report -> destroy[/dim]",
 )
 
 
@@ -125,7 +125,6 @@ from lakebench.cli._generate import generate as _generate_fn  # noqa: E402
 from lakebench.cli._plan import plan as _plan_fn  # noqa: E402
 from lakebench.cli._query import benchmark as _benchmark_fn  # noqa: E402
 from lakebench.cli._query import query as _query_fn  # noqa: E402
-from lakebench.cli._reproduce import reproduce as _reproduce_fn  # noqa: E402
 from lakebench.cli._run import run as _run_fn  # noqa: E402
 
 app.command(name="deploy")(_deploy_fn)
@@ -135,7 +134,6 @@ app.command(name="generate")(_generate_fn)
 app.command(name="run")(_run_fn)
 app.command(name="query")(_query_fn)
 app.command(name="benchmark")(_benchmark_fn)
-app.command(name="reproduce")(_reproduce_fn)
 app.command(name="plan")(_plan_fn)
 
 from lakebench.cli import _aliases  # noqa: E402
@@ -1345,8 +1343,14 @@ def info(
         j: executor_override(j, cfg) for j in ("bronze-ingest", "silver-stream", "gold-refresh")
     }
     streaming_executor_parts = []
+    from lakebench.modules.pipeline_engines.spark.job import streaming_executor_count
+
     for job_name, override_val in streaming_override_map.items():
-        auto_count = _scale_executor_count(_profiles[job_name], scale)
+        from lakebench.modules.pipeline_engines.spark.job import stage_profile
+
+        auto_count = streaming_executor_count(
+            job_name, stage_profile(job_name, cfg) or _profiles[job_name], cfg
+        )
         if override_val is not None:
             streaming_executor_parts.append(f"{job_name}={override_val} (override)")
         else:
@@ -2371,7 +2375,9 @@ def recommend(
 
 def main() -> None:
     """Main entry point for CLI."""
-    app()
+    from lakebench.cli._process_exit import run_and_exit
+
+    run_and_exit(app)
 
 
 if __name__ == "__main__":

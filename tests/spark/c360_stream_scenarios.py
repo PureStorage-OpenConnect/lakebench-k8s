@@ -21,7 +21,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -52,7 +51,7 @@ def bronze_rows(n, day0=datetime(2024, 6, 1), start=0):
                 "channel": ["web", "mobile_app", "store"][i % 3],
                 "device_type": "mobile",
                 "browser": "chrome",
-                "ip_address": "10.0.0.1",
+                "ip_address": "10.0.1.50",
                 "city_raw": "NYC",
                 "state_raw": "NY",
                 "zip_code": "10001",
@@ -123,14 +122,22 @@ def session(jars, work):
     )
 
 
+#: Parquet files of one source get mtimes counting up from here.
+_BASE_MTIME = 1_700_000_000
+
+
 def stage_files(spark, work, name, files, rows_per_file, start=0):
     """Write ``files`` Parquet files of bronze rows, one micro-batch each."""
     src = f"{work}/src-{name}"
+    seen: set[Path] = set()
     for k in range(files):
         bronze_df(spark, rows_per_file, start + k * rows_per_file).coalesce(1).write.mode(
             "append"
         ).parquet(src)
-        time.sleep(0.05)  # distinct mtimes keep the file source's order stable
+        # Distinct, increasing mtimes keep the file source's order stable.
+        (part,) = set(Path(src).glob("part-*.parquet")) - seen
+        seen.add(part)
+        os.utime(part, (_BASE_MTIME + k, _BASE_MTIME + k))
     return src
 
 
@@ -244,7 +251,6 @@ def main():
     out["ice_silver_rows"] = t.count()
     out["ice_silver_distinct_ids"] = t.select("id").distinct().count()
     out["ice_silver_same_query"] = q1 == q2
-    out["ice_silver_recency_max"] = t.agg({"customer_recency_score": "max"}).first()[0]
 
     def deletes(table):
         return spark.sql(
@@ -275,7 +281,6 @@ def main():
     refuse_fresh_checkpoint_over_data(spark, ckpt_fresh, tbl)
     spark.sql("CREATE TABLE ice.silver.empty_t (id BIGINT) USING iceberg")
     refuse_fresh_checkpoint_over_data(spark, f"{work}/ckpt-never-used", "ice.silver.empty_t")
-    out["refuse_allows_used_or_empty"] = True
 
     # Upgrade path: a silver table created without the key columns (batch
     # mode or an older release) gains them, then a replay is still exact.

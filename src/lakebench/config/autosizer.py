@@ -87,14 +87,14 @@ def _parse_cpu_millicores(cpu: str | int | float) -> int:
     return to_millicores(cpu)
 
 
-# Datagen memory model (LB-204 re-fit, 2026-09-29). Fitted to the cgroup
+# Datagen memory model (re-fit 2026-09-29). Fitted to the cgroup
 # memory high-watermark (memory.peak) of the busiest pod of datagen-only
 # cluster Jobs: generator with mimalloc and owned-file typology pruning, the
 # fixed 64 MB file size, 8 threads (request = limit = 8 CPU), 8 pods (4 for
 # c360; 40 for financial scale 500), no thread cap. Every pod holds full-population state, so the busiest
 # pod (node 0 or a worker) sets the request for all of them. Measured points
 # are in DATAGEN_MEASURED_PEAK_GIB; the model is an upper envelope of them at
-# the pod count each was measured with (tests/test_lb199_datagen_memfit.py).
+# the pod count each was measured with (tests/test_datagen_memory_model.py).
 # The points were measured on the 1.6.0 generator. The a592385 generator (the
 # 1.7 default) peaks 0.23 to 0.37 GiB higher on financial at scale 10 (local
 # process max RSS, not cgroup memory.peak; node 0 of 4; n=1 to 2), about 8%.
@@ -181,12 +181,91 @@ def _datagen_clamp_note(config: LakebenchConfig, cpu: str) -> str:
     )
 
 
-# Datagen pod floor (LB-204): each pod keeps typology row payloads only for the
+# Datagen pod floor: each pod keeps typology row payloads only for the
 # files it owns, so per-pod memory rises as the pod count falls. The memory
 # model was measured at 8 or more pods, so financial datagen above scale 100
 # runs at least that many (the Indexed Job queues pods a small cluster cannot
-# place at once).
+# place at once). A count set in the config is kept, with a warning.
 DATAGEN_MIN_PODS = 8
+
+
+#: Continuous load, a published workload definition (owner,
+#: 2026-10-07): the MB/s of datagen files a continuous run offers per
+#: scale unit. The same scale offers the same load on every system.
+CONTINUOUS_LOAD_MB_S_PER_SCALE: dict[str, float] = {"financial": 4.0, "customer360": 10.0}
+#: MB/s per core (bytes of datagen's files) of datagen and of each streaming
+#: stage while busy: defaults the balance formula sizes with. Bronze and
+#: silver from the scale-10 matrix of 2026-10-07 (medians, AML n=6,
+#: Customer360 n=3; timer triggers at a light load). They carried the offered
+#: load balanced on 2026-10-08 (AML scale 10, Customer360 scale 10 and 100). A
+#: balanced back-to-back run cannot re-measure them: every stage takes what
+#: datagen offers and is nearly always inside a batch, so its MB/s per core is
+#: the offered load over its cores, not its capacity. Datagen runs flat out,
+#: so its rate is measured directly: AML 26-29 MB/s per core on 2026-10-08
+#: (n=3), below the matrix's 34. Every stage's executors stay overridable.
+STAGE_MB_S_PER_CORE: dict[str, dict[str, float]] = {
+    "financial": {"datagen": 28.0, "bronze": 4.3, "silver": 0.7},
+    "customer360": {"datagen": 104.0, "bronze": 40.5, "silver": 14.2},
+}
+#: The share of a stage's capacity the offered load may use, so its lag stays
+#: flat through bursts.
+BALANCE_HEADROOM = 0.8
+#: Most generator cores in one datagen pod (memory bandwidth per node).
+DATAGEN_POD_CORES = 8
+
+
+def is_continuous(config: LakebenchConfig) -> bool:
+    """The config runs continuous (``run --continuous`` sets it on its copy)."""
+    from lakebench.config.schema import is_continuous_mode
+
+    return is_continuous_mode(config.architecture.pipeline.mode)
+
+
+def _schema_of(config: LakebenchConfig) -> str:
+    schema = getattr(config.architecture.workload.schema_type, "value", "customer360")
+    return schema if schema in CONTINUOUS_LOAD_MB_S_PER_SCALE else "customer360"
+
+
+def continuous_offered_load_mb_s(config: LakebenchConfig) -> float:
+    """The MB/s a continuous run offers at its scale (the workload definition)."""
+    scale = float(config.architecture.workload.datagen.get_effective_scale())
+    return CONTINUOUS_LOAD_MB_S_PER_SCALE[_schema_of(config)] * scale
+
+
+#: Datagen CPU steps (millicores) and the smallest pod: the pod's CPU limit
+#: equals its request, and it runs one generator thread per started core
+#: (deploy/datagen.py), held to its share by the CPU quota.
+DATAGEN_CPU_STEP_M = 100
+DATAGEN_MIN_CPU_M = 200
+
+
+def _cpu_str(millicores: int) -> str:
+    return str(millicores // 1000) if millicores % 1000 == 0 else f"{millicores}m"
+
+
+def continuous_datagen_cores(config: LakebenchConfig) -> tuple[int, int, str]:
+    """(millicores, pods, cpu per pod) that produce the offered load:
+    load / datagen MB/s per core, in steps of DATAGEN_CPU_STEP_M, in pods of
+    at most DATAGEN_POD_CORES. Each pod runs flat out on its CPU."""
+    import math
+
+    rate = STAGE_MB_S_PER_CORE[_schema_of(config)]["datagen"]
+    step = DATAGEN_CPU_STEP_M
+    total = math.ceil(continuous_offered_load_mb_s(config) / rate * 1000 / step) * step
+    total = max(DATAGEN_MIN_CPU_M, total)
+    pods = math.ceil(total / (DATAGEN_POD_CORES * 1000))
+    per_pod = math.ceil(total / pods / step) * step
+    return per_pod * pods, pods, _cpu_str(per_pod)
+
+
+def datagen_offered_mb_s(config: LakebenchConfig) -> float:
+    """The MB/s continuous datagen offers: its pods x CPU x datagen MB/s per
+    core. A datagen the config sizes offers that load; unset, the scale's."""
+    rate = STAGE_MB_S_PER_CORE[_schema_of(config)]["datagen"]
+    datagen = config.architecture.workload.datagen
+    if {"cpu", "parallelism"} & datagen.model_fields_set:
+        return datagen.parallelism * _parse_cpu_millicores(datagen.cpu) / 1000 * rate
+    return continuous_datagen_cores(config)[0] / 1000 * rate
 
 
 def _apply_datagen_pod_floor(config: LakebenchConfig, changes: list[str]) -> None:
@@ -197,6 +276,24 @@ def _apply_datagen_pod_floor(config: LakebenchConfig, changes: list[str]) -> Non
         and float(datagen.get_effective_scale()) > 100
         and datagen.parallelism < DATAGEN_MIN_PODS
     ):
+        if "parallelism" in datagen.model_fields_set:
+            changes.append(
+                f"datagen.parallelism={datagen.parallelism} (set in config) kept; the "
+                f"datagen memory model was measured at {DATAGEN_MIN_PODS} or more pods, "
+                "so a pod may run out of memory"
+            )
+            return
+        if is_continuous(config) and "cpu" not in datagen.model_fields_set:
+            # Continuous: the cores are the offered load; spread them over the
+            # floor's pods rather than adding cores.
+            import math
+
+            total_m = datagen.parallelism * _parse_cpu_millicores(datagen.cpu)
+            per_pod = math.ceil(total_m / DATAGEN_MIN_PODS / DATAGEN_CPU_STEP_M)
+            cpu = _cpu_str(max(DATAGEN_MIN_CPU_M, per_pod * DATAGEN_CPU_STEP_M))
+            object.__setattr__(datagen, "cpu", cpu)
+            if "memory" not in datagen.model_fields_set:
+                object.__setattr__(datagen, "memory", _datagen_memory_default(config, cpu))
         object.__setattr__(datagen, "parallelism", DATAGEN_MIN_PODS)
         changes.append(
             f"datagen.parallelism raised to {DATAGEN_MIN_PODS}: the datagen memory model "
@@ -255,7 +352,7 @@ def resolve_auto_sizing(
 
     Returns:
         The cuts made to fit the cluster, each with its reason, so callers
-        can show them. Every cut is also logged at WARNING (LB-160).
+        can show them. Every cut is also logged at WARNING.
     """
 
     scale = config.architecture.workload.datagen.scale
@@ -305,6 +402,15 @@ def resolve_auto_sizing(
     # the CPU (thread count) actually used.
     datagen = config.architecture.workload.datagen
     dg_cpu = datagen.cpu if "cpu" in datagen.model_fields_set else "8"
+    dg_pods = guidance.datagen.parallelism
+    if is_continuous(config) and not ({"cpu", "parallelism"} & datagen.model_fields_set):
+        # Continuous: datagen offers the scale's load (a workload definition),
+        # not the batch table, which sizes datagen to write a corpus fast.
+        total_m, dg_pods, dg_cpu = continuous_datagen_cores(config)
+        changes.append(
+            f"datagen: {total_m / 1000:g} core(s) in {dg_pods} pod(s) for the offered load "
+            f"of {continuous_offered_load_mb_s(config):g} MB/s (scale {scale:g})"
+        )
     dg_memory = _datagen_memory_default(config, dg_cpu)
     clamp = _datagen_clamp_note(config, dg_cpu)
     if clamp and "memory" not in datagen.model_fields_set:
@@ -314,16 +420,17 @@ def resolve_auto_sizing(
     if _set_if_default(datagen, "memory", dg_memory):
         changes.append(f"datagen.memory={dg_memory}")
 
-    if _set_if_default(datagen, "parallelism", guidance.datagen.parallelism):
-        changes.append(f"datagen.parallelism={guidance.datagen.parallelism}")
+    if _set_if_default(datagen, "parallelism", dg_pods):
+        changes.append(f"datagen.parallelism={dg_pods}")
 
     # -- Schema-specific overrides --
     # Workload schemas that differ from Customer360 on baseline resource shape
     # override defaults here. Financial raises the Spark Thrift memory.
-    # Per-executor scratch PVCs are _JOB_PROFILES["scratch_size"] (silver-build
-    # 300Gi) with _SCHEMA_PROFILE_OVERRIDES on top, applied at manifest-build
-    # time in modules/pipeline_engines/spark/job.py.
-    # -- Spark Thrift on Delta (LB-148) --
+    # Per-executor scratch PVCs are job.py:scratch_executor_size (the stage's
+    # scratch_gib_per_scale x scale over its executors, up to the profile's
+    # scratch_size) with _SCHEMA_PROFILE_OVERRIDES on top, applied at
+    # manifest-build time in modules/pipeline_engines/spark/job.py.
+    # -- Spark Thrift on Delta --
     # Runs before the schema overrides so the financial 24g heap still wins.
     delta_change = _apply_delta_thrift_default(config, cluster_capacity)
     if delta_change:
@@ -344,6 +451,29 @@ def resolve_auto_sizing(
     if cluster_capacity is not None:
         _apply_cluster_scaling(config, cluster_capacity, effective_mode, guidance, changes)
 
+    if is_continuous(config):
+        from lakebench.modules.pipeline_engines.spark.job import (
+            _streaming_concurrent_budget,
+            fit_executor_cores,
+            unbalanced_stages,
+        )
+
+        budget = None
+        if cluster_capacity is not None:
+            changes.extend(
+                fit_executor_cores(
+                    config,
+                    cluster_capacity.largest_node_cpu_millicores,
+                    cluster_capacity.largest_node_memory_bytes,
+                )
+            )
+            budget = _streaming_concurrent_budget(
+                config,
+                cluster_capacity.total_cpu_millicores,
+                cluster_memory_bytes=cluster_capacity.total_memory_bytes,
+            )
+        changes.extend(f"cannot balance: {m}" for m in unbalanced_stages(config, budget))
+
     if changes:
         log.info(
             "Auto-sized for scale=%d (tier=%s, mode=%s): %s",
@@ -352,13 +482,22 @@ def resolve_auto_sizing(
             effective_mode,
             ", ".join(changes),
         )
-    cuts = [c for c in changes if " capped " in c or c.startswith("datagen.parallelism raised")]
+    # Cuts to fit the cluster, and set-in-config values kept although they do
+    # not fit: both are shown to the user.
+    cuts = [
+        c
+        for c in changes
+        if " capped " in c
+        or c.startswith("datagen.parallelism raised")
+        or "(set in config) kept" in c
+        or c.startswith("cannot balance")
+    ]
     for cut in cuts:
-        log.warning("Auto-sizing cut to fit the cluster: %s", cut)
+        log.warning("Auto-sizing: %s", cut)
     return cuts
 
 
-# LB-148: Spark Thrift default for Delta tables. The Thrift server is Spark
+# Spark Thrift default for Delta tables. The Thrift server is Spark
 # local mode in one pod, so its cores are the query parallelism. Iceberg is
 # compacted before the benchmark and passes all 8 c360 queries at 2 cores /
 # 4g; Delta OPTIMIZE is skipped for Thrift (it OOMs), so
@@ -383,7 +522,7 @@ def _apply_delta_thrift_default(
     config: LakebenchConfig,
     cluster_capacity: ClusterCapacity | None = None,
 ) -> str | None:
-    """Raise the Spark Thrift defaults for Delta + Hive (LB-148).
+    """Raise the Spark Thrift defaults for Delta + Hive.
 
     Only fields the user did not set are touched. On a cluster whose
     largest node cannot hold the default, the target is fitted down with a
@@ -478,9 +617,9 @@ def _apply_schema_overrides(
 
     Baseline (Customer360) leaves everything at scale-tier guidance.
     Financial (FinServ-Crime, AML) lifts the Spark Thrift default from 4g
-    toward 16g -- LB-093, first live
-    S1 run OOM'd every AML benchmark query at 4g because the silver
-    aggregation and rule-target joins are heavier than C360's silver.
+    toward 16g -- the first live S1 run OOM'd every AML benchmark query at
+    4g because the silver aggregation and rule-target joins are heavier
+    than C360's silver.
     Only fields the user did not explicitly set are touched.
 
     Cluster-cap on the thrift bump: on a small cluster whose largest
@@ -506,7 +645,7 @@ def _apply_schema_overrides(
     changes: list[str] = []
     if config.architecture.query_engine.type.value == "spark-thrift":
         thrift = config.architecture.query_engine.spark_thrift
-        # LB-117: 16g was on the edge for AML analytical queries -- three
+        # 16g was on the edge for AML analytical queries -- three
         # S1 iters saw QpH 6.6 / 0.0 / 8.2 with the 0.0 being a thrift-pod
         # OOM mid-benchmark on aggregate_typology_coverage.sql. 24g clears
         # it with headroom. Cluster-cap threshold is 36 GiB *allocatable*:
@@ -521,6 +660,19 @@ def _apply_schema_overrides(
                 target_memory = f"{int(fitted)}g"
         if _set_if_default(thrift, "memory", target_memory):
             changes.append(f"query_engine.spark_thrift.memory={target_memory}")
+    elif config.architecture.query_engine.type.value == "duckdb":
+        duck = config.architecture.query_engine.duckdb
+        # 4g OOMKilled the DuckDB pod (exit 137) in an AML continuous
+        # benchmark round at scale 1 (polaris-iceberg-spark-duckdb,
+        # 2026-10-07): the AML query set joins gold.alerts to the silver
+        # tables. 16g, capped on a small node as for Thrift (8 GiB headroom).
+        target_memory = "16g"
+        if cluster_capacity is not None:
+            largest_node_gi = _largest_node_memory_gi(cluster_capacity)
+            if largest_node_gi is not None and largest_node_gi < 24.0:
+                target_memory = f"{int(max(4.0, largest_node_gi - 8.0))}g"
+        if _set_if_default(duck, "memory", target_memory):
+            changes.append(f"query_engine.duckdb.memory={target_memory}")
 
     if not changes:
         return None
@@ -680,7 +832,7 @@ def _apply_cluster_scaling(
     if datagen.parallelism > 0:
         datagen_cpu_m = _parse_cpu_millicores(datagen.cpu)
         cluster_max_datagen = _round_down_even(datagen_budget_m // datagen_cpu_m)
-        # A cut must say why (LB-160): at scale 250 and 500 the Trino tier's
+        # A cut must say why: at scale 250 and 500 the Trino tier's
         # workers held 85 and 165 of 434 cores and 43 pods silently became
         # 38 and 30.
         share = f"{int(_STREAMING_DATAGEN_SHARE * 100)}% of " if is_streaming else ""
@@ -702,7 +854,11 @@ def _apply_cluster_scaling(
         )
 
         if "parallelism" not in datagen.model_fields_set:
-            if scale > 50 and cluster_max_datagen > datagen.parallelism:
+            if (
+                scale > 50
+                and cluster_max_datagen > datagen.parallelism
+                and not is_continuous(config)
+            ):
                 # Large scale: use the cluster
                 object.__setattr__(datagen, "parallelism", cluster_max_datagen)
                 changes.append(f"datagen.parallelism scaled to {cluster_max_datagen} (cluster CPU)")
@@ -713,9 +869,11 @@ def _apply_cluster_scaling(
                 )
                 object.__setattr__(datagen, "parallelism", cluster_max_datagen)
         elif datagen.parallelism > cluster_max_datagen:
-            # User-set value still gets capped to fit
+            # A value set in the config is the run's pressure and is used
+            # exactly: say what will not fit, never cut it.
             changes.append(
-                f"datagen.parallelism capped {datagen.parallelism} -> "
-                f"{cluster_max_datagen} (set in config): {datagen_cap_reason}"
+                f"datagen.parallelism={datagen.parallelism} (set in config) kept; the "
+                f"cluster fits about {cluster_max_datagen} (batch pods queue; a continuous "
+                f"run is refused at preflight): "
+                f"{datagen_cap_reason}"
             )
-            object.__setattr__(datagen, "parallelism", cluster_max_datagen)

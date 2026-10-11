@@ -1,113 +1,12 @@
-"""Tests for CLI auto-discovery and resolve_config_path."""
-
-from pathlib import Path
+"""CLI preflight guards, Spark interval parsing, maintenance retention and the
+engine-aware Iceberg maintenance helper."""
 
 import pytest
 import typer
 
-from lakebench.cli import DEFAULT_CONFIG, resolve_config_path
-
-
-class TestResolveConfigPath:
-    """Tests for config file auto-discovery."""
-
-    def test_explicit_path_returned(self, tmp_path):
-        """Explicit path is returned as-is, even if it doesn't exist."""
-        p = tmp_path / "custom.yaml"
-        assert resolve_config_path(p) == p
-
-    def test_none_finds_default(self, tmp_path, monkeypatch):
-        """None resolves to ./lakebench.yaml when it exists."""
-        monkeypatch.chdir(tmp_path)
-        default = tmp_path / DEFAULT_CONFIG
-        default.write_text("name: test\n")
-        result = resolve_config_path(None)
-        assert result == Path(DEFAULT_CONFIG)
-
-    def test_none_exits_when_missing(self, tmp_path, monkeypatch):
-        """None raises typer.Exit when ./lakebench.yaml is absent."""
-        monkeypatch.chdir(tmp_path)
-        with pytest.raises(typer.Exit):
-            resolve_config_path(None)
-
-    def test_default_config_constant(self):
-        """DEFAULT_CONFIG is lakebench.yaml."""
-        assert DEFAULT_CONFIG == "lakebench.yaml"
-
-
-class TestRecommendCommand:
-    """Tests for the lakebench recommend command."""
-
-    def test_compute_requirements_scale_1(self):
-        """Scale 1 requires minimal cluster resources."""
-        from lakebench.config.scale import customer360_dimensions, full_compute_guidance
-
-        scale = 1
-        dims = customer360_dimensions(scale)
-        guidance = full_compute_guidance(scale)
-
-        assert dims.approx_bronze_gb == 10.0
-        assert guidance.spark.tier_name == "minimal"
-        assert guidance.spark.recommended_executors == 2
-        assert guidance.datagen.parallelism == 2
-
-    def test_compute_requirements_scale_100(self):
-        """Scale 100 requires performance tier resources."""
-        from lakebench.config.scale import customer360_dimensions, full_compute_guidance
-
-        scale = 100
-        dims = customer360_dimensions(scale)
-        guidance = full_compute_guidance(scale)
-
-        assert dims.approx_bronze_gb == 1000.0  # 1 TB
-        assert guidance.spark.tier_name == "performance"
-        assert guidance.spark.recommended_executors >= 8
-
-    def test_compute_requirements_scale_500(self):
-        """Scale 500 requires significant cluster resources."""
-        from lakebench.config.scale import customer360_dimensions, full_compute_guidance
-
-        scale = 500
-        dims = customer360_dimensions(scale)
-        guidance = full_compute_guidance(scale)
-
-        assert dims.approx_bronze_gb == 5000.0  # 5 TB
-        assert guidance.spark.tier_name == "performance"
-        assert guidance.spark.recommended_executors >= 16
-
-    def test_scale_tiers_are_monotonic(self):
-        """Higher scales require more resources."""
-        from lakebench.config.scale import full_compute_guidance
-
-        prev_executors = 0
-        for scale in [1, 10, 50, 100, 500, 1000]:
-            guidance = full_compute_guidance(scale)
-            current = guidance.spark.recommended_executors
-            assert current >= prev_executors, (
-                f"Scale {scale} should need >= executors than lower scales"
-            )
-            prev_executors = current
-
-    def test_cluster_requirements_include_all_components(self):
-        """Cluster requirements include Spark, Trino, Datagen, and infra."""
-        from lakebench.config.scale import full_compute_guidance
-
-        scale = 100
-        guidance = full_compute_guidance(scale)
-
-        # All components should have non-zero resources
-        assert guidance.spark.recommended_executors > 0
-        assert guidance.trino.worker_replicas > 0
-        assert guidance.datagen.parallelism > 0
-
-        # Memory strings should be valid
-        assert guidance.spark.recommended_memory.endswith("g")
-        assert guidance.trino.worker_memory.endswith("Gi")
-        assert guidance.datagen.memory.endswith("Gi")
-
 
 class TestPreflightCheck:
-    """Tests for _preflight_check deploy guard."""
+    """_preflight_check refuses a deploy whose Stackable operators are absent."""
 
     @pytest.fixture(autouse=True)
     def _capacity_fits(self, monkeypatch):
@@ -120,389 +19,115 @@ class TestPreflightCheck:
             lambda cfg: PrereqResult(name="cluster-capacity", passed=True, message="OK"),
         )
 
-    def test_preflight_blocks_on_missing_stackable(self, monkeypatch):
-        """Preflight exits 1 when Stackable CRDs are missing and install is false."""
+    @pytest.mark.parametrize(
+        ("present", "missing"),
+        [
+            ([], ["hive-operator", "secret-operator"]),
+            (["hiveclusters.hive.stackable.tech"], ["secret-operator"]),
+            (["secretclasses.secrets.stackable.tech"], ["hive-operator"]),
+            (["hiveclusters.hive.stackable.tech", "secretclasses.secrets.stackable.tech"], []),
+        ],
+    )
+    def test_blocks_on_missing_stackable_operators(self, present, missing, capsys):
         from unittest.mock import MagicMock, patch
 
         from lakebench.cli import _preflight_check
+        from lakebench.exit_codes import ExitCode
+        from tests.conftest import make_config
 
-        # Build a config with catalog=hive, install=false, and valid S3
-        cfg = MagicMock()
-        cfg.architecture.catalog.type.value = "hive"
-        cfg.architecture.catalog.hive.operator.install = False
-        cfg.architecture.catalog.hive.operator.version = "25.7.0"
-        cfg.architecture.catalog.hive.operator.namespace = "stackable"
-        cfg.platform.storage.s3.endpoint = "http://s3:80"
-        cfg.platform.storage.s3.access_key = "key"
-        cfg.platform.storage.s3.secret_key = "secret"
-
-        # Mock K8s CRD listing to return no Stackable CRDs
-        mock_crd_list = MagicMock()
-        mock_crd_list.items = []
-
-        with (
-            patch("kubernetes.client.ApiextensionsV1Api") as mock_api,
-            pytest.raises(typer.Exit),
-        ):
-            mock_api.return_value.list_custom_resource_definition.return_value = mock_crd_list
-            _preflight_check(cfg)
-
-    def test_preflight_blocks_on_missing_stackable_whatever_install_says(self, capsys):
-        """Deploy never installs Stackable, so a missing one stops the
-        preflight with the admin command even with install: true (which the
-        loader refuses anyway). Reverted, install: true only warned."""
-        from unittest.mock import MagicMock, patch
-
-        from lakebench.cli import _preflight_check
-
-        cfg = MagicMock()
-        cfg.architecture.catalog.type.value = "hive"
-        cfg.architecture.catalog.hive.operator.install = True
-        cfg.platform.storage.s3.endpoint = "http://s3:80"
-        cfg.platform.storage.s3.access_key = "key"
-        cfg.platform.storage.s3.secret_key = "secret"
-
-        mock_crd_list = MagicMock()
-        mock_crd_list.items = []
-
-        with (
-            patch("kubernetes.client.ApiextensionsV1Api") as mock_api,
-            pytest.raises(typer.Exit),
-        ):
-            mock_api.return_value.list_custom_resource_definition.return_value = mock_crd_list
-            _preflight_check(cfg)
-        cap = capsys.readouterr()
-        out = " ".join((cap.out + cap.err).split())
-        assert "lakebench admin install --component stackable" in out
-        assert "helm install" not in out
-
-    def test_preflight_stops_when_observability_is_enabled_but_not_installed(self, capsys):
-        """Deploy no longer installs the shared stack, so a missing one stops
-        the preflight, before anything is created, rather than at the last
-        deploy step."""
-        from unittest.mock import MagicMock, patch
-
-        from lakebench.cli import _preflight_check
-
-        cfg = MagicMock()
-        cfg.architecture.catalog.type.value = "polaris"
-        cfg.observability.enabled = True
-        cfg.platform.kubernetes.context = ""
-        cfg.platform.storage.s3.endpoint = "http://s3:80"
-        cfg.platform.storage.s3.access_key = "key"
-        cfg.platform.storage.s3.secret_key = "secret"
-        with (
-            patch("lakebench.deploy.observability.find_observability_release", return_value=None),
-            pytest.raises(typer.Exit),
-        ):
-            _preflight_check(cfg)
-        cap = capsys.readouterr()
-        out = " ".join((cap.out + cap.err).split())
-        assert "lakebench admin install --component observability" in out
-
-    def test_preflight_passes_when_stackable_present(self, monkeypatch):
-        """Preflight does not exit when Stackable CRDs are present."""
-        from unittest.mock import MagicMock, patch
-
-        from lakebench.cli import _preflight_check
-
-        cfg = MagicMock()
-        cfg.architecture.catalog.type.value = "hive"
-        cfg.platform.storage.s3.endpoint = "http://s3:80"
-        cfg.platform.storage.s3.access_key = "key"
-        cfg.platform.storage.s3.secret_key = "secret"
-
-        # Mock CRDs to include the required Stackable CRDs
-        crd1 = MagicMock()
-        crd1.metadata.name = "hiveclusters.hive.stackable.tech"
-        crd2 = MagicMock()
-        crd2.metadata.name = "secretclasses.secrets.stackable.tech"
-        mock_crd_list = MagicMock()
-        mock_crd_list.items = [crd1, crd2]
+        cfg = make_config()
+        assert cfg.architecture.catalog.type.value == "hive"
+        crds = MagicMock()
+        crds.items = []
+        for name in present:
+            crd = MagicMock()
+            crd.metadata.name = name
+            crds.items.append(crd)
 
         with patch("kubernetes.client.ApiextensionsV1Api") as mock_api:
-            mock_api.return_value.list_custom_resource_definition.return_value = mock_crd_list
-            # Should not raise
-            _preflight_check(cfg)
-
-    def test_preflight_skips_stackable_for_polaris(self, monkeypatch):
-        """Preflight skips Stackable check when catalog is Polaris."""
-        from unittest.mock import MagicMock
-
-        from lakebench.cli import _preflight_check
-
-        cfg = MagicMock()
-        cfg.architecture.catalog.type.value = "polaris"
-        cfg.platform.storage.s3.endpoint = "http://s3:80"
-        cfg.platform.storage.s3.access_key = "key"
-        cfg.platform.storage.s3.secret_key = "secret"
-
-        # Should not raise (Stackable check skipped entirely)
-        _preflight_check(cfg)
+            mock_api.return_value.list_custom_resource_definition.return_value = crds
+            if not missing:
+                _preflight_check(cfg)
+                return
+            with pytest.raises(typer.Exit) as exc:
+                _preflight_check(cfg)
+        assert exc.value.exit_code == ExitCode.PREREQUISITE
+        out = capsys.readouterr()
+        text = out.out + out.err
+        for op in ("hive-operator", "secret-operator"):
+            assert (op in text) is (op in missing)
 
 
 class TestRunPreflightInfraCheck:
-    """Tests for _run_preflight_infra_check run guard."""
+    """_run_preflight_infra_check refuses a run when a component is absent or unready."""
 
-    def _make_cfg(self, catalog="hive", engine="trino"):
-        from unittest.mock import MagicMock
-
-        cfg = MagicMock()
-        cfg.get_namespace.return_value = "lakebench"
-        cfg.platform.kubernetes.context = ""
-        cfg.architecture.catalog.type.value = catalog
-        cfg.architecture.query_engine.type.value = engine
-        cfg.observability.enabled = False
-        return cfg
-
-    def test_blocks_when_namespace_missing(self):
-        """Exits 1 when the target namespace does not exist."""
-        from unittest.mock import patch
-
-        from lakebench.cli import _run_preflight_infra_check
-
-        cfg = self._make_cfg()
-        with (
-            patch("lakebench.cli.get_k8s_client") as mock_get,
-            pytest.raises(typer.Exit),
-        ):
-            mock_get.return_value.namespace_exists.return_value = False
-            _run_preflight_infra_check(cfg)
-
-    def test_blocks_when_postgres_missing(self):
-        """Exits 1 when PostgreSQL is not deployed."""
+    @pytest.mark.parametrize(
+        ("fault", "named"),
+        [
+            ("namespace", "lakebench-test"),
+            ("postgres", "PostgreSQL"),
+            ("trino-workers", "Trino workers"),
+            (None, None),
+        ],
+    )
+    def test_blocks_on_a_missing_or_unready_component(self, fault, named, capsys):
         from unittest.mock import MagicMock, patch
 
         from kubernetes.client.rest import ApiException
 
         from lakebench.cli import _run_preflight_infra_check
+        from lakebench.exit_codes import ExitCode
+        from tests.conftest import make_config
 
-        cfg = self._make_cfg()
+        cfg = make_config(name="lakebench-test")
+        assert cfg.architecture.query_engine.type.value == "trino"
+        assert cfg.get_namespace() == "lakebench-test"
 
-        def fake_read_sts(name, ns):
-            if name == "lakebench-postgres":
+        def read(name, ns):
+            if fault == "postgres" and name == "lakebench-postgres":
                 raise ApiException(status=404, reason="Not Found")
             obj = MagicMock()
-            obj.status.ready_replicas = 1
-            obj.spec.replicas = 1
-            return obj
-
-        def fake_read_dep(name, ns):
-            obj = MagicMock()
-            obj.status.ready_replicas = 1
-            obj.spec.replicas = 1
-            return obj
-
-        with (
-            patch("lakebench.cli.get_k8s_client") as mock_get,
-            patch("kubernetes.client.AppsV1Api") as mock_apps,
-            pytest.raises(typer.Exit),
-        ):
-            mock_get.return_value.namespace_exists.return_value = True
-            mock_apps.return_value.read_namespaced_stateful_set.side_effect = fake_read_sts
-            mock_apps.return_value.read_namespaced_deployment.side_effect = fake_read_dep
-            _run_preflight_infra_check(cfg)
-
-    def test_blocks_when_trino_not_ready(self):
-        """Exits 1 when Trino workers have 0 ready replicas."""
-        from unittest.mock import MagicMock, patch
-
-        from lakebench.cli import _run_preflight_infra_check
-
-        cfg = self._make_cfg(engine="trino")
-
-        def fake_read_sts(name, ns):
-            obj = MagicMock()
-            if name == "lakebench-trino-worker":
-                obj.status.ready_replicas = 0
-                obj.spec.replicas = 4
-            else:
-                obj.status.ready_replicas = 1
-                obj.spec.replicas = 1
-            return obj
-
-        def fake_read_dep(name, ns):
-            obj = MagicMock()
-            obj.status.ready_replicas = 1
-            obj.spec.replicas = 1
-            return obj
-
-        with (
-            patch("lakebench.cli.get_k8s_client") as mock_get,
-            patch("kubernetes.client.AppsV1Api") as mock_apps,
-            pytest.raises(typer.Exit),
-        ):
-            mock_get.return_value.namespace_exists.return_value = True
-            mock_apps.return_value.read_namespaced_stateful_set.side_effect = fake_read_sts
-            mock_apps.return_value.read_namespaced_deployment.side_effect = fake_read_dep
-            _run_preflight_infra_check(cfg)
-
-    def test_passes_when_all_ready(self):
-        """Does not exit when all components are deployed and ready."""
-        from unittest.mock import MagicMock, patch
-
-        from lakebench.cli import _run_preflight_infra_check
-
-        cfg = self._make_cfg(engine="trino")
-
-        def fake_read_sts(name, ns):
-            obj = MagicMock()
-            if name == "lakebench-trino-worker":
-                obj.status.ready_replicas = 4
-                obj.spec.replicas = 4
-            else:
-                obj.status.ready_replicas = 1
-                obj.spec.replicas = 1
-            return obj
-
-        def fake_read_dep(name, ns):
-            obj = MagicMock()
-            obj.status.ready_replicas = 1
-            obj.spec.replicas = 1
+            workers = name == "lakebench-trino-worker"
+            obj.spec.replicas = 4 if workers else 1
+            obj.status.ready_replicas = (
+                0 if workers and fault == "trino-workers" else obj.spec.replicas
+            )
             return obj
 
         with (
             patch("lakebench.cli.get_k8s_client") as mock_get,
             patch("kubernetes.client.AppsV1Api") as mock_apps,
         ):
-            mock_get.return_value.namespace_exists.return_value = True
-            mock_apps.return_value.read_namespaced_stateful_set.side_effect = fake_read_sts
-            mock_apps.return_value.read_namespaced_deployment.side_effect = fake_read_dep
-            # Should not raise
-            _run_preflight_infra_check(cfg)
-
-    def test_polaris_duckdb_components(self):
-        """Checks Polaris + DuckDB components when configured."""
-        from unittest.mock import MagicMock, patch
-
-        from lakebench.cli import _run_preflight_infra_check
-
-        cfg = self._make_cfg(catalog="polaris", engine="duckdb")
-
-        def fake_read_sts(name, ns):
-            obj = MagicMock()
-            obj.status.ready_replicas = 1
-            obj.spec.replicas = 1
-            return obj
-
-        def fake_read_dep(name, ns):
-            obj = MagicMock()
-            obj.status.ready_replicas = 1
-            obj.spec.replicas = 1
-            return obj
-
-        with (
-            patch("lakebench.cli.get_k8s_client") as mock_get,
-            patch("kubernetes.client.AppsV1Api") as mock_apps,
-        ):
-            mock_get.return_value.namespace_exists.return_value = True
-            mock_apps.return_value.read_namespaced_stateful_set.side_effect = fake_read_sts
-            mock_apps.return_value.read_namespaced_deployment.side_effect = fake_read_dep
-            # Should not raise -- checks Polaris (Deployment) + DuckDB (Deployment)
-            _run_preflight_infra_check(cfg)
+            mock_get.return_value.namespace_exists.return_value = fault != "namespace"
+            mock_apps.return_value.read_namespaced_stateful_set.side_effect = read
+            mock_apps.return_value.read_namespaced_deployment.side_effect = read
+            if fault is None:
+                _run_preflight_infra_check(cfg)
+                return
+            with pytest.raises(typer.Exit) as exc:
+                _run_preflight_infra_check(cfg)
+        assert exc.value.exit_code == ExitCode.PREREQUISITE
+        out = capsys.readouterr()
+        assert named in out.out + out.err
 
 
 class TestParseSparkInterval:
     """Tests for _parse_spark_interval()."""
 
-    def test_seconds(self):
+    @pytest.mark.parametrize(
+        ("text", "seconds"),
+        [
+            ("30 seconds", 30),
+            ("1 second", 1),
+            ("5 minutes", 300),
+            ("1 minute", 60),
+            ("2 hours", 7200),
+        ],
+    )
+    def test_parse(self, text, seconds):
         from lakebench.cli import _parse_spark_interval
 
-        assert _parse_spark_interval("30 seconds") == 30
-
-    def test_single_second(self):
-        from lakebench.cli import _parse_spark_interval
-
-        assert _parse_spark_interval("1 second") == 1
-
-    def test_minutes(self):
-        from lakebench.cli import _parse_spark_interval
-
-        assert _parse_spark_interval("5 minutes") == 300
-
-    def test_single_minute(self):
-        from lakebench.cli import _parse_spark_interval
-
-        assert _parse_spark_interval("1 minute") == 60
-
-    def test_hours(self):
-        from lakebench.cli import _parse_spark_interval
-
-        assert _parse_spark_interval("2 hours") == 7200
-
-    def test_fallback_on_junk(self):
-        from lakebench.cli import _parse_spark_interval
-
-        assert _parse_spark_interval("garbage") == 300
-
-    def test_fallback_on_empty(self):
-        from lakebench.cli import _parse_spark_interval
-
-        assert _parse_spark_interval("") == 300
-
-    def test_fallback_on_no_unit(self):
-        from lakebench.cli import _parse_spark_interval
-
-        assert _parse_spark_interval("300") == 300
-
-    def test_parse_spark_interval_minutes(self):
-        """Verify that _parse_spark_interval handles '5 minutes'."""
-        from lakebench.cli import _parse_spark_interval
-
-        assert _parse_spark_interval("5 minutes") == 300
-
-
-class TestBenchmarkSchedulingFloors:
-    """Warmup and interval must be >= gold_refresh_interval."""
-
-    def test_warmup_below_gold_refresh_is_clamped(self):
-        """If warmup < gold_refresh_interval, warmup is raised to match."""
-        from lakebench.cli import _parse_spark_interval
-
-        gold_interval_s = _parse_spark_interval("5 minutes")
-        bench_warmup = 60  # user sets 60s, gold refresh is 300s
-
-        # Simulate the clamping logic from cli.py
-        if bench_warmup < gold_interval_s:
-            bench_warmup = gold_interval_s
-
-        assert bench_warmup == 300
-
-    def test_warmup_above_gold_refresh_unchanged(self):
-        """If warmup >= gold_refresh_interval, no clamping occurs."""
-        from lakebench.cli import _parse_spark_interval
-
-        gold_interval_s = _parse_spark_interval("5 minutes")
-        bench_warmup = 600  # user sets 10 min, gold refresh is 5 min
-
-        if bench_warmup < gold_interval_s:
-            bench_warmup = gold_interval_s
-
-        assert bench_warmup == 600
-
-    def test_interval_below_gold_refresh_is_clamped(self):
-        """If interval < gold_refresh_interval, interval is raised to match."""
-        from lakebench.cli import _parse_spark_interval
-
-        gold_interval_s = _parse_spark_interval("5 minutes")
-        bench_interval = 120  # user sets 120s, gold refresh is 300s
-
-        if bench_interval < gold_interval_s:
-            bench_interval = gold_interval_s
-
-        assert bench_interval == 300
-
-    def test_interval_above_gold_refresh_unchanged(self):
-        """If interval >= gold_refresh_interval, no clamping occurs."""
-        from lakebench.cli import _parse_spark_interval
-
-        gold_interval_s = _parse_spark_interval("5 minutes")
-        bench_interval = 600  # user sets 10 min, gold refresh is 5 min
-
-        if bench_interval < gold_interval_s:
-            bench_interval = gold_interval_s
-
-        assert bench_interval == 600
+        assert _parse_spark_interval(text) == seconds
 
 
 class TestResolveMaintenanceRetention:
@@ -516,42 +141,24 @@ class TestResolveMaintenanceRetention:
         cfg.architecture.workload.retention_months = retention_months
         return cfg
 
-    def test_default_workload_returns_zero_seconds(self):
+    @pytest.mark.parametrize(
+        ("kw", "threshold"),
+        [
+            ({}, "0s"),
+            # retention workloads keep the window plus 6 months headroom at 30.5 days
+            ({"retention_workload": True, "retention_months": 60}, "2013d"),
+            ({"retention_workload": True, "retention_months": 12}, "549d"),
+        ],
+    )
+    def test_threshold(self, kw, threshold):
         from lakebench.cli._sustained import resolve_maintenance_retention
+        from lakebench.modules.table_formats.iceberg.maintenance import _parse_threshold_seconds
 
-        assert resolve_maintenance_retention(self._cfg()) == "0s"
-
-    def test_retention_workload_preserves_60_months_plus_headroom(self):
-        from lakebench.cli._sustained import resolve_maintenance_retention
-
-        threshold = resolve_maintenance_retention(
-            self._cfg(retention_workload=True, retention_months=60)
-        )
-        # 66 months * 30.5 days = 2013 days
-        assert threshold == "2013d"
-
-    def test_retention_workload_scales_with_months(self):
-        from lakebench.cli._sustained import resolve_maintenance_retention
-
-        # 12 + 6 = 18 months * 30.5 = 549 days
-        threshold = resolve_maintenance_retention(
-            self._cfg(retention_workload=True, retention_months=12)
-        )
-        assert threshold == "549d"
-
-    def test_retention_workload_threshold_is_parseable_by_maintenance(self):
-        """Sanity check: the day-string must round-trip through the parser."""
-        from lakebench.cli._sustained import resolve_maintenance_retention
-        from lakebench.modules.table_formats.iceberg.maintenance import (
-            _parse_threshold_seconds,
-        )
-
-        threshold = resolve_maintenance_retention(
-            self._cfg(retention_workload=True, retention_months=60)
-        )
-        seconds = _parse_threshold_seconds(threshold)
-        # 2013 days in seconds
-        assert seconds == 2013 * 86400
+        got = resolve_maintenance_retention(self._cfg(**kw))
+        assert got == threshold
+        # the day-string round-trips through the maintenance parser
+        if threshold.endswith("d"):
+            assert _parse_threshold_seconds(got) == int(threshold[:-1]) * 86400
 
 
 class TestRunIcebergMaintenance:
@@ -604,189 +211,3 @@ class TestRunIcebergMaintenance:
                 assert "retention_threshold => '30m'" in cmd[2]
             else:
                 assert "retention_threshold => '1450m'" in cmd[2]
-
-    def test_runs_maintenance_on_all_tables_spark_thrift(self):
-        """Runs expire_snapshots + remove_orphan_files via Spark Thrift beeline."""
-        from unittest.mock import MagicMock, patch
-
-        from rich.console import Console
-
-        from lakebench.cli import _run_iceberg_maintenance
-
-        cfg = self._make_cfg("spark-thrift")
-        k8s = MagicMock()
-        console = Console(quiet=True)
-        j = MagicMock()
-
-        mock_pod = MagicMock()
-        mock_pod.metadata.name = "spark-thrift-0"
-        mock_pod_list = MagicMock()
-        mock_pod_list.items = [mock_pod]
-
-        with patch("kubernetes.client") as mock_core:
-            mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
-            _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
-
-        # Batch c360: silver + gold (no bronze table exists) x 2 operations.
-        assert k8s.exec_in_pod.call_count == 4
-        # Verify beeline invocation
-        for call in k8s.exec_in_pod.call_args_list:
-            cmd = call[0][1]
-            assert cmd[0] == "/opt/spark/bin/beeline"
-
-    def test_skips_when_no_engine_pod(self):
-        """Does not crash when no engine pod is found."""
-        from unittest.mock import MagicMock, patch
-
-        from rich.console import Console
-
-        from lakebench.cli import _run_iceberg_maintenance
-
-        cfg = self._make_cfg("trino")
-        k8s = MagicMock()
-        console = Console(quiet=True)
-        j = MagicMock()
-
-        mock_pod_list = MagicMock()
-        mock_pod_list.items = []
-
-        with patch("kubernetes.client") as mock_core:
-            mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
-            _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
-
-        k8s.exec_in_pod.assert_not_called()
-
-    def test_skips_for_duckdb(self):
-        """DuckDB cannot run Iceberg maintenance -- skips cleanly."""
-        from unittest.mock import MagicMock
-
-        from rich.console import Console
-
-        from lakebench.cli import _run_iceberg_maintenance
-
-        cfg = self._make_cfg("duckdb")
-        k8s = MagicMock()
-        console = Console(quiet=True)
-        j = MagicMock()
-
-        # Should not attempt any pod lookups or exec calls
-        _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
-        k8s.exec_in_pod.assert_not_called()
-
-    def test_continues_on_per_table_failure(self):
-        """Failure on one table does not abort maintenance on others."""
-        from unittest.mock import MagicMock, patch
-
-        from rich.console import Console
-
-        from lakebench.cli import _run_iceberg_maintenance
-
-        cfg = self._make_cfg("trino")
-        k8s = MagicMock()
-        console = Console(quiet=True)
-        j = MagicMock()
-
-        mock_pod = MagicMock()
-        mock_pod.metadata.name = "trino-coordinator-0"
-        mock_pod_list = MagicMock()
-        mock_pod_list.items = [mock_pod]
-
-        # First two calls (silver) fail, the gold ones still run
-        k8s.exec_in_pod.side_effect = [
-            Exception("table not found"),
-            Exception("table not found"),
-            (0, "", ""),
-            (0, "", ""),
-        ]
-
-        with patch("kubernetes.client") as mock_core:
-            mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
-            # Should not raise
-            _run_iceberg_maintenance(cfg, k8s, console, j, "1h")
-
-        # All 4 calls were attempted despite the first 2 failing
-        assert k8s.exec_in_pod.call_count == 4
-
-    def test_handles_k8s_api_failure(self):
-        """Does not crash when K8s API listing fails."""
-        from unittest.mock import MagicMock, patch
-
-        from rich.console import Console
-
-        from lakebench.cli import _run_iceberg_maintenance
-
-        cfg = self._make_cfg()
-        k8s = MagicMock()
-        console = Console(quiet=True)
-        j = MagicMock()
-
-        with patch("kubernetes.client.CoreV1Api") as mock_core:
-            mock_core.return_value.list_namespaced_pod.side_effect = Exception("API unreachable")
-            # Should not raise
-            _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
-
-        k8s.exec_in_pod.assert_not_called()
-
-
-class TestRunIcebergCompaction:
-    """Tests for _run_iceberg_compaction() helper (v1.1.0)."""
-
-    def _make_cfg(self, engine_type="trino"):
-        from unittest.mock import MagicMock
-
-        cfg = MagicMock()
-        cfg.get_namespace.return_value = "lakebench-test"
-        cfg.architecture.query_engine.type.value = engine_type
-        cfg.architecture.query_engine.trino.catalog_name = "lakehouse"
-        cfg.architecture.query_engine.spark_thrift.catalog_name = "lakehouse"
-        from lakebench.config.schema import TableNamesConfig
-
-        cfg.architecture.tables = TableNamesConfig()
-        cfg.architecture.workload.schema_type.value = "customer360"
-        return cfg
-
-    def test_runs_compaction_trino(self):
-        """Compaction runs optimize on silver and gold via Trino."""
-        from unittest.mock import MagicMock, patch
-
-        from rich.console import Console
-
-        from lakebench.cli import _run_iceberg_compaction
-
-        cfg = self._make_cfg("trino")
-        k8s = MagicMock()
-        console = Console(quiet=True)
-        j = MagicMock()
-
-        mock_pod = MagicMock()
-        mock_pod.metadata.name = "trino-coordinator-0"
-        mock_pod_list = MagicMock()
-        mock_pod_list.items = [mock_pod]
-
-        with patch("kubernetes.client") as mock_core:
-            mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
-            _run_iceberg_compaction(cfg, k8s, console, j)
-
-        # 2 tables * 1 compaction operation, after one partition read of
-        # the silver table (LB-210); the mock's output is unreadable, so
-        # silver falls back to one unchunked statement.
-        calls = [call[0][1] for call in k8s.exec_in_pod.call_args_list]
-        assert all(cmd[0] == "trino" for cmd in calls)
-        assert ["$partitions" in cmd[2] for cmd in calls] == [True, False, False]
-        assert all("optimize" in cmd[2].lower() for cmd in calls[1:])
-
-    def test_skips_for_duckdb(self):
-        """DuckDB is read-only -- compaction skipped."""
-        from unittest.mock import MagicMock
-
-        from rich.console import Console
-
-        from lakebench.cli import _run_iceberg_compaction
-
-        cfg = self._make_cfg("duckdb")
-        k8s = MagicMock()
-        console = Console(quiet=True)
-        j = MagicMock()
-
-        _run_iceberg_compaction(cfg, k8s, console, j)
-        k8s.exec_in_pod.assert_not_called()

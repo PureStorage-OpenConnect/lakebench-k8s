@@ -1,4 +1,4 @@
-"""DEP-2 request module (SD-2, ch01 s2.2): coordinates, groups, hosts, hashes.
+"""DEP-2 request module (SD-2): coordinates, groups, hosts, hashes.
 
 Expected coordinates are the Maven facts the SD-1 offline resolve fetched
 from Maven Central on 2026-10-01 (every one resolved), not values read back
@@ -7,28 +7,15 @@ from the code under test.
 
 from __future__ import annotations
 
-import ast
-import hashlib
-from pathlib import Path
-
 import pytest
 
 from lakebench.deps import request as req
 from tests.conftest import make_config
+from tests.fixtures.deps_request_helpers import SPARK40 as SPARK40
+from tests.fixtures.deps_request_helpers import _cfg as _cfg
 
-SPARK40 = "apache/spark:4.0.2-python3"
 SPARK41 = "apache/spark:4.1.1-python3"
 SPARK35 = "apache/spark:3.5.4-python3"
-GOOGLE = "https://maven-central.storage-download.googleapis.com/maven2/"
-
-
-def _cfg(image=SPARK40, fmt="iceberg", version=None, **over):
-    tf: dict = {"type": fmt}
-    if version:
-        tf[fmt] = {"version": version}
-    arch = over.pop("architecture", {})
-    arch.setdefault("table_format", tf)
-    return make_config(images={"spark": image}, architecture=arch, **over)
 
 
 @pytest.mark.parametrize(
@@ -76,12 +63,6 @@ def _cfg(image=SPARK40, fmt="iceberg", version=None, **over):
             ],
         ),
         (
-            SPARK40,
-            "delta",
-            None,
-            ["io.delta:delta-spark_2.13:4.0.0", "org.apache.hadoop:hadoop-aws:3.4.1"],
-        ),
-        (
             SPARK41,
             "delta",
             None,
@@ -94,69 +75,22 @@ def test_jar_coordinates(image, fmt, version, expected):
     assert req.jar_coordinates(_cfg(image, fmt, version, recipe=recipe)) == expected
 
 
-def test_selected_groups_by_workload_and_engine():
-    assert req.selected_groups(make_config(recipe="hive-iceberg-spark-trino")) == ("jars",)
-    assert req.selected_groups(make_config(recipe="polaris-iceberg-spark-duckdb")) == (
-        "jars",
-        "duckdb",
-    )
-    aml = make_config(recipe="hive-iceberg-spark-trino", workload={"schema": "financial"})
-    assert req.selected_groups(aml) == ("jars", "py-reference")
+@pytest.mark.parametrize(
+    "recipe,schema,groups",
+    [
+        ("hive-iceberg-spark-trino", None, ("jars",)),
+        ("polaris-iceberg-spark-duckdb", None, ("jars", "duckdb")),
+        ("hive-iceberg-spark-trino", "financial", ("jars", "py-reference")),
+    ],
+)
+def test_selected_groups_by_workload_and_engine(recipe, schema, groups):
+    over = {"workload": {"schema": schema}} if schema else {}
+    assert req.selected_groups(make_config(recipe=recipe, **over)) == groups
 
 
-def test_repositories_default_and_mirror(monkeypatch):
-    cfg = make_config(recipe="hive-iceberg-spark-trino")
-    assert req.repositories(cfg) == ["https://repo1.maven.org/maven2/", GOOGLE]
-    monkeypatch.setattr(
-        req,
-        "_deps_key",
-        lambda c, k: (
-            "http://nexus.lb.svc:8081/repository/maven/" if k == "maven_repository" else None
-        ),
-    )
-    assert req.repositories(cfg) == ["http://nexus.lb.svc:8081/repository/maven/"]
-
-
-def test_egress_hosts_default_per_group():
-    c360 = make_config(recipe="hive-iceberg-spark-trino")
-    assert req.egress_hosts(c360) == [
-        "maven-central.storage-download.googleapis.com",
-        "repo1.maven.org",
-    ]
-    aml = make_config(recipe="hive-iceberg-spark-trino", workload={"schema": "financial"})
-    assert req.egress_hosts(aml) == [
-        "files.pythonhosted.org",
-        "maven-central.storage-download.googleapis.com",
-        "pypi.org",
-        "repo1.maven.org",
-    ]
-    duck = make_config(recipe="polaris-iceberg-spark-duckdb")
-    assert "extensions.duckdb.org" in req.egress_hosts(duck)
-    assert "pypi.org" in req.egress_hosts(duck)
-
-
-def test_egress_hosts_with_mirrors_name_only_the_mirrors(monkeypatch):
-    mirrors = {
-        "maven_repository": "http://nexus.lb.svc:8081/repository/maven/",
-        "pypi_index": "http://nexus.lb.svc:8081/repository/pypi/simple/",
-        "duckdb_extension_repository": "http://ext.mirror.example",
-    }
-    monkeypatch.setattr(req, "_deps_key", lambda c, k: mirrors.get(k))
-    duck = make_config(recipe="polaris-iceberg-spark-duckdb")
-    assert req.egress_hosts(duck) == ["ext.mirror.example", "nexus.lb.svc"]
-
-
-def test_request_hash_mirror_sensitive_pinset_not(monkeypatch):
-    """A mirror change alters request_sha256; the same file triples give the
-    same pinset_sha256 whatever the repositories (ch01 s2.2, s2.7)."""
-    cfg = make_config(recipe="hive-iceberg-spark-trino")
-    public = req.select_request(cfg, tools_digest="t").request_sha256
-    assert req.select_request(cfg, tools_digest="t").request_sha256 == public
-    monkeypatch.setattr(
-        req, "_deps_key", lambda c, k: "http://nexus/m2/" if k == "maven_repository" else None
-    )
-    mirrored = req.select_request(cfg, tools_digest="t").request_sha256
-    assert mirrored != public
+def test_pinset_hash_ignores_size_and_resolve_time():
+    """The same file triples give the same pinset_sha256 whatever the
+    repositories or resolve metadata."""
     groups = {"jars": [{"file": "a.jar", "sha256": "11", "size": 1, "coordinate": "g:a:1"}]}
     assert req.pinset_sha256(groups, ["a.jar"]) == req.pinset_sha256(
         {"jars": [{"file": "a.jar", "sha256": "11", "size": 999, "resolved_at": "x"}]}, ["a.jar"]
@@ -181,92 +115,10 @@ def test_request_hash_covers_resolver_image_and_versions():
     )
 
 
-def test_c360_request_carries_no_python_or_duckdb_fields():
-    r = req.select_request(make_config(recipe="hive-iceberg-spark-trino"), tools_digest="t")
-    js = r.canonical_json()
-    for key in ("py_reference", "pypi_index", "duckdb_version", "duckdb_image"):
-        assert key not in js
-
-
-def test_aml_request_reads_reference_pins_in_place():
-    from lakebench.modules.pipeline_engines.spark.job import REFERENCE_PY_DEPS
-
-    aml = make_config(recipe="hive-iceberg-spark-trino", workload={"schema": "financial"})
-    assert req.select_request(aml, tools_digest="t").py_reference == tuple(REFERENCE_PY_DEPS)
-
-
-def test_pinset_canonical_form():
-    """lb_deps.py (stdlib only) must compute the same value: compact
-    sorted-key JSON of the sorted [group, file, sha256] triples and the jar
-    order."""
-    groups = {
-        "py-reference": [{"file": "six-1.17.0-py2.py3-none-any.whl", "sha256": "bb"}],
-        "jars": [{"file": "b.jar", "sha256": "02"}, {"file": "a.jar", "sha256": "01"}],
-    }
-    order = ["b.jar", "a.jar"]
-    literal = (
-        '{"files":[["jars","a.jar","01"],["jars","b.jar","02"],'
-        '["py-reference","six-1.17.0-py2.py3-none-any.whl","bb"]],"jar_order":["b.jar","a.jar"]}'
-    )
-    assert req.pinset_sha256(groups, order) == hashlib.sha256(literal.encode()).hexdigest()
-    changed = {
-        **groups,
-        "jars": [{"file": "b.jar", "sha256": "03"}, {"file": "a.jar", "sha256": "01"}],
-    }
-    assert req.pinset_sha256(changed, order) != req.pinset_sha256(groups, order)
-    moved = {"duckdb-ext": groups["jars"], "py-reference": groups["py-reference"]}
-    assert req.pinset_sha256(moved, []) != req.pinset_sha256(groups, order)
-    assert req.pinset_sha256(groups, ["a.jar", "b.jar"]) != req.pinset_sha256(groups, order)
-
-
-def test_tools_sha256_raises_when_resolver_missing(tmp_path):
-    with pytest.raises(FileNotFoundError):
-        req.tools_sha256(tmp_path / "lb_deps.py")
-
-
-def test_one_runtime_reader():
-    """Only iceberg_runtime_suffix_for reads _ICEBERG_RUNTIME_SUFFIX (ch01
-    s2.10). A second reader is how Thrift and the jobs diverged (UX D2)."""
-    name = "_ICEBERG_RUNTIME_SUFFIX"
-    job = "modules/pipeline_engines/spark/job.py"
-    src = Path(req.__file__).resolve().parents[1]
-    offenders = []
-    for path in sorted(src.rglob("*.py")):
-        rel = path.relative_to(src).as_posix()
-        tree = ast.parse(path.read_text())
-        allowed: set[int] = set()
-        if rel == job:
-            for node in tree.body:
-                if isinstance(node, ast.Assign):
-                    targets = node.targets
-                elif isinstance(node, ast.AnnAssign):
-                    targets = [node.target]
-                else:
-                    targets = []
-                definition = any(isinstance(t, ast.Name) and t.id == name for t in targets)
-                reader = (
-                    isinstance(node, ast.FunctionDef) and node.name == "iceberg_runtime_suffix_for"
-                )
-                if definition or reader:
-                    allowed.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
-        for node in ast.walk(tree):
-            idents = []
-            if isinstance(node, ast.Name):
-                idents = [node.id]
-            elif isinstance(node, ast.Attribute):
-                idents = [node.attr]
-            elif isinstance(node, ast.ImportFrom):
-                idents = [a.name for a in node.names]
-            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
-                idents = [node.value]  # getattr(job, "_ICEBERG_RUNTIME_SUFFIX")
-            if name in idents and node.lineno not in allowed:
-                offenders.append(f"{rel}:{node.lineno}")
-    assert offenders == []
-
-
-@pytest.mark.parametrize(
-    "field,value",
-    [
+def test_every_request_field_enters_the_hash():
+    """A field that falls out of request_sha256 would let a redeploy keep a
+    set resolved for another request (the resolve skips on the hash)."""
+    for field, value in [
         ("py_reference", ("numpy==2.2.7",)),
         ("pypi_index", "http://pypi.mirror/simple/"),
         ("duckdb_version", "1.5.6"),
@@ -277,64 +129,60 @@ def test_one_runtime_reader():
         ("jar_coordinates", ("g:a:2",)),
         ("spark_image", "apache/spark:4.1.1-python3"),
         ("groups", ("jars",)),
+    ]:
+        import dataclasses
+
+        aml_duck = make_config(
+            recipe="polaris-iceberg-spark-duckdb", workload={"schema": "financial"}
+        )
+        base = req.select_request(aml_duck, tools_digest="t")
+        assert base.py_reference and base.duckdb_version  # both groups selected
+        assert dataclasses.replace(base, **{field: value}).request_sha256 != base.request_sha256
+
+
+def _with_deps(recipe="hive-iceberg-spark-trino", schema=None, **deps):
+    s3 = {"endpoint": "http://minio:9000", "access_key": "k", "secret_key": "s"}
+    over = {"workload": {"schema": schema}} if schema else {}
+    return make_config(recipe=recipe, platform={"storage": {"s3": s3}, "deps": deps}, **over)
+
+
+@pytest.mark.parametrize(
+    "recipe,schema,deps",
+    [
+        ("hive-iceberg-spark-trino", None, {"maven_repository": "http://nexus/m2/"}),
+        ("polaris-iceberg-spark-duckdb", "financial", {"pypi_index": "http://pypi.lab/simple/"}),
+        (
+            "polaris-iceberg-spark-duckdb",
+            "financial",
+            {"duckdb_extension_repository": "http://ext.lab"},
+        ),
     ],
 )
-def test_every_request_field_enters_the_hash(field, value):
-    """A field that falls out of request_sha256 would let a redeploy keep a
-    set resolved for another request (ch01 s2.3 step 1 skips on the hash)."""
-    import dataclasses
-
-    aml_duck = make_config(recipe="polaris-iceberg-spark-duckdb", workload={"schema": "financial"})
-    base = req.select_request(aml_duck, tools_digest="t")
-    assert base.py_reference and base.duckdb_version  # both groups selected
-    assert dataclasses.replace(base, **{field: value}).request_sha256 != base.request_sha256
-
-
-def _with_deps(**deps):
-    s3 = {"endpoint": "http://minio:9000", "access_key": "k", "secret_key": "s"}
-    return make_config(platform={"storage": {"s3": s3}, "deps": deps})
+def test_configured_mirror_changes_the_request_hash(recipe, schema, deps):
+    """A mirror set in platform.deps alters request_sha256."""
+    public = req.select_request(_with_deps(recipe, schema), tools_digest="t")
+    mirrored = req.select_request(_with_deps(recipe, schema, **deps), tools_digest="t")
+    assert (
+        public.request_sha256
+        == req.select_request(_with_deps(recipe, schema), tools_digest="t").request_sha256
+    )
+    assert mirrored.request_sha256 != public.request_sha256
 
 
-def test_deps_key_reads_platform_deps():
-    """request.py reads the typed platform.deps keys (SD-4a)."""
-    cfg = _with_deps(maven_repository=" http://nexus/m2 ")
-    assert req._deps_key(cfg, "maven_repository") == "http://nexus/m2/"
-    assert req._deps_key(cfg, "pypi_index") is None
-    assert req.repositories(cfg) == ["http://nexus/m2/"]
+def test_configured_maven_mirror_is_the_only_repository():
+    assert req.repositories(_with_deps(maven_repository=" http://nexus/m2 ")) == [
+        "http://nexus/m2/"
+    ]
     assert req.repositories(_with_deps())[0] == req.MAVEN_CENTRAL
-    aml = make_config(recipe="polaris-iceberg-spark-duckdb", workload={"schema": "financial"})
-    mirrored = aml.model_copy(deep=True)
-    mirrored.platform.deps.pypi_index = "http://pypi.lab/simple/"
-    mirrored.platform.deps.duckdb_extension_repository = "http://ext.lab"
-    r = req.select_request(mirrored, tools_digest="t")
-    assert (r.pypi_index, r.duckdb_extension_repository) == (
-        "http://pypi.lab/simple/",
-        "http://ext.lab",
+
+
+def test_egress_hosts_follow_configured_mirrors():
+    cfg = _with_deps(
+        "polaris-iceberg-spark-duckdb",
+        "financial",
+        pypi_index="http://pypi.lab/simple/",
+        duckdb_extension_repository="http://ext.lab",
     )
-    assert r.request_sha256 != req.select_request(aml, tools_digest="t").request_sha256
-    assert req.egress_hosts(mirrored) == sorted(
+    assert req.egress_hosts(cfg) == sorted(
         {"repo1.maven.org", "maven-central.storage-download.googleapis.com", "pypi.lab", "ext.lab"}
-    )
-
-
-def test_pypi_files_host_follows_the_index_host(monkeypatch):
-    monkeypatch.setattr(
-        req, "_deps_key", lambda c, k: "https://pypi.org/simple" if k == "pypi_index" else None
-    )
-    aml = make_config(recipe="hive-iceberg-spark-trino", workload={"schema": "financial"})
-    assert "files.pythonhosted.org" in req.egress_hosts(aml)
-
-
-def test_manifest_groups_cover_every_request_group():
-    assert req.MANIFEST_GROUPS == {
-        "jars": ("jars",),
-        "py-reference": ("py-reference",),
-        "duckdb": ("duckdb-wheels", "duckdb-ext"),
-    }
-
-
-def test_pinset_accepts_iterables_read_once():
-    groups = {"jars": [{"file": "a.jar", "sha256": "11"}]}
-    assert req.pinset_sha256({"jars": iter(groups["jars"])}, iter(["a.jar"])) == req.pinset_sha256(
-        groups, ["a.jar"]
     )

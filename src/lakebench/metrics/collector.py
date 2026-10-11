@@ -74,7 +74,7 @@ class JobMetrics:
     # A rule that declined to run for a structural reason (e.g. W1 above
     # its vertex cap) shows up in ``rules_skipped[rule_id]`` with the skip
     # reason, and is deliberately ABSENT from ``alerts_by_rule`` so a skip
-    # is never read as a zero-recall result (LB-119).
+    # is never read as a zero-recall result.
     alerts_by_rule: dict[str, int] = field(default_factory=dict)
     rule_errors: dict[str, str] = field(default_factory=dict)
     rules_skipped: dict[str, str] = field(default_factory=dict)
@@ -118,7 +118,7 @@ class JobMetrics:
     # from bronze-verify. None on other jobs and workloads.
     c360_check: dict[str, Any] | None = None
     c360_bronze: dict[str, int] | None = None
-    # A2 (LB-044 gate metrics): per-silver-table row counts a silver-build
+    # A2 gate metrics: per-silver-table row counts a silver-build
     # job wrote (`silver_transactions_rows`, `silver_entities_rows`,
     # `silver_accounts_rows`, `silver_statements_rows`, `silver_edges_rows`,
     # `silver_profiles_rows`). Empty on non-silver jobs; empty on c360 silver
@@ -158,7 +158,7 @@ class StreamingJobMetrics:
     # None on bronze and silver (they have no freshness), and on a gold stage
     # that logged no freshness line.
     freshness_seconds: float | None = None
-    # LB-145. Gold cycles tagged "(silver idle)" saw no new silver data. Only
+    # Gold cycles tagged "(silver idle)" saw no new silver data. Only
     # the TRAILING run of idle cycles (after the last cycle that saw data) can
     # be a drained corpus; an idle stretch followed by new data is a stall and
     # stays in freshness_active_seconds. None when no cycle is outside the
@@ -198,6 +198,9 @@ class StreamingJobMetrics:
     # budget and any override. None when unknown (the profile is used).
     requested_executors: int | None = None
     micro_batch_duration_ms: float = 0.0
+    # Median batch time: one huge batch (bronze's first, with no trigger
+    # limit, takes everything written before the window) does not move it.
+    median_batch_duration_ms: float | None = None
     batch_size: int = 0
     total_batches: int = 0
     total_rows_processed: int = 0
@@ -215,6 +218,10 @@ class StreamingJobMetrics:
     window_commits: int | None = None
     window_new_data_cycles: int | None = None
     window_output_rows: int | None = None
+    # Silver only: window_input_rows with the batches that straddle the
+    # window's start or end counted pro rata by the share of their run time
+    # inside it (``pro_rata_window_rows``). None when not measured.
+    window_rows_pro_rata: float | None = None
     last_write_offset_seconds: float | None = None
     trickle_start_offset_seconds: float | None = None
     # Rows the stage wrote by the window's end (bronze: rows written; silver:
@@ -257,6 +264,9 @@ class StreamingJobMetrics:
         elif self.job_type == "silver-stream":
             self.unique_rows_processed = self.total_rows_processed
             self.committed_rows = stats["committed_rows_to_end"]
+            self.window_rows_pro_rata = pro_rata_window_rows(
+                parse_events(logs, self.job_type), start, end
+            )
         if self.job_type == "gold-refresh":
             self.freshness_seconds = stats["freshness_seconds"]
             self.freshness_active_seconds = stats["freshness_active_seconds"]
@@ -399,9 +409,11 @@ class PipelineMetrics:
     success: bool = False
 
     # Data size
-    bronze_size_gb: float = 0.0
-    silver_size_gb: float = 0.0
-    gold_size_gb: float = 0.0
+    # GiB from the end-of-run bucket listing; None when it was not measured
+    # (listing failed, or the run stopped first), never a measured zero.
+    bronze_size_gb: float | None = None
+    silver_size_gb: float | None = None
+    gold_size_gb: float | None = None
 
     # Job metrics
     jobs: list[JobMetrics] = field(default_factory=list)
@@ -448,8 +460,8 @@ class PipelineMetrics:
     # Serialised as ``datagen.stale_bronze``.
     datagen_stale_bronze: dict[str, Any] | None = None
 
-    # Financial (AML) recall scoring (optional -- populated for a batch
-    # financial run when `financial score` is folded into `run` (LB-123)).
+    # Financial (AML) recall scoring (optional -- populated when `run`
+    # scores a financial run).
     # Shape: the recall.json sidecar written by score_financial.py --
     # {"typologies": [{typology_type, workload_category, designated_rules,
     # recall, instance_count, detection_status}], "typology_counts",
@@ -508,10 +520,8 @@ class PipelineMetrics:
     # {"start", "end", "seconds"} in UTC, each stream's start
     # {"streams": {job: {"running_at", "submission_failures",
     # "submission_retry_seconds"}}}, the gate's
-    # problems, and the result check {"settle": {...}, "result_check":
-    # {"query_set_id", "fingerprints"} or {"not_checked": reason}}: gold and
-    # the query set read once the whole corpus has passed through, so two
-    # runs of the same experiment can be shown to return the same results.
+    # problems. Older records also carry "settle" and "result_check" (the
+    # end-of-run result check, since removed); nothing reads them.
     # None on batch runs and on records from before it.
     continuous: dict[str, Any] | None = None
 
@@ -661,8 +671,29 @@ class PipelineMetrics:
             d["tm_operations"] = self.tm_operations
         if self.c360_correctness is not None:
             d["c360_correctness"] = self.c360_correctness
+        token = ((self.config_snapshot or {}).get("s3") or {}).get("endpoint") or "s3-endpoint"
+        d = _scrub_address_urls(d, str(token))
         d["verdict"] = verdict_from_record(d).to_dict()
         return d
+
+
+#: A URL whose host is an IPv4 literal: what an engine's error message quotes
+#: when an object-store request fails (DuckDB "HTTP GET to 'http://<ip>:80/
+#: <bucket>/...'"). The config snapshot holds only a hash of the endpoint.
+_ADDRESS_URL = re.compile(r"(https?://)(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?")
+
+
+def _scrub_address_urls(value: Any, token: str) -> Any:
+    """*value* with the host of every IPv4-literal URL in its strings
+    replaced by *token* (the snapshot's endpoint hash), so a stored error
+    message does not carry the lab address."""
+    if isinstance(value, str):
+        return _ADDRESS_URL.sub(lambda m: m.group(1) + token, value) if "://" in value else value
+    if isinstance(value, dict):
+        return {k: _scrub_address_urls(v, token) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_address_urls(v, token) for v in value]
+    return value
 
 
 #: The completeness threshold a stored ratio is judged against (the
@@ -831,8 +862,9 @@ class StageMetrics:
 
     # Streaming-specific (None = unmeasurable, 0.0 = measured-and-zero)
     latency_ms: float | None = None
+    median_batch_ms: float | None = None  # streaming: median micro-batch time
     freshness_seconds: float | None = None
-    freshness_active_seconds: float | None = None  # all but the trailing idle run (LB-145)
+    freshness_active_seconds: float | None = None  # all but the trailing idle run
     trailing_idle_cycles: int = 0  # gold cycles after silver last moved
     committed_rows: int | None = None  # silver: rows in committed micro-batches
     batch_span_seconds: float | None = None  # bronze: first to last batch that wrote rows
@@ -850,6 +882,8 @@ class StageMetrics:
     # Continuous only: the measurement window (metrics/continuous_window.py).
     # None = no window recorded (batch, or a record from before the window).
     window_input_rows: int | None = None  # rows taken in inside the window
+    # Silver: window rows with edge batches counted pro rata (the pace).
+    window_rows_pro_rata: float | None = None
     pre_window_input_rows: int | None = None  # rows taken in before it opened
     window_commits: int | None = None  # commits (gold: refreshes) inside it
     window_new_data_cycles: int | None = None  # gold: refreshes that saw new silver data
@@ -904,26 +938,29 @@ class PipelineBenchmark:
 
     **time_to_value_seconds** (primary score)
         Wall-clock seconds from the first stage's ``start_time`` to the last
-        stage's ``end_time``.  Lower is better.  Falls back to
-        ``total_elapsed_seconds`` when timestamps are absent.
+        stage's ``end_time``.  Lower is better.  Falls back to the stages'
+        summed seconds when timestamps are absent.
 
     **total_elapsed_seconds**
-        Sum of every stage's ``elapsed_seconds``.
+        The run's wall clock, start to end (datagen, stages, gaps,
+        maintenance, benchmark).
 
     **total_data_processed_gb**
-        Sum of every stage's ``input_size_gb``.
+        Sum of every stage's ``input_size_gb`` (GiB): the bytes each job
+        reported reading, never a bucket listing.
 
     **pipeline_throughput_gb_per_second**
-        ``total_data_processed_gb / total_elapsed_seconds``.  Higher is better.
+        ``total_data_processed_gb / time_to_value_seconds``.  Higher is better.
 
     Sustained scoring (pipeline_mode="sustained")
     -----------------------------------------------
     Answers: "How fresh is gold, and how fast are we sustaining it?"
 
     **data_freshness_seconds** (primary score)
-        Worst-case (max) ``freshness_seconds`` across streaming stages.
-        This is the staleness of the gold layer -- how far behind real-time
-        the queryable data is.  Lower is better.
+        The largest ``freshness_seconds`` across streaming stages. Gold
+        freshness is sampled when a refresh completes, its freshest point:
+        between refreshes readers see data up to one refresh interval older.
+        Lower is better.
 
     **sustained_throughput_rps**
         Bronze rows ingested inside the measurement window over the seconds
@@ -935,11 +972,11 @@ class PipelineBenchmark:
         Per-stage micro-batch processing latency.  Lower is better.
 
     **total_rows_processed**
-        Sum of ``input_rows`` across streaming stages.  Total volume
-        processed during the monitoring window.
+        Sum of window rows across streaming stages, gold's re-reads of
+        silver each cycle included: not distinct rows.
 
     **total_elapsed_seconds** (shared)
-        Sum of all stage durations (same as batch).
+        The run's wall clock, start to end.
 
     Stage construction
     ------------------
@@ -947,8 +984,8 @@ class PipelineBenchmark:
 
     - **Batch**: ``bronze-verify`` → bronze, ``silver-build`` → silver,
       ``gold-finalize`` → gold.  Output sizes fall back to measured S3 bucket
-      sizes.  Gold input falls back to measured ``silver_size_gb`` when the
-      Iceberg metadata query returns 0.
+      sizes.  Inputs are what each job reported reading; a gold that
+      reported none has its input unmeasured.
     - **Streaming**: ``bronze-ingest`` → bronze, ``silver-stream`` → silver,
       ``gold-refresh`` → gold.  Carries latency, freshness, and batch metrics.
     - **Query**: Created from :class:`BenchmarkMetrics` (Trino QpH benchmark).
@@ -1026,7 +1063,7 @@ class PipelineBenchmark:
     # before the window ended, so later gold cycles had nothing new to read.
     # Freshness then covers only the cycles that saw data, and
     # sustained_throughput_rps is corpus rows / window, a lower bound on what
-    # the pipeline could sustain (LB-145). None when ingest_ratio is unknown.
+    # the pipeline could sustain. None when ingest_ratio is unknown.
     corpus_drained: bool | None = None
     # What bounded intake when ingest_ratio < 0.95. "bronze_capacity": bronze
     # micro-batches ran back to back for most of the window, so its processing
@@ -1043,6 +1080,11 @@ class PipelineBenchmark:
     # Share of the window bronze spent inside micro-batches (batches x mean
     # batch time / window). None when bronze logged no batch times.
     bronze_busy_fraction: float | None = None
+    # Continuous: per stage (bronze, silver) its busy fraction and the raw
+    # MB/s per core it would take busy all window (window rows / busy time x
+    # datagen bytes per row / cores), plus datagen's own MB/s per core. A
+    # measurement, not a score; a low busy fraction extrapolates further.
+    stage_capacity: dict[str, dict[str, float]] | None = None
     # When intake_limit is "trickle_rate": seconds the trickle needs to
     # ingest the whole corpus at the rate it held (datagen rows / rows/s).
     corpus_drain_seconds: float | None = None
@@ -1054,10 +1096,24 @@ class PipelineBenchmark:
     # had released by the window's end (ingest_ratio's denominator when known).
     corpus_ingest_ratio: float | None = None
     released_rows: int | None = None
+    # The run's own continuous datagen, generating for the whole window
+    # (config_snapshot "datagen_continuous"): rows it wrote by the window's
+    # end that bronze had not taken, and whether that left a backlog (bronze
+    # under 0.95 of datagen's rows). With a backlog and bronze busy (intake_limit "bronze_capacity") the paces are
+    # the pipeline's capacity; without one they are datagen's rate. None when
+    # datagen was not continuous or its rows are unknown.
+    backlog_rows: int | None = None
+    datagen_ahead: bool | None = None
+    # Window seconds per million rows taken in inside the window, lower is
+    # better: bronze's, and end to end (rows through silver; gold re-reads
+    # silver, and how far it trails is data_freshness_seconds). None when
+    # unmeasured.
+    bronze_pace_seconds_per_million_rows: float | None = None
+    pace_seconds_per_million_rows: float | None = None
     window_arrival_fraction: float | None = None
     pre_window_rows: int | None = None
-    # AML continuous time to detect: from the newest bronze ingest_ts of an
-    # alert's related transactions to the end of the detection pass that
+    # AML continuous time to detect: from the newest arrival (bronze
+    # ingest_ts, the file's landing time) of an alert's related transactions to the end of the detection pass that
     # first raised it. Median (the score), p95 and max over newly raised
     # alerts; None when not measured.
     time_to_detect_seconds: float | None = None
@@ -1075,11 +1131,16 @@ class PipelineBenchmark:
 
     # In-stream benchmark rounds (sustained mode only)
     benchmark_rounds: list[BenchmarkMetrics] = field(default_factory=list)
+    # A stored record written before the composite was over one fixed query
+    # set (its composite_qph_basis has no composite_set): its composite is
+    # the median over every round, as recorded, and re-renders that way.
+    blended_composite_recorded: bool = False
     # Median gold event-date age at query time (corpus position, not freshness).
     query_time_event_age_seconds: float = 0.0
 
-    # S3 object health (sustained mode -- set by cli.py after monitoring)
-    total_s3_objects: int = 0
+    # Objects across the three buckets at run end; None when any listing
+    # failed or did not run.
+    total_s3_objects: int | None = None
 
     # Multi-cycle batch metrics (v1.1.0)
     cycles: list[CycleMetrics] = field(default_factory=list)
@@ -1119,12 +1180,12 @@ class PipelineBenchmark:
     maintenance_value_pct: float | None = None
     maintenance_paired_queries: int = 0
     # Set when maintenance_value_pct is None after both rounds ran: the
-    # difference was unmeasurable or inside the within-round spread (LB-150).
+    # difference was unmeasurable or inside the within-round spread.
     maintenance_value_reason: str = ""
     # The pre-maintenance round as BenchmarkResult.to_dict(), every sample
     # included, so the noise judgement can be rechecked from metrics.json.
     pre_compaction_benchmark: dict[str, Any] | None = None
-    # Storage settle wait between maintenance and the post round (LB-150).
+    # Storage settle wait between maintenance and the post round.
     # None when the wait did not run. Not a stage: it adds to the run's wall
     # clock only, never to time_to_value or maintenance_elapsed_seconds.
     maintenance_settle_seconds: float | None = None
@@ -1147,14 +1208,16 @@ class PipelineBenchmark:
         appropriate score set.
 
         **Batch** (4 scores):
-            1. ``total_elapsed_seconds`` -- sum of all stage durations.
+            1. ``total_elapsed_seconds`` -- the run's wall clock.
             2. ``total_data_processed_gb`` -- sum of all stage input sizes.
             3. ``pipeline_throughput_gb_per_second`` -- (2) / (1).
             4. ``time_to_value_seconds`` -- wall clock: ``max(end_time) -
-               min(start_time)``.  Falls back to (1) when timestamps absent.
+               min(start_time)``.  Falls back to the stages' summed seconds
+               when timestamps are absent.
 
         **Sustained** (4 scores + shared ``total_elapsed_seconds``):
-            1. ``data_freshness_seconds`` -- worst-case gold staleness.
+            1. ``data_freshness_seconds`` -- the largest freshness sampled at a
+               gold refresh.
             2. ``sustained_throughput_rps`` -- aggregate rows/sec.
             3. ``stage_latency_profile`` -- per-stage processing latency [b/s/g].
             4. ``total_rows_processed`` -- total volume processed.
@@ -1162,13 +1225,22 @@ class PipelineBenchmark:
         Must be called after all stages are added (called automatically by
         :func:`build_pipeline_benchmark`).
         """
-        # Universal: total elapsed across all stages
-        self.total_elapsed_seconds = sum(s.elapsed_seconds for s in self.stages)
+        # The stages' summed seconds: only time_to_value's fallback when the
+        # stages carry no timestamps (stages and the gaps between them are
+        # not a wall clock).
+        stage_seconds = sum(s.elapsed_seconds for s in self.stages)
+        self.total_elapsed_seconds = stage_seconds
 
         if self.pipeline_mode == "sustained":
             self._compute_sustained_scores()
         else:
             self._compute_batch_scores()
+            # The run's wall clock, start to end (datagen, stages, the gaps
+            # between them, maintenance and the benchmark), as continuous.
+            if self.start_time and self.end_time:
+                self.total_elapsed_seconds = max(
+                    0.0, (self.end_time - self.start_time).total_seconds()
+                )
 
     def _compute_batch_scores(self) -> None:
         """Compute batch pipeline scores from stage metrics."""
@@ -1254,6 +1326,11 @@ class PipelineBenchmark:
         windowed = bool(bronze_stages) and all(
             s.window_input_rows is not None for s in bronze_stages
         )
+        # A stage's cadence: its trigger interval, or with none ("0
+        # seconds", back to back) its median micro-batch time.
+        bronze_cadence_s = _cadence_seconds(
+            sustained.get("bronze_trigger_interval"), bronze_stages[0] if bronze_stages else None
+        )
         if windowed:
             from lakebench.metrics.continuous_window import arrival_seconds
 
@@ -1269,7 +1346,7 @@ class PipelineBenchmark:
                 run_duration,
                 max(offsets) if offsets else None,
                 datagen_rows > 0 and total_bronze_rows >= datagen_rows,
-                _interval_seconds(sustained.get("bronze_trigger_interval")),
+                bronze_cadence_s,
             )
             if run_duration > 0:
                 self.window_arrival_fraction = self.arrival_seconds / run_duration
@@ -1305,7 +1382,7 @@ class PipelineBenchmark:
         # so a trickle that has not yet offered the rest of the corpus is not
         # read as a pipeline that fell behind. Records without the window or
         # the corpus file count keep the corpus ratio. Both stay None when
-        # the denominator is unknown (LB-044 shape).
+        # the denominator is unknown.
         if datagen_rows > 0:
             self.corpus_ingest_ratio = total_bronze_rows / datagen_rows
             released = None
@@ -1319,6 +1396,25 @@ class PipelineBenchmark:
                     sustained.get("max_files_per_trigger"),
                     datagen_rows,
                     int(self.config_snapshot.get("datagen_output_files") or 0),
+                )
+            dg_elapsed = self.config_snapshot.get("datagen_elapsed_s")
+            if (
+                released is None
+                and windowed
+                and self.config_snapshot.get("datagen_continuous")
+                and isinstance(dg_elapsed, (int, float))
+                and dg_elapsed > 0
+            ):
+                # The run's continuous datagen: the rows it had written one
+                # bronze cycle before the window's end, at its mean rate,
+                # the same one-trigger allowance as the trickle's released
+                # rows. Its total includes the rows it wrote after the
+                # window, before its pods saw the stop marker, and bronze's
+                # last cycle cannot take what lands after it starts.
+                trigger = bronze_cadence_s or 0.0
+                released = min(
+                    datagen_rows,
+                    round(datagen_rows / dg_elapsed * max(0.0, run_duration - trigger)),
                 )
             self.released_rows = released
             self.ingest_ratio = (
@@ -1339,18 +1435,29 @@ class PipelineBenchmark:
         # limit was not bronze's processing.
         bronze = bronze_stages[0] if bronze_stages else None
         bronze_batches = _window_batches(bronze) if bronze else 0
-        if bronze and bronze.latency_ms and bronze_batches and bronze.elapsed_seconds > 0:
-            self.bronze_busy_fraction = (
-                bronze_batches * bronze.latency_ms / 1000.0 / bronze.elapsed_seconds
+        # The median batch time, not the mean: with no trigger limit
+        # bronze's first batch takes everything written before the window,
+        # and that one batch would read a stall inside it as busy.
+        batch_ms = (bronze.median_batch_ms or bronze.latency_ms) if bronze else None
+        if bronze and batch_ms and bronze_batches and bronze.elapsed_seconds > 0:
+            # Capped at 1: a batch that straddles the window's start or end
+            # counts whole, so a bronze busy throughout can read above it.
+            self.bronze_busy_fraction = min(
+                1.0, bronze_batches * batch_ms / 1000.0 / bronze.elapsed_seconds
             )
+        self.stage_capacity = _stage_capacity(streaming, self.config_snapshot) or None
         if self.ingest_ratio is not None:
             if self.ingest_ratio >= 0.95:
                 self.intake_limit = "none"
             elif self.bronze_busy_fraction is not None:
                 # Trigger evidence first: a bronze that finishes each batch
                 # inside its trigger is held by the trigger even when busy
-                # for most of it.
-                if bronze is not None and self._bronze_kept_to_trigger(bronze):
+                # for most of it. With no trigger limit nothing held it.
+                if (
+                    bronze is not None
+                    and sustained.get("max_files_per_trigger")
+                    and self._bronze_kept_to_trigger(bronze)
+                ):
                     self.intake_limit = "trickle_rate"
                 elif self.bronze_busy_fraction >= _BRONZE_BUSY_BOUND:
                     self.intake_limit = "bronze_capacity"
@@ -1362,7 +1469,7 @@ class PipelineBenchmark:
         # The offered load is the configured trickle (max_files_per_trigger
         # per bronze trigger), not the corpus. A corpus larger than trickle
         # rate x window reads short on ingest_ratio while every stage keeps
-        # pace (LB-156, c360 scale 100: 19% of the corpus in 1800 s, bronze
+        # pace (c360 scale 100: 19% of the corpus in 1800 s, bronze
         # idle 32% of the window), so that is not saturation, provided silver
         # kept up with what bronze took. The ratio verdict stands for every
         # other short run: a stall, a late start or a bronze at capacity did
@@ -1372,8 +1479,37 @@ class PipelineBenchmark:
                 self.corpus_drain_seconds = datagen_rows / self.sustained_throughput_rps
             # None: bronze held the trickle but silver's pace is unmeasured,
             # so saturation is unknown rather than asserted either way.
-            kept = self._silver_kept_pace(silver, silver_committed, total_bronze_rows)
+            kept = self._silver_kept_pace(silver, silver_committed, total_bronze_rows, bronze)
             self.pipeline_saturated = None if kept is None else not kept
+
+        # Continuous datagen: the backlog it left and the window paces.
+        if self.config_snapshot.get("datagen_continuous") and datagen_rows > 0:
+            self.backlog_rows = max(0, datagen_rows - total_bronze_rows)
+            # Ahead: a backlog past the 0.95 ingest line, against the rows
+            # datagen had written one bronze trigger before the window's end
+            # (released_rows, as ingest_ratio), not its total, which includes
+            # what it wrote after the window, before its pods saw the stop
+            # marker.
+            offered = self.released_rows or datagen_rows
+            self.datagen_ahead = total_bronze_rows < 0.95 * offered
+        if windowed and run_duration > 0:
+            # Silver rows in the window, a batch straddling either edge
+            # counted pro rata (owner, 2026-10-08): whole-batch counting
+            # moved the pace ~25% on which side of the edge one ~200 s batch
+            # committed. Records without the pro-rata count keep the
+            # committed rows.
+            silver_window = [
+                s.window_rows_pro_rata
+                if s.window_rows_pro_rata is not None
+                else s.window_input_rows
+                for s in silver
+            ]
+            if window_rows > 0:
+                self.bronze_pace_seconds_per_million_rows = run_duration / (window_rows / 1e6)
+            if silver and all(r is not None for r in silver_window):
+                through = sum(r or 0 for r in silver_window)
+                if through > 0:
+                    self.pace_seconds_per_million_rows = run_duration / (through / 1e6)
 
         # Time to detect (AML continuous): the gold stage's merged histogram.
         gold = next((s for s in streaming if s.stage_name == "gold"), None)
@@ -1389,10 +1525,14 @@ class PipelineBenchmark:
 
         # Drained: every datagen row reached bronze and silver COMMITTED all
         # of it, so the trailing idle gold cycles measured an empty feed, not a
-        # slow pipeline (LB-145). A stall (rows missing, silver behind or its
+        # slow pipeline. A stall (rows missing, silver behind or its
         # last commit unlogged) is not drained and keeps its full staleness.
         if self.ingest_ratio is None:
             self.corpus_drained = None
+        elif self.config_snapshot.get("datagen_continuous"):
+            # Datagen generated until the window ended: no finite corpus ran
+            # out early (a datagen that stopped early is the window gate's).
+            self.corpus_drained = False
         else:
             # Exact counts, no slack: a bronze stall that leaves even a few
             # files unread is a stall. Every datagen row in bronze and every
@@ -1444,9 +1584,14 @@ class PipelineBenchmark:
             self.qph_degradation_pct = None
             self.qph_degradation_withheld = QPH_DEGRADATION_BLENDED
         elif self.benchmark_rounds and len(self.benchmark_rounds) >= 4:
-            mid = len(self.benchmark_rounds) // 2
-            first_half = [r.qph for r in self.benchmark_rounds[:mid] if r.qph > 0]
-            second_half = [r.qph for r in self.benchmark_rounds[mid:] if r.qph > 0]
+            # Over the composite's rounds (AML: the fixed full set only).
+            # Two or more rounds a half, as over every round before.
+            series = self.composite_rounds()
+            if len(series) < 4:
+                series = []
+            mid = len(series) // 2
+            first_half = [r.qph for r in series[:mid]]
+            second_half = [r.qph for r in series[mid:]]
             if first_half and second_half:
                 m1 = statistics.median(first_half)
                 m2 = statistics.median(second_half)
@@ -1533,7 +1678,11 @@ class PipelineBenchmark:
         return bronze.total_batches >= span_triggers - missed
 
     def _silver_kept_pace(
-        self, silver: list[StageMetrics], silver_committed: int | None, bronze_rows: int
+        self,
+        silver: list[StageMetrics],
+        silver_committed: int | None,
+        bronze_rows: int,
+        bronze: StageMetrics | None = None,
     ) -> bool | None:
         """Whether silver kept pace with what bronze took.
 
@@ -1554,19 +1703,40 @@ class PipelineBenchmark:
                 return False
             return None
         sustained = self.config_snapshot.get("sustained") or {}
-        silver_trigger_s = _interval_seconds(sustained.get("silver_trigger_interval"))
-        bronze_trigger_s = _interval_seconds(sustained.get("bronze_trigger_interval"))
+        silver_trigger_s = _cadence_seconds(sustained.get("silver_trigger_interval"), silver[0])
+        bronze_trigger_s = _cadence_seconds(sustained.get("bronze_trigger_interval"), bronze)
         if not silver_trigger_s or not bronze_trigger_s:
             return None
-        if any(s.latency_ms / 1000.0 >= silver_trigger_s for s in silver if s.latency_ms):
+        interval = _interval_seconds(sustained.get("silver_trigger_interval"))
+        # Against an interval, a batch that overruns it is behind; back to
+        # back, the committed lag below decides.
+        if interval and any(s.latency_ms / 1000.0 >= interval for s in silver if s.latency_ms):
             return False
         allowed_lag = self.sustained_throughput_rps * (2 * silver_trigger_s + bronze_trigger_s)
         return bronze_rows - silver_committed <= allowed_lag
 
+    def composite_rounds(self) -> list[BenchmarkMetrics]:
+        """In-stream rounds behind the continuous composite QpH: rounds with a
+        QpH (a round whose every query failed has none). AML: only rounds
+        that executed the fixed full query set (``composite_query_set``);
+        its rounds before the first case run a smaller set and stay in
+        ``composite_qph_by_set``."""
+        rounds = [r for r in self.benchmark_rounds if r.qph > 0]
+        fixed = composite_query_set(self.config_snapshot)
+        if fixed is None or self.blended_composite_recorded:
+            return rounds
+        groups = rounds_by_query_set(rounds)
+        return groups.get(fixed, [])
+
+    def in_stream_qph(self) -> float | None:
+        """Median QpH over ``composite_rounds``; None when there is none."""
+        rounds = self.composite_rounds()
+        return statistics.median(r.qph for r in rounds) if rounds else None
+
     def qph_rounds(self) -> int:
-        """In-stream rounds behind the continuous QpH median (rounds with a
-        QpH; a round whose every query failed has none and is not in it)."""
-        return sum(1 for r in self.benchmark_rounds if r.qph > 0)
+        """In-stream rounds behind the continuous QpH median
+        (``composite_rounds``)."""
+        return len(self.composite_rounds())
 
     def qph_trend(self) -> dict[str, Any] | None:
         """How in-stream QpH moved across the window, beside the median.
@@ -1601,6 +1771,20 @@ class PipelineBenchmark:
             trend["silver_data_files_unavailable"] = self._file_count_unavailable_reason()
         return trend
 
+    def maintenance_pct(self) -> float:
+        """Maintenance seconds as a share of pipeline plus maintenance time:
+        batch, time to value (maintenance runs after gold, outside it) plus
+        maintenance; continuous, the run's wall clock, which holds it. 0.0
+        when maintenance did not run."""
+        maint = self.maintenance_elapsed_seconds
+        if maint <= 0:
+            return 0.0
+        if self.pipeline_mode == "sustained":
+            base = max(self.total_elapsed_seconds, maint)
+        else:
+            base = self.time_to_value_seconds + maint
+        return maint / base * 100 if base > 0 else 0.0
+
     def _file_count_unavailable_reason(self) -> str:
         cs = self.config_snapshot or {}
         engine = str(cs.get("query_engine") or "")
@@ -1620,11 +1804,9 @@ class PipelineBenchmark:
         qph = round(self.query_benchmark.qph, 1) if self.query_benchmark else 0.0
 
         # If in-stream rounds exist, use their median QpH as the primary score
-        in_stream_qph = 0.0
-        if self.benchmark_rounds:
-            round_qphs = [r.qph for r in self.benchmark_rounds if r.qph > 0]
-            if round_qphs:
-                in_stream_qph = round(statistics.median(round_qphs), 1)
+        # (AML: over the fixed full query set only, composite_rounds).
+        median_qph = self.in_stream_qph() if self.benchmark_rounds else None
+        in_stream_qph = round(median_qph, 1) if median_qph else 0.0
 
         if self.pipeline_mode == "sustained":
             # stage_latency_profile: object with named keys (v2.0 format)
@@ -1641,7 +1823,9 @@ class PipelineBenchmark:
                 else {}
             )
             # Composite QpH: None when no benchmark data supports a measurement
-            raw_qph = in_stream_qph if in_stream_qph > 0 else qph
+            # With rounds, only their median: the aggregate's QpH is the same
+            # median, and an AML run with no full-set round has none.
+            raw_qph = in_stream_qph if self.benchmark_rounds else qph
             composite_qph: float | None = raw_qph if raw_qph > 0 else None
             scores: dict[str, Any] = {
                 "data_freshness_seconds": (
@@ -1668,7 +1852,7 @@ class PipelineBenchmark:
                     else {
                         "composite_qph": composite_qph,
                         # The n behind the figure: medians over different
-                        # round counts are not like-for-like (DESIGN 2.4).
+                        # round counts are not like-for-like.
                         "composite_qph_rounds": self.qph_rounds() if in_stream_qph > 0 else 0,
                     }
                 ),
@@ -1692,6 +1876,13 @@ class PipelineBenchmark:
             if self.corpus_ingest_ratio is not None:
                 scores["corpus_ingest_ratio"] = round(self.corpus_ingest_ratio, 4)
                 scores["released_rows"] = self.released_rows
+            if self.datagen_ahead is not None:
+                scores["backlog_rows"] = self.backlog_rows
+                scores["datagen_ahead"] = self.datagen_ahead
+            for key in ("pace_seconds_per_million_rows", "bronze_pace_seconds_per_million_rows"):
+                value = getattr(self, key)
+                if value is not None:
+                    scores[key] = round(value, 2)
             if self.window_seconds is not None:
                 scores["window_seconds"] = round(self.window_seconds, 1)
                 scores["arrival_seconds"] = round(self.arrival_seconds or 0.0, 1)
@@ -1701,8 +1892,6 @@ class PipelineBenchmark:
                     else None
                 )
                 scores["pre_window_rows"] = self.pre_window_rows
-            if self.query_time_event_age_seconds > 0:
-                scores["query_time_event_age_seconds"] = round(self.query_time_event_age_seconds, 2)
             # AML runs always carry the keys, None when unmeasured, so a
             # missing measurement is visible rather than an absent field.
             if (
@@ -1732,7 +1921,7 @@ class PipelineBenchmark:
             # Maintenance metrics (v1.3) -- same fields for sustained
             if self.maintenance_elapsed_seconds > 0:
                 scores["maintenance_elapsed_seconds"] = round(self.maintenance_elapsed_seconds, 2)
-                scores["maintenance_pct_of_pipeline"] = round(self.maintenance_pct_of_pipeline, 2)
+                scores["maintenance_pct_of_pipeline"] = round(self.maintenance_pct(), 2)
             if self.pre_compaction_file_count > 0:
                 scores["pre_compaction_file_count"] = self.pre_compaction_file_count
                 scores["post_compaction_file_count"] = self.post_compaction_file_count
@@ -1790,7 +1979,7 @@ class PipelineBenchmark:
         # Maintenance metrics (v1.3) -- included in both batch and sustained scores
         if self.maintenance_elapsed_seconds > 0:
             batch_scores["maintenance_elapsed_seconds"] = round(self.maintenance_elapsed_seconds, 2)
-            batch_scores["maintenance_pct_of_pipeline"] = round(self.maintenance_pct_of_pipeline, 2)
+            batch_scores["maintenance_pct_of_pipeline"] = round(self.maintenance_pct(), 2)
         if self.maintenance_stopped:
             batch_scores["maintenance_stopped"] = True
             batch_scores["maintenance_stop_reason"] = self.maintenance_stop_reason
@@ -1875,6 +2064,14 @@ class PipelineBenchmark:
             )
             d["pipeline_saturated"] = self.pipeline_saturated
             d["corpus_drained"] = self.corpus_drained
+            if self.stage_capacity:
+                d["stage_capacity"] = self.stage_capacity
+        if self.query_time_event_age_seconds > 0:
+            # Diagnostic, not a score: wall clock minus the corpus's
+            # synthetic event dates (months), not how stale gold is.
+            d["diagnostics"] = {
+                "query_time_event_age_seconds": round(self.query_time_event_age_seconds, 2)
+            }
         if self.query_benchmark:
             d["query_benchmark"] = self.query_benchmark.to_dict()
         if self.pre_compaction_benchmark:
@@ -1921,6 +2118,67 @@ class PipelineBenchmark:
         if sizes["gold_gb"] == 0.0:
             sizes["gold_gb"] = round(self.config_snapshot.get("gold_size_gb", 0.0), 3)
         return sizes
+
+
+def pro_rata_window_rows(events: list[Any], start: datetime, end: datetime) -> float | None:
+    """Silver rows taken in inside the window [*start*, *end*] (naive UTC),
+    each batch counted by the share of its run time inside the window.
+
+    A batch runs from its start (its ``transforming`` line, or its commit
+    time less the seconds the commit line reports, whichever is earlier)
+    to its commit. A batch with no commit by the time the log was read is
+    in flight: it counts by the share of the median committed batch time
+    that fell inside the window, at most whole. None when the log has no
+    batch with rows."""
+    from lakebench.metrics.continuous_window import utc_naive
+
+    start, end = utc_naive(start), utc_naive(end)
+    began: dict[int, datetime] = {}
+    rows: dict[int, int] = {}
+    done: dict[int, tuple[datetime, float]] = {}
+    for e in events:
+        if e.kind == "transform" and (e.rows or 0) > 0:
+            began.setdefault(e.ident, e.at)
+            rows[e.ident] = e.rows or 0
+        elif e.kind == "commit":
+            done[e.ident] = (e.at, float(e.value or 0.0))
+    if not rows:
+        return None
+    # Each committed batch's run: (start, commit).
+    runs = {
+        b: (min(began[b], at - timedelta(seconds=secs)), at)
+        for b, (at, secs) in done.items()
+        if b in began
+    }
+    durations = [(hi - lo).total_seconds() for lo, hi in runs.values()]
+    typical = statistics.median(durations) if durations else None
+    total = 0.0
+    for b, n in rows.items():
+        if b in runs:
+            lo, hi = runs[b]
+            length = (hi - lo).total_seconds()
+            if length <= 0:
+                total += n if start <= hi <= end else 0
+                continue
+            inside = (min(hi, end) - max(lo, start)).total_seconds()
+            total += n * max(0.0, inside) / length
+        else:
+            lo = began[b]
+            if lo >= end or not typical:
+                continue
+            inside = (end - max(lo, start)).total_seconds()
+            total += n * min(1.0, max(0.0, inside) / typical)
+    return total
+
+
+def _datagen_bytes_per_row(fleet: Any) -> float | None:
+    """Raw bytes per row from a datagen fleet record, or None."""
+    if not isinstance(fleet, dict):
+        return None
+    written, rows = fleet.get("total_bytes_written"), fleet.get("total_rows_written")
+    if isinstance(written, (int, float)) and isinstance(rows, (int, float)) and rows > 0:
+        return float(written) / float(rows) if written > 0 else None
+    return None
 
 
 def _cycle_datagen_overlap(
@@ -1976,8 +2234,8 @@ def build_pipeline_benchmark(
         driver log didn't emit it), the measured S3 bucket size for that
         layer is used instead (``run.bronze_size_gb``, etc.).
 
-        Gold input fallback: when gold's ``input_size_gb == 0`` (Iceberg
-        metadata query returned nothing), ``run.silver_size_gb`` is used.
+        Inputs: the bytes each job reported reading, never a bucket
+        listing. The datagen stage's output is its fleet's bytes written.
 
     **Streaming** (streaming list populated):
         Creates stages for each streaming job via ``_STREAMING_MAP``:
@@ -2028,7 +2286,10 @@ def build_pipeline_benchmark(
             elapsed = elapsed or float(fleet.get("wall_elapsed_max_s", 0.0))
             fleet_bytes = float(fleet.get("total_bytes_written", 0))
             if fleet_bytes > 0:
-                output_gb = output_gb or fleet_bytes / 1e9
+                # What datagen wrote, from its own pods: a listing of the
+                # bronze bucket also holds the bronze table and earlier
+                # runs' files. GiB, as every other stage size.
+                output_gb = fleet_bytes / (1024**3)
             fleet_rows = int(fleet.get("total_rows_written", 0))
             if fleet_rows > 0:
                 output_rows = output_rows or fleet_rows
@@ -2062,12 +2323,14 @@ def build_pipeline_benchmark(
     }
     for job in run.jobs:
         stage_name, size_attr = _STAGE_MAP.get(job.job_type, (job.job_type, ""))
-        fallback_size = getattr(run, size_attr, 0.0) if size_attr else 0.0
+        fallback_size = (getattr(run, size_attr, None) or 0.0) if size_attr else 0.0
 
-        # Gold reads from silver -- use measured silver size as input fallback
+        # The bytes the job reported reading (bronze: the raw files; silver:
+        # the bronze input; gold: silver's current snapshot from table
+        # metadata). Never a bucket listing, which holds retained snapshots
+        # and earlier runs' files: a gold that reported nothing has its
+        # input unmeasured (0), not the silver bucket.
         input_gb = job.input_size_gb
-        if stage_name == "gold" and input_gb == 0.0 and run.silver_size_gb > 0:
-            input_gb = run.silver_size_gb
 
         stage = StageMetrics(
             stage_name=stage_name,
@@ -2098,7 +2361,7 @@ def build_pipeline_benchmark(
                 from lakebench.spark.job import get_job_profile as _get_profile
 
                 # Schema-aware so AML overrides (e.g. bronze-verify 20Gi) are
-                # reported, not the c360 base (LB-135 review finding).
+                # reported, not the c360 base.
                 _schema = run.config_snapshot.get("workload_schema")
                 _b_profile = _get_profile(job.job_type, _schema)
                 if _b_profile:
@@ -2112,9 +2375,6 @@ def build_pipeline_benchmark(
                         )
             except Exception:
                 pass
-        # Recompute throughput if input was corrected by fallback
-        if input_gb != job.input_size_gb:
-            stage.compute_derived()
         stages.append(stage)
 
     # Streaming stages (sustained mode)
@@ -2134,10 +2394,18 @@ def build_pipeline_benchmark(
 
             _s_schema = run.config_snapshot.get("workload_schema")
             _s_profile = _get_profile(sj.job_type, _s_schema)
+            # A continuous stage may run grown executors: the shape it ran.
+            _shape = (
+                run.config_snapshot.get("spark", {}).get("streaming_shape", {}).get(sj.job_type)
+            )
+            if _s_profile and _shape:
+                _s_profile = {**_s_profile, **_shape}
             if _s_profile:
                 _s_cores = _s_profile["executor_cores"]
                 _s_scale = run.config_snapshot.get("scale", 10)
-                _s_execs = _get_exec_count(sj.job_type, _s_scale, _s_schema)
+                _s_execs = (_shape or {}).get("executors") or _get_exec_count(
+                    sj.job_type, _s_scale, _s_schema
+                )
                 # Check config overrides (streaming jobs may have explicit counts)
                 from lakebench.modules.pipeline_engines.spark.job import (
                     EXECUTOR_OVERRIDE_FIELDS,
@@ -2183,6 +2451,7 @@ def build_pipeline_benchmark(
             ),
             output_rows=sj.output_rows,
             window_input_rows=sj.window_input_rows,
+            window_rows_pro_rata=sj.window_rows_pro_rata,
             pre_window_input_rows=sj.pre_window_input_rows,
             window_commits=sj.window_commits,
             window_new_data_cycles=sj.window_new_data_cycles,
@@ -2190,6 +2459,7 @@ def build_pipeline_benchmark(
             trickle_start_offset_seconds=sj.trickle_start_offset_seconds,
             throughput_rows_per_second=sj.throughput_rps,
             latency_ms=sj.micro_batch_duration_ms or None,
+            median_batch_ms=sj.median_batch_duration_ms,
             freshness_seconds=sj.freshness_seconds or None,
             freshness_active_seconds=sj.freshness_active_seconds,
             trailing_idle_cycles=sj.trailing_idle_cycles,
@@ -2210,30 +2480,40 @@ def build_pipeline_benchmark(
         )
         stages.append(stage)
 
-    # Backfill input_size_gb for streaming stages from measured S3 bucket sizes.
-    # Bronze-ingest reads from landing zone (bronze bucket), silver-stream reads
-    # from bronze Iceberg table (bronze bucket), gold-refresh reads from silver.
-    _STREAMING_SIZE_MAP = {
-        "bronze": "bronze_size_gb",
-        "silver": "silver_size_gb",
-        "gold": "silver_size_gb",
-    }
+    # Continuous stage input bytes: the raw bytes of the rows each stage
+    # took in inside the window (rows x datagen's bytes per row), bronze and
+    # silver; never a bucket listing (bronze's bucket holds the raw files and
+    # the bronze table, about twice the input). Gold re-reads silver every
+    # cycle and reports no input bytes. Unmeasured (0) when datagen's bytes
+    # per row are unknown.
+    _bpr = run.config_snapshot.get("datagen_bytes_per_row") or _datagen_bytes_per_row(
+        datagen_fleet if datagen_fleet is not None else getattr(run, "datagen_fleet", None)
+    )
     for stage in stages:
-        if stage.stage_type == "streaming" and stage.input_size_gb == 0.0:
-            fallback_attr = _STREAMING_SIZE_MAP.get(stage.stage_name)
-            if fallback_attr:
-                stage.input_size_gb = getattr(run, fallback_attr, 0.0)
-                stage.compute_derived()
+        if (
+            stage.stage_type == "streaming"
+            and stage.stage_name in ("bronze", "silver")
+            and stage.input_size_gb == 0.0
+            and _bpr
+        ):
+            rows = (
+                stage.window_input_rows if stage.window_input_rows is not None else stage.input_rows
+            )
+            stage.input_size_gb = rows * _bpr / (1024**3)
+            stage.compute_derived()
 
     # Query stage from benchmark
     if run.benchmark:
+        # The engine the benchmark ran on. No input size: the queries scan
+        # silver and gold tables, which no listing attributes to them.
         query_stage = StageMetrics(
             stage_name="query",
             stage_type="query",
-            engine="trino",
+            engine=str(
+                run.benchmark.engine or run.config_snapshot.get("query_engine") or "unknown"
+            ),
             elapsed_seconds=run.benchmark.total_seconds,
             success=True,
-            input_size_gb=run.gold_size_gb,
             queries_executed=len(run.benchmark.queries),
             queries_per_hour=run.benchmark.qph,
         )
@@ -2245,6 +2525,23 @@ def build_pipeline_benchmark(
         snapshot["datagen_output_rows"] = datagen_output_rows
     if datagen_output_files > 0:
         snapshot["datagen_output_files"] = datagen_output_files
+    # Continuous datagen's wall time: with its rows it gives the rate, and so
+    # the rows it had written by a point in the window (ingest_ratio).
+    _fleet = datagen_fleet if datagen_fleet is not None else getattr(run, "datagen_fleet", None)
+    if snapshot.get("datagen_continuous") and isinstance(_fleet, dict):
+        _elapsed = _fleet.get("wall_elapsed_max_s")
+        if isinstance(_elapsed, (int, float)) and _elapsed > 0:
+            snapshot["datagen_elapsed_s"] = float(_elapsed)
+        # Raw bytes per row and datagen's MB/s per core: the sizing units
+        # (PipelineBenchmark.stage_capacity). Only from a complete fleet.
+        _bytes, _rows = _fleet.get("total_bytes_written"), _fleet.get("total_rows_written")
+        _cores = _fleet.get("cores_total")
+        if _fleet.get("data_quality") == "complete" and _bytes and _rows:
+            snapshot["datagen_bytes_per_row"] = _bytes / _rows
+            if isinstance(_elapsed, (int, float)) and _elapsed > 0:
+                snapshot["datagen_measured_mb_s"] = _bytes / 1e6 / _elapsed
+                if _cores:
+                    snapshot["datagen_mb_s_per_core"] = _bytes / 1e6 / _elapsed / _cores
 
     benchmark = PipelineBenchmark(
         run_id=run.run_id,
@@ -2321,36 +2618,22 @@ def rounds_by_query_set(rounds: list[BenchmarkMetrics]) -> dict[str, list[Benchm
     return groups
 
 
-def executed_subset_query_set(
-    rounds: list[BenchmarkMetrics], recorded_at: Any = None
-) -> str | None:
-    """The query set id in-stream rounds executed when they all executed the
-    same set and it is smaller than the set they listed (a query that failed
-    in every round); None otherwise, and the aggregate's id stands. Such a
-    QpH is over the smaller set. Rounds from before the round record map
-    their executed names through the legacy table (``"unknown"`` when it has
-    no entry), never through today's SQL."""
-    from lakebench.benchmark.queries import legacy_query_set_id
+def aml_fixed_query_set() -> str:
+    """The AML continuous composite's query set id: the full Financial set
+    (12 queries with the investigator class)."""
+    from lakebench.benchmark.queries import get_benchmark_queries, query_set_id
+    from lakebench.config.schema import WorkloadSchema
 
-    groups = rounds_by_query_set(rounds)
-    if len(groups) != 1:
+    return query_set_id([q.name for q in get_benchmark_queries(WorkloadSchema.FINANCIAL)])
+
+
+def composite_query_set(config_snapshot: dict[str, Any] | None) -> str | None:
+    """The query set id a continuous composite QpH is over, or None for the
+    median over every round. AML (owner, 2026-10-08): the fixed full set,
+    never a blend with the 8-query rounds that run before a case exists."""
+    if (config_snapshot or {}).get("workload_schema") != "financial":
         return None
-    ((key, members),) = groups.items()
-    if key == QUERY_SET_NOT_RECORDED:
-        return None
-    listed = {
-        str(q.get("name") or q.get("query_name"))
-        for r in members
-        for q in r.queries or []
-        if isinstance(q, dict) and (q.get("name") or q.get("query_name"))
-    }
-    rec = members[0].round_record
-    executed = (rec or {}).get("executed_queries")
-    if not isinstance(executed, list):
-        executed = executed_query_set(members[0])[0]
-    if not listed or set(executed) == listed:
-        return None
-    return key if rec is not None else legacy_query_set_id(executed, recorded_at)
+    return aml_fixed_query_set()
 
 
 def composite_qph_basis(rounds: list[BenchmarkMetrics]) -> tuple[dict[str, Any], dict[str, float]]:
@@ -2361,13 +2644,20 @@ def composite_qph_basis(rounds: list[BenchmarkMetrics]) -> tuple[dict[str, Any],
     each set has; by_set is the median QpH per executed set. A round from
     before the round record gets its set from its queries' success flags;
     a round with no queries listed is ``QUERY_SET_NOT_RECORDED``, and the
-    basis says so."""
+    basis says so. When the rounds ran the AML fixed full set beside a
+    smaller one, the composite is over the fixed set alone
+    (``aggregate_benchmark_rounds``, ``PipelineBenchmark.composite_rounds``):
+    ``composite_set`` names it and the composite does not blend."""
     groups = rounds_by_query_set(rounds)
     recorded = {k: v for k, v in groups.items() if k != QUERY_SET_NOT_RECORDED}
+    fixed = aml_fixed_query_set()
+    on_fixed = len(groups) > 1 and fixed in groups
     basis: dict[str, Any] = {
-        "blended": len(groups) > 1,
+        "blended": len(groups) > 1 and not on_fixed,
         "sets": {k: len(v) for k, v in sorted(groups.items())},
     }
+    if on_fixed:
+        basis["composite_set"] = fixed
     if QUERY_SET_NOT_RECORDED in groups:
         basis["note"] = "some rounds list no queries; their query set is not known"
     by_set = {
@@ -2395,16 +2685,29 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
     if not rounds:
         raise ValueError("Cannot aggregate zero benchmark rounds")
 
-    # Median QpH and total_seconds
-    median_qph = statistics.median([r.qph for r in rounds])
-    median_total = statistics.median([r.total_seconds for r in rounds])
+    # The rounds the median stands for: those with a QpH (a round whose every
+    # query failed has none), and, when the rounds ran the AML fixed full
+    # set beside a smaller one, that set's rounds only (composite_rounds).
+    timed = [r for r in rounds if (r.qph or 0) > 0]
+    groups = rounds_by_query_set(timed)
+    fixed = aml_fixed_query_set()
+    set_id: str | None = None
+    if len(groups) > 1 and fixed in groups:
+        timed, set_id = groups[fixed], fixed
+    elif len(groups) > 1:
+        # Different sets and none is the fixed one: never comparable, not
+        # even with another blend.
+        set_id = BLENDED_QUERY_SET
+    basis = timed or rounds
 
-    # Per-query median elapsed times.  Build a dict of query_name -> list of elapsed values.
-    # All rounds should have the same queries in the same order, but handle
-    # missing queries defensively.
+    median_qph = statistics.median([r.qph for r in basis]) if timed else 0.0
+    median_total = statistics.median([r.total_seconds for r in basis])
+
+    # Per-query median elapsed time over the rounds, with the samples, min
+    # and max taken from every round (not the first round's).
     query_times: dict[str, list[float]] = {}
     query_template: dict[str, dict[str, Any]] = {}
-    for rnd in rounds:
+    for rnd in basis:
         for q in rnd.queries:
             name = q.get("name", "")
             if name not in query_times:
@@ -2416,20 +2719,14 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
     for name, times in query_times.items():
         qd = dict(query_template[name])
         qd["elapsed_seconds"] = round(statistics.median(times), 3)
-        if "result_fingerprint" in qd:
-            # Each in-stream round read a different state of tables still
-            # being written; the first round's fingerprint is not the
-            # aggregate's.
-            qd["result_fingerprint"] = None
-            qd["result_fingerprint_note"] = "aggregated over in-stream rounds"
+        if "samples" in qd:
+            qd["samples"] = [round(t, 3) for t in times]
+            qd["min_seconds"] = round(min(times), 3)
+            qd["max_seconds"] = round(max(times), 3)
+            mid = statistics.median(times)
+            qd["relative_range"] = round((max(times) - min(times)) / mid, 4) if mid > 0 else 0.0
         aggregated_queries.append(qd)
 
-    # The query set the median stands for: as before, the set of every
-    # query name the rounds ran, unless the rounds executed different sets,
-    # when it is "blended" (never comparable, not even with another blend;
-    # benchmark.queries.qph_comparable). The executed sets are in
-    # PipelineBenchmark's composite_qph_basis.
-    set_id = BLENDED_QUERY_SET if len(rounds_by_query_set(rounds)) > 1 else None
     return BenchmarkMetrics(
         mode=rounds[0].mode,
         cache=rounds[0].cache,
@@ -2444,10 +2741,10 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
     )
 
 
-#: The benchmark every continuous in-stream round (and the end-of-run result
-#: check) runs: one hot power pass with one sample per query. Gold changes
-#: under a round, so repeats would time different snapshots; the rounds
-#: themselves are the repeats (cli/_sustained.py _run_benchmark_round).
+#: The benchmark every continuous in-stream round runs: one hot power pass
+#: with one sample per query. Gold changes under a round, so repeats would
+#: time different snapshots; the rounds themselves are the repeats
+#: (cli/_sustained.py _run_benchmark_round).
 CONTINUOUS_ROUND_BENCHMARK: dict[str, Any] = {
     "mode": "power",
     "streams": 1,
@@ -2544,6 +2841,7 @@ def build_config_snapshot(
         fingerprint_inputs,
         scratch_size_per_job,
     )
+    from lakebench.modules.pipeline_engines.spark.job import streaming_shape
 
     spark = cfg.platform.compute.spark
     datagen = cfg.architecture.workload.datagen
@@ -2585,7 +2883,9 @@ def build_config_snapshot(
                 "silver_stream": spark.silver_stream_executors,
                 "gold_refresh": spark.gold_refresh_executors,
             },
+            **({"streaming_shape": streaming_shape(cfg)} if _continuous else {}),
         },
+        **({"offered_load": _offered_load(cfg)} if _continuous else {}),
         "catalog": cfg.architecture.catalog.type.value,
         "table_format": cfg.architecture.table_format.type.value,
         "pipeline_engine": cfg.architecture.pipeline_engine.value,
@@ -2695,7 +2995,7 @@ _BRONZE_BUSY_BOUND = 0.8
 
 # Share of the window's bronze triggers that must have run a micro-batch for
 # intake to count as held to the trickle rate. The shortfall allowed covers
-# stream startup (60 of 60 triggers ran on the LB-156 scale-100 run; 0.9
+# stream startup (60 of 60 triggers ran on a scale-100 run; 0.9
 # leaves 180 s of an 1800 s window at a 30 s trigger).
 _TRIGGER_COVERAGE = 0.9
 
@@ -2712,12 +3012,91 @@ _LOG_TS = re.compile(r"\[lb\] (\d{4}-\d\d-\d\dT[\d:.]+) - ")
 _INTERVAL_UNITS = {"second": 1, "minute": 60, "hour": 3600}
 
 
+def _stage_capacity(streaming: list, snapshot: dict) -> dict[str, dict[str, float]]:
+    """Per stage, busy fraction and raw MB/s per core at full busy, and
+    datagen's MB/s per core (``PipelineBenchmark.stage_capacity``). A stage
+    is left out when its batch times, window rows or cores are unknown."""
+    out: dict[str, dict[str, float]] = {}
+    bytes_per_row = snapshot.get("datagen_bytes_per_row")
+    if not isinstance(bytes_per_row, (int, float)) or bytes_per_row <= 0:
+        return out
+    for name in ("bronze", "silver"):
+        stage = next((s for s in streaming if s.stage_name == name), None)
+        if stage is None or stage.elapsed_seconds <= 0:
+            continue
+        batch_ms = stage.median_batch_ms or stage.latency_ms
+        batches = _window_batches(stage)
+        rows = stage.window_input_rows
+        cores = stage.executor_count * stage.executor_cores
+        if not (batch_ms and batches and rows and cores):
+            continue
+        busy = min(1.0, batches * batch_ms / 1000.0 / stage.elapsed_seconds)
+        rows_per_s = rows / (busy * stage.elapsed_seconds)
+        out[name] = {
+            "busy_fraction": round(busy, 3),
+            "mb_s_per_core": round(rows_per_s * bytes_per_row / 1e6 / cores, 3),
+            "cores": cores,
+        }
+    dg = snapshot.get("datagen_mb_s_per_core")
+    if isinstance(dg, (int, float)) and dg > 0:
+        out["datagen"] = {"mb_s_per_core": round(float(dg), 3)}
+    measured = snapshot.get("datagen_measured_mb_s")
+    load = snapshot.get("offered_load") or {}
+    if (
+        isinstance(measured, (int, float))
+        and measured > 0
+        and load.get("sized_mb_s")
+        and load.get("declared_mb_s") is not None
+    ):
+        # The stages were sized for what datagen was sized to offer; one
+        # that offered less leaves them looking faster than the load asked.
+        out.setdefault("datagen", {}).update(
+            measured_mb_s=round(float(measured), 1),
+            sized_mb_s=float(load["sized_mb_s"]),
+            declared_mb_s=float(load["declared_mb_s"]),
+            fell_short=float(measured) < DATAGEN_SHORT_FRACTION * float(load["sized_mb_s"]),
+        )
+    return out
+
+
+#: Key prefix of continuous AML gold's incremental detection state in the
+#: gold bucket (gold_refresh_financial._incremental_detection writes it).
+GOLD_INCREMENTAL_PREFIX = "_checkpoints/incremental/"
+
+#: Datagen offering less than this share of its sized load fell short.
+DATAGEN_SHORT_FRACTION = 0.9
+
+
+def _offered_load(cfg: Any) -> dict[str, float]:
+    """The load a continuous run declares at its scale and the load its
+    datagen was sized to offer (the stages are sized for the second; the 100m
+    CPU steps and the 200m floor put it above the first at small scale)."""
+    from lakebench.config.autosizer import continuous_offered_load_mb_s, datagen_offered_mb_s
+
+    return {
+        "declared_mb_s": round(continuous_offered_load_mb_s(cfg), 1),
+        "sized_mb_s": round(datagen_offered_mb_s(cfg), 1),
+    }
+
+
 def _window_batches(stage: StageMetrics) -> int:
     """Micro-batches a stage committed inside the window, or every batch it
     logged when no window was recorded."""
     if stage.window_commits is not None:
         return stage.window_commits
     return stage.total_batches
+
+
+def _cadence_seconds(interval: Any, stage: Any | None) -> float | None:
+    """A streaming stage's cadence in seconds: its trigger interval, or, with
+    none ("0 seconds": back to back), its median micro-batch time."""
+    trigger = _interval_seconds(interval)
+    if trigger:
+        return trigger
+    if stage is None:
+        return trigger
+    ms = getattr(stage, "median_batch_ms", None) or getattr(stage, "latency_ms", None)
+    return ms / 1000.0 if ms else trigger
 
 
 def _interval_seconds(interval: Any) -> float | None:
@@ -3120,7 +3499,7 @@ class MetricsCollector:
         bronze_bucket: str,
         silver_bucket: str,
         gold_bucket: str,
-    ) -> int:
+    ) -> int | None:
         """Measure and record actual S3 bucket sizes.
 
         Uses paginated listing via ``s3_client.get_bucket_size()``
@@ -3133,11 +3512,12 @@ class MetricsCollector:
             gold_bucket: Gold bucket name
 
         Returns:
-            Total object count across all three buckets (0 if unmeasurable).
+            Total object count across all three buckets, or None when any
+            bucket could not be counted.
         """
-        total_objects = 0
         if not self.current_run:
-            return total_objects
+            return None
+        total_objects: int | None = 0
 
         for layer, bucket in [
             ("bronze", bronze_bucket),
@@ -3145,11 +3525,20 @@ class MetricsCollector:
             ("gold", gold_bucket),
         ]:
             try:
-                info = s3_client.get_bucket_size(bucket)
+                # Continuous AML gold's detection state between passes
+                # (gold_refresh_financial) is working state, not gold; it is
+                # left out of the same listing, as it changes while measured.
+                info = (
+                    s3_client.get_bucket_size(bucket, exclude_prefix=GOLD_INCREMENTAL_PREFIX)
+                    if layer == "gold"
+                    else s3_client.get_bucket_size(bucket)
+                )
                 if info.size_bytes is not None:
                     size_gb = info.size_bytes / (1024**3)
                     setattr(self.current_run, f"{layer}_size_gb", size_gb)
-                    if info.object_count is not None:
+                    if info.object_count is None:
+                        total_objects = None
+                    elif total_objects is not None:
                         total_objects += info.object_count
                     logger.info(
                         f"Measured {layer} bucket: {info.object_count:,} objects, {size_gb:.2f} GB"
@@ -3159,10 +3548,13 @@ class MetricsCollector:
                         f"Bucket '{bucket}' does not exist -- "
                         f"check that config buckets match actual bucket names"
                     )
+                    total_objects = None
                 else:
                     logger.warning(f"Bucket '{bucket}' returned no size data")
+                    total_objects = None
             except Exception as e:
                 logger.warning(f"Could not measure {layer} bucket size: {e}")
+                total_objects = None
 
         return total_objects
 
@@ -3261,10 +3653,10 @@ class MetricsCollector:
             if time_match:
                 metrics.elapsed_seconds = float(time_match.group(2))
 
-        # LB-116: per-rule alert counts and per-rule errors, from the
+        # Per-rule alert counts and per-rule errors, from the
         # driver log line ``[detection] {rule_id}: alerts=N ...``.
         # Emitter format is fixed with ``elapsed=Ns`` as the trailing token:
-        #   success: ``[detection] {rule}: alerts=N prior=P elapsed=Ts``
+        #   success: ``[detection] {rule}: alerts=N elapsed=Ts``
         #   crashed: ``[detection] {rule}: alerts=0 error=<Class>: <msg> elapsed=Ts``
         # Anchor on the LAST ``elapsed=Ns`` at end-of-line via a greedy
         # middle capture + MULTILINE ``$``; the engine backtracks from
@@ -3273,12 +3665,17 @@ class MetricsCollector:
         # Rule slug is ``[A-Za-z0-9_]+`` (matches DEFAULT_DETECTION_RULES
         # plus any future additions) so a stray ``:`` in a message cannot
         # be mis-picked as the rule/alerts separator.
+        # The driver's stdout and log4j share the container log, so a JVM log
+        # line can land on the end of a [detection] line before its newline
+        # ("... elapsed=10.5s26/10/07 07:40:00 INFO BlockManager: ..."). The
+        # token then ends at end of line or where such a timestamp starts.
+        _LINE_END = r"(?=\s*$|\d{2}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} )"
         detection_re = re.compile(
             r"\[detection\]\s+"
             r"(?P<rule>[A-Za-z0-9_]+):\s+"
             r"alerts=(?P<n>\d+)"
             r"(?P<mid>.*?)"
-            r"\s+elapsed=(?P<elapsed>[\d.]+)s\s*$",
+            r"\s+elapsed=(?P<elapsed>[\d.]+)s" + _LINE_END,
             re.MULTILINE,
         )
         for m in detection_re.finditer(logs):
@@ -3297,7 +3694,7 @@ class MetricsCollector:
             if err_match:
                 metrics.rule_errors[rule] = err_match.group(1).strip()
 
-        # LB-119: structural skips are a THIRD shape, distinct from
+        # Structural skips are a THIRD shape, distinct from
         # ``alerts=N``. Emitter format:
         #   ``[detection] {rule}: skipped=<reason> detail=<...> elapsed=Ts``
         # A skipped rule is recorded in ``rules_skipped`` and left OUT of
@@ -3309,7 +3706,7 @@ class MetricsCollector:
             r"(?P<rule>[A-Za-z0-9_]+):\s+"
             r"skipped=(?P<reason>[A-Za-z0-9_-]+)"
             r"(?P<mid>.*?)"
-            r"\s+elapsed=(?P<elapsed>[\d.]+)s\s*$",
+            r"\s+elapsed=(?P<elapsed>[\d.]+)s" + _LINE_END,
             re.MULTILINE,
         )
         for m in skip_re.finditer(logs):
@@ -3429,14 +3826,16 @@ class MetricsCollector:
         total_rows = 0
         batch_ids: set[int] = set()
         batch_durations: list[float] = []
+        gold_cycle_s: dict[int, float] = {}
         freshness_values: list[float] = []
-        # (value, idle) per gold cycle, in log order (LB-145).
+        # (value, idle) per gold cycle, in log order.
         freshness_cycles: list[tuple[float, bool]] = []
         # Silver: rows per batch id, and the batch ids that logged a commit.
         batch_rows: dict[int, int] = {}
         committed_batches: set[int] = set()
         # Bronze: log timestamps of the batches that wrote rows.
         write_times: list[datetime] = []
+        pending_writes: dict[int, tuple[int, datetime | None]] = {}
         ttd_lines: list[re.Match[str]] = []
         ttd_detail: list[re.Match[str]] = []
 
@@ -3484,17 +3883,19 @@ class MetricsCollector:
                 metrics.extra_metrics[m.group("key")] = m.group("val").strip()
                 continue
 
-            # Bronze: "Batch N: writing X rows to ..."
+            # Bronze: "Batch N: writing X rows to ...", counted once the
+            # batch's "committed in" line follows: a stream stopped mid-write
+            # logs the first and never commits.
             m = re.search(r"Batch (\d+): writing ([\d,]+) rows", line)
             if m:
                 ts = _LOG_TS.search(line)
+                at = None
                 if ts:
                     try:
-                        write_times.append(datetime.fromisoformat(ts.group(1)))
+                        at = datetime.fromisoformat(ts.group(1))
                     except ValueError:
                         pass
-                batch_ids.add(int(m.group(1)))
-                total_rows += int(m.group(2).replace(",", ""))
+                pending_writes[int(m.group(1))] = (int(m.group(2).replace(",", "")), at)
                 continue
 
             # Silver: "Batch N: transforming X rows"
@@ -3528,16 +3929,28 @@ class MetricsCollector:
                     batch_ids.add(int(m.group(1)))
                     continue
 
-            # Gold: "Cycle N: refreshed ... in X.Xs (Y KPI records)"
-            m = re.search(r"Cycle \d+: refreshed .+ in ([\d.]+)s", line)
+            # Gold: "Cycle N: refreshed ... in X.Xs (Y KPI records)"; an AML
+            # cycle's "tick timing ... total=X.Xs" replaces it, as it also
+            # covers the time to detect and TM pass after detection.
+            m = re.search(r"Cycle (\d+): refreshed .+ in ([\d.]+)s", line)
             if m:
-                batch_durations.append(float(m.group(1)))
+                gold_cycle_s.setdefault(int(m.group(1)), float(m.group(2)))
                 continue
+            m = re.search(r"Cycle (\d+): tick timing .* total=([\d.]+)s", line)
+            if m:
+                # Not consumed: the tick timing parse below reads it too.
+                gold_cycle_s[int(m.group(1))] = float(m.group(2))
 
             # Bronze: "Batch N: committed in X.Xs"
             m = re.search(r"Batch (\d+): committed in (\d+\.?\d*)s", line)
             if m:
                 batch_durations.append(float(m.group(2)))
+                written = pending_writes.pop(int(m.group(1)), None)
+                if written is not None:
+                    batch_ids.add(int(m.group(1)))
+                    total_rows += written[0]
+                    if written[1] is not None:
+                        write_times.append(written[1])
                 continue
 
             # Silver: "Batch N: committed to ... in X.Xs"
@@ -3581,8 +3994,10 @@ class MetricsCollector:
         if len(write_times) >= 2:
             metrics.batch_span_seconds = (max(write_times) - min(write_times)).total_seconds()
 
+        batch_durations += list(gold_cycle_s.values())
         if batch_durations:
             metrics.micro_batch_duration_ms = (sum(batch_durations) / len(batch_durations)) * 1000
+            metrics.median_batch_duration_ms = statistics.median(batch_durations) * 1000
 
         if freshness_values:
             metrics.freshness_seconds = max(freshness_values)

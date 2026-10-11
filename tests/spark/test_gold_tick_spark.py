@@ -9,6 +9,11 @@
 - The pinned frame does not move when silver takes an append mid-tick.
 - The tick logs a phase breakdown the collector parses, with one phase per
   rule, in the continuous rule order.
+- Every rule's status is 'ran' (scoring reads the status), an alert keeps
+  the detected_ts of the tick that first wrote its content, and the last
+  tick equals the batch result.
+- Time to detect counts exactly the new alerts, also on the tick after one
+  that failed (its baseline carried).
 
 Needs the Iceberg Spark runtime jar in LB_SPARK_TEST_JARS (see
 tests/spark/conftest.py).
@@ -22,7 +27,7 @@ import pytest
 
 pytest.importorskip("pyspark")
 
-pytestmark = pytest.mark.requires_jars("iceberg")
+pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.slow]
 
 
 def test_gold_tick_matches_batch_and_is_idempotent(tmp_path, spark_subprocess, spark_jars):
@@ -63,14 +68,36 @@ def _session(warehouse, jars):
 _TXN_COLS = (
     "uetr string, originator_id bigint, beneficiary_id bigint, txn_timestamp timestamp, "
     "txn_amount decimal(18,2), txn_currency string, txn_amount_usd decimal(18,2), "
-    "ingest_ts timestamp"
+    "rptd_beneficiary_name string, ingest_ts timestamp, _stream_id string, _batch_id bigint"
 )
+
+# Payees on the corpus watchlist (W5 sanctions, W6 PEP); every other payee
+# has a name no entry matches.
+LISTED = {70: "IVAN PETROV SMIRNOV", 71: "MARIA LOPEZ GARCIA"}
+# Every party has an entity row, as silver gives it; these are customers.
+_CUSTOMERS = {1, 2, 10, 11, 12, 40, 41, 42, 43, 44, 50, 51, 52}
+_OTHER_PARTIES = {3, 9, 30, 60, 61, 62, *LISTED}
+
+
+def _write_watchlist(spark, path):
+    from datetime import date
+
+    d = date(2023, 12, 1)
+    spark.createDataFrame(
+        [
+            ("sanctions", "S-1", 1, d, d, None, LISTED[70], []),
+            ("pep", "P-1", 1, d, d, None, LISTED[71], []),
+        ],
+        "list_type string, list_id string, list_version int, version_published_date date, "
+        "listed_date date, country string, name string, aliases array<string>",
+    ).write.mode("overwrite").parquet(path)
 
 
 def _rows(tick):
     """Silver rows (uetr, from, to, hours after t0, usd) and the tick whose
     append brings them. Tick 1 holds a structuring burst (W2), a pass-through
-    (W4), a round trip (W3) and a layering chain (W17); tick 2 adds a second
+    (W4), a round trip (W3), a layering chain (W17) and payments to a sanctioned
+    (W5) and a PEP (W6) payee; tick 2 adds a second
     pass-through and a fourth in-band payment to the burst."""
     t1 = [
         ("s1", 1, 9, 1, 9500),
@@ -85,13 +112,17 @@ def _rows(tick):
         ("l2", 41, 42, 20, 1900),
         ("l3", 42, 43, 30, 1800),
         ("l4", 43, 44, 40, 1700),
+        ("w1", 1, 70, 50, 2000),
+        ("w2", 2, 71, 51, 2000),
     ]
     t2 = [
         ("s4", 1, 9, 4, 9200),
         ("q1", 50, 51, 100, 3000),
         ("q2", 51, 52, 101, 2900),
     ]
-    return t1 if tick == 1 else t2
+    # Later: a pass-through on a new day (W4, a new week).
+    t3 = [("r1", 60, 61, 200, 1234), ("r2", 61, 62, 202, 1200)]
+    return {1: t1, 2: t2}.get(tick, t3)
 
 
 def _append(spark, tick, ingest_epoch):
@@ -102,7 +133,19 @@ def _append(spark, tick, ingest_epoch):
     ing = datetime.fromtimestamp(ingest_epoch, tz=timezone.utc)
     df = spark.createDataFrame(
         [
-            (u, a, b, t0 + timedelta(hours=h), Decimal(amt), "USD", Decimal(amt), ing)
+            (
+                u,
+                a,
+                b,
+                t0 + timedelta(hours=h),
+                Decimal(amt),
+                "USD",
+                Decimal(amt),
+                LISTED.get(b, f"PARTY {b} TRADING"),
+                ing,
+                "s",
+                tick,
+            )
             for u, a, b, h, amt in _rows(tick)
         ],
         _TXN_COLS,
@@ -128,13 +171,22 @@ def _check(spark):
     spark.sql("CREATE NAMESPACE IF NOT EXISTS lakehouse.silver")
     spark.sql(f"CREATE TABLE lakehouse.silver.transactions ({_TXN_COLS}) USING iceberg")
     spark.sql(
-        "CREATE TABLE lakehouse.silver.entities (entity_id BIGINT, is_customer BOOLEAN) "
-        "USING iceberg"
+        "CREATE TABLE lakehouse.silver.entities "
+        "(entity_id BIGINT, is_customer BOOLEAN, country STRING) USING iceberg"
     )
     spark.sql(
         "INSERT INTO lakehouse.silver.entities VALUES "
-        + ",".join(f"({e}, true)" for e in (1, 2, 10, 11, 12, 40, 41, 42, 43, 44, 50, 51, 52))
+        + ",".join(
+            f"({e}, {'true' if e in _CUSTOMERS else 'false'}, 'US')"
+            for e in sorted(_CUSTOMERS | _OTHER_PARTIES)
+        )
     )
+    import os
+
+    warehouse = spark.conf.get("spark.sql.catalog.lakehouse.warehouse")
+    watchlist = f"file://{warehouse}/watchlist.parquet"
+    _write_watchlist(spark, watchlist)
+    os.environ["LB_FINANCIAL_WATCHLIST_PATH"] = watchlist
     g._bootstrap_gold_tables(spark)
 
     lines = []
@@ -145,7 +197,18 @@ def _check(spark):
         real_log(msg)
 
     g.log = capture
-    state = g.TickState(time.time(), manifest_ready=True)
+    # The detection driver logs through its own module's log.
+    gf.log = capture
+    from incremental_detection import IncrementalDetection
+
+    # As deployed: incremental detection state between ticks.
+    state = g.TickState(
+        time.time(),
+        manifest_ready=True,
+        incremental=IncrementalDetection(
+            spark, f"file://{spark.conf.get('spark.sql.catalog.lakehouse.warehouse')}/_incremental"
+        ),
+    )
     now = time.time()
     _append(spark, 1, now - 100)
 
@@ -230,12 +293,26 @@ def _check(spark):
     ]
     assert len(order) == 3 and order == sorted(order), lines
 
-    # Tick 2 over unchanged silver: same content, nothing new to measure.
+    first_seen = {
+        (r["rule_id"], r["entity_id"], tuple(sorted(r["related_txn_ids"]))): r["detected_ts"]
+        for r in spark.table("lakehouse.gold.alerts").collect()
+    }
+
+    # Tick 2 over unchanged silver: same content, nothing new to measure, no
+    # rule rewritten, and every rule's status is 'ran' (scoring reads it).
     lines.clear()
+    snapshots = spark.sql("SELECT count(*) AS n FROM lakehouse.gold.alerts.snapshots").collect()
     g.run_tick(spark, state, 2)
+    after = spark.sql("SELECT count(*) AS n FROM lakehouse.gold.alerts.snapshots").collect()
+    # A rewrite commits a DELETE and an INSERT per rule.
+    assert after[0]["n"] - snapshots[0]["n"] <= 1, (snapshots, after)
     assert _content(spark, "run-tick") == tick1
     ttd2 = [ln for ln in lines if "time to detect alerts=" in ln]
     assert len(ttd2) == 1 and "alerts=0 " in ttd2[0], ttd2
+    status = {
+        r["rule_id"]: r["status"] for r in spark.table("lakehouse.gold.detection_status").collect()
+    }
+    assert all(status[r] == "ran" for r in g.CONTINUOUS_RULES), status
 
     # Tick 3 after new evidence: only the new or changed alerts are measured.
     _append(spark, 2, time.time() - 30)
@@ -246,15 +323,24 @@ def _check(spark):
     assert new, tick3
     ttd3 = [ln for ln in lines if "time to detect alerts=" in ln]
     assert len(ttd3) == 1 and f"alerts={len(new)} " in ttd3[0], (ttd3, new)
+    # Content written on tick 1 keeps tick 1's detected_ts.
+    for r in spark.table("lakehouse.gold.alerts").collect():
+        k = (r["rule_id"], r["entity_id"], tuple(sorted(r["related_txn_ids"])))
+        if k in first_seen:
+            assert r["detected_ts"] == first_seen[k], (k, r["detected_ts"], first_seen[k])
 
     # A failing baseline does not cost the tick its alerts or measurements,
-    # but one that keeps failing still fails the tick.
+    # but one that keeps failing still fails the tick: the days it did not
+    # rewrite stay pending, so the next tick retries them with nothing new.
     real_baseline, real_max = g.build_baseline_dashboards, g.MAX_CONSECUTIVE_FAILURES
 
     def broken(*_a, **_k):
         raise RuntimeError("dashboards down")
 
     g.build_baseline_dashboards, g.MAX_CONSECUTIVE_FAILURES = broken, 2
+    from incremental_detection import FULL
+
+    state.baseline_cut = FULL
     try:
         lines.clear()
         g.run_tick(spark, state, 4)
@@ -268,6 +354,49 @@ def _check(spark):
     finally:
         g.build_baseline_dashboards, g.MAX_CONSECUTIVE_FAILURES = real_baseline, real_max
 
+    # A tick that fails after taking in new rows leaves their baseline days
+    # pending: the next tick, with nothing new, still rewrites them.
+    g.run_tick(spark, state, 6)  # clears what the failing baseline left pending
+    assert state.baseline_cut is None
+    tick6 = _content(spark, "run-tick")
+    real_detect = g.run_detection_rules
+
+    def detection_down(*_a, **_k):
+        raise RuntimeError("detection down")
+
+    g.run_detection_rules = detection_down
+    _append(spark, 3, time.time() - 10)
+    try:
+        g.run_tick(spark, state, 7)
+        raise AssertionError("the failing tick did not raise")
+    except RuntimeError as e:
+        assert "detection down" in str(e), e
+    finally:
+        g.run_detection_rules = real_detect
+    # Tick 8 measures against tick 7's carried baseline: the alerts new since
+    # tick 6, though the rows came in on tick 7.
+    lines.clear()
+    g.run_tick(spark, state, 8)
+    new8 = set(_content(spark, "run-tick")) - set(tick6)
+    ttd8 = [ln for ln in lines if "time to detect alerts=" in ln]
+    assert new8 and len(ttd8) == 1 and f"alerts={len(new8)} " in ttd8[0], (ttd8, new8)
+
+    def baseline_rows(df):
+        return sorted(
+            (
+                r["dashboard_date"],
+                r["alert_count"],
+                r["entity_count"],
+                r["total_alerted_amount_usd"],
+            )
+            for r in df.collect()
+        )
+
+    want = g.build_baseline_dashboards(spark.table("lakehouse.silver.transactions"), "x")
+    got = spark.table("lakehouse.gold.daily_dashboards").where("rule_id = 'baseline'")
+    assert baseline_rows(got) == baseline_rows(want), (baseline_rows(got), baseline_rows(want))
+    drained = _content(spark, "run-tick")
+
     # Equivalence: the batch driver over the same silver writes the same
     # content, rule by rule.
     gf.run_detection_rules(
@@ -276,7 +405,7 @@ def _check(spark):
         "run-batch",
         rules=g.CONTINUOUS_RULES,
     )
-    assert _content(spark, "run-batch") == tick3
+    assert _content(spark, "run-batch") == drained
 
 
 if __name__ == "__main__":

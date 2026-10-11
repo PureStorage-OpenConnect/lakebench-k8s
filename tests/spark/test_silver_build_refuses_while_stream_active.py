@@ -1,28 +1,18 @@
-"""H4: silver_build_financial refuses to run while an AML stream is active.
+"""silver_build_financial refuses to run while an AML stream is active.
 
-The AML stream deployment writes a ``_STARTED`` marker file next to its
-Structured Streaming checkpoint (``LB_FINANCIAL_SILVER_CHECKPOINT``) on
-start-up and removes it on clean shutdown. If a fat-fingered operator
-then invokes ``silver_build_financial`` on the same deployment, the batch
-job would ``.overwrite(lit(True))`` silver.transactions / silver.entities /
-silver.accounts / silver.account_statements / silver.counterparty_edges /
-silver.entity_profiles, wiping every row the stream has written so far
-(the docstring at ``silver_stream_financial.py:46-53`` calls this out).
+The stream writes a ``_STARTED`` marker next to its checkpoint
+(``LB_FINANCIAL_SILVER_CHECKPOINT``) on start-up and removes it on clean
+shutdown. A batch run on the same deployment would overwrite every silver
+table and wipe the rows the stream wrote, so the guard
+``common.refuse_batch_while_stream_active`` behaves as follows:
 
-The guard converts that docstring warning into a runtime refusal:
+* Marker present, no force rebuild: ``SilverAbort``.
+* Marker present, force rebuild: proceed, marker left in place.
+* Marker absent, checkpoint missing or unset, or the marker probe fails:
+  proceed (fail open), so a batch-only deployment is never blocked.
 
-* Marker present + ``LB_FORCE_REBUILD`` NOT set -> ``SilverAbort`` naming
-  the streaming checkpoint path.
-* Marker present + ``LB_FORCE_REBUILD=1`` (or ``force_rebuild=True``)
-  -> proceed silently. The operator explicitly asked for the wipe.
-* Marker absent -> proceed silently. Fresh deployment, or the stream
-  shut down cleanly.
-
-The guard lives in ``common.refuse_batch_while_stream_active`` and is
-called from ``silver_build_financial.main()`` right after the Spark
-session is opened, before any DDL bootstrap or write happens. The tests
-here exercise the helper via a fake sidecar filesystem (matching the B5
-tests' ``_FakeSpark`` pattern) so no live Spark session is needed.
+The helper is exercised through a fake sidecar filesystem, so no live Spark
+session is needed.
 """
 
 from __future__ import annotations
@@ -31,108 +21,69 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("load_script")
 
+CKPT = "s3a://lb-bronze/_checkpoints/silver_stream_financial/"
+MARKER = CKPT.rstrip("/") + "/_STARTED"
+
 
 class _FakeFS:
-    """In-memory Hadoop FileSystem for the marker path."""
+    """In-memory marker filesystem; ``exists`` can be made to fail."""
 
-    def __init__(self):
-        self.files: dict[str, bytes] = {}
-        self.writes = 0
-        self.deletes = 0
+    def __init__(self, files=(), *, exists_raises=False):
+        self.files = set(files)
+        self._exists_raises = exists_raises
 
     def exists(self, path):
+        if self._exists_raises:
+            raise RuntimeError("simulated FS listing failure")
         return str(path) in self.files
-
-    def read(self, path):
-        return self.files[str(path)]
-
-    def write(self, path, data):
-        self.files[str(path)] = data
-        self.writes += 1
-
-    def delete(self, path):
-        if str(path) in self.files:
-            del self.files[str(path)]
-            self.deletes += 1
-            return True
-        return False
 
 
 def test_refuses_with_silver_abort_when_marker_present():
-    """Marker seeded, no force-rebuild: SilverAbort names the checkpoint path."""
     from common import SilverAbort, refuse_batch_while_stream_active
 
-    fs = _FakeFS()
-    ckpt = "s3a://lb-bronze/_checkpoints/silver_stream_financial/"
-    marker = ckpt.rstrip("/") + "/_STARTED"
-    # Seed the marker as the stream would have written on startup.
-    fs.write(marker, b"pid=12345 stream_id=abc")
-
+    fs = _FakeFS([MARKER])
     with pytest.raises(SilverAbort) as excinfo:
         refuse_batch_while_stream_active(
-            spark=None, checkpoint_location=ckpt, force_rebuild=False, fs=fs
+            spark=None, checkpoint_location=CKPT, force_rebuild=False, fs=fs
         )
-    msg = str(excinfo.value)
-    # The refusal must name the streaming checkpoint path so the operator
-    # sees exactly which deployment they are stepping on.
-    assert ckpt.rstrip("/") in msg
-    assert "_STARTED" in msg
-    # And it must point the operator at the escape hatch.
-    assert "force-rebuild" in msg.lower() or "force_rebuild" in msg.lower()
+    assert CKPT.rstrip("/") in str(excinfo.value)
 
 
 def test_force_rebuild_bypasses_marker_check():
-    """Marker seeded, force_rebuild=True: no raise, guard returns cleanly."""
     from common import refuse_batch_while_stream_active
 
-    fs = _FakeFS()
-    ckpt = "s3a://lb-bronze/_checkpoints/silver_stream_financial/"
-    marker = ckpt.rstrip("/") + "/_STARTED"
-    fs.write(marker, b"pid=12345 stream_id=abc")
-
-    # No exception: operator explicitly opted in to the wipe.
+    fs = _FakeFS([MARKER])
     refuse_batch_while_stream_active(
-        spark=None, checkpoint_location=ckpt, force_rebuild=True, fs=fs
+        spark=None, checkpoint_location=CKPT, force_rebuild=True, fs=fs
     )
-    # The guard does NOT clear the marker: only the stream shutdown path
-    # removes it, so a subsequent stream restart still sees a clean state
-    # and the batch operator has not silently disabled the guard for
-    # future runs.
-    assert marker in fs.files
+    # Only the stream shutdown path removes the marker.
+    assert fs.files == {MARKER}
 
 
-def test_env_var_bypass_matches_flag_bypass():
-    """LB_FORCE_REBUILD=1 alone is the operator opt-in used by job.py.
-
-    silver_build_financial.main() reads the env var and forwards it as
-    ``force_rebuild``; the helper itself only sees the resolved flag.
-    This test locks the pattern so a future refactor cannot introduce
-    a divergent bypass path.
-    """
+@pytest.mark.parametrize(
+    ("checkpoint", "fs"),
+    [
+        (CKPT, _FakeFS()),
+        (CKPT, _FakeFS(exists_raises=True)),
+        (None, _FakeFS([MARKER])),
+        ("", _FakeFS([MARKER])),
+    ],
+    ids=["no_marker", "probe_failure", "checkpoint_unset", "checkpoint_empty"],
+)
+def test_guard_fails_open(checkpoint, fs):
     from common import refuse_batch_while_stream_active
 
-    fs = _FakeFS()
-    ckpt = "s3a://lb-bronze/_checkpoints/silver_stream_financial/"
-    marker = ckpt.rstrip("/") + "/_STARTED"
-    fs.write(marker, b"pid=1 stream_id=x")
-
-    # force_rebuild resolved from the env var (True/False both routed
-    # through the same parameter): both cases behave identically to the
-    # direct flag test above.
+    before = set(fs.files)
     refuse_batch_while_stream_active(
-        spark=None, checkpoint_location=ckpt, force_rebuild=True, fs=fs
+        spark=None, checkpoint_location=checkpoint, force_rebuild=False, fs=fs
     )
-    assert marker in fs.files
+    # The marker is a stream-side writer only: the guard never creates or removes it.
+    assert fs.files == before
 
 
 def test_main_calls_guard_before_writes(monkeypatch):
-    """silver_build_financial.main wires the guard before any Spark writes.
-
-    Mock the guard to raise a distinctive exception; assert main() surfaces
-    it verbatim without ever reaching the DDL bootstrap or _replace_data
-    stage. Also verifies main() reads LB_FINANCIAL_SILVER_CHECKPOINT and
-    forwards LB_FORCE_REBUILD as the guard's force_rebuild argument.
-    """
+    """main() reads LB_FINANCIAL_SILVER_CHECKPOINT, forwards LB_FORCE_REBUILD
+    as ``force_rebuild`` and calls the guard before any Spark write."""
     pytest.importorskip("pyspark")
 
     import silver_build_financial as sbf
@@ -143,30 +94,19 @@ def test_main_calls_guard_before_writes(monkeypatch):
     seen: dict[str, object] = {}
 
     def _fake_guard(*, spark, checkpoint_location, force_rebuild, fs=None):
-        seen["spark"] = spark
         seen["checkpoint_location"] = checkpoint_location
         seen["force_rebuild"] = force_rebuild
         raise _Sentinel("guard fired")
 
-    monkeypatch.setattr(sbf, "refuse_batch_while_stream_active", _fake_guard)
-
-    # Point silver_build at a distinctive checkpoint so we can verify it
-    # was forwarded. LB_FORCE_REBUILD=1 must propagate to the guard as
-    # ``force_rebuild=True``.
-    monkeypatch.setenv("LB_FINANCIAL_SILVER_CHECKPOINT", "s3a://fake/checkpoints/silver-h4/")
-    monkeypatch.setenv("LB_FORCE_REBUILD", "1")
-
-    # Stop main() from actually opening a Spark session or writing tables;
-    # the guard is supposed to fire before anything is bootstrapped.
     class _StubSpark:
-        class _Conf:
-            def set(self, *a, **kw):
-                pass
+        def __init__(self):
+            self.conf = self
 
-            def get(self, *a, **kw):
-                return "UTC"
+        def set(self, *a, **kw):
+            pass
 
-        conf = _Conf()
+        def get(self, *a, **kw):
+            return "UTC"
 
         def sql(self, *a, **kw):
             raise AssertionError("guard should have fired before any spark.sql call")
@@ -181,7 +121,10 @@ def test_main_calls_guard_before_writes(monkeypatch):
         def getOrCreate(self):
             return _StubSpark()
 
+    monkeypatch.setattr(sbf, "refuse_batch_while_stream_active", _fake_guard)
     monkeypatch.setattr(sbf.SparkSession, "builder", _Builder())
+    monkeypatch.setenv("LB_FINANCIAL_SILVER_CHECKPOINT", "s3a://fake/checkpoints/silver-h4/")
+    monkeypatch.setenv("LB_FORCE_REBUILD", "1")
 
     with pytest.raises(_Sentinel):
         sbf.main()

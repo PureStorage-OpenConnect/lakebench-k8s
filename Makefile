@@ -1,4 +1,4 @@
-.PHONY: help install dev check-fast test-spark test test-unit test-integration test-e2e test-extended test-stress lint typecheck fmt clean
+.PHONY: help install dev check-fast test-spark test test-unit test-integration test-e2e lint typecheck fmt clean
 
 help:
 	@echo "Lakebench Development Commands"
@@ -15,8 +15,6 @@ help:
 	@echo "  test-unit        Run unit tests only, serially (slow AML statistics tests included)"
 	@echo "  test-integration Run integration tests (requires K8s/S3)"
 	@echo "  test-e2e         Run end-to-end tests (full workflow)"
-	@echo "  test-extended    Run scale matrix tests (1, 10, 50, 100)"
-	@echo "  test-stress      Run stress tests at large scales (250, 500, 1000)"
 	@echo ""
 	@echo "Code Quality:"
 	@echo "  lint             Run ruff linter"
@@ -62,11 +60,9 @@ check-fast:
 test:
 	$(UNIT_PYTEST)
 
-# The Spark tier as CI runs it: the jars pinned in
-# tests/spark/jars.lock.json for the installed pyspark, every jar-reason skip
-# an error, serially (the Spark sessions share the JVM's working directory).
-# CI splits it into two jobs (--lb-shard 1/2 and 2/2) and also runs both
-# shards with --lb-reverse.
+# The Spark tier: the jars pinned in tests/spark/jars.lock.json for the
+# installed pyspark, and a missing jar fails the test instead of skipping it
+# (LB_REQUIRE_JARS). CI does not run this tier; run it before a release.
 test-spark:
 	jars="$$(python scripts/fetch_test_jars.py --leg auto --print-env)" && export "$$jars" && \
 	LB_REQUIRE_JARS=1 PYSPARK_PYTHON="$$(command -v python)" pytest tests/spark -q -rsxX -p no:cacheprovider
@@ -79,12 +75,6 @@ test-integration:
 
 test-e2e:
 	pytest tests/ -v -m "e2e"
-
-test-extended:
-	pytest tests/test_e2e.py -v -m "extended"
-
-test-stress:
-	pytest tests/test_e2e.py -v -m "stress"
 
 test-cov:
 	pytest tests/ --cov=lakebench --cov-report=term-missing --cov-report=html
@@ -113,7 +103,7 @@ clean:
 # the end and lists the failures.
 # Nothing here merges, tags, pushes or publishes.
 # ---------------------------------------------------------------------------
-RELEASE_STEPS := version generated-docs filler-words build package-guard gate
+RELEASE_STEPS := version filler-words build package-guard gate
 .PHONY: release-check $(addprefix rc-,$(RELEASE_STEPS))
 RC_PY = PYTHONPATH=src$${PYTHONPATH:+:$$PYTHONPATH} $(PYTHON)
 #: Where rc-build writes and rc-package-guard reads; release-check uses a
@@ -151,9 +141,6 @@ ifdef DRY
 else
 	$(RC_PY) scripts/check_version.py --tag "v$(VERSION)"
 endif
-
-rc-generated-docs:
-	$(RC_PY) scripts/gen_docs.py --check
 
 # git grep exits 1 when nothing matches; 2 or more is an error, not a pass.
 rc-filler-words:

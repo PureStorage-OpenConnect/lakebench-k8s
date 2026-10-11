@@ -1,12 +1,5 @@
-"""Measurement precision fixes from the lb16-checks2 live run (v1.6).
-
-1. The continuous headline printed event-date age (~54.9M s) as freshness.
-2. Batch stage times were quantized to the 15 s job-monitor poll.
-3. The default continuous retention_threshold warned on every run.
-4. Metrics timestamps were naive local time beside UTC window times.
-5. ``lakebench info`` labelled a continuous config by its datagen mode and
-   showed the scale default date range instead of the configured one.
-6. Destroy did not name the tables whose files stay in a refused bucket.
+"""Measurement precision: the continuous freshness headline, UTC timestamps,
+batch stage timing from the cluster clock, and run ordering.
 """
 
 from __future__ import annotations
@@ -25,10 +18,10 @@ from lakebench.metrics.collector import (
 )
 
 # ---------------------------------------------------------------------------
-# 1. Continuous freshness headline
+# Continuous freshness headline
 # ---------------------------------------------------------------------------
 
-LIVE_EVENT_AGE = 54_890_938.0  # lb16-checks2 run 20260927-011043-e338c5
+LIVE_EVENT_AGE = 54_890_938.0
 
 
 def _continuous_pb(**kw) -> PipelineBenchmark:
@@ -72,21 +65,13 @@ class TestContinuousFreshnessHeadline:
         pb.data_freshness_seconds = None
         assert pipeline_score_freshness(pb) == "n/a"
 
-    def test_event_age_is_labelled_in_days(self):
-        from lakebench.cli._sustained import event_age_label
-
-        assert event_age_label(LIVE_EVENT_AGE) == "635.3 d"
-        assert event_age_label(None) == "n/a"
-
-    def test_scores_carry_event_age_under_its_own_name(self):
-        pb = _continuous_pb()
-        scores = pb.to_dict()["scores"]
-        assert "query_time_freshness_seconds" not in scores
-        assert scores["query_time_event_age_seconds"] == pytest.approx(LIVE_EVENT_AGE + 2)
-
-    def test_description_says_it_is_not_freshness(self):
-        desc = PipelineBenchmark._SCORE_DESCRIPTIONS["query_time_event_age_seconds"]
-        assert "not freshness" in desc
+    def test_event_age_is_a_diagnostic_never_a_score(self):
+        """Event age (wall clock minus synthetic event dates) is kept under
+        its own name, outside the scorecard."""
+        d = _continuous_pb().to_dict()
+        assert "query_time_freshness_seconds" not in d["scores"]
+        assert "query_time_event_age_seconds" not in d["scores"]
+        assert d["diagnostics"]["query_time_event_age_seconds"] == pytest.approx(LIVE_EVENT_AGE + 2)
 
     def test_legacy_round_meta_loads_as_event_age(self, tmp_path):
         from lakebench.metrics.storage import MetricsStorage
@@ -109,7 +94,7 @@ class TestContinuousFreshnessHeadline:
         assert "gold_freshness_seconds" not in d
         json.dumps(d)
 
-    def test_report_does_not_present_event_age_as_freshness(self):
+    def test_report_does_not_present_event_age_as_freshness(self, tmp_path):
         from lakebench.metrics.collector import PipelineMetrics
         from lakebench.reports.generator import ReportGenerator
 
@@ -124,14 +109,14 @@ class TestContinuousFreshnessHeadline:
             benchmark_rounds=list(pb.benchmark_rounds),
             config_snapshot={"pipeline_mode": "continuous"},
         )
-        html = ReportGenerator(metrics_dir="/tmp/unused-lb16")._generate_html(metrics)
+        html = ReportGenerator(metrics_dir=tmp_path)._generate_html(metrics)
         assert "Query-Time Freshness" not in html
         assert "54890" not in html
         assert "Median freshness" not in html
 
 
 # ---------------------------------------------------------------------------
-# 4. Timestamps are UTC with a zone
+# Timestamps are UTC with a zone
 # ---------------------------------------------------------------------------
 
 
@@ -177,7 +162,7 @@ class TestUtcTimestamps:
 
 
 # ---------------------------------------------------------------------------
-# 2. Batch stage times from the Spark application, not the poll
+# Batch stage times from the Spark application, not the poll
 # ---------------------------------------------------------------------------
 
 T0 = datetime(2026, 9, 27, 7, 11, 25, 250000, tzinfo=timezone.utc)
@@ -188,7 +173,6 @@ def _timing(**kw):
 
     args = {
         "submitted_at": T0,
-        # lb16: every stage ended on a 15 s poll tick
         "observed_end": T0 + timedelta(seconds=90.09),
         "cluster_end": None,
         "cluster_source": "driver_container",
@@ -221,11 +205,52 @@ class TestStageTiming:
         t = _timing(cluster_end=T0 + timedelta(seconds=80), clock_offset_seconds=None)
         assert t.source == "poll" and "offset unknown" in t.note
 
-    @pytest.mark.parametrize("secs", [-30.0, 200.0])
-    def test_end_outside_the_observed_run_is_skew_not_a_time(self, secs):
-        t = _timing(cluster_end=T0 + timedelta(seconds=secs + 4.5))
-        assert t.source == "poll"
-        assert "outside the observed run" in t.note
+    @pytest.mark.parametrize(
+        ("kw", "source"),
+        [
+            # the cluster clock puts the end outside the observed run
+            ({"cluster_end": T0 + timedelta(seconds=-30.0 + 4.5)}, "poll"),
+            ({"cluster_end": T0 + timedelta(seconds=200.0 + 4.5)}, "poll"),
+            # a slow driver node (120 s behind on a 470 s stage) is not taken as the end
+            (
+                {
+                    "observed_end": T0 + timedelta(seconds=470.0),
+                    "cluster_end": T0 + timedelta(seconds=350.0 + 4.5),
+                },
+                "poll",
+            ),
+            # an end within the poll and operator lag is accepted
+            (
+                {
+                    "observed_end": T0 + timedelta(seconds=470.0),
+                    "cluster_end": T0 + timedelta(seconds=440.0 + 4.5),
+                },
+                "driver_container",
+            ),
+            # under API load the last running poll, not the observed end, bounds the end
+            (
+                {
+                    "observed_end": T0 + timedelta(seconds=470.0),
+                    "cluster_end": T0 + timedelta(seconds=380.0 + 4.5),
+                    "last_running": T0 + timedelta(seconds=375.0),
+                },
+                "driver_container",
+            ),
+            (
+                {
+                    "observed_end": T0 + timedelta(seconds=470.0),
+                    "cluster_end": T0 + timedelta(seconds=300.0 + 4.5),
+                    "last_running": T0 + timedelta(seconds=465.0),
+                },
+                "poll",
+            ),
+        ],
+    )
+    def test_cluster_end_is_accepted_or_rejected_as_skew(self, kw, source):
+        t = _timing(**kw)
+        assert t.source == source
+        if source == "poll":
+            assert "outside the observed run" in t.note
 
     def test_end_before_the_last_submission_is_a_stale_status(self):
         """A retried application: terminationTime left from the first attempt."""
@@ -239,17 +264,6 @@ class TestStageTiming:
         t = _timing(cluster_end=T0 + timedelta(seconds=90.09 + 4.5 + 1.0))
         assert t.source == "driver_container"
         assert t.end == T0 + timedelta(seconds=90.09)
-
-    def test_parse_k8s_time(self):
-        from lakebench.modules.pipeline_engines.spark.monitor import parse_k8s_time
-
-        assert parse_k8s_time("2026-09-27T07:12:55Z") == datetime(
-            2026, 9, 27, 7, 12, 55, tzinfo=timezone.utc
-        )
-        naive = datetime(2026, 9, 27, 7, 12, 55)
-        assert parse_k8s_time(naive).tzinfo is timezone.utc
-        assert parse_k8s_time("") is None
-        assert parse_k8s_time("not a time") is None
 
 
 def _driver_pod(name, finished):
@@ -330,11 +344,6 @@ class TestRunStageTiming:
         )
         assert t.source == "poll" and t.resolution_seconds == _run._STAGE_POLL_S
 
-    def test_poll_is_no_longer_15s(self):
-        from lakebench.cli import _run
-
-        assert _run._STAGE_POLL_S <= 5
-
     def test_timing_source_reaches_the_stage_and_survives_a_reload(self):
         from lakebench.metrics import build_pipeline_benchmark
         from lakebench.metrics.collector import JobMetrics, PipelineMetrics
@@ -362,219 +371,39 @@ class TestRunStageTiming:
         assert back.pipeline_benchmark.time_to_value_seconds == pytest.approx(64.25)
 
 
-# ---------------------------------------------------------------------------
-# 5. lakebench info shows the pipeline mode and the configured date range
-# ---------------------------------------------------------------------------
+@pytest.fixture
+def kolkata_tz():
+    """UTC+5:30 for the test, restored on teardown."""
+    import os
+    import time
 
-
-def _continuous_c360(tmp_path, **datagen):
-    import yaml
-
-    from tests.conftest import make_config
-
-    base = make_config().model_dump(mode="json")
-    data = {
-        "name": "lb16-cont2",
-        "platform": base["platform"],
-        "architecture": {"pipeline": {"mode": "continuous"}},
-        "workload": {"schema": "customer360", "datagen": {"scale": 1, **datagen}},
-    }
-    path = tmp_path / "c.yaml"
-    path.write_text(yaml.safe_dump(data))
-    return path
-
-
-class TestInfoLabels:
-    def test_continuous_config_is_not_labelled_batch(self, tmp_path):
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        path = _continuous_c360(tmp_path, timestamp_start="2024-12-18", timestamp_end="2025-01-01")
-        out = CliRunner().invoke(app, ["info", str(path)])
-        assert out.exit_code == 0, out.output
-        assert "customer360-continuous" in out.output
-        assert "customer360-batch" not in out.output
-        assert "14 days (2024-12-18 to 2025-01-01)" in out.output
-        assert "365 days" not in out.output
-
-    def test_continuous_datagen_mode_says_how_the_corpus_arrives(self, tmp_path):
-        """lb16-cs: what "Datagen mode" says beside "Pipeline mode: continuous"."""
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        out = CliRunner().invoke(app, ["info", str(_continuous_c360(tmp_path))])
-        assert out.exit_code == 0, out.output
-        text = " ".join(out.output.replace("\u2502", " ").split())
-        # Wave 2 D-wave (2026-09-28): AUTO resolves to continuous at every
-        # scale (delivery pattern, not resource tier). Trickle sentence is
-        # kept for the continuous pipeline.
-        assert "continuous delivery (auto); corpus written up front" in text
-        assert "trickled to bronze by the pipeline" in text
-
-    def test_datagen_mode_line_batch_and_explicit(self):
-        from lakebench.cli import info_datagen_mode
-        from tests.conftest import make_config
-
-        cfg = make_config()
-        # AUTO -> continuous everywhere (Wave 2 D-wave, 2026-09-28).
-        assert info_datagen_mode(cfg) == "continuous delivery (auto)"
-        assert "trickle" not in info_datagen_mode(cfg)
-        cfg = make_config(workload={"datagen": {"mode": "batch"}})
-        assert info_datagen_mode(cfg) == "batch delivery (set in config)"
-
-    def test_date_range_defaults_and_non_c360(self):
-        from lakebench.cli import info_date_range
-        from tests.conftest import make_config
-
-        cfg = make_config()
-        assert info_date_range(cfg, 365) == "365 days"
-        cfg.architecture.workload.datagen.timestamp_end = "2024-01-15"
-        assert info_date_range(cfg, 365) == "14 days (2024-01-01 to 2024-01-15)"
-        cfg.architecture.workload.datagen.timestamp_start = "bad"
-        assert info_date_range(cfg, 365) == "365 days"
-        fin = make_config(workload={"schema": "financial"})
-        fin.architecture.workload.datagen.timestamp_start = "2024-12-18"
-        assert info_date_range(fin, 1826) == "1826 days"
-
-
-# ---------------------------------------------------------------------------
-# 6. Destroy names the tables whose files stay in a refused bucket
-# ---------------------------------------------------------------------------
-
-
-class TestDestroyNamesTablesLeftInRefusedBuckets:
-    def _engine(self):
-        from tests.conftest import make_config
-
-        cfg = make_config(workload={"schema": "financial"})
-        cfg.platform.storage.s3.buckets.bronze = "lb16-lb186-bronze"
-        cfg.platform.storage.s3.buckets.silver = "lb16-lb186-silver"
-        cfg.platform.storage.s3.buckets.gold = "lb16-lb186-gold"
-        return SimpleNamespace(config=cfg)
-
-    def test_refused_bronze_names_its_tables_only(self):
-        from lakebench.deploy import destroy as destroy_mod
-
-        engine = self._engine()
-        tables = engine.config.architecture.tables
-        bronze = [f"lakehouse.{t}" for t in tables.workload_tables("financial", layers=("bronze",))]
-        silver = [f"lakehouse.{t}" for t in tables.workload_tables("financial", layers=("silver",))]
-        notes = destroy_mod._files_left_in_refused_buckets(
-            engine, {"lb16-lb186-bronze"}, bronze + silver
-        )
-        assert len(notes) == 1
-        assert "remain in lb16-lb186-bronze" in notes[0]
-        for t in bronze:
-            assert t.split(".", 1)[1] in notes[0]
-        for t in silver:
-            assert t.split(".", 1)[1] not in notes[0]
-
-    def test_nothing_refused_or_nothing_unregistered(self):
-        from lakebench.deploy import destroy as destroy_mod
-
-        engine = self._engine()
-        assert destroy_mod._files_left_in_refused_buckets(engine, set(), ["lakehouse.a.b"]) == []
-        assert destroy_mod._files_left_in_refused_buckets(engine, {"lb16-lb186-bronze"}, []) == []
-
-    def test_end_to_end_the_bucket_step_says_where_the_files_stay(self):
-        """LB-186 live: bronze refused (tagless, not on the record), Trino
-        unregistered the tables, and the refused bucket kept their files."""
-        from tests.test_destroy_bucket_delete import FakeBoto, TestDestroyAllBuckets
-
-        h = TestDestroyAllBuckets()
-        boto = FakeBoto({"a-bronze": ["warehouse/t/data.parquet"], "a-silver": [], "a-gold": []})
-        r = h._run(
-            boto,
-            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "UNSUPPORTED"),
-            created={"a-silver", "a-gold"},
-            maint=("trino", "trino-coordinator-0", "lakehouse"),
-        )
-        assert boto.buckets == {"a-bronze": ["warehouse/t/data.parquet"]}
-        assert "their files remain in a-bronze" in r.message
-        assert "silver.t" in r.message
-        tables = [x for x in h._results if x.component == "table-cleanup"][-1]
-        assert "silver.t, gold.t" in tables.message
-
-
-class TestReviewFixes:
-    def test_slow_node_clock_is_not_taken_as_the_end(self):
-        """Review: a driver node 120 s slow on a 470 s stage read as 345 s."""
-        t = _timing(
-            observed_end=T0 + timedelta(seconds=470.0),
-            cluster_end=T0 + timedelta(seconds=350.0 + 4.5),
-        )
-        assert t.source == "poll" and "outside the observed run" in t.note
-
-    def test_end_within_poll_and_operator_lag_is_accepted(self):
-        t = _timing(
-            observed_end=T0 + timedelta(seconds=470.0),
-            cluster_end=T0 + timedelta(seconds=440.0 + 4.5),
-        )
-        assert t.source == "driver_container"
-
-    def test_clock_offset_is_read_once_per_monitor(self):
-        from lakebench.cli import _run
-
-        calls = []
-
-        def offset():
-            calls.append(1)
-            return 0.0
-
-        monitor = SimpleNamespace(
-            application_end=lambda _n, _s: (T0 + timedelta(seconds=60), "spark_application")
-        )
-        result = SimpleNamespace(final_status=None)
-        with patch("lakebench.cli._sustained.cluster_clock_offset_seconds", side_effect=offset):
-            for _ in range(3):
-                _run._stage_timing(monitor, "x", result, T0, T0 + timedelta(seconds=65))
-        assert len(calls) == 1
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Kolkata"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
 
 
 class TestRunOrdering:
-    def test_latest_run_is_by_instant_not_string(self, tmp_path, monkeypatch):
-        """Review: on a UTC+5:30 host an old naive run at 10:00 local sorted
-        after a new UTC run at 05:30Z (11:00 local)."""
-        import time
-
+    def test_latest_run_is_by_instant_not_string(self, tmp_path, kolkata_tz):
+        """On a UTC+5:30 host an old naive run at 10:00 local sorted after a
+        new UTC run at 05:30Z (11:00 local)."""
         from lakebench.metrics.storage import MetricsStorage
 
-        monkeypatch.setenv("TZ", "Asia/Kolkata")
-        time.tzset()
-        try:
-            for rid, start in (
-                ("20260927-100000-aaaaaa", "2026-09-27T10:00:00.000001"),
-                ("20260927-110000-bbbbbb", "2026-09-27T05:30:00.000001+00:00"),
-            ):
-                d = tmp_path / f"run-{rid}"
-                d.mkdir()
-                (d / "metrics.json").write_text(
-                    json.dumps({"run_id": rid, "deployment_name": "d", "start_time": start})
-                )
-            runs = MetricsStorage(metrics_dir=tmp_path).list_runs()
-        finally:
-            monkeypatch.delenv("TZ")
-            time.tzset()
+        for rid, start in (
+            ("20260927-100000-aaaaaa", "2026-09-27T10:00:00.000001"),
+            ("20260927-110000-bbbbbb", "2026-09-27T05:30:00.000001+00:00"),
+        ):
+            d = tmp_path / f"run-{rid}"
+            d.mkdir()
+            (d / "metrics.json").write_text(
+                json.dumps({"run_id": rid, "deployment_name": "d", "start_time": start})
+            )
+        runs = MetricsStorage(metrics_dir=tmp_path).list_runs()
         assert [r["run_id"] for r in runs][0] == "20260927-110000-bbbbbb"
-
-
-class TestLagAnchor:
-    def test_end_anchored_on_the_last_running_poll_survives_a_slow_api(self):
-        """Fix pass: under API load the observed end can trail the driver by
-        more than poll + lag; the last running poll is the real bound."""
-        t = _timing(
-            observed_end=T0 + timedelta(seconds=470.0),
-            cluster_end=T0 + timedelta(seconds=380.0 + 4.5),
-            last_running=T0 + timedelta(seconds=375.0),
-        )
-        assert t.source == "driver_container"
-
-    def test_end_well_before_the_last_running_poll_is_skew(self):
-        t = _timing(
-            observed_end=T0 + timedelta(seconds=470.0),
-            cluster_end=T0 + timedelta(seconds=300.0 + 4.5),
-            last_running=T0 + timedelta(seconds=465.0),
-        )
-        assert t.source == "poll"

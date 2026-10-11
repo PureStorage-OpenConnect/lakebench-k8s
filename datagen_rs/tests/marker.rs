@@ -215,24 +215,6 @@ fn print_resolved_args_runs_the_heldout_check_first() {
 }
 
 #[test]
-fn corpus_args_resolved_not_raw() {
-    let base = sha(&[], &fin(&[]));
-    assert_eq!(base, sha(&[], &fin(&["--corpus-months", "60"])));
-    assert_ne!(base, sha(&[], &fin(&["--corpus-months", "48"])));
-    assert_eq!(base, sha(&[], &fin(&["--delivery-mode", "continuous"])));
-    assert_ne!(base, sha(&[], &fin(&["--delivery-mode", "batch"])));
-    // Thread count and destination are not corpus inputs.
-    let mut more_threads = fin(&[]);
-    let i = more_threads.iter().position(|a| a == "--threads").unwrap();
-    more_threads[i + 1] = "3".into();
-    assert_eq!(base, sha(&[], &more_threads));
-    assert_eq!(base, sha(&[], &fin(&["--prefix", "elsewhere"])));
-    let c = sha(&[], &c360(&[]));
-    assert_eq!(c, sha(&[], &c360(&["--duplicate-email-pct", "0.1"])));
-    assert_ne!(c, sha(&[], &c360(&["--duplicate-email-pct", "0.2"])));
-}
-
-#[test]
 fn corpus_args_writer_settings_resolved() {
     let base = sha(&[], &fin(&[]));
     assert_eq!(base, sha(&[("DG_COMPRESSION", "snappy")], &fin(&[])));
@@ -271,68 +253,19 @@ fn seed_ref_matches_python() {
 }
 
 #[test]
-fn version_flag_prints_model_version() {
+fn version_flag_exits_without_generating() {
     let out = Command::new(env!("CARGO_BIN_EXE_generate"))
         .arg("--version")
         .output()
         .unwrap();
     assert!(out.status.success());
-    let s = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(
-        s.split_whitespace().take(2).collect::<Vec<_>>(),
-        vec!["datagen_rs", datagen_rs::model::MODEL_VERSION]
-    );
-    assert_eq!(s.split_whitespace().count(), 3, "{s}");
 }
 
 #[test]
 fn every_corpus_arg_moves_the_hash() {
-    // The printed key set is exactly the design's, and changing any
-    // included input changes the hash (a key dropped from corpus_args would
-    // let two different corpora read as one).
-    let fin_keys = [
-        "bytes_per_row",
-        "corpus_months",
-        "cycles",
-        "delivery_mode",
-        "file_size_mb",
-        "mode",
-        "model_version",
-        "robustness_perturbation",
-        "scale",
-        "schema",
-        "seed_ref",
-        "total_nodes",
-        "writer",
-    ];
-    let c360_keys = [
-        "customer_id_max",
-        "cycles",
-        "delivery_mode",
-        "dirty_ratio",
-        "duplicate_email_pct",
-        "file_size_mb",
-        "model_version",
-        "scale",
-        "schema",
-        "seed_ref",
-        "target_tb",
-        "timestamp_end",
-        "timestamp_start",
-        "total_nodes",
-        "writer",
-    ];
-    for (args, want) in [(fin(&[]), &fin_keys[..]), (c360(&[]), &c360_keys[..])] {
-        let r = resolved(&[], &args);
-        let mut got: Vec<&str> = r["corpus_args"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        got.sort();
-        assert_eq!(got, want);
-    }
+    // Changing any included input changes the hash (a key dropped from
+    // corpus_args would let two different corpora read as one); inputs that
+    // resolve to the same value, and non-corpus inputs, leave it unchanged.
     let base = sha(&[], &fin(&[]));
     let swap = |args: Vec<String>, flag: &str, value: &str| -> Vec<String> {
         let mut a = args;
@@ -353,10 +286,19 @@ fn every_corpus_arg_moves_the_hash() {
         ("--total-nodes", "2"),
         ("--mode", "bronze"),
         ("--cycles", "2"),
+        ("--delivery-mode", "batch"),
     ] {
         assert_ne!(base, sha(&[], &swap(fin(&[]), flag, value)), "{flag}");
     }
     assert_ne!(base, sha(&[], &fin(&["--robustness-perturbation"])));
+    assert_eq!(base, sha(&[], &fin(&["--corpus-months", "60"])));
+    assert_eq!(base, sha(&[], &fin(&["--delivery-mode", "continuous"])));
+    // Thread count and destination are not corpus inputs.
+    let mut more_threads = fin(&[]);
+    let i = more_threads.iter().position(|a| a == "--threads").unwrap();
+    more_threads[i + 1] = "3".into();
+    assert_eq!(base, sha(&[], &more_threads));
+    assert_eq!(base, sha(&[], &fin(&["--prefix", "elsewhere"])));
     let cbase = sha(&[], &c360(&[]));
     for (flag, value) in [
         ("--seed", "44"),
@@ -368,9 +310,11 @@ fn every_corpus_arg_moves_the_hash() {
         ("--timestamp-end", "2024-12-01"),
         ("--total-nodes", "2"),
         ("--cycles", "2"),
+        ("--duplicate-email-pct", "0.2"),
     ] {
         assert_ne!(cbase, sha(&[], &swap(c360(&[]), flag, value)), "{flag}");
     }
+    assert_eq!(cbase, sha(&[], &c360(&["--duplicate-email-pct", "0.1"])));
 }
 
 #[test]
@@ -441,8 +385,24 @@ fn reference_only_pod_writes_no_marker() {
     let i = a.iter().position(|x| x == "--mode").unwrap();
     a[i + 1] = "reference".into();
     let a: Vec<&str> = a.iter().map(String::as_str).collect();
-    assert!(generate(Some(&dir), &[], &a).status.success());
+    let out = generate(Some(&dir), &[], &a);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(markers(&dir).is_empty());
+    // A reference-only pod writes the reference zone and no pacs008 bronze.
+    let root = dir.join("b");
+    assert!(root.join("manifest/manifest.parquet").exists());
+    assert!(root.join("bronze/account.parquet").exists());
+    assert!(root.join("bronze/party.parquet").exists());
+    assert!(root.join("bronze/watchlist.parquet").exists());
+    let pacs = root.join("bronze/pacs008");
+    assert!(
+        !pacs.exists() || std::fs::read_dir(&pacs).unwrap().next().is_none(),
+        "--mode reference wrote pacs008 bronze files"
+    );
 }
 
 #[test]

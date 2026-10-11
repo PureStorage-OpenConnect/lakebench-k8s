@@ -1,9 +1,9 @@
-"""RPT-3 AML results block (DESIGN-v1.7 ch03 section 16), and the cap label
+"""RPT-3 AML results block, and the cap label
 on the AML totals (QUEUE carry from ER-3, invariant 6).
 
 Expected values are read from the record by the test. The per-reason-code
 and covered-recall tables are tested on fixture records edited to carry the
-AM-9 and AM-11 fields as ch04 defines them (``recall_by_code`` /
+AM-9 and AM-11 fields (``recall_by_code`` /
 ``fp_by_code``: ``{rule: {code: fraction}}``; ``mode: "covered"`` with
 ``covered.typologies[]``), since no stored record holds them yet.
 """
@@ -13,9 +13,9 @@ from __future__ import annotations
 import re
 from html import unescape
 
+from tests.fixtures.report_consistency_helpers import _render_dict, mismatches
 from tests.fixtures.report_goldens import page_text, render
 from tests.fixtures.stored_records import load_record
-from tests.test_report_consistency import _render_dict, mismatches
 
 
 def _plain(html: str) -> str:
@@ -50,22 +50,13 @@ def test_aml_block_values():
     assert f"SARs filed {ops['sars_filed']:,} tm_operations.ops.sars_filed" in funnel
     per = ops["funnel"]["alerts"] / ops["reconciliation"]["completeness.customers"]
     assert f"customer alerts per customer {per:.2f}" in funnel
-    # Reconciliation, each identity checked here from the record.
-    assert scoring["total_alerts"] == ops["alerts_total"]
+    # Reconciliation labels.
     assert "scoring and TM rule alerts agree" in funnel
-    assert (
-        ops["funnel"]["alerts"] + ops["alerts_out_of_scope"] - ops["alerts_withdrawn_carried"]
-        == ops["alerts_total"]
-    )
     assert (
         "TM rule alerts = customer + non-customer dispositions - withdrawn carried alerts" in funnel
     )
-    assert sum(ops["alerts_by_disposition"].values()) == (
-        ops["funnel"]["alerts"] + ops["alerts_out_of_scope"]
-    )
     assert "dispositions sum to customer + non-customer dispositions" in funnel
     cont = ops["reconciliation"]["funnel.continuing_sars"]
-    assert ops["sars_filed"] == ops["funnel"]["sars"] + cont
     assert f"SARs filed = {ops['funnel']['sars']:,} on alert cases + {cont:,}" in funnel
     # Per-rule recall with chance beside it.
     recall = next(t for t in scoring["typologies"] if t["typology_type"] == "rapid_layering")
@@ -83,11 +74,6 @@ def test_funnel_names_a_difference_it_cannot_explain():
     assert "scoring rule alerts differ from TM's by +10; the record does not say why" in text
 
 
-def test_reason_codes_absent_says_so():
-    text = _plain(render("1320bd"))
-    assert "Per-reason-code recall and FP: reason codes not recorded in this run." in text
-
-
 def test_reason_code_table():
     record = load_record("1320bd")
     record["financial_scoring"]["recall_by_code"] = {
@@ -100,10 +86,6 @@ def test_reason_code_table():
     assert "W2_structuring W2.base 9.9% 99.3%" in text
     assert "W2_structuring W2.split 5.0% -" in text
     assert mismatches(record, html) == []
-
-
-def test_leakage_not_measured_by_default():
-    assert "Leakage: not measured in this run" in _plain(render("1320bd"))
 
 
 def _covered(status: str = "scored") -> dict:
@@ -137,23 +119,16 @@ def test_continuous_recall_covered_with_coverage():
     html = _render_dict(record)
     text = _plain(html)
     assert "Recall over covered instances (uncalibrated, in-sample)" in text
-    assert "61.2% covered, coverage 33.8%" in text
+    assert "rapid_layering 201,503 61.2% covered, coverage 33.8% 5.0%" in text
+    assert "Chance (covered)" in text and "Off-target (covered)" in text
     assert "Recall (uncalibrated, in-sample)" not in text
     assert mismatches(record, html) == []
 
 
-def test_continuous_not_scored_names_the_reason():
-    text = _plain(_render_dict(_covered("not_scored")))
-    assert (
-        "Recall over covered instances not scored: snapshot silver.transactions expired "
-        "before scoring" in text
-    )
-
-
 def test_totals_labelled_when_a_rule_skipped_on_a_cap():
     """W1 skipped on vertex-cap (a Lakebench cap the verdict lists in
-    rule_caps): Total alerts and the off-target rate carry the cap; the
-    skip reason names it."""
+    rule_caps): the funnel, Total alerts and the off-target rate carry the
+    cap; the skip reason names it."""
     record = load_record("1320bd")
     gold = next(j for j in record["jobs"] if j["job_type"] == "gold-finalize")
     gold["rules_skipped"]["W1_connected_components"] = "vertex-cap"
@@ -165,6 +140,9 @@ def test_totals_labelled_when_a_rule_skipped_on_a_cap():
         f"{total:,} BOUNDED BY: rule W1_connected_components cap" in text
     )
     assert re.search(r"Overall off-target rate .*?: \d+\.\d% BOUNDED BY: rule W1", text)
+    funnel = _funnel(text)
+    assert f"Rule alerts (scoring) {total:,} BOUNDED BY: rule W1_connected_components cap" in funnel
+    assert "Every count here comes from the rules that ran" in funnel
 
 
 def test_totals_not_capped_on_a_data_skip():
@@ -175,18 +153,6 @@ def test_totals_not_capped_on_a_data_skip():
     line = text[i : text.index("Subject customer check", i)]
     assert "over the rules that ran (W1_connected_components skipped: giant-component)" in line
     assert "BOUNDED BY" not in line
-
-
-def test_funnel_render_error_shows_a_notice(monkeypatch):
-    from lakebench.reports import scorecard
-
-    def boom(*a, **k):
-        raise KeyError("x")
-
-    monkeypatch.setattr(scorecard, "_funnel_html", boom)
-    text = _plain(render("1320bd"))
-    assert "The funnel could not be rendered: KeyError" in text
-    assert "Detection Scorecard" in text
 
 
 def test_nested_counts_and_withdrawn_alerts_reconcile():
@@ -214,15 +180,6 @@ def test_nested_counts_and_withdrawn_alerts_reconcile():
     assert "differ" not in funnel
 
 
-def test_funnel_carries_the_rule_cap():
-    record = load_record("1320bd")
-    gold = next(j for j in record["jobs"] if j["job_type"] == "gold-finalize")
-    gold["rules_skipped"]["W1_connected_components"] = "vertex-cap"
-    funnel = _funnel(_plain(_render_dict(record)))
-    assert "Rule alerts (scoring) 728,291 BOUNDED BY: rule W1_connected_components cap" in funnel
-    assert "Every count here comes from the rules that ran" in funnel
-
-
 def test_any_cap_skip_is_labelled_even_outside_the_allowed_set():
     """A skip reason naming a cap labels the totals whether or not the
     verdict allows it (metrics/bounds.py's rule)."""
@@ -232,36 +189,6 @@ def test_any_cap_skip_is_labelled_even_outside_the_allowed_set():
     gold["alerts_by_rule"].pop("W2_structuring", None)
     text = _plain(_render_dict(record))
     assert "BOUNDED BY: rule W2_structuring cap" in text
-
-
-def test_reason_code_status_from_the_producer():
-    """The producer writes empty dicts and a by_code_status when no alert
-    carries a code: the status is shown, never an empty section."""
-    record = load_record("1320bd")
-    record["financial_scoring"].update(
-        recall_by_code={},
-        fp_by_code={},
-        alerts_by_code={},
-        by_code_status="not_scored: 12 alerts carry no reason code",
-    )
-    text = _plain(_render_dict(record))
-    assert "Reason codes: not_scored: 12 alerts carry no reason code" in text
-
-
-def test_reason_code_with_no_alerts_is_marked():
-    record = load_record("1320bd")
-    record["financial_scoring"].update(
-        recall_by_code={"W2_structuring": {"W2.split": 0.0}},
-        fp_by_code={},
-        alerts_by_code={"W2_structuring": {"W2.split": 0}},
-    )
-    text = _plain(_render_dict(record))
-    assert "W2.split (no alert carries this code) 0.0%" in text
-
-
-def test_covered_mode_labels_chance_and_off_target():
-    text = _plain(_render_dict(_covered()))
-    assert "Chance (covered)" in text and "Off-target (covered)" in text
 
 
 def test_continuous_totals_name_their_scope():

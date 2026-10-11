@@ -1,105 +1,110 @@
 # Running Pipelines
 
-The `lakebench run` command executes the data pipeline: a sequence of Spark
-jobs that transform raw bronze data into queryable gold tables, followed by
-a query benchmark against the active engine. Metrics are automatically
-collected at every stage and saved for reporting.
+Guide: run the pipeline with `lakebench run` and read what it measured.
 
-## Basic Usage
+`lakebench run` runs a sequence of Spark jobs that turn raw bronze data into
+queryable gold tables, then a query benchmark on the active engine. It
+records metrics at every stage. [CLI Reference](cli-reference.md#run) lists
+every flag, refused combination and exit code.
+
+## Basic usage
 
 ```bash
-lakebench run my-config.yaml
+lakebench run my-config.yaml --generate   # first run: generate the corpus, then the pipeline
+lakebench run my-config.yaml              # later runs: reuse the corpus in bronze
 ```
 
-This runs the full batch pipeline in order, waits for each stage to complete,
-runs the query benchmark, and saves metrics. The output includes per-stage
-timing, a QpH (queries per hour) score, and the path to the saved metrics
-file.
+- `run` runs the stages in order, waits for each, runs the benchmark and
+  saves metrics.
+- Without `--generate`, `run` reuses the corpus already in bronze. On an
+  empty bronze bucket it exits 4 and names `--generate`.
+- The output shows per-stage timing, a QpH (queries per hour) score and the
+  path to the metrics file.
 
-## Batch Mode (Default)
+Common variations:
 
-The default pipeline executes four stages sequentially:
+```bash
+lakebench run my-config.yaml --stage silver-build          # one stage only
+lakebench run my-config.yaml --timeout 7200                # 2 h per job
+lakebench run my-config.yaml --skip-benchmark              # no query benchmark
+lakebench run my-config.yaml --generate --timeout 7200     # datagen, then everything
+```
+
+The per-job timeout defaults to `max(3600, scale * 120)` seconds. AML adds
+900 s and never goes below its bronze-verify budget for the scale.
+
+## Batch mode (default)
+
+Four stages run in sequence:
 
 ```
 bronze-verify --> silver-build --> gold-finalize --> benchmark
 ```
 
+Per-executor cores, memory and scratch for each job are in
+[Job Profiles](component-spark.md#batch-jobs).
+
 ### Stage 1: bronze-verify
 
-Validates raw Parquet files in the bronze S3 bucket. Reads every file, checks
-schema conformance, flags quality issues (nulls, format inconsistencies,
-duplicates), and writes validation summary metrics. This stage is I/O-bound
-and exercises the S3 read path.
-
-**Job profile:** 2 cores per executor. Customer 360: 4g memory, 2g
-overhead, 50Gi PVC. Financial (AML): 8g memory, 12g overhead, 500Gi PVC
-(LB-118: financial trips the CTAS fallback above scale 5, which spills
-roughly twice the per-executor input to local disk).
+- Reads every raw Parquet file in the bronze bucket and checks it against
+  the schema.
+- Flags nulls, format inconsistencies and duplicates, and writes summary
+  metrics.
+- I/O-bound: it exercises the S3 read path.
+- Financial (AML) falls back to a CTAS rewrite when `add_files` fails or the
+  source exceeds 1.5 TiB or 800,000 files; the profile is sized for it
+  because AML sources cross these from about scale 5 (job.py profile note).
+  The CTAS spills about twice the per-executor input to local disk. That is why its scratch PVC
+  is larger.
 
 ### Stage 2: silver-build
 
-The core transformation stage. Reads validated bronze data and produces an
-enriched Iceberg table in the silver bucket. Applies five transforms:
-email normalization, phone normalization, geo enrichment, customer
-segmentation, and quality flagging.
+The core transformation. It reads validated bronze and writes an enriched
+Iceberg table to the silver bucket with five transforms: email
+normalization, phone normalization, geo enrichment, customer segmentation
+and quality flagging.
 
-Silver-build selects a write strategy from the measured bronze data size.
-These are silver-build write strategies, not pipeline modes:
+It picks a write strategy from the measured bronze size. These are
+silver-build strategies, not pipeline modes:
 
-| Strategy | Data Size | Description |
+| Strategy | Bronze size | What it does |
 |---|---|---|
-| **simple** | < 100 GB | Standard Spark processing. |
-| **streaming** | >= 100 GB | Single-pass direct write with no shuffle (column transforms only); Iceberg hash distribution clusters rows by partition. |
-| **salted** | override only | Retired: forcing it logs a no-op and runs `simple`. Never selected automatically. |
+| `simple` | < 100 GB | Standard Spark processing. |
+| `streaming` | >= 100 GB | One pass, direct write, no shuffle (column transforms only). Iceberg hash distribution clusters rows by partition. |
 
-Automatic selection chooses only `simple` or `streaming`. To force a
-strategy, set `spark.lb.silver.strategy` (or the `LB_SILVER_STRATEGY`
-environment variable) to `simple` or `streaming` (`salted` runs `simple`).
-
-**Job profile:** 4 cores, 48g memory, 12g overhead per executor, 300Gi PVC.
+To force one, set `spark.lb.silver.strategy` (or the `LB_SILVER_STRATEGY`
+environment variable) to `simple` or `streaming`. `salted` is refused: the
+silver-build job stops at start and the stage fails.
 
 ### Stage 3: gold-finalize
 
-Aggregates the silver Iceberg table into daily KPI summaries for the executive
-dashboard. Produces metrics like daily active customers, total revenue,
-conversions, engagement scores, and churn risk counts. The output is a compact
-gold-layer Iceberg table partitioned by date.
-
-**Job profile:** 4 cores, 32g memory, 8g overhead per executor, 300Gi PVC.
+Aggregates silver into daily KPI summaries for the executive dashboard:
+daily active customers, total revenue, conversions, engagement scores and
+churn risk counts. The output is a compact gold Iceberg table partitioned by
+date.
 
 ### Stage 4: benchmark
 
-Runs the workload's query set (8 queries for Customer 360, 12 for AML) on
-the active query engine against the silver and gold tables and computes a QpH
-(queries per hour) score. Queries span five categories:
+Runs the workload's query set on the active engine against silver and gold:
+8 queries for Customer 360, 12 for AML.
 
-| Category | Queries | Description |
-|---|---|---|
-| **scan** | Q1 | Full table scan with aggregation. I/O throughput bound. |
-| **filter/prune** | Q2, Q4 | Date-range filtering and predicate pushdown with GROUP BY. |
-| **aggregation** | Q3, Q7 | Hash aggregation, conditional SUM(CASE), conversion funnels. |
-| **analytics** | Q5, Q6 | Window functions (MA7 revenue trend), CTEs (RFM scoring). |
-| **operational** | Q9 | Gold-layer executive dashboard read with LAG window functions. |
+| Class | Customer 360 | AML | What it tests |
+|---|---|---|---|
+| scan | Q1 | FQ1 | Full table scan with aggregation. I/O bound. |
+| filter/prune | Q2, Q4 | FQ2, FQ6 | Date-range filtering and predicate pushdown with GROUP BY. |
+| aggregation | Q3, Q7 | FQ3, FQ7 | Hash aggregation, conditional SUM(CASE), funnels and concentration. |
+| analytics | Q5, Q6 | FQ4 | Window functions and CTEs. |
+| operational | Q9 | FQ5, FQ8 | Gold and alert reads, as a dashboard or triage screen runs them. |
+| investigator | | IQ1-IQ4 | One investigator's case lookups: customer 360, 12-month activity, two-hop network, aged cases. |
 
-The benchmark runs in power mode by default (single stream, hot cache). The
-QpH score is `(number_of_queries / total_seconds) * 3600`.
+The default is power mode: one stream, hot cache. QpH is
+`(number_of_queries / total_seconds) * 3600`.
 
 ## Multi-Cycle Batch
 
-When `pipeline.cycles` is set to 2 or more, the batch pipeline runs N
-iterations. Each cycle generates new data for its portion of the timestamp
-range, then runs the full bronze-verify -> silver-build -> gold-finalize
-sequence. The run generates without `--generate`, which a multi-cycle run
-refuses (exit 2): a whole corpus generated first would be read again by
-cycle 0. A non-empty datagen prefix is refused (exit 3) unless
-`--regenerate`, which clears it on a bucket this deployment created.
-
-To run the cycles again over the same corpus, add `--skip-generate`: every
-cycle runs its stages over its own slice with no datagen, provided the
-corpus series marker says the multi-cycle generate finished for this
-config's cycle count, windows and generation (exit 3 otherwise). An AML
-multi-cycle run cannot reuse its corpus this way: its stages read the whole
-bronze prefix every cycle.
+Set `pipeline.cycles` to 2 or more to run N batch iterations. Each cycle
+generates data for its part of the timestamp range, then runs bronze-verify,
+silver-build and gold-finalize.
 
 ```yaml
 architecture:
@@ -108,431 +113,392 @@ architecture:
     pre_benchmark_maintenance: true
 ```
 
-Cycle 1 creates tables via full overwrite. Cycles 2+ run in incremental
-mode -- silver appends new rows, gold merges based on a date watermark.
-This simulates multi-day table growth where each cycle is a new "day" of
-data.
+- Cycle 1 creates the tables with a full overwrite.
+- Later cycles are incremental: silver appends new rows, gold merges on a
+  date watermark. Each cycle is a new "day" of table growth.
+- The run generates on its own. `--generate` is refused (exit 2): a corpus
+  generated first would be read again by cycle 0.
+- A non-empty datagen prefix is refused (exit 3) unless you pass
+  `--regenerate`, which clears it on a bucket this deployment created.
+- To rerun the cycles over the same corpus, add `--skip-generate`. Each
+  cycle then runs its stages over its own slice with no datagen. The corpus
+  series marker must show the multi-cycle generate finished for this
+  config's cycle count, windows and generation (exit 3 otherwise).
+- An AML multi-cycle run cannot reuse its corpus: its stages read the whole
+  bronze prefix every cycle.
 
-The terminal output shows cycle headers (`Cycle 1/3`, `Cycle 2/3`, etc.)
-and per-cycle timing. After all cycles complete, pre-benchmark maintenance
-runs compaction and snapshot expiry (if enabled), then the benchmark
-measures QpH against the accumulated table.
+The terminal shows cycle headers (`Cycle 1/3`, `Cycle 2/3`) and per-cycle
+timing. After the last cycle, pre-benchmark maintenance runs compaction and
+snapshot expiry (if enabled), then the benchmark measures QpH on the grown
+table.
 
-Metrics include a `cycles[]` array with per-cycle datagen timing
-(`datagen_skipped` under `--skip-generate`), job metrics, and table health (data file counts and snapshot counts from
-Iceberg system tables). The `cycle_progression` score shows how elapsed
-time and table state evolve across cycles.
+Metrics carry a `cycles[]` array: per-cycle datagen timing
+(`datagen_skipped` under `--skip-generate`), job metrics, and table health
+(data file and snapshot counts from Iceberg system tables). The
+`cycle_progression` score shows how elapsed time and table state change
+across cycles.
 
-## Repeated Batch Runs
+## Repeated batch runs
 
-`lakebench run --repeat 3` runs the batch pipeline three times as one
-series over one corpus: repetition 1 may generate, repetitions 2 and 3
-rebuild silver and gold from the same bronze. Bronze is checked between
-repetitions and the series stops (exit 3) if it changed. Records carry
-`series {id, index, size}`; the series manifest is
-`lakebench-output/series/<id>.json`. `--repeat` is refused with a
-continuous run, with `cycles` above 1, and with `--stage`, `--local`,
-`--deploy-only` or `--generate-only`. See
-[CLI Reference](cli-reference.md#run) for the rules.
-
-## Command Flags
-
-| Flag | Short | Default | Description |
-|---|---|---|---|
-| `--stage` | `-s` | (all) | Run a specific stage only: `bronze-verify`, `silver-build`, or `gold-finalize` |
-| `--timeout` | `-t` | auto | Timeout per job in seconds. Defaults to `max(3600, scale * 120)` when omitted. The financial (AML) workload adds 900 s and never goes below the AML bronze-verify budget for the scale. |
-| `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline stages |
-| `--continuous` | | `false` | Run in continuous mode. Overrides `pipeline.mode` in config. |
-| `--duration` | | config value | Continuous run duration in seconds (continuous mode only) |
-| `--generate` | | `false` | Run datagen before pipeline stages (batch mode only -- continuous mode always runs datagen automatically) |
-
-### Examples
-
-Run the full batch pipeline:
-
-```bash
-lakebench run my-config.yaml
-```
-
-Run only the silver-build stage:
-
-```bash
-lakebench run my-config.yaml --stage silver-build
-```
-
-Run with a longer per-job timeout (2 hours):
-
-```bash
-lakebench run my-config.yaml --timeout 7200
-```
-
-Run the pipeline without the query benchmark:
-
-```bash
-lakebench run my-config.yaml --skip-benchmark
-```
-
-Full end-to-end run including data generation:
-
-```bash
-lakebench run my-config.yaml --generate --timeout 7200
-```
+`lakebench run --repeat 3` runs the batch pipeline three times as one series
+over one corpus. Repetition 1 may generate; repetitions 2 and 3 rebuild
+silver and gold from the same bronze. If bronze changes between repetitions
+the series stops (exit 3). Records carry `series {id, index, size}`, and the
+manifest is `lakebench-output/series/<id>.json`. The refused combinations
+and exit codes are under "Repeating a run" in
+[CLI Reference](cli-reference.md#run).
 
 ## Continuous Mode
 
-Continuous mode runs the continuous pipeline instead of batch. Set it in the
-config file or activate it with the `--continuous` CLI flag:
+Set continuous mode in the config, or pass `--continuous` for one run:
 
 ```yaml
-# In your config YAML:
 architecture:
   pipeline:
     mode: continuous              # batch | continuous
 ```
 
 ```bash
-# Or as a one-off override:
 lakebench run my-config.yaml --continuous
 ```
 
-When `pipeline.mode` is set to `continuous` in the config, `lakebench run`
-uses the continuous pipeline automatically -- no CLI flag needed. The
-`--continuous` flag still works as an override for one-off runs.
-
-In continuous mode, three Spark Structured Streaming jobs run concurrently:
+With `pipeline.mode: continuous`, `run` needs no flag. Three Spark
+Structured Streaming jobs run at once:
 
 ```
 bronze-ingest + silver-stream + gold-refresh  (concurrent)
 ```
 
-- **bronze-ingest** -- Reads new Parquet files from S3 as they appear (via
-  `maxFilesPerTrigger`), writes to a bronze Iceberg table.
-- **silver-stream** -- Reads the bronze Iceberg table as a streaming source,
-  applies silver transforms, writes to the silver Iceberg table.
-- **gold-refresh** -- Periodically refreshes the gold aggregation table from
-  the silver table.
+- **bronze-ingest** reads new Parquet files from S3 as they land and writes
+  a bronze Iceberg table.
+- **silver-stream** reads the bronze table as a stream, applies the silver
+  transforms and writes the silver table.
+- **gold-refresh** updates gold from new silver rows (see below).
 
-Datagen starts with the streaming jobs and writes the scale's whole corpus
-at full speed (about 2 minutes for 1 TB at scale 100). This is automatic -- no
-`--generate` flag is needed. That flag only applies to batch mode.
+Each stage reads only what the stage before it committed. The commit is the
+handoff.
 
-Bronze reads that corpus as a trickle: at most `max_files_per_trigger` files
-per `bronze_trigger_interval`. That rate is the offered load. By default it is
-derived per run so the corpus keeps arriving for about 1.2 x the window
-(c360 scale 1: 2 files per 30 s, about 2,400 s of arrival; scale 10: 22
-files, about 2,190 s), capped at 50 files per 30 s (about 107 MB/s; a Lakebench-imposed cap, so
-an auto-capped rate measures the cap, not the infrastructure). At the
-cap, a 30-minute window takes about 19% of the scale-100 corpus. The larger
-corpus is not a failure: a run the trickle held is recorded in
-`experiment.limits.trickle_bound`, its throughput is labelled the offered
-load, and the scorecard reads `intake_limit: none` (bronze kept up with what
-was released). `intake_limit: trickle_rate` and `corpus_drain_seconds` appear
-when the released rows are unknown or bronze took under 0.95 of them. See
-[Scoring and Benchmarking](benchmarking.md#continuous-mode).
+### Datagen and offered load
 
-The measurement window opens when all three streams are running and lasts
-the configured duration (default: 1800 seconds / 30 minutes). A stream whose
-submission fails (for example a truncated Maven download) is reported on each
-attempt while the Spark Operator retries it. During the window, Lakebench
-runs periodic benchmark rounds to measure query performance while streaming
-is active. After the window ends the continuous gate checks that data kept
-arriving and that silver and gold committed continuously inside the window;
-a run that passes lets the rest of the corpus settle, stops the streams, and
-runs a result check over the settled tables so the run can be compared with
-another (see "Continuous gate" and "Result check" in
-[Scoring and Benchmarking](benchmarking.md)). A window much longer than the
-time the trickle needs to offer the corpus measures an idle pipeline: the
-gate fails it when data stopped arriving before half the window, and the run
-warns about this at start. `run_duration` must be at least 3 x
-`gold_refresh_interval`, or the run is refused before it starts.
+- Datagen starts once the three streams are running. No `--generate` is
+  needed; that flag is for batch only.
+- The measurement window opens at datagen's first file. Lakebench warns if
+  none arrives within 300 s.
+- Datagen writes for the whole window. Every pod writes as fast as it can
+  until the window ends, then the run stops it.
+  - AML: the 24-month history, then successive 24-month periods of the same
+    bank.
+  - Customer 360: successive time slices.
+- A restarted datagen pod resumes where it stopped. An AML pod reports one
+  metrics line covering every period it wrote.
 
-### How Continuous Mode Works
+Scale sets the **offered load**, the data rate datagen offers. It is part of
+the workload definition and the same on every system:
 
-The three streaming jobs behave differently:
+| Workload | Offered load per scale unit | At scale 10 | Datagen MB/s per core |
+|---|---|---|---|
+| AML | 4 MB/s | 40 MB/s | 28 |
+| Customer 360 | 10 MB/s | 100 MB/s | 104 |
 
-- **bronze-ingest** and **silver-stream** are true streaming jobs. They
-  process data incrementally -- each micro-batch appends new rows to the
-  Iceberg table. Bronze reads Parquet files from S3; silver reads changes
-  from the bronze Iceberg table.
+- Unset, `workload.datagen.cpu` and `parallelism` are the cores that load
+  needs, in pods of up to 8 cores. Set them to offer a different load.
+- Bronze reads with no per-trigger limit unless `max_files_per_trigger` is
+  set. A set value is a Lakebench cap and the record labels it.
 
-- **gold-refresh** is a periodic batch aggregation. Every refresh cycle it
-  reads the entire silver table, computes daily KPI aggregates, and
-  **replaces** the gold table. It is not incremental -- the gold table is
-  fully rewritten each cycle.
+### Sizing the streaming stages
 
-This means gold freshness depends on the refresh interval. With the default
-5-minute cycle, gold can be up to 5 minutes stale even when bronze and
-silver are seconds behind real-time.
+Lakebench sizes bronze and silver to carry the offered load with 20%
+headroom:
 
-Gold refresh also causes **Q9 contention**: if a benchmark query reads the
-gold table while it's being rewritten, the query fails. Lakebench handles
-this with automatic retries (30s/60s backoff). The scorecard records
-contention events per round.
+```
+executors = load / (stage MB/s per core x 0.8) / executor cores
+```
 
-### Continuous Mode Configuration
+| Stage MB/s per core (measured at scale 10) | Bronze | Silver |
+|---|---|---|
+| AML | 4.3 | 0.7 |
+| Customer 360 | 40.5 | 14.2 |
+
+- A stage whose need is above its profile's executor cap (`max_executors`)
+  first grows its executors to 8 cores, then 16.
+- If it still cannot carry the load, `run` names it before the run starts
+  ("cannot balance"). Its lag will grow and the run will FAIL the balance
+  check. Lower the scale or give the stage more cores.
+- Every stage's executor count and cores per executor can be set under
+  `platform.compute.spark`.
+- The record's `stage_capacity` gives, per stage (bronze, silver), the share
+  of the window it was busy and the MB/s per core it would take busy all
+  window, plus datagen's MB/s per core. A low busy share extrapolates
+  further.
+
+### Two kinds of run
+
+- **Capacity run.** Datagen stays ahead of the pipeline
+  (`datagen_ahead: true`). The run measures capacity, scored by pace in
+  seconds per million rows.
+- **Steady-state run.** With fewer datagen pods the pipeline keeps up. The
+  run is scored by freshness.
+
+Above bronze's capacity each batch takes in more than the last until one
+batch fills the window, and the run fails saying so. See
+[Continuous gate](benchmarking/verdict.md#continuous-gate).
+
+With `--skip-generate`, bronze reads a finite corpus already in the bucket a
+few files at a time (`max_files_per_trigger`, the most files bronze reads per
+trigger; derived per run when unset).
+
+### Storage growth
+
+Continuous datagen's files are kept, as a bank keeps its raw payment
+messages. A long run grows its bronze bucket at the datagen rate:
+
+- AML at scale 10 wrote about 116 GiB of raw files per hour (measured,
+  n=1), about 2.7 TiB for a 24-hour run, beside the tables built from them.
+- The report's storage section gives the run's own rate and 24-hour size.
+
+### The window and the checks after it
+
+- The window lasts the configured duration (default 1800 s, 30 minutes).
+- A stream whose submission fails (for example a truncated Maven download)
+  is reported on each attempt while the Spark Operator retries it.
+- Benchmark rounds run during the window (see In-stream benchmarking).
+- After the window, the continuous gate checks that data kept arriving and
+  that silver and gold committed continuously inside the window.
+- The streams stop at window end. The in-stream rounds are the run's only
+  query checks: failed queries (a Q9 failure is tolerated unless it fails in
+  every round) and empty answers in the last round. See [Continuous gate](benchmarking/verdict.md#continuous-gate)
+  and [After the window](benchmarking/verdict.md#after-the-window).
+- A window much longer than a finite corpus needs to arrive measures an idle
+  pipeline. The gate fails a run whose data stopped arriving before half the
+  window, and the run warns about this at start.
+- With gold on an interval, `run_duration` must be at least 3 x
+  `gold_refresh_interval`, or the run is refused before it starts.
+
+### How the streams work
+
+- **bronze-ingest** and **silver-stream** are true streaming jobs. Each
+  micro-batch appends new rows to its Iceberg table. Bronze reads Parquet
+  files from S3; silver reads changes from the bronze table.
+- **gold-refresh, Customer 360**, streams the silver table. Each micro-batch
+  is the silver commits since gold's position (its checkpoint, so a restart
+  resumes). It pins silver at one snapshot, recomputes the daily KPIs of
+  every date the new rows touch from all of silver's rows on those dates, and
+  replaces those dates.
+- **gold-refresh, AML**, runs detection over the pinned silver on each
+  refresh. It re-detects only what the new rows can change and keeps the
+  rest, so the alerts equal a full recompute. Every rule runs on every
+  refresh, over the new rows plus that rule's window.
+
+Gold runs back to back by default (`gold_refresh_interval` `0 seconds`).
+With an interval set, gold can be up to that interval stale even when bronze
+and silver are seconds behind, and the run labels it.
+
+### Lag and balance
+
+Every two minutes inside the window the run prints each handoff's lag: how
+long the oldest commit the next stage has not taken has waited
+(`datagen->bronze`, `bronze->silver`, `silver->gold`).
+
+**Clock offset.** Datagen's landing times come from the object store's
+clock, which can be minutes off the cluster's. At start, bronze measures the
+offset with a probe object and moves landing times onto the cluster clock
+(`continuous.freshness.store_clock_offset_s`). Bronze retries the probe and
+fails if it keeps failing.
+
+**Files written before the run.** A file that landed before bronze first
+started (a corpus written before the run, `--skip-generate`) counts from
+when bronze takes it. Datagen-to-bronze lag is recorded but not judged with
+`--skip-generate` or a set `max_files_per_trigger`: the corpus or the limit
+sets that lag, not bronze.
+
+**Keeping up.** When the window closes, a stage keeps up if its lag did not
+climb through the window's second half:
+
+- The lag is sampled once per batch at the same point: bronze at each
+  commit, silver and gold as each batch starts.
+- The trend of those samples must rise by less than one cadence. The
+  cadence is the stage's trigger interval or, when it runs back to back, its
+  median batch time in the window's first half. An AML gold refresh that
+  found no new silver row is not counted. A stage whose batches grow as it
+  falls behind therefore cannot widen its own allowance.
+- The start-up ramp, and a lag that swings by one batch time, do not count.
+
+The run is balanced if every stage keeps up. A run that is not balanced
+FAILS. Its bottleneck line names the stage, its lag and busy share, and the
+executors to raise.
+
+**What the record keeps.** `continuous.balance` holds the lag samples and
+`continuous.freshness` gold freshness p50, p95 and max. Both workloads
+measure freshness from file landing (bronze's `ingest_ts`, which silver
+carries). A stream on a trigger interval from the config is labelled beside
+freshness (`experiment.limits.trigger_bound`): freshness is measured at each
+write, so between writes gold can be up to that interval older.
+
+**Q9 contention.** A benchmark query that reads gold while it is being
+rewritten fails. Lakebench retries it (30 s, then 60 s backoff) and the
+scorecard records contention events per round.
+
+### Continuous configuration
 
 ```yaml
 architecture:
   pipeline:
     continuous:
-      bronze_trigger_interval: "30 seconds"
-      silver_trigger_interval: "60 seconds"
-      gold_refresh_interval: "5 minutes"
+      bronze_trigger_interval: "0 seconds"   # back to back (default)
+      silver_trigger_interval: "0 seconds"   # back to back (default)
+      gold_refresh_interval: "0 seconds"     # back to back (default)
       run_duration: 1800              # 30 minutes
-      # max_files_per_trigger: unset   # auto: arrival lasts ~1.2 x run_duration
+      # max_files_per_trigger: unset   # no limit while datagen generates
       checkpoint_base: checkpoints
       benchmark_interval: 300         # Seconds between in-stream rounds
       benchmark_warmup: 300           # Seconds before first round
 ```
 
-Override the run duration on the command line:
+Override the window on the command line:
 
 ```bash
 lakebench run my-config.yaml --continuous --duration 3600
 ```
 
-### Tuning Reference
+Each key's type, range and default is in
+[Configuration](configuration.md#architecture----pipeline). When to change
+them:
 
-| Field | Default | What it controls | When to change |
-|---|---|---|---|
-| `bronze_trigger_interval` | 30s | How often bronze checks for new files. Lower = fresher data, higher CPU. | Reduce to 10-15s if freshness is critical. Increase to 60s+ for large scales where each batch is already large. |
-| `silver_trigger_interval` | 60s | How often silver reads new bronze rows. Lower = fresher silver, more micro-batches. | Keep at 2x bronze interval. Reducing below bronze interval wastes cycles on empty batches. |
-| `gold_refresh_interval` | 5 min | How often gold re-aggregates from silver. Sets the floor for gold freshness. | Reduce for fresher dashboards, but each cycle reads all of silver -- at large scales a refresh can take 30s+, so don't set the interval below the refresh duration. |
-| `max_files_per_trigger` | auto | Files bronze reads per trigger (c360: 15,491 rows per 64 MB file). With `bronze_trigger_interval` it is the offered load. Auto derives it so data keeps arriving for about 1.2 x `run_duration`, capped at 50 (Lakebench-imposed). | Set it to offer a fixed load across scales, and size bronze-ingest and silver-stream for it. A value that would offer the corpus before the window ends is refused at start with the value to use. A short `ingest_ratio` with `intake_limit: trickle_rate` is not saturation. |
-| `run_duration` | 1800 | Measurement window in seconds. At least 3 x `gold_refresh_interval` (900 s at defaults), or the run is refused: the continuous gate needs two gold refreshes on new data inside it. For 5 benchmark rounds: `gold_refresh_interval + 5 * (benchmark_interval + round_time)`. | Use 900 s or more for short tests (UAT included); see [Scoring and Benchmarking](benchmarking.md) for a planning table. |
-| `benchmark_warmup` | 300s | Delay before first benchmark round. **Clamped to `gold_refresh_interval`** at runtime -- gold must complete at least one full refresh before benchmark rounds produce valid QpH. | Reduce only if you also reduce `gold_refresh_interval`. |
-| `benchmark_interval` | 300s | Time between benchmark rounds (measured from completion of previous round). **Clamped to `gold_refresh_interval`** at runtime -- intervals shorter than the gold cycle cause Q9 contention as rounds overlap with gold rewrites. | To get more rounds, increase `run_duration` instead of lowering the interval. |
-| `bronze_target_file_size_mb` | 512 | Target Iceberg data file size for bronze writes. | Reduce to 128-256 MB at small scales (< 10) where 512 MB files are never reached. |
-| `silver_target_file_size_mb` | 512 | Target Iceberg data file size for silver writes. | Same guidance as bronze. |
-| `gold_target_file_size_mb` | 128 | Target Iceberg data file size for gold writes. Smaller because gold is a compact aggregation table. | Rarely needs changing. |
+- **Trigger intervals**: leave at 0 to measure the pipeline. A positive
+  interval holds the stage to that cadence and is labelled as a Lakebench
+  cap; a timer only builds backlog or adds waiting.
+- **`max_files_per_trigger`**: leave unset while datagen runs. With
+  `--skip-generate`, unset is derived so a finite corpus keeps arriving for
+  about 1.2 x `run_duration`, at most 50 files.
+- **`run_duration`**: use 900 s or more for short tests (UAT included). For
+  5 benchmark rounds:
+  `benchmark_warmup + 4 * (benchmark_interval + round_time) + max(60, 1.2 * round_time)`.
+  [Planning round counts](benchmarking/query-benchmark.md#planning-round-counts) has a planning table.
+- **`benchmark_warmup`**: raise it for a slow first gold refresh.
+- **`benchmark_interval`**: for more rounds, raise `run_duration` instead of
+  lowering the interval. With gold on a longer interval, both are raised to
+  it.
+- **Target file sizes**: reduce `bronze_target_file_size_mb` and
+  `silver_target_file_size_mb` to 128-256 MB below scale 10, where 512 MB
+  files are never reached. `gold_target_file_size_mb` rarely needs changing.
 
 ### Iceberg Retention
 
-Continuous-mode pipelines create new Iceberg snapshots every micro-batch.
-Without periodic maintenance, snapshot metadata and orphan data files grow
-unbounded -- a 24-hour run can produce over a million S3 objects.
+Continuous pipelines create a new snapshot every micro-batch. Without
+maintenance, snapshot metadata and orphan files grow without bound: a
+24-hour run can produce over a million S3 objects.
 
-Lakebench runs periodic `expire_snapshots` and `remove_orphan_files` (Delta:
-`VACUUM`) during the continuous monitoring loop. Two config fields control the
-schedule:
+Lakebench runs `expire_snapshots` and `remove_orphan_files` (Delta:
+`VACUUM`) during the run. The `retention_interval` and
+`retention_threshold` fields are in
+[Configuration](configuration.md#architecture----pipeline).
 
-```yaml
-architecture:
-  pipeline:
-    continuous:
-      retention_interval: 600      # Seconds between maintenance rounds (300-7200; unset = run_duration / 3)
-      retention_threshold: 30m     # Snapshot age to retain (e.g. 30m, 1h, 7d)
-```
+`retention_threshold` is not applied as-is everywhere:
 
-`retention_threshold` must be a whole number and one unit (`s`, `m`, `h` or
-`d`); anything else is rejected when the config loads. The threshold is not
-applied as-is everywhere:
-
-- **Snapshot expiry** is floored at 1 h while streams are live, so a stream
-  is never left without the snapshot it is reading.
+- **Snapshot expiry** is floored at 1 h while streams are live, so no stream
+  loses the snapshot it is reading.
 - **Orphan-file removal** never uses less than 24 h 10 min, on any engine or
-  path, so files a running writer has not yet committed are not deleted.
+  path, so files a running writer has not committed are not deleted.
 - **Delta VACUUM** keeps Delta's 7-day default retention while streams are
-  live. A continuous Delta run shorter than 7 days therefore gets no effective
-  cleanup, and `total_s3_objects` grows for the whole run.
+  live. A continuous Delta run shorter than 7 days gets no effective cleanup,
+  and `total_s3_objects` grows for the whole run.
 
-Before v1.6 none of this maintenance worked. Trino refused every
-`expire_snapshots` and `remove_orphan_files` below its 7-day system minimum,
-the Spark Thrift form failed a parameter-binding error, and Delta VACUUM never
-applied its retention (LB-172, LB-173, LB-174). Continuous numbers from v1.5
-and earlier were measured with no snapshot expiry and no VACUUM.
+Continuous numbers from v1.5 and earlier were measured with no snapshot
+expiry and no VACUUM ([CHANGELOG](../CHANGELOG.md)).
 
-Maintenance uses whichever query engine is deployed:
+Maintenance uses the deployed query engine:
 
-| Engine | Maintenance Support | Method |
-|--------|:-------------------:|--------|
+| Engine | Maintenance | Method |
+|--------|:-----------:|--------|
 | Trino | Yes | `SET SESSION <catalog>.expire_snapshots_min_retention = ...; ALTER TABLE ... EXECUTE expire_snapshots(...)` in one submission (likewise for `remove_orphan_files`) |
 | Spark Thrift | Iceberg only | `CALL catalog.system.expire_snapshots(table => ..., older_than => TIMESTAMP '...')` via beeline. Delta VACUUM is skipped (it runs Spark Thrift out of memory) |
-| DuckDB | No | Read-only -- maintenance is skipped |
+| DuckDB | No | Read-only; maintenance is skipped |
 
-Each maintenance or compaction statement may run for min(600 s, half the
-interval) and a whole round is capped at half the interval (and at the time
-left in the run). The first statement that times out stops the rest of that
-round; timeouts are journaled separately from failures, because the engine
-may still be running the statement. The next round starts at the table after
-the one that timed out, so a table that always times out cannot starve the
-others, and compaction waits one statement timeout before it runs. A round
-due with less than a minute of the run left is skipped. The bounds apply to
-lakebench's wait, not to the engine: a statement that timed out near the end
-of the run can still be running after the monitoring window closes.
+With `query_engine.type` `duckdb` or `none`, maintenance is skipped with a
+log message. A failure on one table (for example one that does not exist yet
+early in the run) is logged and does not stop the pipeline.
+
+Time limits:
+
+- Each maintenance or compaction statement may run for min(600 s, half the
+  interval). A round is capped at half the interval and at the time left in
+  the run.
+- The first statement that times out stops the rest of that round. Timeouts
+  are journaled apart from failures, because the engine may still be running
+  the statement.
+- The next round starts at the table after the one that timed out, so one
+  slow table cannot starve the others. Compaction waits one statement
+  timeout before it runs.
+- A round due with less than a minute of the run left is skipped.
+- The limits bound Lakebench's wait, not the engine. A statement that timed
+  out near the end can still be running after the window closes.
 
 `expire_snapshots` does not delete old `metadata.json` files; each commit
-leaves one behind. Every Iceberg table lakebench creates therefore sets
+leaves one. Every Iceberg table Lakebench creates sets
 `write.metadata.delete-after-commit.enabled=true` and
 `write.metadata.previous-versions-max=50`, so each commit deletes metadata
-files beyond the newest 50. This applies to tables created by the current
-version. A table that already exists in a reused catalog keeps its old
-properties until it is recreated (a fresh deployment, or a run that replaces
-the table).
+files beyond the newest 50. A table that already exists in a reused catalog
+keeps its old properties until it is recreated (a fresh deployment, or a run
+that replaces the table).
 
-When `query_engine.type` is `duckdb` or `none`, maintenance is skipped with
-a log message. Failures on individual tables (e.g., a table that doesn't exist
-yet early in the run) are logged but do not abort the pipeline.
+### In-stream benchmarking
 
-### In-Stream Benchmarking
+During the window Lakebench runs the workload's full query benchmark (8
+queries for Customer 360, 12 for AML) on the active engine. By default the
+first round starts after 5 minutes and then every 5 minutes. Each round
+measures QpH, per-query latency and gold freshness at query time.
 
-During the measurement window, Lakebench runs the workload's full query benchmark (8 queries for Customer 360, 12 for AML)
-at regular intervals using the active query engine. The default schedule is:
-first round after 5 minutes of warmup, then every 5 minutes. Each round
-measures QpH, per-query latency, and gold-table freshness at the moment of
-query execution.
+- The continuous QpH is the **median** of the in-stream rounds.
+- The terminal shows a per-round table: QpH, per-query times, freshness and
+  Q9 contention. The HTML report's "In-Stream Benchmark Rounds" section has
+  the same data.
+- A run too short for a round produces no QpH.
 
-The final continuous QpH is the **median** of all in-stream rounds. The
-terminal output shows a per-round summary table with QpH, per-query times,
-freshness, and Q9 contention status. The HTML report includes an "In-Stream
-Benchmark Rounds" section with the same data.
+Round planning and the end-of-window guard are in
+[Planning round counts](benchmarking/query-benchmark.md#planning-round-counts).
 
-If the run is too short for in-stream rounds, no benchmark runs and no QpH
-score is produced.
+### Continuous scores
 
-For round count planning and the adaptive end-of-window guard, see
-[Scoring and Benchmarking](benchmarking.md).
+Every continuous score and its formula: [Continuous scores](benchmarking/continuous.md).
+The balance check: [Verdict](benchmarking/verdict.md#continuous-gate).
 
-### Continuous Mode Scoring
+## Reading output
 
-Continuous mode produces a different set of scores than batch:
+Each run saves a metrics JSON and an HTML report.
 
-| Score | Description |
-|---|---|
-| **data_freshness_seconds** | Worst-case gold table staleness from the stream job logs. |
-| **query_time_event_age_seconds** | Diagnostic, not freshness: median age of gold's newest event date at query time (when in-stream rounds ran). Written as `query_time_freshness_seconds` before v1.6. |
-| **sustained_throughput_rps** | Rows/sec bronze ingested inside the window, over the seconds data was arriving (`arrival_seconds`). |
-| **composite_qph** | In-stream median QpH. When the rounds executed different query sets (a round with a failed query), `composite_qph_basis.blended` is true, the median is over different queries and is not compared, and `composite_qph_by_set` holds the median per set. |
-| **in_stream_composite_qph** | Same as composite_qph (explicit label for in-stream origin). |
-| **composite_qph_rounds** | In-stream rounds behind the composite_qph median (0 when it is the post-stream benchmark). Benchmark iterations are an execution condition, so two runs with different counts are comparable but not like-for-like. |
-| **stage_latency_profile** | Average micro-batch processing time per stage (`bronze_ms`, `silver_ms`, `gold_ms`). |
-| **total_rows_processed** | Total volume processed during the measurement window. |
-| **pre_window_rows** | Bronze rows taken in before the window opened; not in any score. |
-
-## Reading Output
-
-After a pipeline run completes, Lakebench saves two outputs:
-
-### Metrics JSON
-
-A structured JSON file containing per-stage metrics (timing, throughput, data
-volumes, resource allocation), benchmark query results, and pipeline-level
-aggregate scores. Saved to `lakebench-output/runs/run-<id>/metrics.json`.
+**Metrics JSON** is at `lakebench-output/runs/run-<id>/metrics.json`:
 
 ```bash
-# View the latest run metrics
-cat lakebench-output/runs/run-*/metrics.json | python3 -m json.tool
+# View the newest run's metrics
+python3 -m json.tool "$(ls -td lakebench-output/runs/run-*/ | head -1)metrics.json"
 ```
 
-Key fields in the metrics JSON:
-
-- `jobs[]` -- Per-stage metrics: elapsed time, input/output sizes, throughput,
+- `jobs[]`: per-stage elapsed time, input and output sizes, throughput,
   executor count, CPU-seconds, memory allocated.
-- `benchmark` -- Query benchmark results: QpH, per-query timing and row counts.
-- `pipeline_benchmark.scores` -- Aggregate scores: `time_to_value_seconds`
-  (batch) or `data_freshness_seconds` (continuous), pipeline throughput.
+- `benchmark`: QpH, per-query timing and row counts.
+- `pipeline_benchmark.scores`: aggregate scores, such as
+  `time_to_value_seconds` (batch) or `data_freshness_seconds` (continuous),
+  and pipeline throughput.
 
-### HTML Report
-
-A self-contained HTML report with charts and tables. Includes a summary panel,
-per-stage breakdown, storage metrics, resource utilization estimates, and
-recommendations. Saved alongside the metrics JSON.
-
-```bash
-# Open the report in a browser
-open lakebench-output/runs/run-*/report.html
-```
-
-To generate a report from a previous run:
+**HTML report** sits beside the metrics JSON. It is self-contained: summary
+panel, per-stage breakdown, storage metrics, resource estimates and
+recommendations.
 
 ```bash
-lakebench report
+open lakebench-output/runs/run-*/report.html   # open in a browser
+lakebench report                                # build a report from a previous run
 ```
 
-## Executor Scaling
+## Executor scaling
 
-Executor counts for each Spark job scale with the scale factor unless
-overridden in the config. Per-executor sizing (cores, memory, PVC) is fixed
-from proven production profiles and does not change with scale. This keeps
-data-per-executor constant as the dataset grows.
-
-### Default Executor Counts by Scale
-
-Each job's executor count comes from its job profile: a base count up to
-scale 10, plus a per-profile number of executors per 100 scale units above
-that, capped at the profile's maximum. The formula is
-`min(base + int((scale - 10) * per_100 // 100), max)`.
-
-| Job | Base (scale <= 10) | Added per 100 scale | Maximum |
-|---|:---:|:---:|:---:|
-| bronze-verify (c360) | 4 | 4 | 20 |
-| bronze-verify (financial) | 4 | 8 | 28 |
-| silver-build | 8 | 12 | 28 |
-| gold-finalize | 4 | 8 | 28 |
-
-At scale 100 that gives bronze-verify 7 (c360) or 11 (financial),
-silver-build 18 and gold-finalize 11. The 28 maximum is a Lakebench-imposed
-ceiling (K8s API polling, below), not a cluster limit. The auto-sizer does not
-change these counts (v1.7 removed the `platform.compute.spark.executor`
-block, which never did);
-`lakebench info <config>` (hidden and deprecated, but the only command that prints the per-job counts) shows the resolved per-job values. In continuous
-mode the streaming jobs have their own profiles and are capped to a
-concurrent CPU budget when the cluster is smaller than the profiles need.
-
-Override executor counts per job with the `platform.compute.spark.*_executors`
-fields:
-
-```yaml
-platform:
-  compute:
-    spark:
-      bronze_executors: 4
-      silver_executors: 12
-      gold_executors: 8
-```
-
-### High Executor Count Considerations
-
-When overriding executor counts above 20, be aware of two scaling limits:
-
-**Driver memory:** The Spark driver maintains K8s API watches for each
-executor pod. Profile drivers are 4g for bronze-verify and 32g for
-silver-build and gold-finalize on Spark 4 (24g on Spark 3). Above 20
-executors, the 4g bronze-verify driver may be insufficient. If you see OOM errors in the driver pod, set a global
-driver memory override. It applies to every job, so do not set it below
-the 32g silver-build and gold-finalize default (24g OOMed those drivers on
-Spark 4, BUG-005 and BUG-007):
-
-```yaml
-platform:
-  compute:
-    spark:
-      driver_memory: "32g"
-      silver_executors: 24
-```
-
-**K8s API polling storms:** At 32+ executors, the fabric8 Kubernetes
-client (used by Spark on K8s) polls the API server once per executor per
-heartbeat interval. This can overwhelm the API server, causing timeout
-errors that look like network failures. This is a hard infrastructure
-limit -- adding more driver memory does not help. Keep executor counts
-at 28 or below (the Lakebench-imposed ceiling on computed counts).
-
-**maxResultSize:** Lakebench automatically scales
-`spark.driver.maxResultSize` based on the effective executor count. You
-do not need to set this manually unless you see "serialized results"
-errors in driver logs. Override it in `spark.conf` if needed.
-
-## Troubleshooting
-
-**Job fails with "No space left on device":** The Portworx PVC per executor is
-the constraint. Silver-build requires 300Gi PVCs at scale. Ensure scratch
-storage is configured with sufficient capacity.
-
-**Job times out:** Increase the `--timeout` value. At scale 100 (~1 TB),
-silver-build can take 30--60 minutes depending on cluster resources.
-
-**Benchmark fails but pipeline succeeded:** The benchmark runs against a live
-Trino cluster. If Trino pods are unhealthy, the benchmark may fail while
-pipeline data is still valid. Run `lakebench status` to check Trino health,
-then re-run the benchmark separately.
+- Formula, per-job table and AML overrides:
+  [Auto-Scaling](component-spark.md#auto-scaling).
+- Count overrides (`platform.compute.spark.<job>_executors`), driver memory
+  and tested ranges: [Executor Override Guide](configuration.md#executor-override-guide).
+- Counts grow more slowly than the data, so data per executor grows with
+  scale.
+- The cap of 28 is a hard Lakebench cap. From 32 executors the driver's
+  fabric8 client floods the API server with polls, with timeouts that look
+  like network failures. More driver memory does not help.
+- Override `spark.driver.maxResultSize` in `spark.conf` only if driver logs
+  show "serialized results" errors.

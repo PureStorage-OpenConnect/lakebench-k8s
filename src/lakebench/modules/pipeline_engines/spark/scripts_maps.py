@@ -120,9 +120,15 @@ SCRIPT_MAPS: dict[str, tuple[ScriptSource, ...]] = {
         "bronze_ingest_delta.py",
         "silver_stream_delta.py",
     ),
-    # Library modules the AML jobs import: detection rules (replay, gold) and
-    # the P10 operations layer (gold, and the executors' workflow replay).
-    "aml-rules": _scripts("detection_rules.py", "tm_operations.py", "aml_reason_codes.py"),
+    # Library modules the AML jobs import: detection rules (gold) and
+    # the P10 operations layer (gold, and the executors' workflow replay), and
+    # continuous gold's incremental re-detection.
+    "aml-rules": _scripts(
+        "detection_rules.py",
+        "tm_operations.py",
+        "aml_reason_codes.py",
+        "incremental_detection.py",
+    ),
     "aml-jobs": _scripts(
         "bronze_verify_financial.py",
         "silver_build_financial.py",
@@ -130,8 +136,6 @@ SCRIPT_MAPS: dict[str, tuple[ScriptSource, ...]] = {
         "bronze_ingest_financial.py",
         "silver_stream_financial.py",
         "gold_refresh_financial.py",
-        "replay_financial.py",
-        "reproduce_financial.py",
         "score_financial.py",
         "time_travel_financial.py",
     ),
@@ -154,6 +158,7 @@ SCRIPT_MAPS: dict[str, tuple[ScriptSource, ...]] = {
             "aml_registered_looks.json",
             "heldout_hashes.json",
             "high_risk_jurisdictions.json",
+            "pacs008_schema.json",
             "synthetic_corridors.json",
         )
     ),
@@ -176,8 +181,6 @@ MOUNTS_BY_JOB_TYPE: dict[JobType, tuple[str, ...]] = {
     JobType.BRONZE_INGEST: ROLES,
     JobType.SILVER_STREAM: ROLES,
     JobType.GOLD_REFRESH: ROLES,
-    JobType.REPLAY_FINANCIAL: ROLES,
-    JobType.REPRODUCE_FINANCIAL: ROLES,
     JobType.SCORE_FINANCIAL: ROLES,
     JobType.TIME_TRAVEL_FINANCIAL: ROLES,
     JobType.SCORE_FINANCIAL_REFERENCE: ROLES,

@@ -6,11 +6,11 @@ the submission mechanism differs.
 
 Two workarounds are mandatory here and are not needed on the operator path:
 
-- **Ivy cache (LB-053).** The Spark image user has no home directory, so
+- **Ivy cache.** The Spark image user has no home directory, so
   ``--packages`` fails with ``FileNotFoundException:
   /nonexistent/.ivy2.5.2/cache/...``. ``spark.jars.ivy`` and ``HOME`` must
   point somewhere writable.
-- **S3A region (LB-052).** Without ``fs.s3a.endpoint.region``, S3A signs with
+- **S3A region.** Without ``fs.s3a.endpoint.region``, S3A signs with
   a default region. Garage validates the sigv4 scope and rejects it with an
   opaque 400.
 """
@@ -130,13 +130,13 @@ class LocalSparkRunner:
             # Cluster defaults (200) are far too many for a single JVM over a
             # laptop-sized dataset; the scheduling overhead dominates the work.
             "spark.sql.shuffle.partitions": str(partitions),
-            # LB-053: the image user has no home, so Ivy cannot write its cache.
+            # The image user has no home, so Ivy cannot write its cache.
             "spark.jars.ivy": "/work/ivy",
             "spark.sql.extensions": (
                 "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
             ),
             "spark.hadoop.fs.s3a.endpoint": cfg.endpoint,
-            # LB-052: Garage validates the sigv4 region scope.
+            # Garage validates the sigv4 region scope.
             "spark.hadoop.fs.s3a.endpoint.region": cfg.region,
             "spark.hadoop.fs.s3a.access.key": cfg.access_key,
             "spark.hadoop.fs.s3a.secret.key": cfg.secret_key,
@@ -186,7 +186,7 @@ class LocalSparkRunner:
     def _env(self, job_type: str) -> dict[str, str]:
         cfg = self.config
         return {
-            "HOME": "/work",  # LB-053
+            "HOME": "/work",  # Ivy cache lives under HOME
             "LB_BRONZE_URI": f"s3a://{cfg.bronze_bucket}/",
             "LB_SILVER_URI": f"s3a://{cfg.silver_bucket}/",
             "LB_GOLD_URI": f"s3a://{cfg.gold_bucket}/",
@@ -200,7 +200,7 @@ class LocalSparkRunner:
     def _prepare_ivy(self) -> None:
         """Create the Ivy directories spark-submit expects to already exist.
 
-        LB-053, second half. Pointing ``spark.jars.ivy`` at a writable path is
+        Pointing ``spark.jars.ivy`` at a writable path is
         not sufficient: spark-submit writes its resolution descriptor straight
         into ``<ivy>/cache`` without creating it, so a bare ivy directory still
         fails with ``FileNotFoundException:
@@ -229,7 +229,7 @@ class LocalSparkRunner:
         cmd = [self.cli, "run", "--rm", "--network", "host"]
         for key, value in self._env(job_type).items():
             cmd += ["-e", f"{key}={value}"]
-        # LB-054: lowercase "z" (shared), never "Z". The workdir tree is also
+        # Lowercase "z" (shared), never "Z". The workdir tree is also
         # mounted by the Garage container; a private relabel here revokes
         # Garage's access to its own config the moment a job starts.
         cmd += ["-v", f"{self.workdir}:/work:z"]

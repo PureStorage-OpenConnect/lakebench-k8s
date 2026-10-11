@@ -130,7 +130,4 @@ def _snapshot(spark):
 if __name__ == "__main__":
     # Run by spark_subprocess, which puts the scripts and tests/spark on
     # PYTHONPATH and passes the jar classpath.
-    import _parity_mutation
-
-    _parity_mutation.install()
     _run(sys.argv[1])

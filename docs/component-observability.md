@@ -1,170 +1,114 @@
 # Observability
 
-Observability runs on the `kube-prometheus-stack` Helm chart, which bundles Prometheus, Grafana, kube-state-metrics and node-exporter in a single install (lakebench disables node-exporter on OpenShift, where it needs host access the SCCs block). Prometheus and Grafana versions are not independently configurable -- they come from whatever `observability.chart_version` (default `87.19.2`, currently bundling Prometheus v3.13.1 and Grafana v13.1.x) resolves to.
+Reference: enable and read the optional Prometheus and Grafana stack, per-deployment Pushgateway, local metrics and reports.
 
-HTML reports are generated from local metrics and do not require Prometheus or Grafana.
+## What it does
 
-## YAML Configuration
+- **Always on:** every run writes `metrics.json` and `report.html` locally. Neither needs Prometheus or Grafana.
+- **Optional:** `observability.enabled: true` uses one shared `kube-prometheus-stack` Helm release (Prometheus, Grafana, kube-state-metrics, node-exporter) and gives each deployment a Pushgateway and PodMonitors.
+- Lakebench disables node-exporter on OpenShift, where it needs host access the SCCs block.
+- The stack is independent of the recipe.
 
-All observability settings live under the `observability` key as a flat model:
+## Version and image
 
-```yaml
-observability:
-  enabled: false                     # Master switch for the observability stack
-  dashboards_enabled: true           # Enable Grafana dashboards
-  retention: "7d"                    # Prometheus data retention period
-  storage: "10Gi"                    # Prometheus PVC size (cluster default StorageClass)
-  chart_version: "87.19.2"           # kube-prometheus-stack chart version (pins Prometheus + Grafana)
-  pushgateway_enabled: true          # Per-deployment Pushgateway for live datagen and pipeline metrics
-  pushgateway_image: "prom/pushgateway:v1.11.1"
-  pushgateway_storage: "1Gi"         # Pushgateway persistence PVC size
-  pushgateway_storage_class: "px-csi-scratch"
-```
+- Prometheus and Grafana have no version keys. They come from the chart `observability.chart_version` names. Defaults for it and `pushgateway_image`: [version matrix](compatibility-matrix.md#component-version-matrix).
+- The JMX exporter sidecar image is `images.jmx_exporter`, pinned by digest.
 
-With observability enabled, each deployment also gets its own Prometheus
-Pushgateway (a Deployment, a Service, a 1Gi PVC on `px-csi-scratch` by
-default, and a PodMonitor that scrapes it) in the deployment's namespace,
-removed with the namespace by `destroy`. Datagen pods push live progress to
-it, because a batch pod can finish between two Prometheus scrapes, and
-Spark stages push their final metrics: all three AML batch stages and
-Customer 360 gold-finalize. Customer 360 bronze-verify, silver-build and
-continuous stages do not push yet, so their stage panels stay empty. The push is best-effort: a failed push never affects a
-run, and `metrics.json` stays the source of record. Set
-`pushgateway_enabled: false` to skip it.
+## Configuration keys
 
-v1.7 removed `observability.reports`, `observability.storage_class`,
-`prometheus_stack_enabled`, `s3_metrics_enabled` and `spark_metrics_enabled`,
-which nothing read. Every
-run writes `report.html` into its run directory once, and `lakebench report
---render` writes a fresh copy to `lakebench-output/reports/` without
-overwriting the delivered file; the Prometheus volume claim uses the cluster
-default StorageClass. A config that carries these keys at their old defaults
-loads with a note; any other value is refused by the commands that change
-data.
+`observability` is a flat model; nested YAML such as `metrics.prometheus.enabled` is rejected. Defaults from `ObservabilityConfig` in `config/schema.py`.
 
-The Spark and Trino PodMonitors are applied whenever the stack is enabled.
-`observability.enabled: true` always uses the full shared stack, and the
-Prometheus PVC uses the chart's default StorageClass. For a fresh `lakebench admin
-install --component observability`, `dashboards_enabled` sets the chart's
-`grafana.enabled`, and `retention` and `storage` set the Prometheus retention and PVC
-size; an installed release keeps the values it was installed with.
+| Key | Default | Effect |
+|---|---|---|
+| `enabled` | `false` | Use the shared stack and deploy the per-deployment Pushgateway and PodMonitors. Always the full stack. |
+| `dashboards_enabled` | `true` | Sets the chart's `grafana.enabled` on a fresh admin install. |
+| `retention` | `"7d"` | Prometheus retention on a fresh admin install. |
+| `storage` | `"10Gi"` | Prometheus PVC size on a fresh admin install. The PVC uses the cluster default StorageClass. |
+| `chart_version` | [matrix](compatibility-matrix.md#component-version-matrix) | `kube-prometheus-stack` chart a fresh admin install uses. |
+| `pushgateway_enabled` | `true` | Per-deployment Pushgateway for live datagen and pipeline metrics. |
+| `pushgateway_image` | [matrix](compatibility-matrix.md#component-version-matrix) | Pushgateway image |
+| `pushgateway_storage` | `"1Gi"` | Pushgateway PVC size |
+| `pushgateway_storage_class` | `"px-csi-scratch"` | Pushgateway PVC StorageClass |
 
-Set `observability.enabled: true` to deploy the stack.
+- An installed release keeps the values it was installed with.
+- See [UPGRADING-1.7.md](../UPGRADING-1.7.md) for removed observability keys.
 
-## Local Metrics (Always On)
+## Deploy and destroy
 
-Every `lakebench run` writes a `metrics.json` file to `lakebench-output/runs/run-<id>/`. No setup is needed. The file contains:
+The chart installs cluster-wide objects (CRDs, cluster roles, admission webhooks), so the release named `lakebench-observability` is a shared cluster component, not part of a deployment.
 
-- **Pipeline benchmark scores** -- time-to-value, throughput, and efficiency for batch runs; freshness, sustained throughput, and latency profile for continuous runs.
-- **Per-stage metrics** -- elapsed time, input/output sizes, row counts, throughput, and allocated executor resources for each pipeline stage (bronze, silver, gold, query).
-- **Query results** -- per-query elapsed time, row counts, and pass/fail status from the benchmark.
-- **Config snapshot** -- the full configuration used for the run, enabling cross-run comparison.
+- **Install:** a cluster admin runs `lakebench admin install --component observability <config>` once. It installs into the `lakebench-observability` namespace, under the cluster lease, only when no release named `lakebench-observability` exists anywhere on the cluster. An existing release is never upgraded or modified.
+- **Dashboard:** the same command applies the shared dashboard ConfigMap, and re-applies it when it differs from this Lakebench's.
+- **Deploy:** `lakebench deploy` only checks that the release exists (a missing one fails the step with the install command). It applies the deployment's PodMonitors and Pushgateway in its own namespace.
+- **Destroy:** never uninstalls the release; another deployment may use it. PodMonitors and Pushgateway go with the deployment's namespace. The dashboard ConfigMap stays in `lakebench-observability`.
+- **Exception:** a release an older Lakebench installed into the deployment's own namespace is removed by destroy, because it served only that namespace.
+- **Removing the shared stack** when no deployment uses it: `helm uninstall lakebench-observability -n lakebench-observability`.
 
-The `MetricsCollector` class in `metrics/collector.py` records job metrics, query metrics, streaming metrics, and measured S3 bucket sizes during the run. After completion, `build_pipeline_benchmark()` converts the flat job list into the unified stage-matrix view and computes aggregate scores.
-
-## Prometheus
-
-When `observability.enabled` is `true`, Lakebench uses one shared `kube-prometheus-stack` Helm release for the whole cluster. The chart installs cluster-wide objects (CRDs, cluster roles, admission webhooks), so it is a shared cluster component, not part of a deployment:
-
-- A cluster admin installs it once with `lakebench admin install --component observability <config>`, into the `lakebench-observability` namespace, under the cluster lease, only when no release named `lakebench-observability` exists anywhere on the cluster. That command also applies the shared dashboard ConfigMap, and re-applies it when it differs from this lakebench's. An existing release is never upgraded or modified.
-- `deploy` only checks that the release is there (a missing one fails the step with that command) and applies the deployment's PodMonitors and Pushgateway in its own namespace.
-- `destroy` never uninstalls it; another deployment may be using it. Each deployment's PodMonitors and Pushgateway live in its own namespace and go with it. The Lakebench Overview dashboard ConfigMap is shared: it lives in `lakebench-observability` and destroy leaves it in place. The one exception is a release an older lakebench installed into the deployment's own namespace, which destroy removes because it served only that namespace.
-- To remove the shared stack when no deployment uses it: `helm uninstall lakebench-observability -n lakebench-observability`.
-
-The stack provides:
-
-- Prometheus server that picks up the PodMonitors of every lakebench namespace
-- kube-state-metrics, and node-exporter except on OpenShift, for cluster-level visibility
-- ServiceMonitor and PodMonitor CRDs for automatic target discovery
-
-The Helm release is named `lakebench-observability`. The chart shortens service names, so list them rather than guessing:
+The chart shortens service names, so list them:
 
 ```bash
 kubectl get svc -n lakebench-observability -l release=lakebench-observability
 ```
 
-To deploy the observability stack alongside infrastructure, set `observability.enabled: true` in your config YAML, then deploy as usual:
+### Prometheus targets
 
-```bash
-lakebench deploy test-config.yaml
-```
+- Prometheus picks up the PodMonitors of every Lakebench namespace. ServiceMonitor and PodMonitor CRDs handle target discovery.
+- The Spark and Trino PodMonitors are applied whenever the stack is enabled. Only the Trino one finds a target.
+- Spark pipeline jobs run with the Spark UI off (it guards driver memory at large scale). Spark serves its Prometheus endpoint from the UI, so no Spark engine metrics (GC, shuffle, spill, S3A I/O) are collected. Spark stages report rows, bytes and elapsed time through the Pushgateway and `metrics.json`.
+
+### Pushgateway
+
+Each deployment gets a Deployment, a Service, a 1Gi PVC on `px-csi-scratch` by default, and a PodMonitor that scrapes it, in its own namespace.
+
+- Datagen pods push live progress, because a batch pod can finish between two Prometheus scrapes.
+- Spark stages that push their metrics: AML bronze-verify, silver-build, gold-finalize and silver-stream; Customer 360 gold-finalize.
+- Stages that do not push: Customer 360 bronze-verify, silver-build and continuous stages; bronze-ingest; gold-refresh. Their panels stay empty, and continuous lag and per-cycle cost are not shown live.
+- The push is best-effort. A failed push never affects a run; `metrics.json` stays the record.
 
 ## Grafana
 
-Grafana is included in the kube-prometheus-stack install when `dashboards_enabled` is `true`. The user is `admin`; the chart generates the password per install into the Secret `lakebench-observability-grafana` (key `admin-password`). An install made by 1.6 keeps its `lakebench` password.
+- Included when `dashboards_enabled` is `true`.
+- User `admin`. The chart generates the password per install into the Secret `lakebench-observability-grafana` (key `admin-password`). An install made by 1.6 keeps its `lakebench` password.
+- Access: `kubectl port-forward svc/lakebench-observability-grafana 3000:80 -n lakebench-observability`.
 
-One built-in dashboard, **Lakebench Overview**, is provisioned from a single
-ConfigMap in the shared `lakebench-observability` namespace, applied on every
-deploy and left in place by destroy. `namespace` and `run_id` variables select
-the deployment and run. Its panels: datagen throughput (MB/s per pod, labelled as capped by the Lakebench-set
-pod resources), datagen rows written by pod, datagen phase seconds,
-bronze/silver stage rows (input vs output), silver per-table row counts,
-pipeline stage elapsed seconds, Trino running queries, Trino query
-throughput, and node CPU usage by pod. The
-datagen and pipeline panels read the Pushgateway series, so they are empty
-with `pushgateway_enabled: false`.
+The **Lakebench Overview** dashboard comes from one ConfigMap in `lakebench-observability`. `namespace` and `run_id` variables select the deployment and run. Panels:
 
-Access Grafana via port-forward:
+- datagen throughput (MB/s per pod, labelled as capped by the pod resources Lakebench sets), rows written by pod, phase seconds
+- bronze/silver stage rows (input vs output), silver per-table row counts, pipeline stage elapsed seconds
+- Trino running queries and query throughput
+- CPU usage by pod (containers only, each counted once)
 
-```bash
-kubectl port-forward svc/lakebench-observability-grafana 3000:80 -n lakebench-observability
-```
+The datagen and pipeline panels read Pushgateway series, so they are empty with `pushgateway_enabled: false`. The `namespace` and `run_id` variables come from the pipeline stage series, so on a fresh deployment the datagen panels stay empty until the first Spark stage reports.
 
-## S3 Metrics
+## Local metrics
 
-`observability/s3_metrics.py` defines an `S3MetricsWrapper` with these Prometheus metrics for CLI-side boto3 operations:
+Every `lakebench run` writes `lakebench-output/runs/run-<id>/metrics.json`. It holds:
 
-- `lakebench_s3_request_duration_seconds` -- request latency histogram
-- `lakebench_s3_requests_total` -- total request count by operation
-- `lakebench_s3_errors_total` -- error count by operation
+- **Pipeline scores:** time-to-value, throughput and efficiency (batch); freshness, sustained throughput and latency profile (continuous).
+- **Per-stage metrics:** elapsed time, input/output sizes, row counts, throughput and allocated executor resources for bronze, silver, gold and query.
+- **Query results:** per-query elapsed time, row counts and pass/fail.
+- **Config snapshot:** the full run configuration, for cross-run comparison.
 
-No code path instantiates the wrapper today, so these series are not emitted. They would cover CLI operations (list, head, delete), not Spark/Trino data-path I/O.
+`MetricsCollector` (`metrics/collector.py`) records job, query and streaming metrics and measured bucket sizes. `build_pipeline_benchmark()` turns the job list into the stage matrix and computes aggregate scores.
 
-## Platform Metrics Collection
+### Platform metrics
 
-After a benchmark run completes, the `PlatformCollector` queries the in-cluster Prometheus to snapshot infrastructure metrics (CPU, memory per pod, S3 I/O rates). These are included in the HTML report under the Platform Metrics tab when collected. The `observability.reports` block (including `include.platform_metrics`) has no effect.
+After a run, `PlatformCollector` queries the shared Prometheus for the deployment's namespace over the run window: CPU and memory per pod, and Trino completed and failed queries. The report's Platform Metrics section shows them, or why they were not collected (observability off, Prometheus not found or not reachable, no pod series). No S3 I/O and no Spark engine metrics are collected.
+
+### S3 metrics
+
+No S3 I/O metrics are collected; the report and `metrics.json` record S3 request counts and latency as `null` (not collected).
 
 ## Reports
 
-Every run delivers an HTML report to its run directory as `report.html`. That
-file is the shareable artifact and is written once, at the end of the run.
-The `lakebench report` command reads saved metrics and either prints a summary
-or, with `--render`, writes a fresh timestamped HTML file to
-`lakebench-output/reports/report-<run-id>-<ts>.html` without touching the
-delivered `report.html`.
+- Each run writes `report.html` into its run directory once, at the end. It is the shareable artifact.
+- `lakebench report` prints the summary for a run. `--render` writes a fresh `lakebench-output/reports/report-<run-id>-<ts>.html` and never touches the delivered `report.html`. Flags: [cli-reference.md](cli-reference.md#report).
+- Report layout: [HTML report layout](benchmarking/html-report.md).
 
-```bash
-# Print the summary for the latest run (does not touch report.html)
-lakebench report
+## Troubleshooting
 
-# Print the summary for a specific run
-lakebench report --run <run-id>
+- [Trino metrics show only JVM metrics](troubleshooting.md#trino-metrics-show-only-jvm-metrics)
 
-# Regenerate a fresh HTML report (new file under lakebench-output/reports/)
-lakebench report --run <run-id> --render
+## See also
 
-# Overwrite a specific pre-existing HTML at a caller-chosen path
-lakebench report --run <run-id> --render --output my.html --force
-
-# List available runs
-lakebench report --list
-```
-
-The report includes:
-
-- **Summary cards** -- total time, job pass/fail counts, data processed, throughput, QpH score, and pipeline-level scores (time-to-value for batch, data freshness for continuous).
-- **Pipeline benchmark table** -- the stage matrix showing per-stage elapsed time, input/output sizes, throughput, executor allocation, and status.
-- **Job performance table** -- per-Spark-job duration, input size, output rows, throughput, and CPU-seconds allocated.
-- **Query breakdown** -- per-query duration, rows returned, and pass/fail status.
-- **Platform metrics** -- CPU and memory usage per pod, S3 I/O rates (when observability is enabled).
-- **Configuration snapshot** -- scale factor, S3 endpoint, executor sizing, catalog type, and image versions.
-
-`lakebench destroy` leaves the shared observability release in place (see [Prometheus](#prometheus)).
-
-## See Also
-
-- [Scoring and Benchmarking](benchmarking.md) -- pipeline scorecard and query engine benchmark
-- [Running Pipelines](running-pipelines.md) -- deploy, generate, and run workflow
-- [CLI Reference](cli-reference.md) -- full command and flag reference
-- [Configuration](configuration.md) -- complete YAML schema documentation
-- [Architecture](architecture.md) -- system design and component overview
+[Benchmarking](benchmarking.md), [Running pipelines](running-pipelines.md), [CLI reference](cli-reference.md), [Configuration](configuration.md).

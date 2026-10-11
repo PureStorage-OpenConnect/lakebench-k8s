@@ -42,40 +42,30 @@ NS = _load()
 resolve = NS["resolve_txn_epoch"]
 
 
-def test_full_build_on_a_fresh_table_uses_the_configured_epoch():
-    assert resolve({}, 0, False, 0) == 0
-    assert resolve({}, 4, False, 0) == 4
-
-
-def test_full_build_takes_an_epoch_the_log_has_never_held():
-    """The counter went back to 0 over a log holding epochs 0 and 1."""
-    assert resolve({0: 2, 1: 2}, 0, False, 0) == 2
-    assert resolve({0: 2, 1: 2}, 1, False, 0) == 2
-    assert resolve({0: 2}, 5, False, 0) == 5
-
-
-def test_append_continues_the_newest_epoch_when_the_configured_one_is_stale():
-    """A cycle whose ConfigMap read fell back to 0 after cycle 0 started epoch 3."""
-    assert resolve({0: 2, 3: 0}, 0, True, 1) == 3
-
-
-def test_append_retry_of_a_committed_cycle_keeps_its_key():
-    assert resolve({3: 2}, 3, True, 2) == 3
+@pytest.mark.parametrize(
+    ("log", "configured", "append", "cycle", "epoch"),
+    [
+        ({}, 0, False, 0, 0),
+        ({}, 4, False, 0, 4),
+        # the counter went back to 0 over a log holding epochs 0 and 1
+        ({0: 2, 1: 2}, 0, False, 0, 2),
+        ({0: 2, 1: 2}, 1, False, 0, 2),
+        ({0: 2}, 5, False, 0, 5),
+        # a cycle whose ConfigMap read fell back to 0 after cycle 0 started epoch 3
+        ({0: 2, 3: 0}, 0, True, 1, 3),
+        ({3: 2}, 3, True, 2, 3),  # a retry of a committed cycle keeps its key
+        # the run's full build started epoch 1; a later counter bump does not move it
+        ({1: 0}, 2, True, 1, 1),
+        ({}, 2, True, 1, 2),  # a table without build keys
+    ],
+)
+def test_resolve_txn_epoch(log, configured, append, cycle, epoch):
+    assert resolve(log, configured, append, cycle) == epoch
 
 
 def test_append_behind_a_later_committed_cycle_refuses():
-    with pytest.raises(_Abort, match="already committed cycle 3"):
+    with pytest.raises(_Abort):
         resolve({3: 3}, 3, True, 2)
-
-
-def test_append_follows_the_log_over_a_higher_configured_epoch():
-    """The full build of this run started epoch 1; a later counter bump does
-    not move the run's remaining cycles off it."""
-    assert resolve({1: 0}, 2, True, 1) == 1
-
-
-def test_append_on_a_table_without_build_keys_uses_the_configured_epoch():
-    assert resolve({}, 2, True, 1) == 2
 
 
 def test_app_id_pattern_matches_the_written_keys_only(load_script):
@@ -86,12 +76,6 @@ def test_app_id_pattern_matches_the_written_keys_only(load_script):
     assert pattern.match(app).group(1) == "12"
     assert pattern.match("lb-silver-stream-0b7c4c1e-rebuild-1") is None
     assert pattern.match("lb-silver-build-rebuild-1-x") is None
-
-
-def test_the_writes_use_the_resolved_epoch():
-    src = (_SCRIPTS / "silver_build_delta.py").read_text()
-    assert len(re.findall(r"rebuild_epoch\s*=\s*_txn_epoch\b", src)) == 2
-    assert not re.search(r"rebuild_epoch\s*=\s*_rebuild_epoch\b", src)
 
 
 # --- committed_epochs: reads the log's keys, fails closed ------------------

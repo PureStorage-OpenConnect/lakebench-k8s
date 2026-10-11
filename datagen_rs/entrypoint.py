@@ -192,6 +192,8 @@ def main() -> int:
     # Parse exactly as for a Job, then let the generator print the resolved
     # corpus arguments (canonical JSON on stdout) instead of generating.
     ap.add_argument("--print-resolved-args", action="store_true")
+    # Continuous delivery: generate until this unix second (or the stop marker).
+    ap.add_argument("--deliver-until", type=int, default=None)
     # Strict: an unknown flag exits 2 (argparse), so a typo or a flag from a
     # newer Lakebench never runs as a silent default. --payload-kb stays
     # declared above because a v1.6 template may still pass it.
@@ -393,6 +395,9 @@ def main() -> int:
             f"ts=[{args.timestamp_start},{args.timestamp_end})"
         )
 
+    # Forwarded only when set, so a default argv is unchanged.
+    if args.deliver_until is not None:
+        cmd += ["--deliver-until", str(args.deliver_until)]
     if args.print_resolved_args:
         cmd.append("--print-resolved-args")
     print(

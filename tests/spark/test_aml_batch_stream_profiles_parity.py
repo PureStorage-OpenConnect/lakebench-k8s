@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 
 import pytest
+from _d_full_helpers import PACS_SCHEMA
 from _foreach_batch import foreach_batch_harness
 
 pytest.importorskip("pyspark")
@@ -41,23 +42,6 @@ pytestmark = [
 # The Iceberg catalog the scripts are pointed at (LB_ICEBERG_CATALOG) and the
 # one registered on the shared session.
 _CATALOG = "lh"
-
-
-_PACS_SCHEMA = (
-    "txn_id string, uetr string, "
-    "dbtr struct<nm:string, ctry_of_res:string, "
-    "pstl_adr:struct<twn_nm:string, strt_nm:string>, id:struct<lei:string>>, "
-    "cdtr struct<nm:string, ctry_of_res:string, "
-    "pstl_adr:struct<twn_nm:string, strt_nm:string>, id:struct<lei:string>>, "
-    "dbtr_agt struct<bicfi:string>, cdtr_agt struct<bicfi:string>, "
-    "dbtr_acct struct<iban:string>, cdtr_acct struct<iban:string>, "
-    "intrmy_agt_1 struct<bicfi:string>, "
-    "intrmy_agt_2 struct<bicfi:string>, "
-    "intrmy_agt_3 struct<bicfi:string>, "
-    "intr_bk_sttlm_amt decimal(18,2), intr_bk_sttlm_ccy string, "
-    "cre_dt_tm timestamp, purp_cd string, "
-    "rgltry_rptg array<string>, msg_id string"
-)
 
 
 def _party(nm):
@@ -140,7 +124,7 @@ def build_profiles(spark):
         _row("T13", "C", "R", base + timedelta(days=11), "30.00"),
     ]
     corpus = batch0 + batch1
-    bronze = spark.createDataFrame(corpus, _PACS_SCHEMA)
+    bronze = spark.createDataFrame(corpus, PACS_SCHEMA)
 
     # --- Batch path: build_entity_profiles directly.
     from datetime import date
@@ -181,14 +165,15 @@ def build_profiles(spark):
         "DDL_EDGES",
         "DDL_PROFILES",
         "DDL_BATCH_VERSIONS",
+        "DDL_PAIRS",
     ):
         spark.sql(getattr(ss, ddl_attr))
     ss._KYC = None
     ss._KYC_LOADED = True
     ss._kyc = lambda _s: None
     ss.append_new_dimensions = lambda *_a, **_kw: (0, 0)
-    foreach_batch_harness(spark, ss._merge_batch, spark.createDataFrame(batch0, _PACS_SCHEMA), 0)
-    foreach_batch_harness(spark, ss._merge_batch, spark.createDataFrame(batch1, _PACS_SCHEMA), 1)
+    foreach_batch_harness(spark, ss._merge_batch, spark.createDataFrame(batch0, PACS_SCHEMA), 0)
+    foreach_batch_harness(spark, ss._merge_batch, spark.createDataFrame(batch1, PACS_SCHEMA), 1)
 
     # --- Compare per-entity rows.
     batch_rows = {
@@ -293,35 +278,3 @@ def test_batch_and_stream_profile_sums_agree_on_null(profiles):
 def test_batch_and_stream_produce_equivalent_profiles(profiles):
     problems = value_problems(*profiles)
     assert not problems, problems
-
-
-def _child(jars):
-    """Spark child for the mutation check: the same corpus and comparison,
-    with the parity mutation shim installed before the scripts load."""
-    import json
-    import os
-    import tempfile
-
-    os.environ["LB_ICEBERG_CATALOG"] = _CATALOG
-    import _parity_mutation
-
-    _parity_mutation.install()
-    from _d_full_helpers import build_spark
-
-    with tempfile.TemporaryDirectory() as work:
-        spark = build_spark(work, jars)
-        batch_rows, stream_rows = build_profiles(spark)
-        out = {
-            "coverage": coverage_problems(batch_rows, stream_rows),
-            "sums": sum_problems(batch_rows, stream_rows),
-            "nulls": null_problems(batch_rows, stream_rows),
-            "values": value_problems(batch_rows, stream_rows),
-        }
-        print(json.dumps(out, default=str))
-        spark.stop()
-
-
-if __name__ == "__main__":
-    import sys
-
-    _child(sys.argv[1])

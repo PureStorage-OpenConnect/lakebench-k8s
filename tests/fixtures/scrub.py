@@ -1,74 +1,17 @@
-"""The rule-5 fixture scrubber (SPEC v1.7 section 6 rule 5, DESIGN ch03 ER-1).
+"""The fixture scrubber: nothing lab-specific enters ``tests/fixtures/``.
 
-A run record enters ``tests/fixtures/`` only through ``scrub_record``; driver
-logs and other text go through ``scrub_text``. What it rewrites:
+A run record goes through ``scrub_record``; driver logs and other text go
+through ``scrub_text``. Both rewrite lab endpoints to ``10.0.1.50``, bucket
+names to ``scrubbed-<layer>`` and credentials to ``${LAKEBENCH_...}``
+placeholders. They refuse, rather than rewrite: a live held-out seed anywhere
+(the message names the path and role, never the value), anything that still
+looks like a credential or lab address (``check_clean``), and any rewrite that
+would change the identity of the record (identity dict, fingerprints, stages,
+experiment and verdict blocks). ``tests/test_stored_records.py`` pins each rule.
 
-* **Endpoints.** The host of a value under an endpoint-named key (``endpoint``,
-  ``s3_endpoint``, ``endpointOverride``, ``fs.s3a.endpoint``,
-  ``AWS_ENDPOINT_URL_S3`` and the like), the host of any URL whose host is a
-  private IPv4 address or one of the record's endpoint hosts, every private
-  IPv4 address, and every whole-token occurrence of an endpoint host become
-  ``10.0.1.50``. URL user-info (``user:password@``) is dropped. Scheme, port
-  and path stay; a value under an endpoint key that is a path (``/metrics``)
-  is left alone.
-* **Bucket names.** Every name under ``s3.buckets`` or a bucket-named key
-  becomes ``scrubbed-<layer>`` (``scrubbed-bucket-<n>`` when the layer is
-  unknown), wherever it appears as a whole token, so ``s3a://`` paths stay
-  consistent and ``lakebench-bronze-verify`` is not touched by a bucket
-  ``lakebench-bronze``.
-* **Credentials.** A string under a credential-named key (access key, secret
-  key, password, token, api key, credentials; snake, kebab, dotted or camel
-  case), under any key inside a credential-named mapping, or the ``value`` of
-  a ``{name: <credential-named>, value: ...}`` entry (a Kubernetes env list)
-  becomes a ``${LAKEBENCH_...}`` placeholder, and so does the value of a
-  ``key=value`` or ``key: value`` pair inside a string whose key is
-  credential-named by the same rule (``fs.s3a.secret.key=...``,
-  ``trustStorePassword=...``, ``secretKey: ...``). Prose such as
-  ``password: authentication failed`` is rewritten too, which fails safe. Dict keys are scrubbed for
-  addresses, hosts and buckets as values are; a key rename that would merge
-  two keys, or that falls inside ``experiment`` or ``verdict``, is refused.
-  An endpoint host without a dot (``minio``) is rewritten only in the
-  endpoint value itself, never as a word elsewhere.
-
-It refuses, rather than rewrites:
-
-* a value or key that still looks like a credential or a lab address after
-  the rewrite (``check_clean``);
-* a live held-out seed (the evaluation or robustness role in the AML
-  pre-registration) anywhere: as an int or integral float value, or as a
-  whole digit run in any string or dict key, whatever word surrounds it.
-  A count that happens to equal one refuses too, which fails closed. Spent seeds are retired, and the calibration seed is the public
-  development seed 43. The seed is identity, so it cannot be scrubbed; the
-  message names the path and role, never the value;
-* a bucket name that is a single word, a dict key somewhere in the record,
-  or a value outside the bucket settings (a bucket named ``silver``,
-  ``iceberg`` or ``batch`` would rewrite ``stage_matrix.silver``,
-  ``table_format`` or ``pipeline_mode``);
-* a rewrite inside the ``experiment`` or ``verdict`` blocks other than at an
-  endpoint or bucket key (a credential-named key there is refused too, since
-  ``max_token`` would read as one), or of a ``job_type``, ``job_name``,
-  ``name``, ``status``, ``digest``, ``query_set_id``, ``stage`` or
-  ``stage_name`` value other than at an endpoint, bucket or credential key;
-* a scrub that changes the identity dict (every key, ``generator digest``
-  included), corpus id, result fingerprints, query set, stages run or bound
-  kinds of the stored block, or the identity of the block
-  ``build_experiment`` makes from the record's ``experiment_inputs``. The
-  one identity change it makes itself: a system identity (ER-8) whose
-  ``storage_endpoint`` part it rewrote gets its ``fingerprint`` recomputed
-  over the rewritten parts, so a fixture's fingerprint is the hash of what
-  it shows; a source fingerprint that is not the hash of its own parts, or
-  a rewrite of any other part, is refused.
-
-Not covered: IPv6 addresses; hostnames that are neither in a URL, an
-endpoint value of the same record, nor a subdomain of one of its endpoint
-hosts; and, in free text, a quoted credential value continued past a line
-end (only its first line is replaced), a credential under a key that the
-key rule does not name, a secret after a placeholder on the same line,
-and separators other than ``: = := =>`` or a ``--flag`` (``conf.set("k",
-"v")``, ``Map(k -> v)``, XML, HTML entities). Text credentials are a best-effort rewrite
-with a fail-closed check behind it; records are covered key by key. A ``host`` key is not read as an endpoint (it names Trino, Hive and
-Postgres services too). A report.html is not scrubbed; re-render
-it from the scrubbed record instead.
+Known gaps: IPv6 addresses, hostnames outside URLs and endpoint values, and
+free-text credentials in forms the key rule does not name. A report.html is
+not scrubbed; re-render it from the scrubbed record.
 
 Usage::
 
@@ -81,7 +24,6 @@ from __future__ import annotations
 import argparse
 import bisect
 import copy
-import hashlib
 import ipaddress
 import json
 import re
@@ -90,9 +32,6 @@ import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
-
-#: Bump when a rule changes; recorded in tests/fixtures/records/MANIFEST.json.
-SCRUBBER_VERSION = 11
 
 #: The documented placeholder host for the lab S3 address.
 PLACEHOLDER_HOST = "10.0.1.50"
@@ -754,12 +693,7 @@ def identity_view(record: Mapping[str, Any]) -> dict[str, Any]:
     ``build_experiment`` makes from the record's ``experiment_inputs`` (what
     a record without a stored block gets on load; a stored block is never
     rebuilt, so this is the stricter of the two)."""
-    from lakebench.metrics.experiment import (
-        build_experiment,
-        experiment_of,
-        identity,
-        result_fingerprints,
-    )
+    from lakebench.metrics.experiment import build_experiment, experiment_of, identity
     from lakebench.metrics.storage import MetricsStorage
 
     def view(exp: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -769,7 +703,9 @@ def identity_view(record: Mapping[str, Any]) -> dict[str, Any]:
         return {
             "identity": identity(exp),
             "corpus_id": (exp.get("corpus") or {}).get("id"),
-            "fingerprints": result_fingerprints(exp),
+            # Older stored blocks carry per-query result
+            # fingerprints; the scrubber must leave them as they are.
+            "fingerprints": (exp.get("results") or {}).get("fingerprints"),
             "query_set_id": (exp.get("results") or {}).get("query_set_id"),
             "stages": exp.get("stages"),
             "bound_kinds": limits.get("bound_kinds"),
@@ -942,10 +878,6 @@ def scrub_record(record: Any) -> tuple[dict[str, Any], list[str]]:
             f"(rewritten paths: {', '.join(changed)})"
         )
     return scrubbed, sorted(set(changed) | set(renamed))
-
-
-def sha256_of(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def dump(record: Mapping[str, Any]) -> str:

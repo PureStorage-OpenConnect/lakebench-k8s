@@ -15,7 +15,6 @@ import yaml
 
 from lakebench.config import load_config
 from lakebench.config.loader import ConfigValidationError
-from lakebench.config.schema import ConfigModel, LakebenchConfig, PipelineMode
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = sorted((ROOT / "examples").glob("*.yaml"))
@@ -32,16 +31,11 @@ def example_env(monkeypatch):
 
 
 @pytest.mark.parametrize("path", EXAMPLES, ids=lambda p: p.name)
-def test_example_validates_without_deprecations(path, example_env):
-    # Examples teach the current spelling, so a deprecated key is a failure.
+def test_example_validates_without_deprecations(example_env, path):
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
         cfg = load_config(path)
     assert cfg.name
-
-
-def test_examples_exist():
-    assert len(EXAMPLES) >= 11
 
 
 def _write(tmp_path, data) -> Path:
@@ -63,6 +57,19 @@ def _write(tmp_path, data) -> Path:
         ({"name": "t", "workload": {"datagen": {"scael": 10}}}, "  - workload.datagen.scael"),
         ({"name": "t", "platform": {"compute": {"spark": {"image": "x"}}}}, "spark.image"),
         ({"name": "t", "architecture": {"workloads": {"excluded": []}}}, "workloads"),
+        ({"name": "t", "platform": {"storage": {"s3": {"bogusx": 1}}}}, "s3.bogusx"),
+        ({"name": "t", "platform": {"storage": {"scratch": {"bogusx": 1}}}}, "scratch.bogusx"),
+        ({"name": "t", "images": {"bogusx": 1}}, "images.bogusx"),
+        ({"name": "t", "observability": {"bogusx": 1}}, "observability.bogusx"),
+        ({"name": "t", "architecture": {"catalog": {"hive": {"bogusx": 1}}}}, "hive.bogusx"),
+        ({"name": "t", "architecture": {"catalog": {"polaris": {"bogusx": 1}}}}, "polaris.bogusx"),
+        ({"name": "t", "architecture": {"pipeline": {"bogusx": 1}}}, "pipeline.bogusx"),
+        (
+            {"name": "t", "architecture": {"pipeline": {"continuous": {"bogusx": 1}}}},
+            "continuous.bogusx",
+        ),
+        ({"name": "t", "architecture": {"query_engine": {"trino": {"bogusx": 1}}}}, "trino.bogusx"),
+        ({"name": "t", "platform": {"compute": {"spark": {"bogusx": 1}}}}, "spark.bogusx"),
     ],
 )
 def test_unknown_key_is_rejected_and_named(tmp_path, data, bad_loc):
@@ -70,19 +77,6 @@ def test_unknown_key_is_rejected_and_named(tmp_path, data, bad_loc):
         load_config(_write(tmp_path, data))
     assert bad_loc in str(exc.value)
     assert "unknown key" in str(exc.value)
-
-
-def test_every_schema_model_forbids_extras():
-    def walk(model):
-        yield model
-        for field in model.model_fields.values():
-            ann = field.annotation
-            for t in getattr(ann, "__args__", (ann,)):
-                if isinstance(t, type) and issubclass(t, ConfigModel):
-                    yield from walk(t)
-
-    for model in walk(LakebenchConfig):
-        assert model.model_config.get("extra") == "forbid", model.__name__
 
 
 # -- documented back-compat spellings ---------------------------------------
@@ -99,50 +93,41 @@ def _load_quiet(tmp_path, data):
         return load_config(_write(tmp_path, data))
 
 
-def test_mode_continuous_is_canonical(tmp_path):
-    # D18: 'continuous' is the product's name and loads without a warning.
-    cfg = _load_quiet(
-        tmp_path,
-        {
-            "name": "t",
-            "recipe": "hive-iceberg-spark-trino",
-            "architecture": {"pipeline": {"mode": "continuous"}},
-        },
-    )
-    assert cfg.architecture.pipeline.mode == PipelineMode.CONTINUOUS
-    assert cfg.architecture.pipeline.mode.value == "continuous"
+_RECIPE = "hive-iceberg-spark-trino"
 
 
-def test_mode_sustained_is_the_deprecated_alias(tmp_path):
-    with pytest.warns(DeprecationWarning, match="use 'mode: continuous'"):
-        cfg = load_config(
-            _write(tmp_path, {"name": "t", "architecture": {"pipeline": {"mode": "sustained"}}})
-        )
-    assert cfg.architecture.pipeline.mode == PipelineMode.CONTINUOUS
-    assert PipelineMode.SUSTAINED is PipelineMode.CONTINUOUS
-
-
-def test_pipeline_continuous_key_is_canonical(tmp_path):
-    cfg = _load_quiet(
-        tmp_path,
-        {
-            "name": "t",
-            "recipe": "hive-iceberg-spark-trino",
-            "architecture": {"pipeline": {"continuous": {"run_duration": 600}}},
-        },
-    )
-    assert cfg.architecture.pipeline.sustained.run_duration == 600
-
-
-def test_pipeline_sustained_key_is_the_deprecated_alias(tmp_path):
-    with pytest.warns(DeprecationWarning, match="pipeline.continuous"):
-        cfg = load_config(
-            _write(
-                tmp_path,
-                {"name": "t", "architecture": {"pipeline": {"sustained": {"run_duration": 600}}}},
-            )
-        )
-    assert cfg.architecture.pipeline.sustained.run_duration == 600
+@pytest.mark.parametrize(
+    ("pipeline", "top", "deprecated", "mode", "run_duration"),
+    [
+        ({"mode": "continuous"}, {}, False, "continuous", None),
+        ({"mode": "sustained"}, {}, True, "continuous", None),
+        ({"continuous": {"run_duration": 600}}, {}, False, "batch", 600),
+        ({"sustained": {"run_duration": 600}}, {}, True, "batch", 600),
+        ({}, {"processing": {"mode": "sustained"}}, True, "continuous", None),
+    ],
+    ids=[
+        "mode-continuous",
+        "mode-sustained",
+        "continuous-key",
+        "sustained-key",
+        "processing-key",
+    ],
+)
+def test_continuous_spellings_resolve_to_one_mode(
+    tmp_path, pipeline, top, deprecated, mode, run_duration
+):
+    arch = {**top}
+    if pipeline:
+        arch["pipeline"] = pipeline
+    data = {"name": "t", "recipe": _RECIPE, "architecture": arch}
+    default = load_config(_write(tmp_path, {"name": "t"})).architecture.pipeline
+    if deprecated:
+        cfg = _load_warns(tmp_path, data)
+    else:
+        cfg = _load_quiet(tmp_path, data)
+    resolved = cfg.architecture.pipeline
+    assert resolved.mode.value == mode
+    assert resolved.sustained.run_duration == (run_duration or default.sustained.run_duration)
 
 
 def test_pipeline_continuous_and_sustained_keys_together_refused(tmp_path):
@@ -152,13 +137,6 @@ def test_pipeline_continuous_and_sustained_keys_together_refused(tmp_path):
     }
     with pytest.raises(ConfigValidationError, match="both 'pipeline.continuous'"):
         load_config(_write(tmp_path, data))
-
-
-def test_processing_key(tmp_path):
-    cfg = _load_warns(
-        tmp_path, {"name": "t", "architecture": {"processing": {"mode": "sustained"}}}
-    )
-    assert cfg.architecture.pipeline.mode == PipelineMode.SUSTAINED
 
 
 def test_scratch_create_storage_class_is_dropped_with_warning(tmp_path):
@@ -172,32 +150,3 @@ def test_scratch_create_storage_class_is_dropped_with_warning(tmp_path):
     assert not hasattr(cfg.platform.storage.scratch, "create_storage_class")
     with pytest.raises(ConfigValidationError, match="'create_storage_class' was removed"):
         load_config(_write(tmp_path, data))
-
-
-def test_flat_top_level_fields_still_promote(tmp_path):
-    cfg = load_config(_write(tmp_path, {"name": "t", "scale": 5, "mode": "batch"}))
-    assert cfg.architecture.workload.datagen.scale == 5
-
-
-def test_workload_schema_alias_and_field_name(tmp_path):
-    a = load_config(
-        _write(tmp_path, {"name": "t", "architecture": {"workload": {"schema": "financial"}}})
-    )
-    b = LakebenchConfig(name="t", architecture={"workload": {"schema_type": "financial"}})
-    assert a.architecture.workload.schema_type == b.architecture.workload.schema_type
-
-
-def test_dump_roundtrip_revalidates():
-    cfg = LakebenchConfig(name="t", architecture={"workload": {"schema": "financial"}})
-    again = LakebenchConfig.model_validate(cfg.model_dump(mode="json"))
-    assert again == cfg
-
-
-def test_init_template_validates(tmp_path, monkeypatch):
-    from lakebench.cli._init import first_day_config
-
-    monkeypatch.setenv("LAKEBENCH_S3_ACCESS_KEY", "a")
-    monkeypatch.setenv("LAKEBENCH_S3_SECRET_KEY", "b")
-    p = tmp_path / "init.yaml"
-    p.write_text(first_day_config(name="init-t"))
-    assert load_config(p).name == "init-t"

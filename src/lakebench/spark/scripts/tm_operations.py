@@ -84,6 +84,10 @@ from common import (
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
+#: Seconds a datagen file may become visible after a later-landed one (a
+#: multipart upload takes its time from the upload); the in-flight count looks
+#: back this far before silver's newest landing time.
+IN_FLIGHT_DISORDER_S = 900
 GOLD_STATUS = env("LB_FINANCIAL_GOLD_DETECTION_STATUS", "gold.detection_status")
 GOLD_RECON = env("LB_FINANCIAL_GOLD_TM_RECONCILIATION", "gold.tm_reconciliation")
 GOLD_COVERAGE = env("LB_FINANCIAL_GOLD_SCENARIO_COVERAGE", "gold.scenario_coverage")
@@ -2254,7 +2258,7 @@ def run_tm_operations(
     the reason) when the layer did not run. ``txns`` is only a fallback: the
     silver table (``txns_table``) is read at one pinned snapshot.
     """
-    from pyspark.sql.functions import col, current_timestamp, lit, timestamp_micros
+    from pyspark.sql.functions import col, current_timestamp, expr, lit, timestamp_micros
     from pyspark.sql.functions import max as max_
 
     params = dict(params or params_from_env())
@@ -2347,10 +2351,16 @@ def run_tm_operations(
             epoch = bronze_stream_epoch(spark, btable, bsid) if bsid is not None else None
             pending = None
             if "ingest_ts" in txns.columns and "ingest_ts" in bronze_df.columns:
+                # ingest_ts is the file's landing time, and a file can become
+                # visible after a later-landed one: the bronze rows from
+                # IN_FLIGHT_DISORDER_S before silver's newest landing on that
+                # are not in silver (by uetr) are the in-flight ones.
                 wm = txns.agg(max_(col("ingest_ts")).alias("w")).collect()[0]["w"]
-                pending = (
-                    bronze_df.where(col("ingest_ts") > lit(wm)).count() if wm is not None else None
-                )
+                if wm is not None:
+                    since = lit(wm) - expr(f"INTERVAL {IN_FLIGHT_DISORDER_S} SECONDS")
+                    recent = bronze_df.where(col("ingest_ts") > since).select("uetr")
+                    taken = txns.where(col("ingest_ts") > since).select("uetr")
+                    pending = recent.join(taken, "uetr", "left_anti").count()
             bronze = {"rows": bronze_df.count(), "pending": pending, "ingested": None}
         else:
             bronze, _ = iceberg_table_stats(spark, btable)

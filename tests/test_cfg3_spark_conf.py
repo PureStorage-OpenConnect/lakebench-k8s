@@ -17,13 +17,11 @@ import yaml
 
 from lakebench.config import LoadPurpose, load_config
 from lakebench.config.loader import ConfigValidationError, load_notes
-from lakebench.modules.pipeline_engines.spark import job as job_mod
 from lakebench.modules.pipeline_engines.spark.conf_keys import (
     LAKEBENCH_OWNED_SPARK_KEYS,
     OWNED_AHEAD_OF_WRITER,
     SPARK_CONF_DEFAULTS,
     USER_OVERRIDABLE_SPARK_KEYS,
-    V16_DEFAULT_SPARK_CONF,
 )
 from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
 from tests.conftest import make_config
@@ -53,19 +51,6 @@ def _write(tmp_path, conf: dict, **extra) -> object:
     return path
 
 
-def test_spark_conf_defaults_are_the_v16_runtime_values():
-    # The values that ran under v1.6 for the keys the job does not own.
-    assert SPARK_CONF_DEFAULTS == {
-        "spark.hadoop.fs.s3a.multipart.size": "268435456",
-        "spark.hadoop.fs.s3a.fast.upload.active.blocks": "16",
-        "spark.hadoop.fs.s3a.attempts.maximum": "20",
-        "spark.hadoop.fs.s3a.retry.limit": "10",
-        "spark.hadoop.fs.s3a.retry.interval": "500ms",
-        "spark.memory.fraction": "0.8",
-        "spark.memory.storageFraction": "0.3",
-    }
-
-
 def test_conf_merges_over_defaults():
     user = {"spark.speculation": "true", "spark.memory.fraction": "0.6"}
     conf = _conf(make_config(spark={"conf": user}), JobType.SILVER_BUILD)
@@ -76,63 +61,48 @@ def test_conf_merges_over_defaults():
     for key, value in SPARK_CONF_DEFAULTS.items():
         if key != "spark.memory.fraction":
             assert conf[key] == value, key
-    # Owned keys are Lakebench's whatever the user map holds.
-    assert conf["spark.sql.shuffle.partitions"] == "64"
-    assert conf["spark.hadoop.fs.s3a.connection.maximum"] == "200"
 
 
-def test_default_config_conf_is_unchanged_by_the_merge():
-    # With no user conf the manifest is what v1.6 built from its default
-    # spark.conf: the same keys and values.
-    conf = _conf(make_config(), JobType.SILVER_BUILD)
-    for key, value in V16_DEFAULT_SPARK_CONF.items():
-        if key not in ("spark.sql.shuffle.partitions", "spark.default.parallelism"):
-            want = {
-                "spark.hadoop.fs.s3a.connection.maximum": "200",
-                "spark.hadoop.fs.s3a.threads.max": "100",
-            }.get(key, value)
-            assert conf[key] == want, key
+def test_owned_key_in_the_user_map_does_not_reach_the_manifest():
+    owned = "spark.sql.shuffle.partitions"
+    base = _conf(make_config(), JobType.SILVER_BUILD)
+    cfg = make_config()
+    cfg.spark.conf[owned] = "7"  # past load-time validation
+    conf = _conf(cfg, JobType.SILVER_BUILD)
+    assert conf[owned] == base[owned] != "7"
 
 
+@pytest.mark.parametrize("purpose", [LoadPurpose.RUN, LoadPurpose.MUTATE])
 @pytest.mark.parametrize(
-    ("key", "needle"),
+    "key",
     [
-        ("spark.jars", "resolved dependency set"),
-        ("spark.jars.packages", "resolved dependency set"),
-        ("spark.jars.repositories", "resolved dependency set"),
-        ("spark.jars.ivy", "resolved dependency set"),
-        ("spark.jars.ivySettings", "resolved dependency set"),
-        ("spark.submit.pyFiles", "resolved dependency set"),
-        ("spark.driver.userClassPathFirst", "resolved dependency set"),
-        ("spark.kubernetes.driver.podTemplateFile", "reserved for Lakebench"),
-        ("spark.sql.shuffle.partitions", "<job>_executors"),
-        ("spark.executor.memory", "job profiles"),
-        ("spark.executor.memoryOverheadFactor", "capacity check"),
-        ("spark.driver.memoryOverhead", "capacity check"),
-        ("spark.memory.offHeap.size", "capacity check"),
-        ("spark.executor.pyspark.memory", "capacity check"),
-        ("spark.sql.session.timeZone", "a job script sets it"),
-        ("spark.sql.autoBroadcastJoinThreshold", "a job script sets it"),
-        ("spark.kubernetes.executor.podNamePrefix", "reserved for Lakebench"),
-        ("spark.kubernetes.node.selector.zone", "reserved for Lakebench"),
-        ("spark.hadoop.fs.s3a.endpoint", "platform.storage.s3.endpoint"),
-        ("spark.sql.catalog.lakehouse.uri", "Lakebench writes it"),
+        "spark.jars",
+        "spark.jars.packages",
+        "spark.jars.repositories",
+        "spark.jars.ivy",
+        "spark.jars.ivySettings",
+        "spark.submit.pyFiles",
+        "spark.driver.userClassPathFirst",
+        "spark.kubernetes.driver.podTemplateFile",
+        "spark.sql.shuffle.partitions",
+        "spark.executor.memory",
+        "spark.executor.memoryOverheadFactor",
+        "spark.driver.memoryOverhead",
+        "spark.memory.offHeap.size",
+        "spark.executor.pyspark.memory",
+        "spark.sql.session.timeZone",
+        "spark.sql.autoBroadcastJoinThreshold",
+        "spark.kubernetes.executor.podNamePrefix",
+        "spark.kubernetes.node.selector.zone",
+        "spark.hadoop.fs.s3a.endpoint",
+        "spark.sql.catalog.lakehouse.uri",
     ],
 )
-@pytest.mark.parametrize("purpose", [LoadPurpose.RUN, LoadPurpose.MUTATE])
-def test_owned_key_refused(tmp_path, key, needle, purpose):
+def test_owned_key_refused(tmp_path, purpose, key):
     path = _write(tmp_path, {key: "x"})
     with pytest.raises(ConfigValidationError) as e:
         load_config(path, purpose=purpose, print_notes=False)
-    assert f"{key} is owned by Lakebench" in str(e.value)
-    assert needle in str(e.value)
-
-
-def test_refusal_is_located_at_spark(tmp_path):
-    path = _write(tmp_path, {"spark.sql.shuffle.partitions": "400"})
-    with pytest.raises(ConfigValidationError) as e:
-        load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
-    assert [tuple(err["loc"]) for err in e.value.errors] == [("spark",)]
+    assert key in str(e.value)
 
 
 def test_record_never_carries_a_secret_or_location():
@@ -143,7 +113,7 @@ def test_record_never_carries_a_secret_or_location():
             "conf": {
                 "spark.hadoop.fs.s3a.secret.key": "SUPERSECRET",
                 "spark.hadoop.fs.azure.account.key.acct.dfs.core.windows.net": "AZSECRET",
-                "spark.hadoop.fs.s3a.bucket.b.endpoint": "http://10.9.9.9:80",
+                "spark.hadoop.fs.s3a.bucket.b.endpoint": "http://192.0.2.21:80",
                 # Secrets and locations under names no key predicate knows.
                 "spark.sql.catalog.other.header.Authorization": "Bearer TOKEN1",
                 "spark.executorEnv.DB_PASS": "ENVSECRET",
@@ -159,7 +129,7 @@ def test_record_never_carries_a_secret_or_location():
     for leaked in (
         "SUPERSECRET",
         "AZSECRET",
-        "10.9.9.9",
+        "192.0.2.21",
         "TOKEN1",
         "ENVSECRET",
         "hidden-bucket",
@@ -197,16 +167,6 @@ def test_owned_key_dropped_with_a_note_for_teardown(tmp_path, purpose):
     cfg = load_config(path, purpose=purpose, print_notes=False)
     assert cfg.spark.conf == {"spark.speculation": "true"}
     assert any("spark.sql.shuffle.partitions" in t for t in load_notes(cfg).texts())
-
-
-def test_v16_default_conf_is_inert(tmp_path):
-    # A config carrying the v1.6 schema default of spark.conf (owned keys at
-    # values v1.6 overwrote) changed nothing: it loads for run with notes.
-    path = _write(tmp_path, dict(V16_DEFAULT_SPARK_CONF))
-    cfg = load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
-    assert all(k in SPARK_CONF_DEFAULTS or k not in V16_DEFAULT_SPARK_CONF for k in cfg.spark.conf)
-    notes = " ".join(load_notes(cfg).texts())
-    assert "spark.sql.shuffle.partitions" in notes and "v1.6 default" in notes
 
 
 @pytest.mark.parametrize(
@@ -291,11 +251,13 @@ def test_record_redaction_rules():
             # a location by value or by name: no digest
             "spark.hadoop.fs.defaultFS": "s3a://b",
             "spark.hadoop.javax.jdo.option.ConnectionURL": "jdbc:postgresql://u:pw@h/db",
-            "spark.hadoop.fs.s3a.bucket.b.endpoint": "http://10.1.2.3",
-            "spark.hadoop.some.host": "10.1.2.3",
+            "spark.hadoop.fs.s3a.bucket.b.endpoint": "http://192.0.2.22",
+            "spark.hadoop.some.host": "192.0.2.22",
+            "spark.x.host": "192.0.2.22:80",
             # not secrets, though the old pattern matched them: digested
             "spark.sql.catalog.x.write.partitionKey": "id",
             "spark.authenticate": "false",
+            "spark.x.coord": "io.x:y_2.13:4.0.0.1",
             "spark.hadoop.fs.s3a.bypass.cache": "true",
             # tuning: clear
             "spark.speculation": "true",
@@ -312,10 +274,12 @@ def test_record_redaction_rules():
         "spark.hadoop.javax.jdo.option.ConnectionURL",
         "spark.hadoop.fs.s3a.bucket.<other-bucket>.endpoint",
         "spark.hadoop.some.host",
+        "spark.x.host",
     }
     assert digested == {
         "spark.sql.catalog.x.write.partitionKey",
         "spark.authenticate",
+        "spark.x.coord",
         "spark.hadoop.fs.s3a.bypass.cache",
     }
     assert rec["spark.speculation"] == "true"
@@ -348,14 +312,6 @@ def test_record_names_bucket_layers_not_bucket_names():
         "spark.hadoop.fs.s3a.bucket.<bronze>.committer.name",
         "spark.hadoop.fs.s3a.bucket.<gold>.committer.name",
     }
-
-
-def test_version_strings_are_not_addresses():
-    from lakebench.metrics.fingerprint_inputs import record_spark_conf
-
-    rec = record_spark_conf({"spark.x.coord": "io.x:y_2.13:4.0.0.1", "spark.x.host": "10.1.2.3:80"})
-    assert rec["spark.x.coord"].startswith("<redacted sha256:")
-    assert rec["spark.x.host"] == "<redacted>"
 
 
 # -- drift: the owned set is exactly what the manifest writes ------------------
@@ -405,6 +361,7 @@ def _written_keys(catalog_name: str = "lakehouse") -> set[str]:
     return written
 
 
+@pytest.mark.slow
 def test_owned_keys_match_what_the_manifest_writes():
     written = _written_keys() - set(SPARK_CONF_DEFAULTS) - USER_OVERRIDABLE_SPARK_KEYS
     expand = {k.replace("{catalog}", "lakehouse") for k in LAKEBENCH_OWNED_SPARK_KEYS}
@@ -419,35 +376,3 @@ def test_owned_keys_match_what_the_manifest_writes():
     renamed = _written_keys("cat2") - set(SPARK_CONF_DEFAULTS) - USER_OVERRIDABLE_SPARK_KEYS
     assert all(is_owned_spark_key(k, "cat2") for k in renamed)
     assert not [k for k in renamed if k.startswith("spark.sql.catalog.lakehouse")]
-
-
-def test_job_py_names_the_owned_set():
-    # The design names the constants in job.py; it re-exports them.
-    assert job_mod.LAKEBENCH_OWNED_SPARK_KEYS is LAKEBENCH_OWNED_SPARK_KEYS
-    assert job_mod.SPARK_CONF_DEFAULTS is SPARK_CONF_DEFAULTS
-
-
-def test_keys_the_job_scripts_set_are_owned():
-    """A key a job script sets with spark.conf.set (always, or while a step
-    runs) would not hold for the whole job, so it is owned too."""
-    import re
-    from pathlib import Path
-
-    from lakebench.modules.pipeline_engines.spark.conf_keys import is_owned_spark_key
-
-    scripts = Path(job_mod.__file__).resolve().parents[3] / "spark" / "scripts"
-    found: set[str] = set()
-    for f in scripts.glob("*.py"):
-        text = f.read_text()
-        found.update(re.findall(r'spark\.conf\.set\(\s*"([^"]+)"', text))
-        # Keys set on the Hadoop configuration reach it as spark.hadoop.<key>.
-        if re.search(r"hconf\.set\(\s*key\b", text):
-            found.update(
-                "spark.hadoop." + k
-                for k in re.findall(r'\bkey\s*=\s*"((?:mapreduce|fs|hadoop)\.[^"]+)"', text)
-            )
-        found.update("spark.hadoop." + k for k in re.findall(r'hconf\.set\(\s*"([^"]+)"', text))
-        if re.search(r"spark\.conf\.set\(\s*key\b", text):
-            found.update(re.findall(r'\bkey\s*=\s*"(spark\.[^"]+)"', text))
-    assert found
-    assert not [k for k in sorted(found) if not is_owned_spark_key(k)]

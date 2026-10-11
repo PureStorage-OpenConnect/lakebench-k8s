@@ -3,9 +3,8 @@
 ``PREREQS`` names everything a deployment needs from the cluster before
 ``deploy`` can succeed. Each entry carries a read-only check, the fix, and the
 text ``docs/prerequisites.md`` is generated from
-(``scripts/gen_prereq_docs.py``), so the page and the checks cannot drift:
-``tests/test_prereq_docs_drift.py`` fails on a hand edit or a registry change
-without a regenerate. ``plan`` runs the same checks through
+(``scripts/gen_prereq_docs.py``); regenerate the page after a registry
+change. ``plan`` runs the same checks through
 :func:`run_prereqs`.
 
 Checks never write. They read through a :class:`ClusterReader`, which tests
@@ -448,16 +447,17 @@ PREREQS: tuple[Prereq, ...] = (
         ),
         doc=(
             "Spark pods run as UID 185 and PostgreSQL as UID 999, so on OpenShift both "
-            "ServiceAccounts need the `anyuid` SCC (the Spark Operator's get it at operator install). `deploy` "
-            "grants it the way `oc adm policy add-scc-to-user` does on OpenShift 4.10 and "
-            f"later: the RoleBinding `{ANYUID_CLUSTER_ROLE}` in the ServiceAccount's own "
-            "namespace, bound to the ClusterRole of the same name, made through the API. "
-            "Before writing it checks with a LocalSubjectAccessReview whether the "
-            "ServiceAccount may already use the SCC (an admin's grant), and afterwards that "
-            "the grant took effect. The deploying user needs permission to create "
-            "RoleBindings in the namespace and to bind that ClusterRole. A grant that cannot "
-            "be made fails the deploy step; it is never a warning. OpenShift before 4.10, "
-            "which has no such ClusterRole, is not supported."
+            "ServiceAccounts need the `anyuid` SCC. The Spark Operator's ServiceAccounts get it "
+            "at operator install.\n\n"
+            "- `deploy` grants it as `oc adm policy add-scc-to-user` does on OpenShift 4.10 "
+            f"and later: the RoleBinding `{ANYUID_CLUSTER_ROLE}` in the ServiceAccount's "
+            "namespace, bound to the ClusterRole of the same name.\n"
+            "- Before writing, a LocalSubjectAccessReview checks whether an admin already "
+            "granted it. Afterwards `deploy` checks that the grant took effect.\n"
+            "- The deploying user needs to create RoleBindings in the namespace and to bind "
+            "that ClusterRole.\n"
+            "- A grant that cannot be made fails the deploy step. It is never a warning.\n"
+            "- OpenShift before 4.10 has no such ClusterRole and is not supported."
         ),
     ),
     Prereq(
@@ -472,16 +472,17 @@ PREREQS: tuple[Prereq, ...] = (
             "admin mark one as the cluster default. Prefer a replicated one."
         ),
         doc=(
-            "Each deployment runs its own dependency server, `lb-deps`, which keeps the "
-            "resolved jars, wheels and DuckDB extensions on a 5Gi ReadWriteOnce PVC, "
-            "`lb-deps-data`, from `platform.deps.storage_class` or, when that is empty, the "
-            "cluster default StorageClass. The volume must be writable by UID 185 through "
-            "`fsGroup`. A replicated StorageClass is recommended: if the volume is lost with "
-            "its node, the server pod stays Pending, every `run` stops until the PVC is "
-            "deleted and `deploy` is re-run, and that `deploy` resolves the set again from "
-            "the public repositories or the configured mirrors. The class is read only when "
-            "the PVC is created; to move an existing set, delete the PVC and re-run `deploy`. "
-            "When the PVC exists the check reports its class and nothing else."
+            "Each deployment runs its own dependency server, `lb-deps`. It keeps the resolved "
+            "jars, wheels and DuckDB extensions on a 5Gi ReadWriteOnce PVC, `lb-deps-data`.\n\n"
+            "- The class is `platform.deps.storage_class`, or the cluster default when that "
+            "is empty.\n"
+            "- The volume must be writable by UID 185 through `fsGroup`.\n"
+            "- Use a replicated class. If the volume is lost with its node, the server pod "
+            "stays Pending and every `run` stops. Delete the PVC and re-run `deploy`, which "
+            "resolves the set again.\n"
+            "- The class is read only when the PVC is created. To move a set, delete the PVC "
+            "and re-run `deploy`.\n"
+            "- When the PVC exists, the check reports its class and nothing else."
         ),
     ),
     Prereq(
@@ -497,27 +498,27 @@ PREREQS: tuple[Prereq, ...] = (
             "and `platform.deps.duckdb_extension_repository` at mirrors the cluster can reach."
         ),
         doc=(
-            "`deploy` resolves every jar, wheel and DuckDB extension the deployment uses once, "
-            "in the `lb-deps` pod, from Maven Central and its Google mirror, from PyPI "
-            "(pypi.org and files.pythonhosted.org) for the AML reference and DuckDB wheels, "
-            "and from extensions.duckdb.org for DuckDB. After that no pod fetches a dependency "
-            "from outside the deployment: Spark jobs, Spark Thrift and DuckDB read the set "
-            "from `lb-deps`. The resolve runs again when the request changes (a new image, "
-            "version or mirror) and when the set must be rebuilt (a new or lost PVC, a "
-            "damaged set), so egress is needed at those deploys only. The check lists the "
-            "hosts this config's resolve reads and does not probe them. A host the resolve "
-            "cannot connect to fails the `deps` step of `deploy`, naming the repository and "
-            "the mirror keys; a proxy that answers with an error fails it naming the "
+            "`deploy` resolves every jar, wheel and DuckDB extension once, in the `lb-deps` "
+            "pod. After that no pod fetches a dependency from outside the deployment.\n\n"
+            "- Sources: Maven Central and its Google mirror; PyPI (pypi.org and "
+            "files.pythonhosted.org) for the AML reference and DuckDB wheels; "
+            "extensions.duckdb.org for DuckDB.\n"
+            "- Spark jobs, Spark Thrift and DuckDB read the set from `lb-deps`.\n"
+            "- Egress is needed only at a deploy that resolves again: a new image, version or "
+            "mirror, or a new, lost or damaged set.\n"
+            "- The check lists the hosts this config reads and does not probe them.\n"
+            "- An unreachable host fails the `deps` step of `deploy`, naming the repository "
+            "and the mirror keys. A proxy that answers with an error fails it, naming the "
             "artifact and the repository.\n\n"
-            "On a cluster without that egress, set the mirror keys under `platform.deps`. "
-            "`maven_repository` becomes the only Maven repository; `pypi_index` replaces "
-            "pypi.org as a PyPI simple index; `duckdb_extension_repository` replaces "
-            "extensions.duckdb.org. Mirrors are read anonymously, over plain HTTP or over "
-            "HTTPS with a publicly trusted certificate; mirror credentials and a private CA "
-            "are not supported. Changing a mirror re-resolves at the next `deploy`. A mirror "
-            "that serves the same bytes gives the same set hash, so runs before and after "
-            "stay like-for-like; one that serves other bytes gives a different set, and "
-            "those runs are not like-for-like.\n\n"
+            "On a cluster without that egress, set the mirror keys under `platform.deps`:\n\n"
+            "- `maven_repository` becomes the only Maven repository.\n"
+            "- `pypi_index` replaces pypi.org as a PyPI simple index.\n"
+            "- `duckdb_extension_repository` replaces extensions.duckdb.org.\n\n"
+            "Mirrors are read anonymously, over HTTP or over HTTPS with a publicly trusted "
+            "certificate. Mirror credentials and a private CA are not supported. Changing a "
+            "mirror re-resolves at the next `deploy`. A mirror that serves the same bytes "
+            "gives the same set hash, so runs stay like-for-like. Other bytes give a different "
+            "set, and those runs are not like-for-like.\n\n"
             "Image pulls are separate: the nodes pull the images named under `images` (and "
             "the Stackable Hive image for a Hive catalog) from their registries at every "
             "pod start."
@@ -704,7 +705,7 @@ DOC_HEADER = """\
 # Prerequisites
 
 <!-- Generated by scripts/gen_prereq_docs.py from src/lakebench/deploy/prereqs.py.
-     Do not edit by hand: tests/test_prereq_docs_drift.py fails on any difference. -->
+     Do not edit by hand: regenerate with scripts/gen_prereq_docs.py. -->
 
 What a cluster needs before `lakebench deploy` can succeed. Each entry is a
 read-only check in `src/lakebench/deploy/prereqs.py`, and the preflight of

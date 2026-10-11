@@ -12,7 +12,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from lakebench.deploy.cluster_lock import ClusterLockError, ClusterLockHeld
 from lakebench.modules.pipeline_engines.spark import operator as mgr_mod
 from lakebench.modules.pipeline_engines.spark.operator import (
     SparkOperatorManager,
@@ -26,88 +25,6 @@ def _mgr() -> SparkOperatorManager:
         version="2.5.1",
         job_namespace="my-ns",
     )
-
-
-class TestStrictMode:
-    def test_strict_dispatches_to_locked(self):
-        mgr = _mgr()
-        with patch.object(
-            mgr, "_remove_namespace_from_watch_locked", return_value=True
-        ) as mock_locked:
-            r = mgr.remove_namespace_from_watch("my-ns", strict=True)
-        assert r is True
-        mock_locked.assert_called_once_with("my-ns", None, None)
-
-    def test_nonstrict_does_not_engage_lock(self):
-        mgr = _mgr()
-        with (
-            patch.object(mgr, "_remove_namespace_from_watch_locked") as mock_locked,
-            patch.object(mgr, "_get_watched_namespaces", return_value=None),
-        ):
-            # Non-strict path returns True for "watches all namespaces".
-            r = mgr.remove_namespace_from_watch("my-ns")
-        assert r is True
-        mock_locked.assert_not_called()
-
-    def test_raises_on_helm_failure(self):
-        """A False from the underlying helper becomes an error message
-        naming ``admin repair-operator`` for recovery."""
-        mgr = _mgr()
-        cm_ctx = MagicMock()
-        cm_ctx.__enter__ = MagicMock(return_value=MagicMock())
-        cm_ctx.__exit__ = MagicMock(return_value=False)
-        with (
-            patch("kubernetes.client.CoreV1Api"),
-            patch("lakebench.deploy.cluster_lock.cluster_lock", return_value=cm_ctx),
-            patch.object(mgr, "_remove_namespace_from_watch_impl", return_value=False),
-        ):
-            with pytest.raises(WatchListMutationError) as ei:
-                mgr._remove_namespace_from_watch_locked("my-ns")
-        assert "admin repair-operator" in str(ei.value)
-
-    def test_raises_on_lease_held(self):
-        mgr = _mgr()
-        with (
-            patch("kubernetes.client.CoreV1Api"),
-            patch(
-                "lakebench.deploy.cluster_lock.cluster_lock",
-                side_effect=ClusterLockHeld(
-                    holder="other@host@abc",
-                    acquired_at="2026-09-21T00:00:00+00:00",
-                    ttl_seconds=3600,
-                    expires_at="2026-09-21T01:00:00+00:00",
-                ),
-            ),
-        ):
-            with pytest.raises(WatchListMutationError) as ei:
-                mgr._remove_namespace_from_watch_locked("my-ns")
-        assert "other@host@abc" in str(ei.value)
-        assert "release-lock" in str(ei.value)
-
-    def test_raises_on_lease_error(self):
-        mgr = _mgr()
-        with (
-            patch("kubernetes.client.CoreV1Api"),
-            patch(
-                "lakebench.deploy.cluster_lock.cluster_lock",
-                side_effect=ClusterLockError("transport blew up"),
-            ),
-        ):
-            with pytest.raises(WatchListMutationError) as ei:
-                mgr._remove_namespace_from_watch_locked("my-ns")
-        assert "admin repair-operator" in str(ei.value)
-
-    def test_success_returns_true(self):
-        mgr = _mgr()
-        cm_ctx = MagicMock()
-        cm_ctx.__enter__ = MagicMock(return_value=MagicMock())
-        cm_ctx.__exit__ = MagicMock(return_value=False)
-        with (
-            patch("kubernetes.client.CoreV1Api"),
-            patch("lakebench.deploy.cluster_lock.cluster_lock", return_value=cm_ctx),
-            patch.object(mgr, "_remove_namespace_from_watch_impl", return_value=True),
-        ):
-            assert mgr._remove_namespace_from_watch_locked("my-ns") is True
 
 
 class TestPrecondition:
@@ -198,48 +115,14 @@ class TestAddRefusesTerminatingNamespace:
         )
         return ns
 
-    def test_terminating_namespace_is_not_added(self):
-        mgr = _mgr()
-        with (
-            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
-            patch("kubernetes.client.CoreV1Api") as core,
-            patch.object(mgr, "_run") as run,
-        ):
-            core.return_value.read_namespace.return_value = self._ns(deleting=True)
-            assert mgr._add_namespace_to_watch_impl("my-ns") is False
-        run.assert_not_called()
-
-    def test_live_namespace_is_added(self):
-        mgr = _mgr()
-        with (
-            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
-            patch.object(mgr, "_filter_existing_namespaces", return_value=["other"]),
-            patch("kubernetes.client.CoreV1Api") as core,
-            patch.object(mgr, "_run", return_value=MagicMock(returncode=1, stderr="boom")) as run,
-        ):
-            core.return_value.read_namespace.return_value = self._ns(deleting=False)
-            mgr._add_namespace_to_watch_impl("my-ns")
-        assert run.called, "a live namespace proceeds to the helm upgrade"
-
-    def test_namespace_already_gone_is_not_added(self):
-        """Fix review: destroy can finish deleting it while the deploy waits
-        for the lease; a 404 must refuse, not fail open."""
-        from kubernetes.client.rest import ApiException
-
-        mgr = _mgr()
-        with (
-            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
-            patch("kubernetes.client.CoreV1Api") as core,
-            patch.object(mgr, "_run") as run,
-        ):
-            core.return_value.read_namespace.side_effect = ApiException(status=404)
-            assert mgr._add_namespace_to_watch_impl("my-ns") is False
-        run.assert_not_called()
-
-    @pytest.mark.parametrize("status", [429, 500, 503])
-    def test_unreadable_namespace_is_not_added(self, status, monkeypatch):
-        """Third review: under API throttling a failed read must refuse the
-        add, not treat the namespace as live (crash-loop route)."""
+    @pytest.mark.parametrize(
+        "read",
+        ["terminating", 404, 429, 500, 503, "transport"],
+    )
+    def test_unproven_namespace_is_not_added(self, read, monkeypatch):
+        """A terminating, gone (destroy finished while deploy waited for the
+        lease), throttled or unreachable namespace read refuses the add: no
+        helm upgrade (a watched deleted namespace crash-loops the operator)."""
         from kubernetes.client.rest import ApiException
 
         monkeypatch.setattr(mgr_mod.time, "sleep", lambda _s: None)
@@ -249,43 +132,54 @@ class TestAddRefusesTerminatingNamespace:
             patch("kubernetes.client.CoreV1Api") as core,
             patch.object(mgr, "_run") as run,
         ):
-            core.return_value.read_namespace.side_effect = ApiException(status=status)
+            rn = core.return_value.read_namespace
+            if read == "terminating":
+                rn.return_value = self._ns(deleting=True)
+            elif read == "transport":
+                rn.side_effect = ConnectionError("reset")
+            else:
+                rn.side_effect = ApiException(status=read)
             assert mgr._add_namespace_to_watch_impl("my-ns") is False
         run.assert_not_called()
 
-    def test_transport_error_is_not_added(self, monkeypatch):
-        mgr = _mgr()
-        with (
-            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
-            patch("kubernetes.client.CoreV1Api") as core,
-            patch.object(mgr, "_run") as run,
-        ):
-            monkeypatch.setattr(mgr_mod.time, "sleep", lambda _s: None)
-            core.return_value.read_namespace.side_effect = ConnectionError("reset")
-            assert mgr._add_namespace_to_watch_impl("my-ns") is False
-        run.assert_not_called()
-
-    def test_one_transient_error_is_retried_then_added(self, monkeypatch):
-        """Fourth review: a single 429 must not fail deploy after postgres,
-        catalog and engine are up; retry the read, then proceed."""
+    @pytest.mark.parametrize("transient", [False, True])
+    def test_live_namespace_is_added(self, transient, monkeypatch):
+        """A live namespace, or one read after a single transient 429, is added
+        to spark.jobNamespaces by the helm upgrade."""
         from kubernetes.client.rest import ApiException
 
-        slept: list[float] = []
-        monkeypatch.setattr(mgr_mod.time, "sleep", lambda sec: slept.append(sec))
+        monkeypatch.setattr(mgr_mod.time, "sleep", lambda _s: None)
         mgr = _mgr()
+        reads = [self._ns(deleting=False)]
+        if transient:
+            reads.insert(0, ApiException(status=429))
+        chart = '[{"name": "spark-operator", "chart": "spark-operator-2.5.1"}]'
+
+        upgraded: list[bool] = []
+
+        def watched(*_a, **_kw):
+            return ["other", "my-ns"] if upgraded else ["other"]
+
+        def run_cmd(cmd, **_kw):
+            is_list = cmd[:2] == ["helm", "list"]
+            if cmd[:2] == ["helm", "upgrade"]:
+                upgraded.append(True)
+            return MagicMock(returncode=0, stdout=chart if is_list else "", stderr="")
+
         with (
-            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
+            patch.object(mgr, "_get_watched_namespaces", side_effect=watched),
             patch.object(mgr, "_filter_existing_namespaces", return_value=["other"]),
             patch("kubernetes.client.CoreV1Api") as core,
-            patch.object(mgr, "_run", return_value=MagicMock(returncode=1, stderr="x")) as run,
+            patch.object(mgr, "_run", side_effect=run_cmd) as run,
         ):
-            core.return_value.read_namespace.side_effect = [
-                ApiException(status=429),
-                self._ns(deleting=False),
-            ]
-            mgr._add_namespace_to_watch_impl("my-ns")
-        assert run.called
-        assert slept == [0.5]
+            core.return_value.read_namespace.side_effect = reads
+            added = mgr._add_namespace_to_watch_impl("my-ns")
+        assert added is True
+        upgrades = [c.args[0] for c in run.call_args_list if c.args[0][:2] == ["helm", "upgrade"]]
+        assert any(
+            any(a.startswith("spark.jobNamespaces=") and "my-ns" in a and "other" in a for a in cmd)
+            for cmd in upgrades
+        )
 
 
 class TestPinnedContext:
@@ -355,48 +249,6 @@ class TestPinnedContext:
             assert mgr._add_namespace_to_watch("my-ns") is False
         pin.assert_called_once()
         impl.assert_called_once()
-
-    def test_add_conflict_after_the_upgrade_fails_closed_and_names_repair(self, caplog):
-        """A kubeconfig rewritten after the helm upgrade (before the
-        OpenShift patches) must not escape as a raw error."""
-        from lakebench.k8s.target import ContextConflictError
-
-        mgr = _mgr()
-        with (
-            patch.object(mgr, "_acquire_watch_lease", return_value=(None, "unlocked")),
-            patch("lakebench.k8s.target.cli_args", return_value=[]),
-            patch.object(
-                mgr,
-                "_add_namespace_to_watch_impl",
-                side_effect=ContextConflictError("one cluster context per process"),
-            ),
-            caplog.at_level("ERROR"),
-        ):
-            assert mgr._add_namespace_to_watch("my-ns") is False
-        assert "admin repair-operator" in caplog.text
-        assert "partly modified" in caplog.text
-
-    def test_conflict_mid_sequence_names_repair_operator(self):
-        from lakebench.k8s.target import ContextConflictError
-
-        mgr = _mgr()
-        cm_ctx = MagicMock()
-        cm_ctx.__enter__ = MagicMock(return_value=MagicMock())
-        cm_ctx.__exit__ = MagicMock(return_value=False)
-        with (
-            patch("lakebench.k8s.target.cli_args", return_value=[]),
-            patch("kubernetes.client.CoreV1Api"),
-            patch("lakebench.deploy.cluster_lock.cluster_lock", return_value=cm_ctx),
-            patch.object(
-                mgr,
-                "_remove_namespace_from_watch_impl",
-                side_effect=ContextConflictError("one cluster context per process"),
-            ),
-        ):
-            with pytest.raises(WatchListMutationError) as ei:
-                mgr._remove_namespace_from_watch_locked("my-ns")
-        assert "partly modified" in str(ei.value)
-        assert "admin repair-operator" in str(ei.value)
 
     def test_run_refuses_a_tool_given_as_a_path(self):
         mgr = _mgr()

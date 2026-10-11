@@ -3,8 +3,8 @@
 Historically a run reported a single ``success`` boolean. That was too coarse:
 the process exit code, the HTML badge, and the underlying pipeline / benchmark
 gate outcomes can disagree. A run whose CLI exited 0 with all jobs succeeded
-can still be FAILED by the badge (e.g. LB-044, sustained runs where bronze
-never kept pace with the trickle, or gold was stale for most of the window).
+can still be FAILED by the badge (e.g. sustained runs where bronze never
+kept pace with the trickle, or a stage fell behind through the window).
 
 This module defines the ``Verdict`` value object, the shared badge helper
 (``compute_badge_status``) that both this module and ``reports.generator``
@@ -365,7 +365,7 @@ def compute_badge_status(
             and pb.pipeline_saturated is False
         ):
             # The configured trickle bounded intake and the pipeline kept
-            # pace with it (LB-156): a caveat on the ratio, not a failure.
+            # pace with it: a caveat on the ratio, not a failure.
             warnings.append(pb.trickle_note() or "Intake held to the trickle rate")
         elif (
             is_sustained
@@ -378,12 +378,22 @@ def compute_badge_status(
                 f"Ingest ratio {pb.ingest_ratio:.2f}: intake held to the trickle rate, "
                 "but silver's pace was not measured, so saturation is unknown"
             )
+        elif (
+            is_sustained
+            and pb.ingest_ratio is not None
+            and pb.ingest_ratio < 0.95
+            and getattr(pb, "datagen_ahead", None)
+            and pb.intake_limit == "bronze_capacity"
+        ):
+            # Continuous datagen stayed ahead of a busy bronze: the backlog
+            # is what the run measures (bronze's capacity), not a failure.
+            pass
         elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio < 0.95:
-            cause = (
-                "intake held to the trickle rate, silver did not keep pace"
-                if pb.intake_limit == "trickle_rate"
-                else "pipeline saturated"
-            )
+            cause = {
+                "trickle_rate": "intake held to the trickle rate, silver did not keep pace",
+                # Bronze had idle time: a late start or a stall, not capacity.
+                "below_bronze_capacity": "bronze took in less than arrived without being at capacity",
+            }.get(pb.intake_limit or "", "pipeline saturated")
             reasons.append(f"Ingest ratio {pb.ingest_ratio:.2f} < 0.95 ({cause})")
         elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio > 1.05:
             warnings.append(
@@ -399,20 +409,39 @@ def compute_badge_status(
                 f"Scale ratio {pb.scale_ratio:.1%} > 105% (more data than the scale asks for)"
             )
 
-    # Freshness -- sustained mode only
+    # Freshness -- sustained mode only. Peak freshness is a number, never a
+    # gate: wall clock includes reset and drain, and a fixed share of the
+    # window fails a slow gold cadence on any system.
     if is_sustained and pb is not None and pb.data_freshness_seconds is not None:
         run_dur = metrics.total_elapsed_seconds or 1.0
         freshness_pct = pb.data_freshness_seconds / run_dur
-        if freshness_pct > 0.5:
-            reasons.append(
+        snap = getattr(pb, "config_snapshot", None) or {}
+        # A capacity run offers more than the pipeline takes in, so its
+        # slowest stage falls behind by design and pace is its score: stale
+        # gold is reported, not failed. One is a run whose datagen left a
+        # backlog at bronze.
+        capacity_run = bool(snap.get("datagen_continuous")) and bool(
+            getattr(pb, "datagen_ahead", None)
+        )
+        if freshness_pct > 0.5 and capacity_run:
+            warnings.append(
                 f"Gold freshness {pb.data_freshness_seconds:,.0f}s "
-                f"({freshness_pct:.0%} of run duration -- gold was stale for most of the run)"
+                f"({freshness_pct:.0%} of run duration): a capacity run, its slowest stage "
+                "fell behind what datagen offered; pace is the score"
+            )
+        elif freshness_pct > 0.5:
+            # Reported, not judged: whether gold kept up is the balance
+            # gate (its lag did not climb through the window).
+            warnings.append(
+                f"Gold freshness {pb.data_freshness_seconds:,.0f}s "
+                f"({freshness_pct:.0%} of run duration); the balance gate judges "
+                "whether gold kept up"
             )
 
     if is_sustained and pb is not None and pb.corpus_drained:
         warnings.append(
             "Corpus fully ingested before the window ended: freshness covers only gold "
-            "cycles that saw new data, and rows/s is a lower bound set by corpus size (LB-145)"
+            "cycles that saw new data, and rows/s is a lower bound set by corpus size"
         )
 
     # Job / streaming success
@@ -710,8 +739,12 @@ def _layer_rows_gate(metrics: PipelineMetrics) -> _GateResult:
                 if value <= 0:
                     res.reasons.append(f"{layer} has 0 rows: the layer is empty")
                 continue
-            size = float(getattr(metrics, f"{layer}_size_gb", 0) or 0)
-            if size > 0:
+            size = getattr(metrics, f"{layer}_size_gb", None)
+            if size is None:
+                res.reasons.append(
+                    f"{layer}: rows and bytes not measured, so the layer is not shown non-empty"
+                )
+            elif size > 0:
                 unmeasured.append(layer)
                 res.warnings.append(f"rows not measured for {layer}; bytes > 0")
             else:
@@ -734,6 +767,102 @@ def _layer_rows_gate(metrics: PipelineMetrics) -> _GateResult:
     return res
 
 
+def scored_rule_status(metrics: Any) -> tuple[set[str], dict[str, str], dict[str, str]] | None:
+    """Continuous AML: ``(ran, skipped, errored)`` from the detection status
+    the covered scorer read (``financial_scoring.covered.rules``), the status
+    of the tick whose alerts were scored; when scoring did not run, from the
+    drain tick's logged status (``continuous.ticks``). None when neither is
+    recorded.
+
+    A rule that alerted on an earlier tick but skipped or failed on the
+    scored one did not produce the scored alerts. Mode-excluded rules are
+    left out (they are not in the continuous expected set); any status other
+    than ran or skipped counts as errored.
+    """
+    scoring = getattr(metrics, "financial_scoring", None)
+    covered = scoring.get("covered") if isinstance(scoring, Mapping) else None
+    rows = covered.get("rules") if isinstance(covered, Mapping) else None
+    if not isinstance(rows, list):
+        rows = _drain_tick_rule_rows(metrics)
+    if rows is None:
+        return None
+    ran: set[str] = set()
+    skipped: dict[str, str] = {}
+    errored: dict[str, str] = {}
+    for row in rows:
+        if not isinstance(row, Mapping) or not row.get("rule_id"):
+            continue
+        rule, status, why = str(row["rule_id"]), row.get("status"), row.get("reason")
+        if status == "ran":
+            ran.add(rule)
+        elif status == "skipped":
+            if why != "mode-excluded":
+                skipped[rule] = str(why or "no reason recorded")
+        else:
+            errored[rule] = str(why or f"status {status}")
+    return ran, skipped, errored
+
+
+#: The screening rules, in continuous AML from 1.7.1: a record whose rule
+#: status has no row for either ran before they joined it.
+_SCREENING_RULES = frozenset({"W5_sanctions_match", "W6_pep_counterparty"})
+
+
+def continuous_excluded_rules(metrics: Any) -> frozenset[str]:
+    """The rules this continuous AML record's run excluded by mode, so a
+    record is judged by the rule set it ran with: today's excluded rules
+    (excluded in every version), any the record marks ``mode-excluded``,
+    and W5 and W6 when its rule status has no row for either (a run from
+    before they joined continuous, or one that logged no status)."""
+    from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
+
+    scoring = getattr(metrics, "financial_scoring", None)
+    covered = scoring.get("covered") if isinstance(scoring, Mapping) else None
+    rows = covered.get("rules") if isinstance(covered, Mapping) else None
+    if not isinstance(rows, list):
+        rows = _drain_tick_rule_rows(metrics)
+    rows = [r for r in rows or [] if isinstance(r, Mapping) and r.get("rule_id")]
+    out = set(AML_CONTINUOUS_SKIPPED_RULES)
+    out |= {
+        str(r["rule_id"])
+        for r in rows
+        if r.get("status") == "skipped" and r.get("reason") == "mode-excluded"
+    }
+    if rows:
+        seen = {str(r["rule_id"]) for r in rows}
+    else:
+        # No status recorded: the rules that alerted (time-to-detect lines).
+        seen = {
+            str(rule)
+            for stream in getattr(metrics, "streaming", None) or []
+            for rule in (getattr(stream, "ttd_by_rule", None) or {})
+        }
+    if not _SCREENING_RULES & seen:
+        out |= _SCREENING_RULES
+    return frozenset(out)
+
+
+def _drain_tick_rule_rows(metrics: Any) -> list[dict[str, Any]] | None:
+    """The drain tick's rule status (``continuous.ticks[].rule_status`` of
+    the drain's last completed cycle) as covered-score rule rows, for a run
+    whose scoring did not run; None when not recorded."""
+    cont = getattr(metrics, "continuous", None)
+    if not isinstance(cont, Mapping):
+        return None
+    drain = cont.get("drain")
+    cycle = drain.get("last_completed_cycle") if isinstance(drain, Mapping) else None
+    ticks = [t for t in cont.get("ticks") or [] if isinstance(t, Mapping)]
+    match = [t for t in ticks if cycle is not None and t.get("cycle") == cycle]
+    status = match[-1].get("rule_status") if match else None
+    if not isinstance(status, Mapping):
+        return None
+    rows = []
+    for rule, value in status.items():
+        state, _, reason = str(value).partition(":")
+        rows.append({"rule_id": rule, "status": state, "reason": reason or None})
+    return rows
+
+
 def _aml_rules_gate(metrics: PipelineMetrics) -> _GateResult:
     """The expected AML rules ran, none errored, and detection alerted.
 
@@ -746,15 +875,15 @@ def _aml_rules_gate(metrics: PipelineMetrics) -> _GateResult:
     skip fails, and so does a rule outside it. With no per-rule counts the
     rule set is not measured: a warning, as the CLI says. A ``run --stage
     gold-finalize`` record is judged the same way; another single stage
-    runs no detection. Continuous takes the rules from the gold-refresh
-    per-rule time-to-detect lines, which exist only for rules that alerted:
-    it fails a mode-excluded rule (or one outside ``RULE_TARGETS``) that
-    ran, and zero alerts unless a cycle could not count them. The continuous
-    record carries no rule errors or skips, so neither is judged there, and
-    a rule with no alerts is not a failure.
+    runs no detection. Continuous judges the status of the scored tick
+    (``scored_rule_status``) the same way, with no skip allowed: a rule that
+    skipped or failed there fails, even if it alerted on earlier ticks. It
+    also fails zero alerts unless a cycle could not count them. A continuous
+    record with no scored status and no logged drain-tick status takes the
+    rules from the per-rule time-to-detect lines (rules that alerted on some
+    tick), with a warning that the scored rule set is not recorded.
     """
     from lakebench.benchmark.aml_queries import RULE_TARGETS
-    from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
 
     res = _GateResult()
     if getattr(metrics, "stage_only", None) not in (None, "gold-finalize"):
@@ -763,7 +892,7 @@ def _aml_rules_gate(metrics: PipelineMetrics) -> _GateResult:
     allowed = EXPECTED_SKIPS.get(("financial", mode), {})
     expected = set(RULE_TARGETS)
     if mode == "continuous":
-        expected -= set(AML_CONTINUOUS_SKIPPED_RULES)
+        expected -= continuous_excluded_rules(metrics)
     gold_jobs = [j for j in metrics.jobs if j.job_type == "gold-finalize"]
     last = gold_jobs[-1] if gold_jobs else None
     if mode == "batch" and last is None:
@@ -772,8 +901,14 @@ def _aml_rules_gate(metrics: PipelineMetrics) -> _GateResult:
     skipped = dict(getattr(last, "rules_skipped", None) or {})
     by_rule = dict(getattr(last, "alerts_by_rule", None) or {})
     executed = set(by_rule)
-    if mode == "continuous":
+    scored = scored_rule_status(metrics) if mode == "continuous" else None
+    if scored is not None:
+        executed, skipped, errors = scored
+    elif mode == "continuous":
         executed |= {r for s in metrics.streaming for r in (s.ttd_by_rule or {})}
+        res.warnings.append(
+            "rule status at the scored tick not recorded: rules taken from time-to-detect lines"
+        )
     executed -= set(errors)
     for rule, err in sorted(errors.items()):
         res.reasons.append(f"detection rule {rule} failed: {err}")
@@ -791,8 +926,17 @@ def _aml_rules_gate(metrics: PipelineMetrics) -> _GateResult:
         alerts = _aml_continuous_alerts(streams.get("gold-refresh"))
         if alerts == 0:
             res.reasons.append("AML continuous run produced zero alerts")
+        if scored is not None:
+            missing = sorted(expected - executed - set(skipped) - set(errors))
+            if missing:
+                res.reasons.append(f"expected rules did not run: {', '.join(missing)}")
     if mode == "batch":
         scoring = getattr(metrics, "financial_scoring", None)
+        if isinstance(scoring, Mapping) and scoring.get("status") == "not_scored":
+            # Recall and false positives are the AML result; a run whose
+            # answers went unchecked is not a pass.
+            why = str(scoring.get("reason") or "no reason recorded")
+            res.reasons.append(f"AML scoring did not produce a result: {why}")
         total = scoring.get("total_alerts") if isinstance(scoring, Mapping) else None
         if total is not None:
             if int(total) == 0:
@@ -878,7 +1022,7 @@ def _query_answers_gate(metrics: PipelineMetrics) -> _GateResult:
 
 def record_gates(metrics: PipelineMetrics) -> dict[str, _GateResult]:
     """The record gates that apply to *metrics*, by gate id:
-    ``layer_rows``, ``aml_rules`` (financial runs), ``scale_ratio`` (batch)
+    ``layer_rows``, ``aml_rules`` (financial runs), ``scale_ratio`` (batch),
     and ``query_answers`` (runs with benchmark queries). A gate that does
     not apply is left out. Empty for an interrupted run, and for a run whose
     ``pipeline`` gate failed: a failed stage already fails the verdict, and

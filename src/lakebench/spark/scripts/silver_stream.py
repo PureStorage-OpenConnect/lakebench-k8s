@@ -9,7 +9,7 @@ This is the continuous-pipeline equivalent of silver_build.py. Where
 silver_build processes all data in a single batch pass, silver_stream
 processes micro-batches as new rows arrive in bronze_raw.
 
-Replay idempotency (E3, the LB-109 protocol of silver_stream_financial,
+Replay idempotency (E3, the replay protocol of silver_stream_financial,
 scoped to the stream): Structured Streaming re-runs a micro-batch with the
 same batchId when the driver dies after the table commit but before the
 checkpoint commit, and a plain append wrote it twice. Every silver row
@@ -40,7 +40,7 @@ Environment variables (set by job.py):
     LB_ICEBERG_CATALOG   - Iceberg catalog name (e.g., "lakehouse")
     CATALOG_NAME         - same as LB_ICEBERG_CATALOG
     CHECKPOINT_LOCATION  - s3a://silver-bucket/checkpoints/silver-stream/
-    TRIGGER_INTERVAL     - e.g., "60 seconds"
+    TRIGGER_INTERVAL     - e.g., "0 seconds" (back to back)
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ from pyspark.sql.functions import lit
 
 _TABLE_WAIT_INTERVAL = 15  # seconds between checks
 # A3 (silver-plan): capped from run_duration / 4 by job.py so the wait loop
-# cannot spend the whole window before the LB-044 gate fires. Fallback 1800 is
+# cannot spend the whole window before the empty-rows gate fires. Fallback 1800 is
 # only used when job.py did not export the env var (test harness, older
 # deployments), matching the previous hardcoded default.
 _TABLE_WAIT_MAX = int(os.environ.get("LB_SILVER_BRONZE_WAIT_SECONDS", "1800"))
@@ -163,7 +163,7 @@ def main() -> None:
     catalog = env("LB_ICEBERG_CATALOG", "ice")
     silver_uri = env("LB_SILVER_URI", "s3a://lb-silver/")
     checkpoint_location = env("CHECKPOINT_LOCATION")
-    trigger_interval = env("TRIGGER_INTERVAL", "60 seconds")
+    trigger_interval = env("TRIGGER_INTERVAL", "0 seconds")
     target_file_size_bytes = env("TARGET_FILE_SIZE_BYTES", "536870912")
 
     bronze_tbl = f"{catalog}.{env('LB_BRONZE_TABLE', 'default.bronze_raw')}"

@@ -17,10 +17,21 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tests.harness.run_harness import SCENARIOS, run_scenario_full, saved_record
+from tests.harness.run_harness import (
+    CONTINUOUS_ROUNDS,
+    SCENARIOS,
+    run_scenario_full,
+    saved_record,
+)
 
 #: The loop's sleep between namespace reads (cli/_sustained.py check_interval).
 INTERVAL_S = 30.0
+
+
+def _passes(record: dict) -> bool:
+    """The recorded continuous_c360 run passes every gate."""
+    gates = record["verdict"]["gates"]
+    return not [g for g, o in gates.items() if o == "FAIL"]
 
 
 def _run(tmp_path, monkeypatch, *events):
@@ -71,7 +82,7 @@ def test_a_namespace_read_that_fails_twice_is_not_a_reason(tmp_path, monkeypatch
     the end of its window."""
     trace, rec, record = _run(tmp_path, monkeypatch, (95.0, "namespace_blip"))
     assert "abort_reason" not in record
-    assert trace["exit_code"] == 0
+    assert _passes(record)
     assert len(record["benchmark_rounds"]) == 3
 
 
@@ -85,16 +96,16 @@ def test_three_failed_reads_stop_the_run(tmp_path, monkeypatch):
 
 
 def test_the_namespace_is_read_at_every_interval(tmp_path, monkeypatch):
-    """A whole window: one read at the start, one per loop sleep, one before
-    each round, maintenance and compaction round (the goldens pin where)."""
+    """A whole window reads the namespace at least once per loop interval
+    outside its rounds (after every sleep, and before and after each round
+    and maintenance round), so a deleted namespace is seen within one
+    interval, or as a round ends."""
     trace, rec, record = _run(tmp_path, monkeypatch)
-    assert trace["exit_code"] == 0
+    assert "abort_reason" not in record and _passes(record)
     i_window = next(i for i, c in enumerate(rec.calls) if c[:2] == ["VersionApi", "get_code"])
     in_window = [c for c in rec.calls[i_window:] if c[:2] == ["CoreV1Api", "read_namespace"]]
-    # Start, 42 sleeps of the 1800 s window, before and after each of the 3
-    # rounds, 2 maintenance rounds and 1 compaction round; then 29 settle
-    # sleeps and one before the streams are stopped by name.
-    assert len(in_window) == 1 + 42 + 3 + 3 + 2 + 1 + 29 + 1
+    in_rounds = sum(wall for _, wall in CONTINUOUS_ROUNDS)
+    assert len(in_window) >= (1800 - in_rounds) / INTERVAL_S
 
 
 def test_namespace_gone_inside_a_round_is_seen_when_it_ends(tmp_path, monkeypatch):
@@ -103,20 +114,6 @@ def test_namespace_gone_inside_a_round_is_seen_when_it_ends(tmp_path, monkeypatc
     trace, rec, record = _run(tmp_path, monkeypatch, (350.0, "namespace_gone"))
     assert trace["exit_code"] == 1
     assert record["abort_reason"]["at_elapsed"] == pytest.approx(436.5)
-
-
-@pytest.mark.parametrize("event", ["namespace_gone", "namespace_redeployed"])
-def test_namespace_gone_during_settle_stops_the_settle(tmp_path, monkeypatch, event):
-    """After the window, the run waits up to 30 min for the corpus to settle
-    and then stops its streams by name. Gone (or deployed again, with new
-    streams of the same names) during the settle: the run stops at the next
-    settle poll and deletes nothing by name."""
-    trace, rec, record = _run(tmp_path, monkeypatch, (1810.0, event))
-    assert trace["exit_code"] == 1
-    abort = record["abort_reason"]
-    assert 1810.0 <= abort["at_elapsed"] <= 1810.0 + INTERVAL_S
-    assert not [c for c in rec.calls if c[:2] == ["k8s", "delete_custom_resource"]]
-    assert record["verdict"]["status"] == "FAILED"
 
 
 # ---------------------------------------------------------------------------

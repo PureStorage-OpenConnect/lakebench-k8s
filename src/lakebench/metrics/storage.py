@@ -71,7 +71,7 @@ def _dataclass_from_dict(
 ):
     """Reconstruct a dataclass instance from a JSON-dict, iterating fields.
 
-    Class-level fix for the LB-123 defect shape on the LOAD side. Two
+    Class-level fix for a hand-copy-drift shape on the LOAD side. Two
     live-caught instances (silver-plan r3 silver_tables + extra_metrics on
     JobMetrics; extra_metrics on StreamingJobMetrics) reached metrics.json
     via asdict() but reverted to defaults on load because the hand-written
@@ -213,9 +213,8 @@ def _deserialize_benchmark_rounds(
 def recorded_qph_basis(record: Any) -> dict[str, Any] | None:
     """The ``composite_qph_basis`` of a stored metrics.json record, read from
     its in-stream rounds (collector.composite_qph_basis) so a record written
-    before the basis was stored gets the same answer in
-    reproduce. A record that keeps no rounds gives its stored basis,
-    or None."""
+    before the basis was stored gets the same answer. A record that keeps
+    no rounds gives its stored basis, or None."""
     from .collector import composite_qph_basis
 
     rounds = _recorded_rounds(record)
@@ -256,8 +255,8 @@ _ROUND_RECORD_KEYS = (
 def recorded_engine(bench: dict[str, Any]) -> str | None:
     """The query engine a recorded benchmark ran on. Records from before the
     ``engine`` field stamped ``benchmark_type`` "trino_query" on every
-    engine, so it is not trusted; the per-query result fingerprints carried
-    the real engine and are used instead."""
+    engine, so it is not trusted; the per-query result fingerprints those
+    records carry name the real engine and are used instead."""
     if bench.get("engine"):
         return str(bench["engine"])
     for q in bench.get("queries") or []:
@@ -512,9 +511,9 @@ class MetricsStorage:
                 "scale": data.get("config_snapshot", {}).get("scale"),
                 "processing_pattern": data.get("config_snapshot", {}).get("processing_pattern"),
                 "qph": data.get("benchmark", {}).get("qph") if data.get("benchmark") else None,
-                "bronze_size_gb": data.get("bronze_size_gb", 0),
-                "silver_size_gb": data.get("silver_size_gb", 0),
-                "gold_size_gb": data.get("gold_size_gb", 0),
+                "bronze_size_gb": data.get("bronze_size_gb"),
+                "silver_size_gb": data.get("silver_size_gb"),
+                "gold_size_gb": data.get("gold_size_gb"),
                 "streaming_count": len(data.get("streaming", [])),
                 "time_to_value_seconds": pb_scores.get("time_to_value_seconds"),
                 "pipeline_throughput_gb_per_second": pb_scores.get(
@@ -632,7 +631,7 @@ class MetricsStorage:
             # Class-level reload: iterate dataclass fields so every JobMetrics
             # field flows automatically. The hand-written kwargs list here
             # previously omitted silver_tables + extra_metrics -- disk showed
-            # them via asdict() but load reverted to defaults (LB-123 shape on
+            # them via asdict() but load reverted to defaults (hand-copy drift on
             # the READ side, adversarial-review finding 2026-09-28). Same
             # mirror defect on StreamingJobMetrics.extra_metrics, fixed below.
             job = _dataclass_from_dict(JobMetrics, job_data, aliases=_JOB_ALIASES)
@@ -670,9 +669,9 @@ class MetricsStorage:
             start_time=datetime.fromisoformat(data.get("start_time", datetime.now().isoformat())),
             success=data.get("success", False),
             total_elapsed_seconds=data.get("total_elapsed_seconds", 0),
-            bronze_size_gb=data.get("bronze_size_gb", 0),
-            silver_size_gb=data.get("silver_size_gb", 0),
-            gold_size_gb=data.get("gold_size_gb", 0),
+            bronze_size_gb=data.get("bronze_size_gb"),
+            silver_size_gb=data.get("silver_size_gb"),
+            gold_size_gb=data.get("gold_size_gb"),
             jobs=jobs,
             queries=queries,
             streaming=streaming,
@@ -805,7 +804,12 @@ class MetricsStorage:
                 )
 
             scores = pb_data.get("scorecard", pb_data.get("scores", {}))
+            _basis = scores.get("composite_qph_basis")
             metrics.pipeline_benchmark = PipelineBenchmark(
+                # A composite recorded before it was over one fixed set:
+                # no basis, or a basis without composite_set.
+                blended_composite_recorded=bool(scores.get("composite_qph"))
+                and not (isinstance(_basis, dict) and "composite_set" in _basis),
                 run_id=pb_data.get("run_id", ""),
                 deployment_name=pb_data.get("deployment_name", ""),
                 pipeline_mode=pb_data.get("pipeline_mode", "batch"),
@@ -844,6 +848,12 @@ class MetricsStorage:
                 corpus_drained=scores.get("corpus_drained"),
                 intake_limit=scores.get("intake_limit"),
                 bronze_busy_fraction=scores.get("bronze_busy_fraction"),
+                backlog_rows=scores.get("backlog_rows"),
+                datagen_ahead=scores.get("datagen_ahead"),
+                pace_seconds_per_million_rows=scores.get("pace_seconds_per_million_rows"),
+                bronze_pace_seconds_per_million_rows=scores.get(
+                    "bronze_pace_seconds_per_million_rows"
+                ),
                 corpus_drain_seconds=scores.get("corpus_drain_seconds"),
                 window_seconds=scores.get("window_seconds"),
                 corpus_ingest_ratio=scores.get("corpus_ingest_ratio"),
@@ -857,7 +867,7 @@ class MetricsStorage:
                 time_to_detect_alerts=scores.get("time_to_detect_alerts"),
                 time_to_detect_late_alerts=scores.get("time_to_detect_late_alerts"),
                 time_to_detect_unmeasured_cycles=scores.get("time_to_detect_unmeasured_cycles"),
-                total_s3_objects=scores.get("total_s3_objects", 0),
+                total_s3_objects=scores.get("total_s3_objects"),
                 query_benchmark=query_benchmark,
                 config_snapshot=pb_data.get("config_snapshot", {}),
                 success=pb_data.get("success", False),
@@ -987,9 +997,9 @@ class MetricsStorage:
                     "scale": data.get("config_snapshot", {}).get("scale"),
                     "processing_pattern": data.get("config_snapshot", {}).get("processing_pattern"),
                     "qph": data.get("benchmark", {}).get("qph") if data.get("benchmark") else None,
-                    "bronze_size_gb": data.get("bronze_size_gb", 0),
-                    "silver_size_gb": data.get("silver_size_gb", 0),
-                    "gold_size_gb": data.get("gold_size_gb", 0),
+                    "bronze_size_gb": data.get("bronze_size_gb"),
+                    "silver_size_gb": data.get("silver_size_gb"),
+                    "gold_size_gb": data.get("gold_size_gb"),
                     "streaming_count": len(data.get("streaming", [])),
                 }
 

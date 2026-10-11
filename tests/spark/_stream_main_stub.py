@@ -123,7 +123,7 @@ def install(monkeypatch: Any, script: Any) -> StubSession:
     for step in JVM_STEPS:
         # raising=True: a renamed or removed step fails here, not silently.
         monkeypatch.setattr(script, step, _skipped(step))
-    # The stub stream writes no rows, which the LB-044 gate would refuse.
+    # The stub stream writes no rows, which the zero-row gate would refuse.
     monkeypatch.setattr(script, "assert_progress", _skipped("assert_progress"))
     monkeypatch.setattr(script.SparkSession, "builder", _Builder(spark))
     return spark

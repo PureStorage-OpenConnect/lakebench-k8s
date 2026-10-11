@@ -1,4 +1,4 @@
-"""The run-start checks on the deployment's dependency set (ch01 s2.8).
+"""The run-start checks on the deployment's dependency set.
 
 ``load_handle`` is called by every command that submits a Spark job
 (``run``, continuous runs, ``financial``) before anything is recorded or

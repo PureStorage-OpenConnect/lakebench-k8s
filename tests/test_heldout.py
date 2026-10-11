@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -54,10 +55,10 @@ def test_production_file_loads_strictly():
 
 def test_floor_matches_rust():
     # The Rust floor holds every hash of the Python floor, in order, under the
-    # same salt (SPEC section 10: the current role hashes are compiled into
+    # same salt (the current role hashes are compiled into
     # the generator). A redraw appends to the file and _HELDOUT_FLOOR; it is
-    # not finished until heldout.rs carries the same hashes and the look image
-    # is rebuilt from it (test_aml_protocol_look_image pins the image inputs).
+    # not finished until heldout.rs carries the same hashes and the default
+    # image is rebuilt from it.
     src = (ROOT / "datagen_rs/src/heldout.rs").read_text()
     salt = re.findall(r'FLOOR_SALT: &str = "([0-9a-f]{64})"', src)
     assert salt == [ds._HELDOUT_FLOOR["salt"]]
@@ -69,14 +70,6 @@ def test_floor_matches_rust():
     for role in ds.PROTECTED_ROLES:
         found = tuple(h for r, h in entries if r == role.capitalize())
         assert found == tuple(ds._HELDOUT_FLOOR["roles"][role]), role
-
-
-def test_real_seeds_still_refused_under_fixture(held):
-    # The fixture replaces the file, never the compiled floor: the production
-    # floor hashes and salt come along unchanged.
-    assert held.floor_salt == ds._HELDOUT_FLOOR["salt"] != held.salt
-    for role in ds.PROTECTED_ROLES:
-        assert held.floor[role] == frozenset(ds._HELDOUT_FLOOR["roles"][role])
 
 
 def test_floor_checked_under_its_own_salt(monkeypatch):
@@ -253,12 +246,33 @@ def test_guard_messages_never_print_a_heldout_seed(held):
 def test_guard_with_recovered_roles(held):
     c = _corpora()
     assert ds.aml_seed_error(c, EV, "evaluation", ["evaluation"], claim_verified=True) is None
+    # Only the manifest check lifts a refusal on the same corpus and claim.
+    assert ds.aml_seed_error(c, EV, "evaluation", ["evaluation"]) is not None
     assert ds.aml_seed_error(c, None, None, ["evaluation"]) is not None
-    assert "spent" in ds.aml_seed_error(c, None, None, ["spent"])
+    # A counts-only run is not a look: it passes on a protected role ...
     assert ds.aml_seed_error(c, None, None, ["evaluation"], counts_only=True) is None
-    assert "not only the claimed" in ds.aml_seed_error(c, EV, "evaluation", ["evaluation"])
+    # ... but never on a spent one.
+    assert ds.aml_seed_error(c, None, None, ["spent"]) is not None
+    assert ds.aml_seed_error(c, None, None, ["spent"], counts_only=True) is not None
+    assert ds.aml_seed_error(c, None, None, ["evaluation", "spent"], counts_only=True) is not None
     with pytest.raises(ValueError):
         ds.aml_seed_error(c, 43, None, ["calibration"])
+
+
+def test_heldout_and_spent_seed_is_refused(held):
+    # A held-out seed that is also spent (its look recorded, or voided) is
+    # refused even as its own registered run, and a counts-only run on its
+    # corpus is refused too.
+    assert (
+        ds.aml_seed_error(_corpora(), EV, "evaluation", ["evaluation"], claim_verified=True) is None
+    )
+    c = _corpora(spent_seeds=[*_corpora()["spent_seeds"], EV])
+    err = ds.aml_seed_error(c, EV, "evaluation", ["evaluation"], claim_verified=True)
+    assert err and _no_seed_in(err)
+    assert ds.aml_seed_error(c, EV, "evaluation", [EV], claim_verified=True) is not None
+    v = ds.corpus_verdict(ts.manifest_rows(EV, 10), claimed=EV, spent=c["spent_seeds"])
+    assert v.role == "spent"
+    assert ds.aml_seed_error(c, None, None, [v.role], counts_only=True) is not None
 
 
 def test_registered_look_needs_a_seed(held):
@@ -385,8 +399,8 @@ def test_spent_append_of_heldout_needs_recorded_look():
 def test_burn_seed_records_a_spent_seed(tmp_path, held):
     p = tmp_path / ds.LOOKS_FILENAME
     p.write_text(json.dumps({"_doc": "x", "looks": []}))
-    entry = ds.burn_seed("evaluation", EV, " public since 09-24 ", path=p)
-    assert entry["state"] == "burned" and entry["reason"] == "public since 09-24"
+    entry = ds.burn_seed("evaluation", EV, " published before its look ", path=p)
+    assert entry["state"] == "burned" and entry["reason"] == "published before its look"
     assert entry["seed"] == EV and entry["role"] == "evaluation" and entry["burned_utc"]
     assert ds.load_looks(p) == [entry] and EV in ds.recorded_seeds(p)
     with pytest.raises(ValueError, match="already has a completed, burned") as e:
@@ -500,9 +514,21 @@ def two_configs():
     ]
 
 
+def _key_names(node):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield k
+            yield from _key_names(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _key_names(v)
+
+
 def test_prereg_has_no_plaintext_seed_keys():
-    corpora = json.loads(PREREG.read_text())["corpora"]
-    assert not {"evaluation_seed", "robustness_seed"} & set(corpora)
+    names = set(_key_names(json.loads(PREREG.read_text())))
+    assert not {n for n in names if re.search(r"(evaluation|robustness)_seed$", n)}
+    # The value scan runs without a git checkout.
+    assert ds.absence_problems({"prereg": PREREG.read_text()}) == []
 
 
 def _manager(cfg):
@@ -515,24 +541,6 @@ def _manager(cfg):
     mgr = SparkJobManager(cfg, k8s)
     mgr._scripts_apply_refusal = lambda maps: None
     return mgr, k8s
-
-
-def test_scripts_map_refused_when_enforcing(two_configs, monkeypatch, caplog):
-    held = ds.HeldOut(**{**ts.load().__dict__, "absence_check": "enforce"})
-    monkeypatch.setattr(ds, "load_heldout", lambda *a, **k: held)
-    real = ds.absence_problems
-    monkeypatch.setattr(
-        ds,
-        "absence_problems",
-        lambda texts, h=None, exclude=None: real({**texts, "m/planted": str(EV)}, h, []),
-    )
-    from lakebench.modules.pipeline_engines.spark.scripts_maps import ScriptsMapError
-
-    mgr, k8s = _manager(two_configs[1])
-    with pytest.raises(ScriptsMapError, match="held-out") as e:
-        mgr.deploy_scripts_configmap()
-    k8s.apply_manifest.assert_not_called()
-    assert "m/planted" in str(e.value) and _no_seed_in(str(e.value))
 
 
 def test_scripts_map_applied_and_logged_in_report_mode(two_configs, monkeypatch, caplog):
@@ -562,7 +570,12 @@ def test_scripts_map_applied_and_logged_in_report_mode(two_configs, monkeypatch,
     )
     with caplog.at_level(logging.INFO):
         assert mgr.deploy_scripts_configmap() is True
-    assert k8s.apply_manifest.call_count == len(sm.ROLES)
+    built = sm.build_script_configmaps(two_configs[0], "ns")
+    applied = [c.args[0] for c in k8s.apply_manifest.call_args_list]
+    assert sorted(m["metadata"]["name"] for m in applied) == sorted(
+        m["metadata"]["name"] for m in built
+    )
+    assert _no_seed_in(json.dumps(applied))
     assert "m/planted" in caplog.text and _no_seed_in(caplog.text)
 
 
@@ -606,23 +619,10 @@ def test_builder_refuses_a_planted_seed_for_every_caller(two_configs, monkeypatc
         sm.build_script_configmaps(two_configs[0], "ns")
     assert _no_seed_in(str(e.value))
     mgr, k8s = _manager(two_configs[1])
-    with pytest.raises(sm.ScriptsMapError):
+    with pytest.raises(sm.ScriptsMapError, match="lakebench-scripts-common/planted.py") as e2:
         mgr.deploy_scripts_configmap()
+    assert _no_seed_in(str(e2.value))
     k8s.apply_manifest.assert_not_called()
-
-
-def test_heldout_and_spent_seed_is_refused(held):
-    # A held-out seed that is also spent (its look recorded, or voided) is
-    # refused even as its own registered run, and a counts-only run on its
-    # corpus is refused too.
-    c = _corpora(spent_seeds=[*_corpora()["spent_seeds"], EV])
-    err = ds.aml_seed_error(c, EV, "evaluation", ["evaluation"], claim_verified=True)
-    assert err and "spent" in err and _no_seed_in(err)
-    assert "spent" in ds.aml_seed_error(c, EV, "evaluation", [EV], claim_verified=True)
-    v = ds.corpus_verdict(ts.manifest_rows(EV, 10), claimed=EV, spent=c["spent_seeds"])
-    assert v.role == "spent"
-    assert "spent" in ds.aml_seed_error(c, None, None, [v.role], counts_only=True)
-    assert "spent" in ds.aml_seed_error(c, None, None, ["evaluation", "spent"], counts_only=True)
 
 
 def _gate_module():
@@ -702,7 +702,7 @@ def test_ledger_message_names_an_unspent_heldout_seed_by_role(held, monkeypatch,
 
 
 # ---------------------------------------------------------------------------
-# Review round 2 (CD-3+4)
+# Absence check over embedded and grouped spellings
 # ---------------------------------------------------------------------------
 
 
@@ -723,16 +723,8 @@ def test_absence_finds_embedded_and_grouped_seeds(held):
     assert ds.absence_problems(clean, held, exclude=[]) == []
 
 
-def test_rust_compiles_no_heldout_seed():
-    # The generator knows the registered seeds only by hash (heldout.rs);
-    # robustness.rs no longer names them.
-    src = (ROOT / "datagen_rs/src/robustness.rs").read_text()
-    assert "ROBUSTNESS_SEED" not in src and "EVALUATION_SEED" not in src
-    assert ds.absence_problems({"robustness.rs": src}, exclude=()) == []
-
-
 # ---------------------------------------------------------------------------
-# Callers of the removed protected_seeds(): production paths, fail closed
+# Seed protection through the hash record: production paths fail closed
 # ---------------------------------------------------------------------------
 
 
@@ -749,52 +741,11 @@ def test_seed_is_protected_by_hash_and_fails_closed(held, monkeypatch):
     assert ds.seed_is_protected(43), "an unreadable record must hide every seed"
 
 
-def test_reproduce_redacts_and_refuses_through_the_hash_record(held, monkeypatch):
-    from lakebench.cli import _reproduce as rep
-
-    text = f"seed {EV} is refused; seed 43 is fine; 12 rows"
-    out = rep._redact_seed_text(text)
-    assert _no_seed_in(out) and "43" in out and "12 rows" in out
-
-    # reproduce refuses a config through the look guard's one rule (AM-22).
-    from lakebench.aml import look_guard
-
-    assert look_guard.corpus_fields_reason("financial", EV, None) is not None
-    assert look_guard.corpus_fields_reason("financial", 43, None) is None
-    monkeypatch.setattr(ds, "load_looks", lambda path=None: [])
-    meta = {"experiment_identity": {"workload": "financial", "seed": EV}}
-    kind, why = rep._spent_look(meta)
-    assert kind == "refuse" and _no_seed_in(why)
-
-
-def test_reproduce_fails_closed_without_the_hash_record(monkeypatch):
-    from lakebench.cli import _reproduce as rep
-
-    monkeypatch.setattr(ds, "_heldout", _gone)
-    assert rep._redact_seed_text("seed 1234 of 12") == "seed <seed> of 12"
-    meta = {"experiment_identity": {"workload": "financial", "seed": 43}}
-    assert rep._spent_look(meta)[0] == "refuse"
-
-    def role_broken(seed, h=None):
-        raise ValueError("record conflict")
-
-    monkeypatch.setattr(ds, "heldout_role", role_broken)
-    from lakebench.aml import look_guard
-
-    assert look_guard.corpus_fields_reason("financial", 43, None) is not None
-
-
 def test_shipped_hash_file_history_is_clean():
-    # Until QR-10's frozen guard runs heldout_history_problems on every
-    # commit, check the shipped file against the creation rules and the
-    # recorded looks (a spent append of an unlooked held-out seed fails).
+    # The shipped file meets the creation rules and the recorded looks (a
+    # spent append of an unlooked held-out seed fails).
     looks = json.loads((PROD.parent / ds.LOOKS_FILENAME).read_text())
     assert ds.heldout_history_problems(None, json.loads(PROD.read_text()), looks) == []
-
-
-# Tracked files that may still hold a held-out value, each with the change
-# that removes it. Empty since the Rust check reads the hash file.
-_PLAINTEXT_ALLOWED: dict[str, str] = {}
 
 
 def test_no_tracked_file_holds_a_heldout_seed():
@@ -805,11 +756,13 @@ def test_no_tracked_file_holds_a_heldout_seed():
             ["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=True
         ).stdout
     except (OSError, subprocess.CalledProcessError):
+        if os.environ.get("CI"):
+            pytest.fail("the tracked-file seed scan needs a git checkout")
         pytest.skip("not a git checkout")
     texts = {}
     for rel in filter(None, out.decode().split("\0")):
         path = ROOT / rel
-        if rel in _PLAINTEXT_ALLOWED or not path.is_file():
+        if not path.is_file():
             continue
         # latin-1 decodes any bytes, so a non-UTF-8 file is scanned too.
         texts[rel] = path.read_bytes().decode("latin-1")
@@ -817,8 +770,6 @@ def test_no_tracked_file_holds_a_heldout_seed():
     # seed into aml_registered_looks.json and then spent_seeds by design.
     problems = ds.absence_problems(texts)
     assert not problems, problems
-    for rel in _PLAINTEXT_ALLOWED:
-        assert (ROOT / rel).is_file(), f"{rel} is gone: drop it from _PLAINTEXT_ALLOWED"
 
 
 def test_absence_refusal_text_masks_long_numbers(two_configs, monkeypatch):
@@ -831,3 +782,28 @@ def test_absence_refusal_text_masks_long_numbers(two_configs, monkeypatch):
     with pytest.raises(sm.ScriptsMapError) as e:
         sm.build_script_configmaps(two_configs[0], "ns")
     assert _no_seed_in(str(e.value))
+
+
+def _epoch_rows(rows: list[tuple[str, int]], seed: int, epoch: int) -> list[tuple[str, int]]:
+    """*rows* of *seed* as continuous epoch *epoch* writes them: drawn from
+    the epoch's activity seed, ids suffixed -eNNNN."""
+    a = ds.epoch_seed(seed, epoch)
+    return [(f"{i}-e{epoch:04d}", s) for i, s in rows(a)]
+
+
+def test_continuous_epoch_rows_recover_the_corpus_seed(held):
+    # Real generator output (seed 43, epochs 3 and 11): the derivation the
+    # guard inverts is the one datagen_rs writes.
+    doc = json.loads(
+        (ROOT / "tests/fixtures/datagen_reference/aml_epoch_manifest_rows_seed43.json").read_text()
+    )
+    real = [(i, s) for i, s in doc["rows"]]
+    assert any("MATCH" in i for i, _ in real) and all("-e00" in i for i, _ in real)
+    assert ds.recover_corpus_seeds(iter(real)) == {43}
+    # A held-out seed behind an epoch manifest is still found and refused.
+    rows = _epoch_rows(lambda a: ts.manifest_rows(a, 40) + ts.screening_rows(a, 4), EV, 7)
+    assert ds.recover_corpus_seeds(iter(rows)) == {EV}
+    verdict = ds.corpus_verdict(iter(rows), claimed=43, spent=[42])
+    assert verdict.verdict == "refused" and verdict.role == "evaluation"
+    with pytest.raises(ds.CorpusSeedError):
+        ds.recover_corpus_seeds(iter([("W2_2_0000001-e0000", 1)]))

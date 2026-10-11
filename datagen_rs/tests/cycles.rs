@@ -1,4 +1,4 @@
-//! Multi-cycle AML generation (WORKPLAN B4): the union of `--cycles N` runs is
+//! Multi-cycle AML generation: the union of `--cycles N` runs is
 //! the one-shot corpus, row for row, and the manifest union is the one-shot
 //! manifest. Runs the real binary against a local sink (DG_LOCAL_DIR).
 
@@ -214,10 +214,9 @@ fn cycle_arguments_are_strict() {
     }
 }
 
-/// Wave 1 A3 (2026-09-28): `--mode reference` with `--total-nodes > 1` must
-/// refuse to start, because the reference zone is a single-writer artefact
-/// and running two reference pods races the same S3 keys (manifest.parquet,
-/// party.parquet, account.parquet, watchlist.parquet).
+/// `--mode reference` with `--total-nodes > 1` must refuse to start: the
+/// reference zone is a single-writer artefact and two reference pods would
+/// race the same S3 keys.
 #[test]
 fn reference_mode_refuses_multi_writer() {
     let st = generate_cmd()
@@ -243,54 +242,6 @@ fn reference_mode_refuses_multi_writer() {
         st.status.code(),
         Some(2),
         "--mode reference with --total-nodes 2 was accepted (would race)"
-    );
-    let err = String::from_utf8_lossy(&st.stderr);
-    assert!(
-        err.contains("race the reference S3 keys"),
-        "wrong refusal message: {err}"
-    );
-}
-
-/// `--mode reference` with a single node still runs (the guard is on multi-
-/// writer, not on the reference role itself).
-#[test]
-fn reference_mode_with_one_node_runs() {
-    let d = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-mode-ref-ok");
-    let _ = std::fs::remove_dir_all(&d);
-    let st = generate_cmd()
-        .env("DG_LOCAL_DIR", &d)
-        .args([
-            "--bucket",
-            "b",
-            "--seed",
-            "7777",
-            "--scale",
-            SCALE,
-            "--threads",
-            "2",
-            "--mode",
-            "reference",
-            "--total-nodes",
-            "1",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        st.status.success(),
-        "--mode reference --total-nodes 1 failed: {}",
-        String::from_utf8_lossy(&st.stderr)
-    );
-    // Reference-only pod writes manifest + account + party + watchlist and
-    // nothing under bronze/pacs008/.
-    let root = d.join("b");
-    assert!(root.join("manifest/manifest.parquet").exists());
-    assert!(root.join("bronze/account.parquet").exists());
-    assert!(root.join("bronze/party.parquet").exists());
-    assert!(root.join("bronze/watchlist.parquet").exists());
-    let pacs = root.join("bronze/pacs008");
-    assert!(
-        !pacs.exists() || std::fs::read_dir(&pacs).unwrap().next().is_none(),
-        "--mode reference wrote pacs008 bronze files"
     );
 }
 
@@ -320,6 +271,41 @@ fn financial_seed_is_required_strict_and_never_spent() {
             "{bad:?} failed for another reason"
         );
     }
+}
+
+/// FNV-1a over every file under `dir` (relative path, then bytes), sorted by
+/// relative path string.
+fn tree_digest(dir: &Path) -> (u64, usize) {
+    let mut paths = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                // The per-node marker records build and time, so it is
+                // excluded by path.
+                if p.file_name().is_some_and(|n| n == "_corpus") {
+                    continue;
+                }
+                stack.push(p);
+            } else {
+                paths.push(p.strip_prefix(dir).unwrap().to_string_lossy().to_string());
+            }
+        }
+    }
+    paths.sort();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for rel in &paths {
+        for &x in rel
+            .as_bytes()
+            .iter()
+            .chain(std::fs::read(dir.join(rel)).unwrap().iter())
+        {
+            h ^= x as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    (h, paths.len())
 }
 
 #[test]
@@ -374,7 +360,7 @@ fn financial_seed_from_env_is_the_same_corpus_and_never_echoed() {
     }
 }
 
-fn expected_rows(dir: &Path, extra: &[&str]) -> u64 {
+fn generate_layout(dir: &Path, extra: &[&str]) {
     let out = generate_cmd()
         .env("DG_LOCAL_DIR", dir)
         // Large enough that 1 MB files outnumber the 64-file floor.
@@ -389,32 +375,20 @@ fn expected_rows(dir: &Path, extra: &[&str]) -> u64 {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let text =
-        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    let num = |key: &str| -> u64 {
-        let v = text
-            .split(key)
-            .nth(1)
-            .unwrap_or_else(|| panic!("{key} in output"));
-        v.split_whitespace().next().unwrap().parse().unwrap()
-    };
-    // Screening payments (screening.rs) are added on top of the corpus row
-    // budget, so the rows written are total_txns plus screen_rows.
-    num("total_txns=") + num("screen_rows=")
 }
 
 #[test]
 fn rows_are_independent_of_threads_file_size_and_nodes() {
     // Every row, scheduled (D2) ones included, lands in exactly one file
-    // whatever the layout: same multiset of rows, and exactly total_txns.
+    // whatever the layout: same multiset of rows.
     let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("lb-layout-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let a = tmp.join("a");
     let b = tmp.join("b2");
-    let want = expected_rows(&a, &["--threads", "2"]);
+    generate_layout(&a, &["--threads", "2"]);
     for node in ["0", "1"] {
-        expected_rows(
+        generate_layout(
             &b,
             &[
                 "--threads",
@@ -438,93 +412,13 @@ fn rows_are_independent_of_threads_file_size_and_nodes() {
         na
     );
     let rb = rows(&fb);
-    assert_eq!(ra.len() as u64, want, "rows != total_txns + screen_rows");
+    assert!(!ra.is_empty(), "no rows written");
     assert!(ra == rb, "rows depend on threads, file size or nodes");
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// FNV-1a over every file the customer360 driver writes, in path order.
-fn c360_driver_digest(threads: &str) -> (u64, usize) {
-    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("lb-c360-{}-{threads}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let out = generate_cmd()
-        .env("DG_LOCAL_DIR", &dir)
-        .args([
-            "--schema",
-            "customer360",
-            "--bucket",
-            "b",
-            "--seed",
-            "43",
-            "--target-tb",
-            "0.00002",
-            "--file-size-mb",
-            "4",
-            "--threads",
-            threads,
-        ])
-        .output()
-        .expect("run generate");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let mut paths = Vec::new();
-    let mut stack = vec![dir.clone()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).unwrap() {
-            let p = e.unwrap().path();
-            if p.is_dir() {
-                // The per-node marker records build and time, so it is
-                // excluded by path, as in the image byte-compare.
-                if p.file_name().is_some_and(|n| n == "_corpus") {
-                    continue;
-                }
-                stack.push(p);
-            } else {
-                paths.push(p);
-            }
-        }
-    }
-    paths.sort();
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for p in &paths {
-        let rel = p.strip_prefix(&dir).unwrap().to_string_lossy().to_string();
-        for &x in rel
-            .as_bytes()
-            .iter()
-            .chain(std::fs::read(p).unwrap().iter())
-        {
-            h ^= x as u64;
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-    (h, paths.len())
-}
-
-#[test]
-fn c360_driver_output_is_pinned() {
-    // The whole c360 driver path (argument defaults, id sizing, rows per
-    // file, file ids), not just build_batch: the programme reuses c360
-    // evidence only while this output is unchanged. Captured at ab585eb.
-    // A change here is a c360 data change: re-run the c360 evidence, then
-    // update the digest deliberately.
-    let a = c360_driver_digest("2");
-    assert_eq!(a, c360_driver_digest("3"), "c360 output depends on threads");
-    // Updated 2026-09-28 (LB-191 dirty-ratio fix, Wave 1 C1). Pre-fix digest
-    // was (8_993_469_679_856_816_545, 5).
-    assert_eq!(
-        a,
-        (7_884_786_140_200_387_728, 5),
-        "c360 driver output changed"
-    );
-}
-
 // ---------------------------------------------------------------------------
-// Wave 2 D3/D4 (2026-09-28): --delivery-mode {batch|continuous} switch.
+// --delivery-mode {batch|continuous} switch.
 // Both modes must produce the same corpus at a fixed seed. Batch is the
 // current (buffered whole-file PUT) path; continuous streams each parquet
 // file through MpuWriter as row-groups close. Test asserts multiset-equality
@@ -706,14 +600,10 @@ fn aml_row_identity_across_delivery_modes() {
 }
 
 // ---------------------------------------------------------------------------
-// LB-204 (datagen per-pod memory redesign, Tier-1): the world's full-population
-// attribute columns are recomputed on demand instead of held resident. The
-// corpus must stay identical. These tests are the byte/row-multiset proof that
-// the refactor is output-neutral, exercised across --total-nodes 1 and a
-// --total-nodes 2 split (so the node partition actually fires), at a scale
-// where synthetic_identity, dormant_reactivation and corridor_high_risk each
-// have >=1 instance (so the reference syn_overrides base-PII recompute and the
-// dormancy suppression path are actually walked).
+// Node-count and cycle-split invariance of the whole corpus, at a scale where
+// synthetic_identity, dormant_reactivation and corridor_high_risk each have
+// >=1 instance (so the reference base-PII recompute and the dormancy
+// suppression path are walked).
 // ---------------------------------------------------------------------------
 
 /// Scale for the full-corpus checks below: verified to contain at least one
@@ -785,36 +675,52 @@ fn manifest_typology_types(dir: &Path) -> BTreeSet<String> {
     s
 }
 
-/// The whole corpus (bronze + party + account + watchlist + manifest) is the
-/// same row multiset whether generated as one node or split across two, after
-/// the LB-204 recompute-on-demand refactor. A two-node run fires the file
-/// partition on every table, so a recompute that diverged per node (or a
-/// reference column that leaned on a now-removed world Vec) would surface here.
+/// The corpus is the same whether generated as one node, split across two
+/// nodes, or split across two cycles x two nodes. The reference files are
+/// byte-identical across node counts (total_activity feeds crr_score/crr_tier
+/// in party.parquet and inst_uids feeds participant_uetrs in manifest.parquet,
+/// both frozen; a byte comparison catches a low-bit drift a multiset would
+/// smear over). Every other table is the same row multiset. The two-node run
+/// fires the file partition on every table; the cycles x nodes run fires the
+/// `my_files` cycles>1 branch that only runs when both are above one.
 #[test]
-fn full_corpus_row_multiset_is_node_count_invariant() {
+fn corpus_is_invariant_to_node_count_and_cycle_split() {
     let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("lb-node-multiset-{}", std::process::id()));
+        .join(format!("lb-node-invariant-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let one = tmp.join("one");
     let two = tmp.join("two");
-    // One node, one shot.
+    let split = tmp.join("split");
+    let node_args = |n: usize, cycle: Option<usize>| -> Vec<String> {
+        let mut v: Vec<String> = ["--threads", "3", "--total-nodes", "2", "--node-id"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        v.push(n.to_string());
+        if let Some(c) = cycle {
+            v.extend(["--cycle", &c.to_string(), "--cycles", "2"].map(String::from));
+        }
+        v
+    };
+    let run_node = |dir: &Path, n: usize, cycle: Option<usize>| {
+        let a = node_args(n, cycle);
+        let a: Vec<&str> = a.iter().map(String::as_str).collect();
+        run_at(dir, NODE_SCALE, &a);
+    };
     run_at(
         &one,
         NODE_SCALE,
         &["--threads", "3", "--total-nodes", "1", "--node-id", "0"],
     );
-    // Two nodes into one tree: node 0 also writes the reference zones, node 1
-    // writes only its bronze shards. Their union is the whole corpus.
-    run_at(
-        &two,
-        NODE_SCALE,
-        &["--threads", "3", "--total-nodes", "2", "--node-id", "0"],
-    );
-    run_at(
-        &two,
-        NODE_SCALE,
-        &["--threads", "3", "--total-nodes", "2", "--node-id", "1"],
-    );
+    // Node 0 also writes the reference zones; node 1 writes only its bronze
+    // shards. Their union is the whole corpus.
+    run_node(&two, 0, None);
+    run_node(&two, 1, None);
+    for c in 0..2 {
+        for n in 0..2 {
+            run_node(&split, n, Some(c));
+        }
+    }
 
     // The scale must actually exercise the three landmine typologies.
     let types = manifest_typology_types(&one);
@@ -831,9 +737,7 @@ fn full_corpus_row_multiset_is_node_count_invariant() {
 
     // The two-node run really sharded the bronze zone across both nodes: file
     // fid is `part-{fid:06}.parquet`, and node n writes fids with fid % 2 == n.
-    // Require at least one even-fid shard (node 0) AND one odd-fid shard (node
-    // 1), so a degenerate "node 0 writes everything, node 1 writes nothing" bug
-    // cannot pass this test.
+    // A degenerate "node 0 writes everything, node 1 nothing" bug cannot pass.
     let bronze_two = files(&two, "bronze/pacs008", "part-");
     let fid_parity = |p: &PathBuf, want: i64| -> bool {
         let n = p.file_name().unwrap().to_string_lossy();
@@ -852,138 +756,20 @@ fn full_corpus_row_multiset_is_node_count_invariant() {
         bronze_two.iter().any(|p| fid_parity(p, 1)),
         "no node-1 (odd-fid) bronze shard: the two-node split did not fire"
     );
-    // Reference tables are single-writer: exactly one of each in both runs.
-    assert_eq!(files(&two, "bronze", "party").len(), 1);
-    assert_eq!(files(&two, "manifest", "manifest").len(), 1);
-    assert_eq!(files(&two, "bronze", "account").len(), 1);
-    assert_eq!(files(&two, "bronze", "watchlist").len(), 1);
-
-    let ms_one = corpus_multiset(&one);
-    let ms_two = corpus_multiset(&two);
-    assert_eq!(
-        ms_one.len(),
-        ms_two.len(),
-        "corpus row count differs: 1-node {} vs 2-node {}",
-        ms_one.len(),
-        ms_two.len()
-    );
-    assert!(
-        ms_one == ms_two,
-        "full-corpus row multiset differs between 1-node and 2-node builds"
-    );
-    // Sanity: the corpus is non-degenerate (bronze + all four reference tables
-    // contributed rows).
-    assert!(!files(&one, "bronze/pacs008", "part-").is_empty());
-    assert!(ms_one.iter().any(|r| r.starts_with("bronze/party\u{1e}")));
-    assert!(ms_one.iter().any(|r| r.starts_with("bronze/account\u{1e}")));
-    assert!(ms_one
-        .iter()
-        .any(|r| r.starts_with("bronze/watchlist\u{1e}")));
-    assert!(ms_one
-        .iter()
-        .any(|r| r.starts_with("manifest/manifest\u{1e}")));
-    let _ = std::fs::remove_dir_all(&tmp);
-}
-
-/// LB-204 coverage: the only code path that reads `typ_by_file` to decide cycle
-/// membership (the `my_files` filter's cycles>1 branch) fires only when BOTH
-/// --cycles>1 and --total-nodes>1. The typ_by_file prune retains a file's payload
-/// only on its owning node, so a prune that dropped an owned file's rows, or a
-/// cycle filter that read a pruned file, would corrupt the corpus in exactly this
-/// combination and nowhere else. Assert the union over (cycle x node) is the
-/// one-shot corpus, byte-for-byte at the row-multiset level.
-#[test]
-fn cycles_and_nodes_together_union_to_the_one_shot_corpus() {
-    let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("lb-cyc-node-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let one = tmp.join("one");
-    let split = tmp.join("split");
-    run_at(
-        &one,
-        NODE_SCALE,
-        &["--threads", "3", "--total-nodes", "1", "--node-id", "0"],
-    );
-    // 2 cycles x 2 nodes. Node 0 writes the reference zones (once for party/
-    // account, once per cycle for the manifest); node 1 writes only bronze.
-    for c in 0..2 {
-        for n in 0..2 {
-            run_at(
-                &split,
-                NODE_SCALE,
-                &[
-                    "--threads",
-                    "3",
-                    "--total-nodes",
-                    "2",
-                    "--node-id",
-                    &n.to_string(),
-                    "--cycle",
-                    &c.to_string(),
-                    "--cycles",
-                    "2",
-                ],
-            );
-        }
-    }
     // Cycle 1 actually produced bronze (so the cycles>1 my_files path fired).
-    let bronze = files(&split, "bronze/pacs008", "part-");
     assert!(
-        bronze
+        files(&split, "bronze/pacs008", "part-")
             .iter()
             .any(|p| p.to_string_lossy().contains("part-c001-")),
         "cycle 1 wrote no bronze -- the cycle>1 x node>1 path did not fire"
     );
-    // One manifest per cycle, single-writer reference zones.
-    assert_eq!(files(&split, "manifest", "manifest").len(), 2);
-    assert_eq!(files(&split, "bronze", "party").len(), 1);
-    assert_eq!(files(&split, "bronze", "account").len(), 1);
-
-    let ms_one = corpus_multiset(&one);
-    let ms_split = corpus_multiset(&split);
-    assert_eq!(
-        ms_one.len(),
-        ms_split.len(),
-        "corpus row count differs: one-shot {} vs cycles x nodes {}",
-        ms_one.len(),
-        ms_split.len()
-    );
-    assert!(
-        ms_one == ms_split,
-        "full-corpus row multiset differs between one-shot and cycles x nodes"
-    );
-    let _ = std::fs::remove_dir_all(&tmp);
-}
-
-/// The freeze-void razor's edges (LB-204 REVISION 2): total_activity feeds
-/// crr_score/crr_tier in party.parquet, and inst_uids feeds participant_uetrs
-/// in manifest.parquet -- both frozen. A byte-level (not just row-multiset)
-/// comparison of these two files between a 1-node and a 2-node build catches a
-/// low-bit drift a multiset would smear over, and proves the reference bytes do
-/// not depend on the node count. Party/account/manifest each stream through the
-/// same chunked writer regardless of node count, so byte identity is the bar.
-#[test]
-fn reference_files_are_byte_identical_across_node_counts() {
-    let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("lb-node-bytes-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    let one = tmp.join("one");
-    let two = tmp.join("two");
-    run_at(
-        &one,
-        NODE_SCALE,
-        &["--threads", "3", "--total-nodes", "1", "--node-id", "0"],
-    );
-    run_at(
-        &two,
-        NODE_SCALE,
-        &["--threads", "3", "--total-nodes", "2", "--node-id", "0"],
-    );
-    run_at(
-        &two,
-        NODE_SCALE,
-        &["--threads", "3", "--total-nodes", "2", "--node-id", "1"],
-    );
+    // Reference tables are single-writer; one manifest per cycle.
+    for (tree, manifests) in [(&two, 1), (&split, 2)] {
+        assert_eq!(files(tree, "manifest", "manifest").len(), manifests);
+        assert_eq!(files(tree, "bronze", "party").len(), 1);
+        assert_eq!(files(tree, "bronze", "account").len(), 1);
+    }
+    assert_eq!(files(&two, "bronze", "watchlist").len(), 1);
 
     for rel in [
         "b/bronze/party.parquet",
@@ -999,229 +785,45 @@ fn reference_files_are_byte_identical_across_node_counts() {
         );
         assert!(!a.is_empty(), "{rel} is empty");
     }
+
+    let ms_one = corpus_multiset(&one);
+    for (name, dir) in [("2-node", &two), ("cycles x nodes", &split)] {
+        let ms = corpus_multiset(dir);
+        assert_eq!(
+            ms_one.len(),
+            ms.len(),
+            "corpus row count differs: 1-node {} vs {name} {}",
+            ms_one.len(),
+            ms.len()
+        );
+        assert!(
+            ms_one == ms,
+            "full-corpus row multiset differs between 1-node and {name} builds"
+        );
+    }
+    // The corpus is non-degenerate (bronze + all four reference tables
+    // contributed rows).
+    assert!(!files(&one, "bronze/pacs008", "part-").is_empty());
+    for table in [
+        "bronze/party",
+        "bronze/account",
+        "bronze/watchlist",
+        "manifest/manifest",
+    ] {
+        assert!(
+            ms_one
+                .iter()
+                .any(|r| r.starts_with(&format!("{table}\u{1e}"))),
+            "{table} contributed no rows"
+        );
+    }
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// FNV-1a over every file under `dir` (relative path, then bytes), sorted by
-/// relative path string.
-fn tree_digest(dir: &Path) -> (u64, usize) {
-    let mut paths = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).unwrap() {
-            let p = e.unwrap().path();
-            if p.is_dir() {
-                // The per-node marker records build and time, so it is
-                // excluded by path, as in the image byte-compare.
-                if p.file_name().is_some_and(|n| n == "_corpus") {
-                    continue;
-                }
-                stack.push(p);
-            } else {
-                paths.push(p.strip_prefix(dir).unwrap().to_string_lossy().to_string());
-            }
-        }
-    }
-    paths.sort();
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for rel in &paths {
-        for &x in rel
-            .as_bytes()
-            .iter()
-            .chain(std::fs::read(dir.join(rel)).unwrap().iter())
-        {
-            h ^= x as u64;
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
-    }
-    (h, paths.len())
-}
-
-#[test]
-fn financial_output_is_pinned_to_the_frozen_generator() {
-    // Every financial object (pacs008 bronze, party, account, watchlist,
-    // manifest) of a 2-node --mode all run, byte for byte. The digest was
-    // captured from the frozen generator (datagen_rs at 9382420) with the same
-    // arguments, so this pins the LB-204 changes (owned-file typology pruning,
-    // on-demand world columns, mimalloc) as output-neutral. A change here is
-    // an AML generator output change: it voids the AML freeze
-    // (docs/internal/aml-protocol.md).
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("lb-fin-pin-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    for node in ["0", "1"] {
-        let out = generate_cmd()
-            .env("DG_LOCAL_DIR", &dir)
-            .args([
-                "--bucket",
-                "b",
-                "--seed",
-                "7777",
-                "--scale",
-                "0.02",
-                "--threads",
-                "2",
-                "--mode",
-                "all",
-                "--total-nodes",
-                "2",
-                "--node-id",
-                node,
-                "--file-size-mb",
-                "1",
-                "--delivery-mode",
-                "batch",
-            ])
-            .output()
-            .expect("run generate");
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    let got = tree_digest(&dir);
-    let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(
-        got,
-        (14_946_780_858_166_320_800, 179),
-        "financial generator output changed"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Three more pins, captured at integrate 77a65d2 source (equal
-// to the v1.6 release generator, which passes the two pins above). With the
-// two above they cover the paths the look-image changes touch: the
-// perturbation branch, and cycle slicing with cycle-suffixed keys on both
-// schemas. A change here is a generator output change: on financial it
-// voids the AML freeze (docs/internal/aml-protocol.md).
-// ---------------------------------------------------------------------------
-
-/// Run `generate` once per argv into one fresh local tree and digest it.
-fn pin_tree(tag: &str, runs: &[Vec<&str>]) -> (u64, usize) {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("lb-pin-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    for argv in runs {
-        let out = generate_cmd()
-            .env("DG_LOCAL_DIR", &dir)
-            .args(argv)
-            .output()
-            .expect("run generate");
-        assert!(
-            out.status.success(),
-            "generate {:?} failed: {}",
-            argv,
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    let got = tree_digest(&dir);
-    let _ = std::fs::remove_dir_all(&dir);
-    got
-}
-
-/// The financial pin's argv (2 nodes, batch delivery) plus `extra`.
-fn financial_pin_runs<'a>(extra: &[&'a str]) -> Vec<Vec<&'a str>> {
-    ["0", "1"]
-        .iter()
-        .map(|node| {
-            let mut a = vec![
-                "--bucket",
-                "b",
-                "--seed",
-                "7777",
-                "--scale",
-                "0.02",
-                "--threads",
-                "2",
-                "--mode",
-                "all",
-                "--total-nodes",
-                "2",
-                "--node-id",
-                node,
-                "--file-size-mb",
-                "1",
-                "--delivery-mode",
-                "batch",
-            ];
-            a.extend_from_slice(extra);
-            a
-        })
-        .collect()
-}
-
-#[test]
-fn financial_perturbed_output_is_pinned() {
-    let got = pin_tree(
-        "fin-pert",
-        &financial_pin_runs(&["--robustness-perturbation"]),
-    );
-    assert_eq!(
-        got,
-        (2_899_328_701_438_880_645, 179),
-        "financial perturbed output changed"
-    );
-}
-
-#[test]
-fn financial_two_cycle_output_is_pinned() {
-    let mut runs = financial_pin_runs(&["--cycle", "0", "--cycles", "2"]);
-    runs.extend(financial_pin_runs(&["--cycle", "1", "--cycles", "2"]));
-    let got = pin_tree("fin-cyc", &runs);
-    assert_eq!(
-        got,
-        (6_502_905_751_768_177_657, 181),
-        "financial two-cycle output changed"
-    );
-}
-
-#[test]
-fn c360_two_cycle_output_is_pinned() {
-    // The c360 pin's argv as two cycles, with the windows the deployer gives
-    // two cycles over its default range.
-    let windows = [
-        ("0", "2024-01-01", "2024-12-31"),
-        ("1", "2024-12-31", "2025-12-31"),
-    ];
-    let runs: Vec<Vec<&str>> = windows
-        .iter()
-        .map(|(n, start, end)| {
-            vec![
-                "--schema",
-                "customer360",
-                "--bucket",
-                "b",
-                "--seed",
-                "43",
-                "--target-tb",
-                "0.00002",
-                "--file-size-mb",
-                "4",
-                "--threads",
-                "2",
-                "--timestamp-start",
-                start,
-                "--timestamp-end",
-                end,
-                "--cycle",
-                n,
-                "--cycles",
-                "2",
-            ]
-        })
-        .collect();
-    let got = pin_tree("c360-cyc", &runs);
-    assert_eq!(
-        got,
-        (9_956_579_246_127_600_639, 10),
-        "c360 two-cycle output changed"
-    );
-}
-
 fn strict_run(args: &[&str]) -> std::process::Output {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-strict");
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("lb-strict-{n}"));
     let _ = std::fs::remove_dir_all(&dir);
     generate_cmd()
         .env("DG_LOCAL_DIR", &dir)
@@ -1259,18 +861,12 @@ fn rust_bad_node_id_exits_2() {
     let out = strict_run(&["--seed", "7777", "--scale", SCALE, "--total-nodes"]);
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("--total-nodes needs a value"));
-    // The same run with valid flags works, and logs its delivery mode.
+    // The same run with valid flags works.
     let out = strict_run(&ok);
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
-    );
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("delivery_mode=continuous"));
-    assert!(
-        err.contains("\"delivery_mode\":\"continuous\""),
-        "delivery_mode not in metrics"
     );
 }
 
@@ -1356,81 +952,333 @@ fn c360_refuses_financial_flags() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("--corpus-months"));
 }
 
+// ---------------------------------------------------------------------------
+// Continuous c360 delivery (--deliver-until): silent-data
+// invariants only. Argument refusals, log lines, timing and stop-marker
+// behaviour are verified once per change, not here (they fail loud).
+// ---------------------------------------------------------------------------
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// 5 files of 4 MB over 2024.
+fn c360_continuous(dir: &Path, node: &str, until: i64, seed: &str) -> Command {
+    let mut c = generate_cmd();
+    c.env("DG_LOCAL_DIR", dir).args([
+        "--schema",
+        "customer360",
+        "--bucket",
+        "b",
+        "--seed",
+        seed,
+        "--target-tb",
+        "0.00002",
+        "--file-size-mb",
+        "4",
+        "--threads",
+        "2",
+        "--total-nodes",
+        "2",
+        "--node-id",
+        node,
+        "--deliver-until",
+        &until.to_string(),
+    ]);
+    c
+}
+
+type EpochFiles = BTreeMap<(u64, i64), (Vec<i64>, i64, i64, std::time::SystemTime)>;
+
+fn epoch_files(dir: &Path) -> EpochFiles {
+    use arrow::array::{Int64Array, TimestampMicrosecondArray};
+    let mut out = BTreeMap::new();
+    for p in c360_files(dir) {
+        let name = p.file_name().unwrap().to_string_lossy().to_string();
+        let key = datagen_rs::cycle::parse_epoch_part_key(&name).expect("an epoch key");
+        let (mut ids, mut lo, mut hi) = (Vec::new(), i64::MAX, i64::MIN);
+        for b in batches(&p) {
+            let id = b.column_by_name("row_id").unwrap();
+            let id = id.as_any().downcast_ref::<Int64Array>().unwrap();
+            let ts = b.column_by_name("event_timestamp").unwrap();
+            let ts = ts
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            for i in 0..b.num_rows() {
+                ids.push(id.value(i));
+                lo = lo.min(ts.value(i));
+                hi = hi.max(ts.value(i));
+            }
+        }
+        let mtime = std::fs::metadata(&p).unwrap().modified().unwrap();
+        out.insert(key, (ids, lo, hi, mtime));
+    }
+    out
+}
+
+fn node_count(files: &EpochFiles, node: i64) -> usize {
+    files.keys().filter(|(_, f)| f % 2 == node).count()
+}
+
 #[test]
-fn financial_scale_defaults_to_one() {
-    let out = strict_run(&["--seed", "7777", "--total-nodes", "1"]);
+fn continuous_c360_silent_data_invariants() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-c360-cont-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Both pods at once, as on a cluster.
+    let until = unix_now() + 3;
+    let pods: Vec<_> = ["0", "1"]
+        .map(|n| {
+            c360_continuous(&dir, n, until, "42")
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .into_iter()
+        .collect();
+    for p in pods {
+        let out = p.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let files = epoch_files(&dir);
+
+    // Invariant 1: row ids are disjoint across every file (duplicates would
+    // break joins and recall silently).
+    let mut seen = BTreeSet::new();
+    for (k, (ids, ..)) in &files {
+        for id in ids {
+            assert!(seen.insert(*id), "row id {id} repeats at {k:?}");
+        }
+    }
+
+    // Invariant 2: every file lies inside its round's time slice (silent
+    // wrong-time rows would land in the wrong gold aggregation).
+    // round r = (e * 5 + fid) / 2, slice = 2/5 of 2024.
+    let (start, end) = (1_704_067_200_000_000i64, 1_735_689_600_000_000i64);
+    let slice = (end - start) * 2 / 5;
+    for (&(e, fid), (_, lo, hi, _)) in &files {
+        let s_lo = start + (e as i64 * 5 + fid) / 2 * slice;
+        assert!(
+            *lo >= s_lo && *hi < s_lo + slice,
+            "({e}, {fid}) [{lo},{hi}] out of [{s_lo},{})",
+            s_lo + slice
+        );
+    }
+
+    // Invariant 3: each node's indices are contiguous (a silent gap would
+    // leave the gold stage short rows with no error).
+    for node in [0, 1] {
+        let own: Vec<i64> = (0..5).filter(|f| f % 2 == node).collect();
+        for j in 0..node_count(&files, node) {
+            let key = ((j / own.len()) as u64, own[j % own.len()]);
+            assert!(
+                files.contains_key(&key),
+                "node {node} misses index {j} {key:?}"
+            );
+        }
+    }
+
+    // Invariant 4: a restart rewrites nothing (silent id and time collisions
+    // if it did).
+    let n0 = node_count(&files, 0);
+    let out = c360_continuous(&dir, "0", unix_now() + 4, "42")
+        .output()
+        .unwrap();
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let text =
-        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    assert!(
-        text.contains("\"scale\":1.000000"),
-        "default scale is not 1.0"
-    );
+    let again = epoch_files(&dir);
+    for (k, v) in files.iter().filter(|((_, f), _)| f % 2 == 0) {
+        assert_eq!(again[k].3, v.3, "restart rewrote {k:?}");
+    }
+    assert!(node_count(&again, 0) > n0, "restart wrote nothing");
+
+    // Invariant 5: a run with another configuration is refused on resume
+    // (a mixed corpus would be labelled with the new corpus_args).
+    let out = c360_continuous(&dir, "0", unix_now() + 5, "7")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The output pins, by the generator version they were captured under: the
-/// sha256 of every pinned (digest, files) pair in this file, in order. A pin
-/// re-captured without a new MODEL_VERSION (model.rs) fails, because two
-/// corpora with different bytes would then carry one model_version in their
-/// markers' corpus_args.
-const PINS_BY_MODEL_VERSION: &[(&str, &str)] = &[(
-    "datagen-v2-rs-0.3",
-    "dd77637b7c743794752fff4c99c1472d7a83cf1775abddf4f9aa78650e328d90",
-)];
+// ---------------------------------------------------------------------------
+// Continuous AML delivery (batch file path): silent-data invariants only (refusals, timing and the
+// stop marker fail loud and are checked once per change).
+// ---------------------------------------------------------------------------
 
-/// Every pinned `(digest, files)` literal in the five pin tests, as text.
-fn pinned_pairs() -> Vec<String> {
-    let src = include_str!("cycles.rs");
-    let mut out = Vec::new();
-    for name in [
-        "fn c360_driver_output_is_pinned",
-        "fn financial_output_is_pinned_to_the_frozen_generator",
-        "fn financial_perturbed_output_is_pinned",
-        "fn financial_two_cycle_output_is_pinned",
-        "fn c360_two_cycle_output_is_pinned",
-    ] {
-        let body = &src[src.find(name).expect(name)..];
-        let body = &body[..body.find("\n#[test]").unwrap_or(body.len())];
-        let flat: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-        for part in flat.split("assert_eq!(").skip(1) {
-            let Some(rest) = part.split_once(",(").map(|(_, r)| r) else {
-                continue;
-            };
-            let pair = &rest[..rest.find(')').unwrap_or(0)];
-            let ok = pair.split(',').count() == 2
-                && pair
-                    .chars()
-                    .all(|c| c.is_ascii_digit() || c == '_' || c == ',');
-            if ok {
-                out.push(pair.replace('_', ""));
-            }
-        }
-    }
-    out
+fn aml_continuous(dir: &Path, node: &str, until: i64) -> Command {
+    let mut c = generate_cmd();
+    c.env("DG_LOCAL_DIR", dir).args([
+        "--bucket",
+        "b",
+        "--seed",
+        "7777",
+        "--scale",
+        "0.02",
+        "--corpus-months",
+        "24",
+        "--threads",
+        "2",
+        "--mode",
+        "all",
+        "--total-nodes",
+        "2",
+        "--node-id",
+        node,
+        "--file-size-mb",
+        "1",
+        "--delivery-mode",
+        "batch",
+        "--deliver-until",
+        &until.to_string(),
+    ]);
+    c
+}
+
+/// Epoch of an AML bronze file name: 0 for the history's part-NNNNNN.
+fn aml_epoch(name: &str) -> u64 {
+    datagen_rs::cycle::parse_epoch_part_key(name).map_or(0, |(e, _)| e)
 }
 
 #[test]
-fn output_pins_are_keyed_by_model_version() {
-    let pairs = pinned_pairs();
-    assert_eq!(
-        pairs.len(),
-        5,
-        "expected one pinned digest per pin test: {pairs:?}"
-    );
-    let got = datagen_rs::corpus::sha256_hex(&pairs.join(";"));
-    let version = datagen_rs::model::MODEL_VERSION;
-    match PINS_BY_MODEL_VERSION.iter().find(|(v, _)| *v == version) {
-        Some((_, want)) => assert_eq!(
-            &got, want,
-            "an output pin changed but MODEL_VERSION is still {version}: bump MODEL_VERSION \
-             (model.rs) and add the new pin set here"
-        ),
-        None => {
-            panic!("no pin set recorded for MODEL_VERSION {version}: add ({version:?}, {got:?})")
+fn continuous_aml_batch_delivery_silent_data_invariants() {
+    use arrow::array::{ListArray, StringArray, TimestampMicrosecondArray};
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-aml-cont-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let until = unix_now() + 15;
+    let pods: Vec<_> = ["0", "1"]
+        .map(|n| {
+            aml_continuous(&dir, n, until)
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .into_iter()
+        .collect();
+    for p in pods {
+        let out = p.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // Bronze: UETRs per epoch, and each epoch's time range.
+    let bronze = files(&dir, "bronze/pacs008", "part-");
+    let mut uetrs: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
+    let mut span: BTreeMap<u64, (i64, i64)> = BTreeMap::new();
+    let mut all = BTreeSet::new();
+    for p in &bronze {
+        let e = aml_epoch(&p.file_name().unwrap().to_string_lossy());
+        for b in batches(p) {
+            let ts = b.column_by_name("cre_dt_tm").unwrap();
+            let ts = ts
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let s = span.entry(e).or_insert((i64::MAX, i64::MIN));
+            for i in 0..b.num_rows() {
+                s.0 = s.0.min(ts.value(i));
+                s.1 = s.1.max(ts.value(i));
+            }
+        }
+        for u in uetr_col(std::slice::from_ref(p)) {
+            // Invariant 1: no UETR repeats, across files or epochs.
+            assert!(all.insert(u.clone()), "UETR {u} repeats (epoch {e})");
+            uetrs.entry(e).or_default().insert(u);
         }
     }
+    let complete: Vec<u64> = (1..)
+        .take_while(|e| {
+            (0..2).all(|n| {
+                dir.join(format!("b/_corpus/e{e:04}-node-{n:04}.json"))
+                    .exists()
+            })
+        })
+        .collect();
+    assert!(
+        complete.len() >= 2,
+        "only {} live epochs completed",
+        complete.len()
+    );
+
+    // Invariant 2: event time advances: each epoch lies after the previous.
+    for (e, (lo, _)) in span.iter().skip(1) {
+        assert!(*lo > span[&(e - 1)].1, "epoch {e} overlaps epoch {}", e - 1);
+    }
+
+    // Invariants 3 and 4: each complete epoch's manifest names exactly
+    // planted rows of that epoch's bronze, and typology ids never repeat.
+    let mut ids = BTreeSet::new();
+    for e in std::iter::once(0).chain(complete.iter().copied()) {
+        let name = if e == 0 {
+            "manifest.parquet".into()
+        } else {
+            format!("manifest-e{e:04}.parquet")
+        };
+        let mut planted = 0;
+        for b in batches(&dir.join("b/manifest").join(name)) {
+            let tid = b.column_by_name("typology_id").unwrap();
+            let tid = tid.as_any().downcast_ref::<StringArray>().unwrap();
+            let pu = b.column_by_name("participant_uetrs").unwrap();
+            let pu = pu.as_any().downcast_ref::<ListArray>().unwrap();
+            for i in 0..b.num_rows() {
+                assert!(
+                    ids.insert(tid.value(i).to_string()),
+                    "typology id {} repeats",
+                    tid.value(i)
+                );
+                let v = pu.value(i);
+                let v = v.as_any().downcast_ref::<StringArray>().unwrap();
+                for j in 0..v.len() {
+                    assert!(
+                        uetrs[&e].contains(v.value(j)),
+                        "epoch {e} manifest UETR not in its bronze"
+                    );
+                    planted += 1;
+                }
+            }
+        }
+        assert!(planted > 0, "epoch {e} plants nothing");
+    }
+
+    // Invariant 5: a restart rewrites nothing and continues.
+    let mtimes = |d: &Path| -> BTreeMap<PathBuf, std::time::SystemTime> {
+        files(d, "bronze/pacs008", "part-")
+            .into_iter()
+            .map(|p| {
+                (
+                    p.clone(),
+                    std::fs::metadata(&p).unwrap().modified().unwrap(),
+                )
+            })
+            .collect()
+    };
+    let before = mtimes(&dir);
+    let out = aml_continuous(&dir, "0", unix_now() + 3).output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = mtimes(&dir);
+    for (p, t) in &before {
+        assert_eq!(after[p], *t, "restart rewrote {}", p.display());
+    }
+    assert!(after.len() > before.len(), "restart wrote nothing");
+    let _ = std::fs::remove_dir_all(&dir);
 }

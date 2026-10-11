@@ -1,15 +1,14 @@
-"""`lakebench clean` ownership and confirmation regressions (2026-09-24 audit).
+"""`lakebench clean` ownership and confirmation.
 
-1. On a backend without bucket tagging (FlashBlade) every bucket reports
-   UNSUPPORTED, and clean fell straight through to empty_bucket with no name
-   check. It must apply the same longest-prefix rule destroy uses, and refuse
-   when that cannot be checked.
-2. Answering "no" to the running-jobs prompt was swallowed (click.Abort is a
-   RuntimeError caught by a broad except), so the clean went ahead.
+- On a backend without bucket tagging (FlashBlade) every bucket reports
+  UNSUPPORTED. Clean must apply destroy's longest-prefix name rule and refuse
+  when that cannot be checked.
+- Declining the running-jobs prompt aborts the clean.
 """
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,19 +16,7 @@ import click
 import pytest
 import typer
 
-CFG = (
-    "name: my-clean\n"
-    "platform:\n"
-    "  storage:\n"
-    "    s3:\n"
-    "      endpoint: http://minio:9000\n"
-    "      access_key: k\n"
-    "      secret_key: s\n"
-    "      buckets:\n"
-    "        bronze: my-clean-bronze\n"
-    "        silver: my-clean-silver\n"
-    "        gold: my-clean-gold\n"
-)
+from tests.fixtures.clean_helpers import CFG, verified_namespace
 
 
 def _cfg(tmp_path: Path) -> Path:
@@ -57,28 +44,11 @@ def _s3():
 
 
 def _verified_namespace():
-    """Patches that make the deployment's namespace present and verified,
-    so these tests exercise the bucket-level checks after the gate."""
-    from contextlib import ExitStack
-
-    from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
-
+    """A present, verified namespace and no engine pod: clean empties the
+    buckets and leaves the catalog, with a warning (tests/test_clean_unregister.py
+    covers the unregister step)."""
     stack = ExitStack()
-    stack.enter_context(patch("kubernetes.client.CoreV1Api"))
-    stack.enter_context(
-        patch(
-            "lakebench.deploy.ownership.verify_namespace_identity",
-            return_value=IdentityReport(
-                verdict=IdentityVerdict.MATCH,
-                resource_name="lakebench",
-                expected_deployment="my-clean",
-                hint="",
-            ),
-        )
-    )
-    stack.enter_context(patch("lakebench.deploy.ownership.build_identity_from_config"))
-    # No engine pod: clean empties the buckets and leaves the catalog, with a
-    # warning (tests/test_clean_unregister.py covers the unregister step).
+    stack.enter_context(verified_namespace())
     stack.enter_context(
         patch(
             "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
@@ -103,84 +73,47 @@ def _clean(cfg, **kw):
         return clean(**args)
 
 
-@patch("lakebench.k8s.get_k8s_client")
-@patch("kubernetes.client.CustomObjectsApi")
-@patch("kubernetes.client.BatchV1Api")
-@patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=None)
-@patch("lakebench.deploy.ownership.verify_bucket_ownership")
-@patch("lakebench.s3.S3Client")
-def test_unsupported_refuses_when_siblings_unknown(
-    s3_cls, verify, _names, _batch, _crd, _k8s, tmp_path
+@pytest.mark.parametrize(
+    ("siblings", "tagless_ours", "other_buckets", "cleaned"),
+    [
+        (None, True, False, False),  # sibling list unreadable: refuse
+        (["my"], True, True, False),  # the bucket names do not match this deployment
+        ([], True, False, True),  # prefix match and contents recorded as ours
+        ([], False, False, False),  # prefix match but no record: a user's bucket
+    ],
+)
+def test_tagless_bucket_is_cleaned_only_when_provably_ours(
+    tmp_path, siblings, tagless_ours, other_buckets, cleaned
 ):
     s3 = _s3()
-    s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
-    with pytest.raises(typer.Exit) as exc:
-        _clean(_cfg(tmp_path))
-    assert exc.value.exit_code == 1
-    assert s3.empty_bucket.call_count == 0
-
-
-@patch("lakebench.k8s.get_k8s_client")
-@patch("kubernetes.client.CustomObjectsApi")
-@patch("kubernetes.client.BatchV1Api")
-@patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=["my"])
-@patch("lakebench.deploy.ownership.verify_bucket_ownership")
-@patch("lakebench.s3.S3Client")
-def test_unsupported_refuses_when_other_deployment_has_prefix_claim(
-    s3_cls, verify, _names, _batch, _crd, _k8s, tmp_path
-):
-    # Another deployment named "my-clean-x" would win buckets it prefixes;
-    # here the bucket name does not match "my-clean" at all.
-    s3 = _s3()
-    s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
-    cfg = tmp_path / "c.yaml"
-    cfg.write_text(
-        CFG.replace("my-clean-bronze", "other-bronze")
-        .replace("my-clean-silver", "other-silver")
-        .replace("my-clean-gold", "other-gold")
-    )
-    with pytest.raises(typer.Exit):
-        _clean(cfg)
-    assert s3.empty_bucket.call_count == 0
-
-
-@patch("lakebench.deploy.ownership.tagless_contents_are_ours", return_value=True)
-@patch("lakebench.k8s.get_k8s_client")
-@patch("kubernetes.client.CustomObjectsApi")
-@patch("kubernetes.client.BatchV1Api")
-@patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[])
-@patch("lakebench.deploy.ownership.verify_bucket_ownership")
-@patch("lakebench.s3.S3Client")
-def test_unsupported_cleans_on_prefix_match(
-    s3_cls, verify, _names, _batch, _crd, _k8s, _recorded, tmp_path
-):
-    s3 = _s3()
-    s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
-    _clean(_cfg(tmp_path))
-    assert s3.empty_bucket.call_count == 1  # clean silver: one bucket
-
-
-@patch("lakebench.deploy.ownership.tagless_contents_are_ours", return_value=False)
-@patch("lakebench.k8s.get_k8s_client")
-@patch("kubernetes.client.CustomObjectsApi")
-@patch("kubernetes.client.BatchV1Api")
-@patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[])
-@patch("lakebench.deploy.ownership.verify_bucket_ownership")
-@patch("lakebench.s3.S3Client")
-def test_unsupported_prefix_match_without_record_is_not_cleaned(
-    s3_cls, verify, _names, _batch, _crd, _k8s, _recorded, tmp_path
-):
-    """Review: clean still wiped a user's pre-existing, name-matching bucket
-    on FlashBlade after destroy had stopped doing so."""
-    s3 = _s3()
-    s3_cls.return_value = s3
-    verify.side_effect = lambda _c, b, _n, **_k: _unsupported(b)
-    with pytest.raises(typer.Exit):
-        _clean(_cfg(tmp_path))
-    assert s3.empty_bucket.call_count == 0
+    if other_buckets:
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text(
+            CFG.replace("my-clean-bronze", "other-bronze")
+            .replace("my-clean-silver", "other-silver")
+            .replace("my-clean-gold", "other-gold")
+        )
+    else:
+        cfg = _cfg(tmp_path)
+    with (
+        patch("lakebench.s3.S3Client", return_value=s3),
+        patch(
+            "lakebench.deploy.ownership.verify_bucket_ownership",
+            side_effect=lambda _c, b, _n, **_k: _unsupported(b),
+        ),
+        patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=siblings),
+        patch("kubernetes.client.BatchV1Api"),
+        patch("kubernetes.client.CustomObjectsApi"),
+        patch("lakebench.k8s.get_k8s_client"),
+        patch("lakebench.deploy.ownership.tagless_contents_are_ours", return_value=tagless_ours),
+    ):
+        if cleaned:
+            _clean(cfg)
+        else:
+            with pytest.raises(typer.Exit) as exc:
+                _clean(cfg)
+            assert exc.value.exit_code != 0
+    assert s3.empty_bucket.call_count == (1 if cleaned else 0)  # clean silver: one bucket
 
 
 @patch("lakebench.k8s.get_k8s_client")
@@ -193,12 +126,15 @@ def test_declining_running_jobs_prompt_aborts(s3_cls, verify, batch, _crd, _k8s,
     s3_cls.return_value = s3
     batch.return_value.read_namespaced_job.return_value.status.active = 2
 
-    # Answer yes to the general "are you sure" prompt and no to the
-    # running-jobs prompt, so the test exercises the latter.
-    def _confirm(text, *a, **k):
-        if "still writing" in text.lower() or "running" in text.lower():
-            raise click.Abort()
-        return True
+    # The first prompt (are you sure) is answered yes; the next one, about
+    # running jobs, is declined.
+    answers = iter([True])
+
+    def _confirm(*_a, **_k):
+        try:
+            return next(answers)
+        except StopIteration:
+            raise click.Abort() from None
 
     with patch("typer.confirm", side_effect=_confirm):
         with pytest.raises(click.Abort):

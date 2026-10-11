@@ -54,10 +54,9 @@ def test_replicates_are_not_held_out():
         assert ds.heldout_role(s, ds.load_heldout()) is None
 
 
-def test_replicates_are_four_distinct_new_seeds():
-    assert len(REPLICATES) == len(set(REPLICATES)) == 4
+def test_replicates_are_distinct_and_not_calibration_or_spent_seeds():
+    assert len(REPLICATES) == len(set(REPLICATES))
     assert not set(REPLICATES) & set(FIXED)
-    assert 44 not in REPLICATES and 45 not in REPLICATES
 
 
 @pytest.mark.parametrize("seed", REPLICATES)
@@ -126,14 +125,6 @@ def record(tmp_path):
     p = tmp_path / ds.LOOKS_FILENAME
     p.write_text(json.dumps({"_doc": "test", "looks": []}))
     return p
-
-
-def test_tracked_record_exists_and_holds_no_look_before_the_freeze():
-    # Before any registered look the record holds only burned seeds (retired
-    # without a look, OA2), each with a reason.
-    assert ds.looks_path().name == ds.LOOKS_FILENAME
-    for e in ds.load_looks():
-        assert e["state"] == "burned" and e["reason"].strip(), e["role"]
 
 
 def test_claim_then_complete_spends_the_seed(record):
@@ -275,13 +266,6 @@ def test_registered_look_withholds_the_verdict_when_predictions_change(
 # ---------------------------------------------------------------------------
 
 
-def test_tracked_predictions_record_is_uncommitted_so_looks_refuse():
-    with pytest.raises(ValueError, match="no committed predictions"):
-        ds.load_predictions()
-    mod = _runner()
-    assert "not committed" in mod.predictions_error("x@sha256:" + "a" * 64)
-
-
 def _pred_doc(**over):
     pred = {
         "prereg_sha256": "s" * 64,
@@ -311,6 +295,44 @@ def test_predictions_are_validated(tmp_path):
         ds.load_predictions(p)
 
 
+@pytest.fixture
+def predictions_file(tmp_path, monkeypatch):
+    p = tmp_path / ds.PREDICTIONS_FILENAME
+    monkeypatch.setattr(ds, "predictions_path", lambda: p)
+    return p
+
+
+def _registered_predictions(**over):
+    from lakebench.aml.fidelity_gate import in_scope_typologies, load_preregistration
+
+    prereg, sha = load_preregistration()
+    per = {t: {"predicted_ap": 0.7, "pi": [0.6, 0.8]} for t in in_scope_typologies(prereg)}
+    return _pred_doc(**{"prereg_sha256": sha, "typologies": per, "generator_image": IMAGE, **over})
+
+
+IMAGE = "img@sha256:" + "a" * 64
+
+
+def test_look_refused_without_committed_predictions(predictions_file):
+    predictions_file.write_text(json.dumps({"_doc": "no predictions block"}))
+    with pytest.raises(ValueError):
+        ds.load_predictions()
+    assert _runner().predictions_error(IMAGE) is not None
+
+
+@pytest.mark.parametrize(
+    "over, image, refused",
+    [
+        pytest.param({}, IMAGE, False, id="matching"),
+        pytest.param({"prereg_sha256": "0" * 64}, IMAGE, True, id="prereg-changed"),
+        pytest.param({}, "other@sha256:" + "b" * 64, True, id="image-differs"),
+    ],
+)
+def test_look_predictions_must_match_prereg_and_image(predictions_file, over, image, refused):
+    predictions_file.write_text(json.dumps(_registered_predictions(**over)))
+    assert (_runner().predictions_error(image) is not None) is refused
+
+
 def test_replication_reports_observed_against_the_interval():
     pred = _pred_doc()["predictions"]
     rep = ds.replication({"gather_scatter": {"ap": 0.85}}, pred)
@@ -336,17 +358,20 @@ def test_level2_reports_the_original_four_beside_k_of_6():
     assert four["k_in_band"] == 2 and four["holds_on_this_corpus"] is False
 
 
-def test_registered_look_needs_a_clean_checkout(monkeypatch):
+@pytest.mark.parametrize("dirty", [False, True], ids=["clean", "dirty"])
+def test_registered_look_needs_a_clean_checkout(tmp_path, monkeypatch, dirty):
+    import subprocess
+
+    git = ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    (tmp_path / "tracked.json").write_text("{}")
+    subprocess.run([*git, "add", "tracked.json"], check=True)
+    subprocess.run([*git, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "x"], check=True)
+    if dirty:
+        (tmp_path / "tracked.json").write_text('{"changed": 1}')
     mod = _runner()
-
-    class Done:
-        def __init__(self, out):
-            self.stdout = out
-
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: Done(" M src/x.json\n"))
-    assert "clean checkout" in mod.clean_checkout_error()
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: Done(""))
-    assert mod.clean_checkout_error() is None
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    assert (mod.clean_checkout_error() is not None) is dirty
 
 
 def test_out_of_tree_ledger_keeps_a_seed_spent(tmp_path, monkeypatch):

@@ -1,4 +1,4 @@
-"""How a run record names a corpus seed (SPEC release success 5).
+"""How a run record names a corpus seed.
 
 A record, the datagen fleet record and the HTML report keep a corpus seed in
 plaintext unless the AML seed guard says it must not be shown

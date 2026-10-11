@@ -350,7 +350,12 @@ class RunInterrupt:
         object is handled, so whatever a second signal cuts off stays in
         ``skipped``.
         """
-        todo = [e for e in self.owned.values() if not e.finished]
+        # Jobs (datagen, the writer) first, then in creation order: a second
+        # signal that cuts the cleanup must not leave datagen writing.
+        todo = sorted(
+            (e for e in self.owned.values() if not e.finished),
+            key=lambda e: not e.key.startswith(f"{JOB}/"),
+        )
         if not todo:
             return
         _print(console, "Interrupted: stopping this run's jobs (Ctrl-C again to skip)")

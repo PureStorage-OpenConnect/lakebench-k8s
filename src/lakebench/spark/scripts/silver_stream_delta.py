@@ -61,7 +61,7 @@ Environment variables (set by job.py):
     LB_ICEBERG_CATALOG   - catalog name (e.g., "lakehouse")
     CATALOG_NAME         - same as LB_ICEBERG_CATALOG
     CHECKPOINT_LOCATION  - s3a://silver-bucket/checkpoints/silver-stream/
-    TRIGGER_INTERVAL     - e.g., "60 seconds"
+    TRIGGER_INTERVAL     - e.g., "0 seconds" (back to back)
 """
 
 from __future__ import annotations
@@ -119,7 +119,7 @@ def _rows_from_own_commit(spark, silver_tbl, attempt_tag):
     Window is 100 rather than 20: concurrent OPTIMIZE / VACUUM / a second
     writer to the same table can push our commit past a small window
     between our write and our history read, and returning ``None`` on a
-    real commit would silently under-count against A1's LB-044 accumulator
+    real commit would silently under-count against A1's accumulator
     (invariant 5 label drift, not corruption -- rows are still written).
     100 is a cheap Delta metadata scan and covers realistic maintenance
     burst rates.
@@ -356,7 +356,7 @@ def main() -> None:
     catalog = env("LB_ICEBERG_CATALOG", "ice")
     silver_uri = env("LB_SILVER_URI", "s3a://lb-silver/")
     checkpoint_location = env("CHECKPOINT_LOCATION")
-    trigger_interval = env("TRIGGER_INTERVAL", "60 seconds")
+    trigger_interval = env("TRIGGER_INTERVAL", "0 seconds")
 
     bronze_tbl = f"{catalog}.{env('LB_BRONZE_TABLE', 'default.bronze_raw')}"
     silver_tbl = f"{catalog}.{env('LB_SILVER_TABLE', 'silver.customer_interactions_enriched')}"

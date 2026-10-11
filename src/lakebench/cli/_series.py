@@ -2,7 +2,7 @@
 
 Repetition 1 runs as the options ask (it may generate). Repetitions 2 to N
 never generate and rebuild silver and gold from the same bronze. One corpus
-per series (ch03 section 6 "Series corpus identity"):
+per series:
 
 - the config is loaded once, by ``run``, and every repetition runs a copy of
   that load and records the hash of the bytes it was loaded from;

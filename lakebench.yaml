@@ -48,7 +48,7 @@ recipe: polaris-iceberg-spark-trino
 # Container images for every component. Override for private registries.
 # See docs/datagen-custom-images.md for building your own datagen image.
 # images:
-#   datagen: docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04    # tag and digest; :latest is not accepted
+#   datagen: docker.io/sillidata/lb-datagen:3cb67f92@sha256:e1e37d43682f87378b27ea9ff33a2a74885350c76b48caacd9709199c0be83b9    # tag and digest; :latest is not accepted
 #   spark: apache/spark:4.0.2-python3
 #   postgres: postgres:17
 #   trino: trinodb/trino:483

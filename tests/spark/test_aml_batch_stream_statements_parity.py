@@ -25,7 +25,8 @@ arrival order, which diverges from batch mode's globally-sorted
 entry_seq -- silently correct as arrival-order running balance, silently
 wrong as batch-mode parity. Under LB_SILVER_STATEMENTS_STRICT_PARITY=1
 the stream refuses to publish that arrival-order state; the run fails
-loud with SilverAbort (see test_late_arrival_strict_refuses.py). Under
+loud with SilverAbort (see the 'strict' row of test_late_arrival_in_a_fresh_jvm in
+test_late_arrival_labelled.py). Under
 the default posture the stream labels the batch as
 `silver_statements_parity_mode=arrival_order_running_balance` (see
 test_late_arrival_labelled.py).
@@ -198,7 +199,4 @@ def _copy_accounts(spark, src, dst):
 if __name__ == "__main__":
     # Run by spark_subprocess, which puts the scripts and tests/spark on
     # PYTHONPATH and passes the jar classpath.
-    import _parity_mutation
-
-    _parity_mutation.install()
     _run(sys.argv[1])

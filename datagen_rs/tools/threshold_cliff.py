@@ -1,4 +1,4 @@
-"""Threshold-cliff check for a generated financial corpus (AML-GOALS R2, LB-138).
+"""Threshold-cliff check for a generated financial corpus (AML-GOALS R2).
 
 R2: the datagen is never tuned to a rule. The behavioural test is that no
 generated distribution shows a density cliff at a rule threshold. For every

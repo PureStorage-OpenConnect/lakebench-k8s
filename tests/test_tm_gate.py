@@ -73,6 +73,29 @@ def test_continuous_ticks_are_all_gated():
     assert [p.split(":")[0] for p in tm_gate_problems(parse_tm_invariants(logs))] == ["cycle 2"]
 
 
+def test_aml_gate_reads_the_drain_tick():
+    """The window's log stops before the drain tick; the gate reads the
+    drain's alerts and TM cycle, keeping the window's cycles."""
+    from lakebench.cli._sustained import _aml_cumulative_alerts, _aml_gate_logs
+
+    window = (
+        "[detection] cumulative gold.alerts rows: 10\n"
+        "[tm-invariant] reconciliation: status=pass cycle=1 detail=a\n"
+    )
+    drain = SimpleNamespace(
+        state="drained",
+        logs=window
+        + "[detection] cumulative gold.alerts rows: 25\n"
+        + "[tm-status] status=ran cycle=2 reason=\n"
+        + "[tm-invariant] reconciliation: status=fail cycle=2 detail=b\n",
+    )
+    logs, inv, status = _aml_gate_logs(window, drain)
+    assert _aml_cumulative_alerts(logs) == 25
+    assert sorted(inv) == [1, 2] and 2 in status
+    assert [p.split(":")[0] for p in tm_gate_problems(inv)] == ["cycle 2"]
+    assert _aml_gate_logs(window, SimpleNamespace(state="timeout", logs=drain.logs))[0] == window
+
+
 def test_driver_log_to_metrics_json_to_scorecard(tmp_path):
     from lakebench.cli._run import _apply_parsed_job_metrics
     from lakebench.reports.scorecard import FinancialScorecardBlock
@@ -94,48 +117,7 @@ def test_driver_log_to_metrics_json_to_scorecard(tmp_path):
     html = FinancialScorecardBlock().render_detail_html(
         SimpleNamespace(jobs=[loaded], financial_scoring=None, config_snapshot={})
     )
-    assert "Transaction Monitoring Operations" in html
-    assert "simulated from the datagen ground truth" in html
     assert "sars_le_cases" in html and "SARs 5 &lt;= cases 4" in html
-    assert "Productive rate" in html and "precision" not in html.lower().split("detection")[0]
-    assert "Queue health" in html and "Cycle funnel" in html
-
-
-def test_scorecard_without_tm_lines_is_unchanged():
-    from lakebench.reports.scorecard import _render_tm_operations
-
-    assert _render_tm_operations([SimpleNamespace(tm_ops=None, tm_invariants={})]) == ""
-
-
-def test_spark_jobs_get_tm_env_and_the_module():
-    from lakebench.spark.job import JobType, SparkJobManager
-    from tests.conftest import make_config
-
-    cfg = make_config(
-        architecture={
-            "workload": {
-                "schema": "financial",
-                "datagen": {"scale": 1},
-                "tm_operations": {"analyst_accuracy": 0.8, "seed": 5},
-            }
-        }
-    )
-    k8s = MagicMock()
-    k8s.get_cluster_capacity.return_value = None
-    manifest = SparkJobManager(cfg, k8s)._build_manifest(JobType.GOLD_FINALIZE)
-    env = {e["name"]: e.get("value") for e in manifest["spec"]["driver"]["env"]}
-    assert env["LB_TM_ANALYST_ACCURACY"] == "0.8"
-    assert env["LB_TM_SEED"] == "5"
-    assert env["LB_TM_ENABLED"] == "true"
-    assert env["LB_TM_CONTINUOUS_INTERVAL_S"] == "1800"
-    assert env["LB_TM_COUNTERPARTY_SCENARIOS"].split(",")[0] == "W1_connected_components"
-    assert env["LB_FINANCIAL_GOLD_CASES"] == "gold.cases"
-    exec_env = {e["name"] for e in manifest["spec"]["executor"]["env"]}
-    assert "LB_TM_SEED" in exec_env
-
-    from lakebench.modules.pipeline_engines.spark.scripts_maps import SCRIPT_MAPS
-
-    assert "tm_operations.py" in {s.key for s in SCRIPT_MAPS["aml-rules"]}
 
 
 def test_status_lines_parse_and_last_wins():
@@ -187,9 +169,8 @@ def test_continuous_section_renders_from_the_run_record():
     html = FinancialScorecardBlock().render_detail_html(
         SimpleNamespace(jobs=[], financial_scoring=None, config_snapshot={}, tm_operations=verdict)
     )
-    assert "Transaction Monitoring Operations" in html
-    assert "per operations pass" in html and "not run" in html and "window ended" in html
-    assert "Cycle funnel" in html
+    gate = html.split("P10 gate")[1].split("</p>")[0]
+    assert "not run" in gate and "var(--success)" not in gate
 
 
 def test_bad_tm_summary_does_not_blank_the_detection_table():

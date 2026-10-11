@@ -4,11 +4,10 @@ Fails the job (exit 1) when bronze could not produce a meaningful silver:
 no rows, a missing or wrongly typed column that silver or gold computes on,
 a key column that is entirely null, or no row that survives the silver
 quality filter. These used to be warnings or not checked at all, so an empty
-or schema-broken bronze passed and the run reported success on no data
-(LB-044 class).
+or schema-broken bronze passed and the run reported success on no data.
 
-LB_CONTINUOUS_RESET=1 turns the job into the continuous preflight instead
-(LB-142): it drops the tables the continuous jobs write (bronze_raw, silver,
+LB_CONTINUOUS_RESET=1 turns the job into the continuous preflight instead:
+it drops the tables the continuous jobs write (bronze_raw, silver,
 gold) with their data, and verifies nothing. A batch run leaves silver and
 gold full, and silver-stream rightly refuses to start a fresh checkpoint over
 a full table. The CLI deletes the stream checkpoints before submitting this
@@ -26,6 +25,7 @@ from common import (
     clear_unregistered_table_dirs,
     env,
     log,
+    managed_table_location,
     path_size_gb,
     pipeline_catalog,
     pipeline_table,
@@ -186,20 +186,38 @@ def continuous_reset_targets():
     return tables, owned, bronze_uri + "customer/interactions/"
 
 
-def continuous_reset_explicit_locations():
-    """(table, location) for continuous tables created at an explicit path,
-    whose files a DROP leaves: the Delta + Hive bronze table
-    (bronze_ingest_delta.bronze_target). spark_catalog as the pipeline
-    catalog means Delta + Hive (job.py)."""
+def continuous_reset_explicit_locations(spark):
+    """(table, location) for Delta + Hive continuous tables whose files can
+    outlive their catalog entry: bronze, created at an explicit path
+    (bronze_ingest_delta.bronze_target), whose files a DROP leaves; and
+    silver and gold at their managed paths, where a write that committed
+    but never registered (a failed batch build) leaves a Delta log the
+    stream's create cannot adopt. spark_catalog as the pipeline catalog
+    means Delta + Hive (job.py)."""
     if pipeline_catalog() != "spark_catalog":
         return []
     bronze_table = env("LB_BRONZE_TABLE", "default.bronze_raw")
-    return [
+    out = [
         (
             pipeline_table("LB_BRONZE_TABLE", "default.bronze_raw"),
             _s3_table_path(env("LB_BRONZE_URI", "s3a://lb-bronze/"), bronze_table),
         )
     ]
+    for key, default, uri_key, bucket in (
+        ("LB_SILVER_TABLE", "silver.customer_interactions_enriched", "LB_SILVER_URI", "lb-silver"),
+        ("LB_GOLD_TABLE", "gold.customer_executive_dashboard", "LB_GOLD_URI", "lb-gold"),
+    ):
+        fq = pipeline_table(key, default)
+        ns, name = fq.split(".")[-2], fq.split(".")[-1].lower()
+        uri = env(uri_key, f"s3a://{bucket}/").rstrip("/") + "/"
+        # Where the catalog would put it now, and where the stream
+        # (warehouse/<table>) and the batch build (warehouse/<ns>.db/<table>)
+        # create it: the namespace itself may be gone after an earlier reset.
+        paths = [managed_table_location(spark, fq), f"{uri}warehouse/{name}"]
+        paths.append(f"{uri}warehouse/{ns}.db/{name}")
+        for location in dict.fromkeys(p for p in paths if p):
+            out.append((fq, location))
+    return out
 
 
 def main() -> None:
@@ -220,7 +238,7 @@ def main() -> None:
         log("=" * 60)
         dropped = reset_stream_tables(spark, tables, owned_uris=owned, keep_uris=[raw])
         clear_unregistered_table_dirs(
-            spark, continuous_reset_explicit_locations(), owned_uris=owned, keep_uris=[raw]
+            spark, continuous_reset_explicit_locations(spark), owned_uris=owned, keep_uris=[raw]
         )
         log(f"Continuous reset complete: {len(dropped)} of {len(tables)} tables dropped")
         # No JOB METRICS block: this is not a bronze-verify stage.
@@ -273,14 +291,6 @@ def main() -> None:
     df.select("customer_id", "interaction_type", "channel", "city_raw").limit(5).show(
         truncate=False
     )
-
-    log("=" * 60)
-    log("VALUE DISTRIBUTIONS")
-    log("=" * 60)
-    log("Interaction types:")
-    df.groupBy("interaction_type").count().orderBy("count", ascending=False).show()
-    log("Channels:")
-    df.groupBy("channel").count().orderBy("count", ascending=False).show()
 
     total_time = time.time() - start_time
     input_size_gb = path_size_gb(spark, source)

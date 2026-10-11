@@ -14,14 +14,16 @@ table reads ``not_supported``.
 
 from __future__ import annotations
 
+import itertools
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
 
 pytest.importorskip("pyspark")
 
 pytestmark = pytest.mark.requires_jars("iceberg", "delta")
+_N = itertools.count()
 
 
 @pytest.fixture(scope="module")
@@ -31,40 +33,28 @@ def spark(spark_session, iceberg_catalog, tmp_path_factory):
     return spark_session
 
 
-def _record(spark, fq, cycle):
-    """The tick's time-travel record of the table's current snapshot, from
-    the snapshot metadata (as gold_refresh_financial.snapshot_record)."""
-    row = spark.sql(
-        "SELECT snapshot_id, unix_micros(committed_at) AS us, summary['total-records'] AS n, "
-        "summary['total-position-deletes'] AS pos, summary['total-equality-deletes'] AS eq "
-        f"FROM {fq}.snapshots ORDER BY committed_at DESC LIMIT 1"
-    ).collect()[0]
-    # UTC from the epoch micros: a collected timestamp is converted to the
-    # Python process's local time.
-    stamp = datetime.fromtimestamp(row["us"] / 1e6, timezone.utc)
+def _record(spark, gold, fq, cycle):
+    """The tick's time-travel record of the table's current snapshot, built by
+    the tick's own ``snapshot_record``."""
+    sid = int(
+        spark.sql(
+            f"SELECT snapshot_id FROM {fq}.snapshots ORDER BY committed_at DESC LIMIT 1"
+        ).first()[0]
+    )
     return {
         "start": 0,
         "cycle": cycle,
         "table": fq.split(".", 1)[1],
-        "snapshot": int(row["snapshot_id"]),
-        "committed_at": stamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-        "total_records": int(row["n"]),
-        # Iceberg writes the delete totals into every summary; a missing one
-        # would turn the record into verified_hash_only, so it must be there.
-        "pos_deletes": int(row["pos"]),
-        "eq_deletes": int(row["eq"]),
-        "count_source": "summary",
-        "_committed": stamp,
+        **gold.snapshot_record(spark, fq, sid),
     }
 
 
 @pytest.fixture
-def three_commits(spark):
+def three_commits(spark, load_script):
     """(table, [record per commit]) after three commits and an expiry of
     every snapshot older than the second."""
-    import time
-
-    table = f"silver.tt_{datetime.now().strftime('%H%M%S%f')}"
+    gold = load_script("gold_refresh_financial")
+    table = f"silver.tt_{next(_N)}"
     fq = f"lakehouse.{table}"
     spark.sql(
         f"CREATE TABLE {fq} (txn_id STRING, amount DECIMAL(18,2), _stream_id STRING, "
@@ -75,23 +65,21 @@ def three_commits(spark):
         f"INSERT INTO {fq} VALUES ('a', 1.00, 's', 1, TIMESTAMP '2026-01-01 00:00:00', array('x')), "
         "('b', 2.00, 's', 1, TIMESTAMP '2026-01-01 00:00:01', NULL)"
     )
-    records.append(_record(spark, fq, 1))
-    time.sleep(1.1)
+    records.append(_record(spark, gold, fq, 1))
     spark.sql(
         f"INSERT INTO {fq} VALUES ('c', 3.00, 's', 2, TIMESTAMP '2026-01-01 00:00:02', array()), "
         "('d', 4.00, 's', 2, TIMESTAMP '2026-01-01 00:00:03', array('y', NULL))"
     )
-    records.append(_record(spark, fq, 2))
-    time.sleep(1.1)
+    records.append(_record(spark, gold, fq, 2))
     spark.sql(f"DELETE FROM {fq} WHERE txn_id = 'a'")
-    records.append(_record(spark, fq, 3))
-    cutoff = records[1]["_committed"].strftime("%Y-%m-%d %H:%M:%S.%f")
+    records.append(_record(spark, gold, fq, 3))
+    cutoff = datetime.strptime(records[1]["committed_at"], "%Y-%m-%dT%H:%M:%S.%fZ").strftime(
+        "%Y-%m-%d %H:%M:%S.%f"
+    )
     spark.sql(
         f"CALL lakehouse.system.expire_snapshots(table => '{table}', "
         f"older_than => TIMESTAMP '{cutoff}', retain_last => 1)"
     )
-    for r in records:
-        r.pop("_committed")
     return table, records
 
 
@@ -125,20 +113,24 @@ def test_expired_and_verified_on_a_real_table(spark, mod, three_commits, tmp_pat
     assert out["incomplete"] is False
     doc = json.loads((tmp_path / "tt_hashes.json").read_text())
     assert doc["nonce"] == "n-1"
-    # The hash covers the business columns: the column spec is that of the
-    # table less the batch-version sentinels.
+    assert sorted(h["snapshot"] for h in doc["hashes"]) == sorted(
+        r["snapshot"] for r in records[1:]
+    )
+
+
+def test_the_hash_covers_the_business_columns_only(spark, mod, three_commits, tmp_path):
+    """The column spec is that of the table less the batch-version sentinels."""
     from common import frame_fingerprint
 
-    df = spark.table(f"lakehouse.{_table}")
+    table, records = three_commits
+    mod.time_travel(spark, _inputs(records), f"file://{tmp_path}/tt_hashes.json", mod.Budget(None))
+    doc = json.loads((tmp_path / "tt_hashes.json").read_text())
+    df = spark.table(f"lakehouse.{table}")
     business = [c for c in df.columns if c not in EXCLUDE]
     assert business == ["txn_id", "amount", "tags"]
     want_sha = frame_fingerprint(df, business)[2]
     assert {h["cols_sha"] for h in doc["hashes"]} == {want_sha}
     assert want_sha != frame_fingerprint(df, df.columns)[2]
-    assert out["excluded_columns"] == EXCLUDE
-    assert sorted(h["snapshot"] for h in doc["hashes"]) == sorted(
-        r["snapshot"] for r in records[1:]
-    )
 
 
 def test_an_altered_hashes_file_is_a_mismatch(spark, mod, three_commits, tmp_path, monkeypatch):

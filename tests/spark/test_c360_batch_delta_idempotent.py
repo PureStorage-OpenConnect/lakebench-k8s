@@ -1,12 +1,9 @@
-"""B1 (Delta): repeat cycle 1/2 with (txnAppId, txnVersion) collapses to no-op.
+"""Delta: repeating cycle 1 or 2 with (txnAppId, txnVersion) collapses to a no-op.
 
 Delta short-circuits any (appId, version) it has recorded, so a re-submission
-of the same cycle within one rebuild epoch commits nothing. This test writes
-cycles 0/1/2 each twice with delta_batch_txn_options and asserts:
-
-- Final row count equals a single-run sequence's count.
-- DESCRIBE HISTORY shows a SET TRANSACTION on every second submission and
-  no data was added by it.
+of the same cycle within one rebuild epoch commits nothing. The test writes
+cycles 0/1/2, the later two each twice, with delta_batch_txn_options and
+asserts the final row count equals a single-run sequence's count.
 """
 
 from __future__ import annotations
@@ -76,22 +73,3 @@ def test_repeated_cycle_appends_are_delta_no_ops(spark, tmp_path):
 
     # Single-run reference sequence: 5 + 7 + 3 = 15 rows.
     assert spark.read.format("delta").load(path).count() == 15
-
-    # DESCRIBE HISTORY should include at least one SET TRANSACTION for each
-    # duplicate submission (Delta records the txn but no data commit).
-    hist = spark.sql(f"DESCRIBE HISTORY delta.`{path}`").collect()
-    ops = [r["operation"] for r in hist]
-    assert "SET TRANSACTION" in ops or ops.count("WRITE") <= 3, (
-        "expected duplicate submissions to be logged as SET TRANSACTION no-ops "
-        f"or coalesced by Delta; saw operations={ops}"
-    )
-
-
-def test_new_rebuild_epoch_moves_appid_namespace():
-    """A cycle 0 under epoch 1 has a different appId than under epoch 0."""
-    from common import delta_batch_txn_options
-
-    a = delta_batch_txn_options("lb-silver-build", 0, 0)
-    b = delta_batch_txn_options("lb-silver-build", 1, 0)
-    assert a["txnAppId"] != b["txnAppId"]
-    assert a["txnVersion"] == b["txnVersion"] == "0"

@@ -575,7 +575,13 @@ def _decide_capacity(
     ]
     if overrides:
         summary += f"; with executor overrides {', '.join(overrides)}"
-    lower = "Lower or unset the executor overrides, reduce" if overrides else "Reduce"
+    # Values set in the config are used exactly, so the hint names them first.
+    knobs = ["the executor overrides"] if overrides else []
+    dg_set = {"parallelism", "cpu"} & cfg.architecture.workload.datagen.model_fields_set
+    if plan.co_resident.includes_datagen and dg_set:
+        # Continuous datagen pods all run beside the streams; none can queue.
+        knobs.append(", ".join(f"datagen.{k}" for k in sorted(dg_set)))
+    lower = f"Lower or unset {' and '.join(knobs)}, reduce" if knobs else "Reduce"
     hint_lines = "\n".join(f"  {s}" for s in shortfalls)
 
     unread = f"; free capacity could not be read ({fallback})" if fallback else ""

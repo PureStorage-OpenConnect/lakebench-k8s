@@ -3,328 +3,203 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%20|%203.11%20|%203.12%20|%203.13-blue)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/LICENSE)
 
-**Run a real data workload through a composable lakehouse architecture on
-Kubernetes, and get evidence of how it behaved.**
+**Evaluate lakehouse architectures through the workloads they execute.**
 
-Deploy a complete lakehouse stack from a single YAML, generate a workload
-corpus, run its pipeline and queries at any scale, and get a scorecard that
-records exactly what produced it, including a fingerprint of each query's
-result, so a reader can check that two runs returned the same answers
-before comparing their numbers.
+Lakebench runs defined data workloads against configurable lakehouse
+architectures on Kubernetes. It measures how the assembled system behaves,
+where time and resources are consumed, and how results change when
+architectural choices or operating conditions change.
 
-<!-- TODO: Add terminal recording / screenshot of `lakebench run` output here -->
+Rather than benchmarking individual components in isolation, Lakebench
+evaluates the behaviour of the architecture as a whole.
 
 ## Why Lakebench?
 
-- **Compare stacks.** Swap catalogs (Hive, Polaris), query engines (Trino,
-  Spark Thrift, DuckDB), and table formats (Iceberg, Delta) -- same data,
-  same queries, different architecture. Each run's report records a result
-  fingerprint per query, so you can see that two runs returned the same
-  answers before you compare their performance.
-- **Test at scale.** Run the same workload at 10 GB, 100 GB, and 1 TB to find
-  where throughput plateaus or resources saturate on your hardware.
-- **Measure freshness.** Continuous mode keeps data arriving through the
-  pipeline and benchmarks query performance under ongoing ingest load.
+A lakehouse is a composition of technologies. Its behaviour depends on how
+those technologies work together, the workload being executed and the
+infrastructure underneath them.
+
+Component benchmarks cannot tell you how the complete architecture will
+behave when ingesting, transforming, analyzing and maintaining data.
+
+Lakebench provides a repeatable way to investigate three questions:
+
+1. **How does the architecture behave?** Execute a defined workload and
+   measure its outcomes, processing stages and resource consumption.
+2. **Where are the constraints?** Examine where execution time is spent and
+   which system resources contribute to observed behaviour.
+3. **What changes when the architecture changes?** Repeat the workload with
+   different supported components, configurations or operating conditions
+   and compare the evidence.
+
+Lakebench produces measurements and supporting context. It does not
+automatically determine the best architecture or establish production
+suitability.
+
+## How Lakebench Works
+
+Every Lakebench experiment brings together four elements:
+
+**Workload:** The data, processing, queries and outcomes that exercise the
+architecture.
+
+**Architecture:** The supported composition of processing engines, table
+formats, catalogs and query engines.
+
+**System:** The Kubernetes, compute, network and storage environment on
+which the architecture runs.
+
+**Execution conditions:** The scale, resource allocations, execution mode
+and other controls under which the workload executes.
+
+Together, these produce evidence of how the workload behaved.
+
+`Workload x Architecture x System x Execution conditions -> Evidence`
+
+Lakebench automates supported deployment and execution activities, collects
+measurements and produces reports for examining the results.
 
 ## Workloads
 
-Lakebench ships two workload schemas. The stack is the same either way; the
-schema flag routes datagen and the pipeline scripts.
+Lakebench currently provides two synthetic workloads.
 
-- **Customer 360** (default). Retail interactions from ~8 channels flow
-  through bronze / silver / gold into an executive dashboard and the
-  8-query analytical benchmark. `workload.schema: customer360`.
-- **Financial crime (AML).** pacs.008 wire messages from a frozen
-  generator (`datagen-v2-rs-0.3`) flow through bronze / silver / gold.
-  Nine detection rules, including a fuzzy sanctions and PEP screen against
-  a synthetic, dated watchlist, are scored for recall and precision against
-  planted typologies (structuring, round-tripping, layering, dormant
-  reactivation, high-risk corridors and others) by
-  `spark/scripts/score_financial.py`, which `lakebench run` invokes
-  inline. A pre-registered reference model (the fidelity gate) and a
-  band leakage report ship separately as `lakebench financial
-  reference-score`; they diagnose whether a rule could read high recall
-  from a label proxy, and they are not run by `lakebench run`. Iceberg
-  recipes only. `workload.schema: financial`. See
-  [AML Scoring](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/aml-scoring.md)
-  for what precision and recall measure here vs what an AML ops team
-  cares about.
+### Customer 360
 
-## Quick Start
+Customer 360 exercises a retail analytics workload. Customer interactions
+are ingested, validated, transformed and aggregated into analytical datasets
+that are queried for business insights.
+
+It exercises the architecture through data preparation, transformation,
+aggregation and analytical querying.
+
+### Financial Crime / AML
+
+The financial-crime workload exercises transaction-monitoring data
+processing using synthetic financial transactions.
+
+It combines ingestion, transformation, detection and analytical activity to
+examine both processing behaviour and detection outcomes.
+
+Its purpose is to evaluate how the architecture executes the workload, not
+to establish the effectiveness of a production AML detection system.
+
+The two workloads exercise different data-processing behaviours while using
+the same underlying architectural composition model.
+
+## Running an Experiment
+
+Lakebench supports a workflow that:
+
+1. Defines the workload, architecture and execution configuration.
+2. Deploys the required supported components onto Kubernetes.
+3. Generates synthetic workload data.
+4. Executes the workload.
+5. Collects measurements and produces results.
+6. Supports subsequent investigation and comparison.
+
+### Install
 
 ```bash
 pip install lakebench-k8s
 ```
 
-> Pre-built binaries (no Python required) are available on
-> [GitHub Releases](https://github.com/PureStorage-OpenConnect/lakebench-k8s/releases).
+Binaries that need no Python are on
+[GitHub Releases](https://github.com/PureStorage-OpenConnect/lakebench-k8s/releases).
+
+### Run
 
 ```bash
-lakebench init                                 # writes lakebench.yaml (--workload financial for AML): set its S3 endpoint, export the two key variables it names
-lakebench admin install --component all lakebench.yaml  # once per cluster (cluster admin)
-lakebench plan lakebench.yaml                  # what the run needs and whether the cluster has room; changes nothing
-lakebench run lakebench.yaml --generate --yes  # deploy + generate + pipeline + benchmark
-lakebench report lakebench.yaml                # view scorecard
-lakebench destroy lakebench.yaml               # tear down what this deployment owns (asks first; --yes to skip)
+lakebench init --endpoint http://your-s3-endpoint:80    # writes lakebench.yaml
+export LAKEBENCH_S3_ACCESS_KEY=...
+export LAKEBENCH_S3_SECRET_KEY=...
+lakebench admin install --component all lakebench.yaml  # once per cluster
+lakebench plan lakebench.yaml                           # what the run needs (read-only)
+lakebench run lakebench.yaml --generate --yes           # deploy, generate, run workload
+lakebench report lakebench.yaml                         # print results
+lakebench destroy lakebench.yaml                        # remove what this deployment created
 ```
 
-`--yes` lets `run` deploy the namespace and components when they do not
-exist yet; without it `run` stops and asks you to run `lakebench deploy`
-first. The Spark Operator, the Stackable operators (Hive recipes), the scratch
-StorageClass and the observability stack are shared cluster infrastructure:
-`deploy` only checks them, and a cluster admin installs them once with
-`lakebench admin install --component all lakebench.yaml` (see
-[Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md)).
+- `init` writes a minimal configuration. `--recipe <name>` selects an
+  architectural composition; `--workload financial` selects the AML
+  workload. There are 11 supported recipes. `lakebench config recipes`
+  lists them.
+- `admin install` places shared cluster components (Spark Operator,
+  Stackable operators for Hive recipes, scratch StorageClass). Run once
+  per cluster.
+- `plan` checks whether the cluster has room for the workload. It changes
+  nothing.
+- `--generate` fills the bronze bucket with synthetic data. Without it,
+  `run` refuses (exit 4).
+- `--yes` lets `run` deploy the namespace and components. Without it, run
+  `lakebench deploy` first.
+- `destroy` removes only what this deployment created. It asks for
+  confirmation unless `--yes` is passed.
 
-Minimum config:
+The full walkthrough is [Getting Started](docs/getting-started.md).
 
-```yaml
-# lakebench.yaml, as `lakebench init` writes it
-name: lb-alice-7f3c                # names the namespace and the buckets
-recipe: polaris-iceberg-spark-trino
-workload:
-  schema: customer360
-  datagen:
-    scale: 1                       # 1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB
-platform:
-  storage:
-    s3:
-      endpoint: http://s3.example.com:80
-      access_key: "${LAKEBENCH_S3_ACCESS_KEY}"
-      secret_key: "${LAKEBENCH_S3_SECRET_KEY}"
-```
+## Understanding Results
 
-The name is required by every command that changes data (`deploy`,
-`generate`, `run` and the rest); a config without one is refused with the
-name to add. Buckets default to `<name>-bronze`, `<name>-silver`
-and `<name>-gold`, so they are unique on stores where bucket names are
-global (FlashBlade, AWS S3). A config with no `recipe:` (or `recipe: default`)
-still resolves to `hive-iceberg-spark-trino` with a deprecation note; v1.8
-requires the recipe. A component written against the recipe (say
-`catalog.type: hive` under a Polaris recipe) is refused at load.
-Override anything in the nested YAML:
+Lakebench records how the workload executed under the specified conditions.
 
-```yaml
-# lakebench.yaml (with overrides)
-name: flashblade-polaris
-recipe: polaris-iceberg-spark-trino
-images:
-  spark: apache/spark:4.1.1-python3
-platform:
-  storage:
-    s3:
-      endpoint: http://10.0.1.50:80
-      access_key: "${S3_ACCESS_KEY}"   # env var substitution; quote it
-      secret_key: "${S3_SECRET_KEY}"
-architecture:
-  pipeline:
-    mode: batch
-workload:
-  datagen:
-    scale: 50
-```
+Depending on the workload and available instrumentation, this can include:
 
-The flat top-level spellings (`endpoint:`, `scale:` and the others in
-[Configuration](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/configuration.md#flat-fields-deprecated))
-still load, with a deprecation note naming the nested key.
+- Workload outcomes and correctness.
+- Execution time and processing-stage behaviour.
+- Throughput and resource efficiency.
+- Query or detection performance.
+- Compute, memory and storage observations.
 
-Polaris needs no client secret in the config: `deploy` generates one per
-deployment and stores it in the namespace.
+Results describe observed behaviour under particular conditions. They are
+not universal performance claims.
 
-Eleven recipes are available -- see [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md)
-for the full list. Support is judged per workload x recipe x mode:
-**supported** means a live run on the release tree validated it end to end,
-**unverified** means it is valid but not release-validated, and
-**unsupported** is refused before a run
-([rules](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/compatibility-matrix.md#support-states)).
-Every run records its state in `metrics.json`. As computed by this release:
+Comparing results requires understanding what changed between runs and
+whether their execution conditions and workload semantics are equivalent.
 
-<!-- BEGIN GENERATED: support-states -->
-<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
-
-| Recipe | Customer 360 batch | Customer 360 continuous | AML (financial) batch | AML (financial) continuous |
-|---|---|---|---|---|
-| `hive-delta-spark-none` | unverified [1] | unverified [1] | unsupported | unsupported |
-| `hive-delta-spark-thrift` | unverified [2] | unverified [1] | unsupported | unsupported |
-| `hive-delta-spark-trino` | unverified [2] | unverified [2] | unsupported | unsupported |
-| `hive-iceberg-spark-duckdb` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
-| `hive-iceberg-spark-none` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
-| `hive-iceberg-spark-thrift` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
-| `hive-iceberg-spark-trino` | unverified [2] | unverified [2] | unverified [2] | unverified [2] |
-| `polaris-iceberg-spark-duckdb` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
-| `polaris-iceberg-spark-none` | unverified [1] | unverified [1] | unverified [1] | unverified [1] |
-| `polaris-iceberg-spark-thrift` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
-| `polaris-iceberg-spark-trino` | unverified [2] | unverified [1] | unverified [2] | unverified [2] |
-
-- [1] unverified: not in this release's validation matrix.
-- [2] unverified: in this release's validation matrix; no validation run is listed yet.
-- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Use an iceberg recipe (for example recipe: polaris-iceberg-spark-trino), or with no recipe set architecture.table_format.type to iceberg.
-- Any catalog, table format and query engine combination that is not a recipe above is refused at config load for every workload.
-- A supported cell names the Spark minor and table format version its validation runs used; the same cell on any other Spark minor or format version is unverified. Spark 3.5 is unverified and gets no v1.7 features.
-- AML (financial) continuous: AML continuous runs detection rules W2, W3, W4, W17 each tick and records W1, W5, W6, W7, W8 as not run. Its results depend on when detection ran relative to arrival, so no end-of-run result check is recorded.
-
-<!-- END GENERATED: support-states -->
-
-Compare two configurations by running each and reading the two reports side
-by side:
-
-```bash
-lakebench deploy config-hive.yaml && lakebench run config-hive.yaml
-lakebench deploy config-polaris.yaml && lakebench run config-polaris.yaml
-lakebench report config-hive.yaml
-lakebench report config-polaris.yaml
-```
-
-`report` prints each run's scorecard and the path of the HTML report the run
-wrote. Each HTML report's Experiment section states the corpus, datagen image, components,
-maintenance, the stages and rules that ran, a result fingerprint per
-benchmark query and, for AML batch runs, the alert set. Compare performance
-only when the corpus, the result fingerprints and the alert set match:
-a difference means the two stacks returned different answers. A number bounded by a Lakebench cap is labelled as such.
-
-For all recipes, see [`examples/`](https://github.com/PureStorage-OpenConnect/lakebench-k8s/tree/main/examples), `lakebench config recipes`,
-or `lakebench init --recipe <name>`.
-
-## What You Get
-
-Each `lakebench run` prints a scorecard summary (per-stage seconds and the
-run's scores) and writes `lakebench-output/runs/run-<id>/report.html` with
-per-query latencies, bottleneck analysis and, when observability is enabled,
-pod-level CPU, memory and S3 I/O. `lakebench report` prints the summary and
-points at the HTML; `--render` writes a fresh copy. Every run's
-`metrics.json` carries an `experiment` block: workload and generator
-version, seed, recipe and component versions, scale, mode, the maintenance
-that actually ran, the Lakebench-imposed limits that applied and whether
-they bound, the support state, and a fingerprint of each query's result.
-
-Upgrading from 1.6: every change that can break a 1.6 config, command line
-or script, with what to do, is in
-[UPGRADING-1.7.md](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/UPGRADING-1.7.md);
-redeploy each deployment once after upgrading. Numbers from 1.5 and earlier
-are not comparable with 1.7: no Iceberg snapshot expiry or Delta VACUUM ran
-before 1.6, and the v1.7 datagen image changes the corpus. See the
-[CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/CHANGELOG.md).
-
-## How It Works
-
-```
-                    ┌──────────────────────────────────┐
-                    │         lakebench.yaml           │
-                    └────────────┬─────────────────────┘
-                                 │
-                    ┌────────────▼─────────────────────┐
-                    │   deploy (Kubernetes namespace,   │
-                    │   S3 secrets, PostgreSQL, catalog, │
-                    │   query engine, observability)     │
-                    └────────────┬─────────────────────┘
-                                 │
-     Raw Parquet ──► Bronze (validate) ──► Silver (enrich) ──► Gold (aggregate)
-         S3              Spark                Spark               Spark
-                                                                    │
-                                                        ┌───────────▼──────────┐
-                                                        │  8-query benchmark   │
-                                                        │  (Trino / DuckDB /   │
-                                                        │   Spark Thrift)      │
-                                                        └──────────────────────┘
-```
+`lakebench report` prints a summary and the path to the HTML report.
+`--render` writes a fresh copy; `--format json` or `csv` for scripts.
 
 ## Prerequisites
 
-- `kubectl` and `helm` on PATH
-- Kubernetes 1.26+ with room for the minimum below: what must fit at once,
-  for the default recipe (`hive-iceberg-spark-trino`), from the sizing
-  function behind `lakebench config show`, `config recommend` and the `run`
-  capacity preflight. Batch datagen pods that do not fit wait their turn, so
-  the batch minimum is the Spark peak plus the always-on pods. See
-  [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md)
-  for what each figure is built from. `lakebench run` fails fast if the
-  cluster is too small.
+Lakebench requires a supported Kubernetes environment and access to
+compatible storage. It does not provision the underlying infrastructure.
 
-<!-- BEGIN GENERATED: sizing-minimums -->
-<!-- Generated from the code by `python3.11 scripts/gen_sizing_tables.py`; do not edit by hand. -->
+**Host tooling:**
 
-| Workload | Mode | Scale | Minimum CPU | Minimum RAM | Scratch PVC (if enabled) | Largest pod |
-|:---|:---|---:|---:|---:|---:|---:|
-| Customer 360 | batch | 1 | 41 cores | 544 GB | 2,400 Gi | 8 cores / 60 GB |
-| Customer 360 | batch | 10 | 48 cores | 572 GB | 2,400 Gi | 8 cores / 60 GB |
-| Customer 360 | batch | 100 | 114 cores | 1,340 GB | 5,400 Gi | 8 cores / 60 GB |
-| Customer 360 | continuous | 1 | 59 cores | 309 GB | 640 Gi | 8 cores / 40 GB |
-| Customer 360 | continuous | 10 | 82 cores | 345 GB | 640 Gi | 8 cores / 40 GB |
-| Customer 360 | continuous | 100 | 202 cores | 955 GB | 1,700 Gi | 8 cores / 48 GB |
-| AML | batch | 1 | 41 cores | 544 GB | 2,400 Gi | 8 cores / 60 GB |
-| AML | batch | 10 | 48 cores | 572 GB | 2,400 Gi | 8 cores / 60 GB |
-| AML | batch | 100 | 114 cores | 1,340 GB | 5,500 Gi | 8 cores / 60 GB |
-| AML | continuous | 1 | 139 cores | 1,023 GB | 2,300 Gi | 8 cores / 40 GB |
-| AML | continuous | 10 | 162 cores | 1,065 GB | 2,300 Gi | 8 cores / 40 GB |
-| AML | continuous | 100 | 340 cores | 2,253 GB | 4,660 Gi | 8 cores / 48 GB |
+- `kubectl` and `helm` on PATH.
 
-<!-- END GENERATED: sizing-minimums -->
+**Kubernetes:**
 
-- S3-compatible object storage. FlashBlade and Garage are validated; others are
-  expected to work. Run `lakebench config storage` to check yours. See
-  [Storage Backends](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/storage-backends.md).
-- [Kubeflow Spark Operator 2.5.1+](https://github.com/kubeflow/spark-operator),
-  installed once per cluster with `lakebench admin install --component spark-operator`.
-  `deploy` adds its namespace to the operator's watch list itself, under the
-  cluster lock; do not edit `spark.jobNamespaces` by hand.
-- [Stackable Hive Operator](https://docs.stackable.tech/home/stable/hive/) for
-  Hive recipes (not needed for Polaris)
+- Kubernetes 1.26+.
+- Permission to create a namespace.
 
-## Commands
+**Storage:**
 
-| Command | Description |
-|---------|-------------|
-| `init` | Generate a starter config file; `--from OLD` converts an older one |
-| `config validate` | Check config and cluster connectivity |
-| `config storage` | Check the S3 backend supports what lakebench needs |
-| `config show` | Show the resolved configuration and its peak requested resources |
-| `plan` | Show what a config needs (components, sizing, prerequisites) and check the cluster has room; read-only |
-| `deploy` | Deploy all infrastructure components |
-| `generate` | Generate synthetic data at the configured scale |
-| `run` | Execute the medallion pipeline and benchmark |
-| `benchmark` | Run the workload's query benchmark standalone |
-| `query` | Execute ad-hoc SQL against the active engine |
-| `status` | Show deployment status |
-| `report` | Show a run's scorecard in the terminal (`--format` for the stage matrix, `--render` for HTML) |
-| `config recommend` | Recommend a scale factor for the connected cluster |
-| `config recipes` | List recipes and their support state per workload and mode |
-| `admin` | Cluster-admin setup and repair: `install --component`, `doctor`, `status`, `repair-operator`, `release-lock`, `migrate-deployment`, `reclaim-bucket` (`install-spark-operator` and `install-scratch-storage-class` are aliases of `install --component`) |
-| `financial` | AML operator actions (`score`, `reference-score`, `replay`, `reproduce`) |
-| `reproduce` | Record or verify a reproduction package from a run |
-| `destroy` | Tear down the resources this deployment owns |
+- S3-compatible object storage with an endpoint URL, access key and secret
+  key. Validated on FlashBlade and Garage; expected to work on AWS S3,
+  MinIO and other S3-compatible stores. `lakebench config storage` checks
+  yours.
 
-See [CLI Reference](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/cli-reference.md)
-for flags and options.
+**Cluster capacity:**
 
-## Component Versions
+- Room for the workload. Scale 1 batch needs about 41 cores and 544 GB.
+  Requirements grow with scale and differ by workload and execution mode.
+  `lakebench plan` checks the cluster;
+  [Sizing](docs/sizing.md) has every combination.
 
-| Component | Version |
-|-----------|---------|
-| Apache Spark | 3.5.x, 4.0.x (default on the Polaris recipes and hive-delta-spark-thrift: 4.0.2), 4.1.x (default on the Hive recipes: 4.1.1; 4.2 not supported) |
-| Spark Operator | 2.5.1 (Kubeflow) |
-| Apache Iceberg | 1.11.0 (1.10.1 with Spark 3.5.4 on its Java 11 image, and in local mode) |
-| Delta Lake | 4.0.0 / 4.1.0 (auto, by Spark version) |
-| Hive Metastore | 3.1.3 (Stackable 25.7.0) |
-| Apache Polaris | 1.6.0 |
-| Trino | 483 |
-| DuckDB | 1.5.5 (Python 3.11 image) |
-| PostgreSQL | 16, 17, 18 |
-
-All versions are overridable in the YAML config. See
-[Supported Components](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/supported-components.md).
+The [Prerequisites](docs/prerequisites.md) page lists every check and its
+fix.
 
 ## Documentation
 
-- [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md) -- prerequisites, install, first run
-- [Configuration](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/configuration.md) -- full YAML reference
-- [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md) -- catalog + format + engine combinations
-- [Compatibility Matrix](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/compatibility-matrix.md) -- Spark, Iceberg, and Delta version support
-- [Running Pipelines](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/running-pipelines.md) -- batch and continuous modes
-- [Benchmarking](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/benchmarking.md) -- scorecard and query benchmark
-- [AML Scoring](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/aml-scoring.md) -- financial-crime / AML workload: rule recall, reference detector, leakage gate
-- [Architecture](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/architecture.md) -- system design
-- [Storage Backends](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/storage-backends.md) -- validated S3 backends and conformance checks
-- [Troubleshooting](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/troubleshooting.md) -- common errors and fixes
+- [Getting Started](docs/getting-started.md): install, first run, teardown
+- [Documentation index](docs/README.md): full navigation
+- [Configuration](docs/configuration.md): every YAML field
+- [CLI Reference](docs/cli-reference.md): every command and flag
+- [Workloads](docs/README.md#workloads): Customer 360 and AML
+- [Recipes](docs/recipes.md): supported architectural compositions
+- [Results & Comparison](docs/README.md#results--comparison): measurements
+  and interpretation
+- [Upgrading to 1.7](UPGRADING-1.7.md): every breaking change from 1.6
 
 ## License
 

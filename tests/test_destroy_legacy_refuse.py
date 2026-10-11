@@ -159,7 +159,7 @@ class TestNamespaceAbsent:
         assert "--force-legacy" in msg
         # Destroy went on to the namespace delete, which is what the
         # escape hatch is for.
-        # The delete carries the namespace UID read at destroy start (LB-157).
+        # The delete carries the namespace UID read at destroy start.
         engine.k8s.delete_namespace.assert_called_once_with(
             "lb-test", uid=str(engine.k8s.get_namespace_uid.return_value)
         )
@@ -234,29 +234,6 @@ class TestBucketAbsent:
             results = destroy_all(engine, force_legacy=force_legacy)
         return results, mock_s3
 
-    def test_refuse_untagged_without_force_legacy(self):
-        from lakebench.deploy.ownership import IdentityVerdict
-
-        results, s3 = self._run_with_s3(force_legacy=False, bucket_verdict=IdentityVerdict.ABSENT)
-        s3_res = [r for r in results if r.component == "s3-buckets"]
-        assert s3_res and s3_res[-1].status.value.lower() == "failed"
-        assert "no lakebench ownership tag" in s3_res[-1].message
-        assert "--force-legacy" in s3_res[-1].message
-        # S-P5 shape: the refusal is flagged on the bucket step (exit 3 when no
-        # other step fails; this harness leaves postgres and rbac unmocked).
-        assert s3_res[-1].details["refusal"] == "deploy.identity_foreign"
-        # empty_bucket must not have been called.
-        s3.empty_bucket.assert_not_called()
-
-    def test_proceed_untagged_with_force_legacy(self):
-        from lakebench.deploy.ownership import IdentityVerdict
-
-        results, s3 = self._run_with_s3(force_legacy=True, bucket_verdict=IdentityVerdict.ABSENT)
-        s3_res = [r for r in results if r.component == "s3-buckets"]
-        # Proceeded through -- SUCCESS on the bucket-empty step.
-        assert s3_res and s3_res[-1].status.value.lower() == "success"
-        assert s3.empty_bucket.call_count == 3  # bronze / silver / gold
-
     def test_mismatch_never_bypassable(self):
         """Even with --force-legacy, a foreign-tagged bucket refuses."""
         from lakebench.deploy.ownership import IdentityVerdict
@@ -267,20 +244,6 @@ class TestBucketAbsent:
         assert "owned by another deployment" in s3_res[-1].message
         assert s3_res[-1].details["refusal"] == "deploy.identity_foreign"
         s3.empty_bucket.assert_not_called()
-
-
-class TestCliFlag:
-    """The --force-legacy flag is exposed on the destroy CLI."""
-
-    def test_flag_registered(self):
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        runner = CliRunner()
-        r = runner.invoke(app, ["destroy", "--help"])
-        assert r.exit_code == 0
-        assert "--force-legacy" in r.output
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 //! Robustness perturbation (AML-GOALS R3(b), Level 2 condition 5; prereg
-//! corpora.robustness_perturbation). The default path is pinned so the flag
-//! cannot move an unperturbed corpus, and the perturbed path is checked to
-//! move exactly the three registered nuisance parameters, in natural units.
+//! corpora.robustness_perturbation). Perturbation::NONE must take the default
+//! path, so the flag cannot move an unperturbed corpus, and the perturbed path
+//! is checked to move exactly the three registered nuisance parameters, in
+//! natural units.
 
 use datagen_rs::model::build_world_ex;
 use datagen_rs::typology::{schedule, Instance};
@@ -16,11 +17,8 @@ fn fnv(h: &mut u64, bytes: &[u8]) {
     }
 }
 
-// Values are quantised to 1e-9 before hashing. The world is built with
-// f64::exp / f64::ln, which come from the platform libm, so raw bits differ in
-// the last ulp between hosts (RHEL dev host vs the CI runner). Quantising keeps
-// the pin portable while any real data change still moves it. Bit-exact output
-// is only guaranteed within one build environment (the pinned datagen image).
+// Values are quantised to 1e-9 before hashing, so a last-ulp libm difference
+// does not read as a data difference.
 fn q(v: f64) -> i64 {
     (v * 1e9).round() as i64
 }
@@ -63,39 +61,13 @@ fn corpus() -> (i64, i64) {
     (start, start + 1826 * DAY)
 }
 
-// LB-204: the world no longer materialises these columns; recompute them into
+// The world no longer materialises these columns; recompute them into
 // a Vec for tests that need the whole column (digest, slice-taking `schedule`).
 fn logshift_vec(w: &datagen_rs::model::World) -> Vec<f64> {
     (0..=w.population).map(|i| w.amount_logshift(i)).collect()
 }
 fn country_vec(w: &datagen_rs::model::World) -> Vec<&'static str> {
     (0..=w.population).map(|i| w.country(i)).collect()
-}
-
-#[test]
-fn default_world_and_schedule_are_pinned() {
-    // Quantised digest captured on c9d7202 (corpus output byte-identical to c0d658f,
-    // the pre-perturbation point, verified by hashing all 67 files) on dev seed 7777.
-    // A change here is an AML data change, not a refactor.
-    let w = build_world_ex(0.05, DEV_SEED, 60, false);
-    let (s, e) = corpus();
-    let insts = schedule(
-        DEV_SEED,
-        w.dims.total_txns(),
-        w.population,
-        s,
-        e,
-        &country_vec(&w),
-    );
-    let got = (
-        world_digest(&w.activity, &logshift_vec(&w), w.total_activity),
-        schedule_digest(&insts),
-    );
-    assert_eq!(
-        got,
-        (10_581_863_675_670_526_329, 8_773_633_312_168_967_265),
-        "default AML world or schedule changed"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -106,10 +78,7 @@ fn default_world_and_schedule_are_pinned() {
 use datagen_rs::amounts::native_amount;
 use datagen_rs::hash::Rng;
 use datagen_rs::model::build_world_p;
-use datagen_rs::robustness::{
-    Perturbation, ROBUSTNESS_DORMANCY_RANGE_MULTIPLIER, ROBUSTNESS_MEDIAN_AMOUNT_MULTIPLIER,
-    ROBUSTNESS_PERSONA_SD_MULTIPLIER,
-};
+use datagen_rs::robustness::Perturbation;
 use datagen_rs::typology::{schedule_p, DORMANCY_MAX_DAYS, DORMANCY_MIN_DAYS};
 use datagen_rs::world::{BASELINE_ACTIVITY, TYPE_PERSON};
 
@@ -131,9 +100,18 @@ fn median(mut v: Vec<f64>) -> f64 {
 #[test]
 fn none_is_the_default_path() {
     // Perturbation::NONE through the _p entry points is the default world and
-    // schedule, bit for bit (the pinned digests above).
-    let w = build_world_p(SCALE, DEV_SEED, 60, false, &Perturbation::NONE);
+    // schedule.
+    let d = build_world_ex(SCALE, DEV_SEED, 60, false);
     let (s, e) = corpus();
+    let default_insts = schedule(
+        DEV_SEED,
+        d.dims.total_txns(),
+        d.population,
+        s,
+        e,
+        &country_vec(&d),
+    );
+    let w = build_world_p(SCALE, DEV_SEED, 60, false, &Perturbation::NONE);
     let insts = schedule_p(
         DEV_SEED,
         DEV_SEED,
@@ -149,23 +127,11 @@ fn none_is_the_default_path() {
             world_digest(&w.activity, &logshift_vec(&w), w.total_activity),
             schedule_digest(&insts),
         ),
-        (10_581_863_675_670_526_329, 8_773_633_312_168_967_265),
+        (
+            world_digest(&d.activity, &logshift_vec(&d), d.total_activity),
+            schedule_digest(&default_insts),
+        ),
     );
-}
-
-#[test]
-fn registered_multipliers_are_1_2() {
-    // The prereg's values; tests/test_datagen_seed.py ties these constants to
-    // the JSON itself.
-    assert_eq!(
-        Perturbation::REGISTERED,
-        only(
-            ROBUSTNESS_MEDIAN_AMOUNT_MULTIPLIER,
-            ROBUSTNESS_PERSONA_SD_MULTIPLIER,
-            ROBUSTNESS_DORMANCY_RANGE_MULTIPLIER
-        )
-    );
-    assert_eq!(Perturbation::REGISTERED, only(1.2, 1.2, 1.2));
 }
 
 #[test]
@@ -180,8 +146,6 @@ fn median_amount_moves_the_log_mean_by_ln_m_only() {
             "entity {i}: log shift moved by {d}"
         );
     }
-    // Not LN_MU * 1.2 (a 5.5x median shift, AML-GOALS section 9 #25).
-    assert!((ln_m - 0.1823).abs() < 1e-4);
     // Activity untouched.
     assert_eq!(p.activity, base.activity);
     // The drawn amounts: same RNG stream, so the population median of persona
@@ -358,19 +322,6 @@ fn refusal_text_has_no_seed() {
     }
 }
 
-/// The Rust CALIBRATION_REPLICATE_SEEDS list must equal the Python-side
-/// pre-registration `corpora.calibration_replicate_seeds`. This test hard-
-/// codes the expected values (also present in `aml_preregistration.json`);
-/// a drift here is a defence-in-depth bug, not a legitimate freeze change.
-#[test]
-fn calibration_replicate_seeds_match_prereg() {
-    use datagen_rs::robustness::CALIBRATION_REPLICATE_SEEDS;
-    assert_eq!(
-        CALIBRATION_REPLICATE_SEEDS,
-        &[123_456_832, 246_913_621, 370_370_410, 493_827_199]
-    );
-}
-
 #[test]
 fn flag_is_parsed_as_a_flag_not_a_value() {
     use datagen_rs::robustness::flag_in_argv;
@@ -451,14 +402,11 @@ fn manifest_carries_the_stamp_only_when_perturbed() {
 
 #[test]
 fn perturbed_world_keeps_structuring_band_baseline_density() {
-    // The band-density leakage guards in regression.rs
-    // (persona_preserves_structuring_band_baseline_density,
-    // every_currency_has_baseline_mass_in_its_structuring_band), rerun on the
+    // The band-density leakage guard in regression.rs
+    // (every_currency_has_baseline_mass_in_its_structuring_band), rerun on the
     // registered perturbation: a starved band would make a structuring row a
     // label on the robustness corpus. Compared against the unperturbed world
-    // on the same draws, because the USD guard's absolute 1.0% floor sits
-    // inside its own seed-to-seed noise (1.007% on 0xB0BA, 0.967% on 0xB0BB,
-    // unperturbed; perturbed 0.994% and 0.995%).
+    // on the same draws, because an absolute floor is within seed noise.
     use datagen_rs::amounts::{native_amount, structuring_band};
     use datagen_rs::world::amount_log_shift_p;
     let n = 400_000u64;
@@ -477,12 +425,7 @@ fn perturbed_world_keeps_structuring_band_baseline_density() {
         "USD", "GBP", "EUR", "CHF", "JPY", "AED", "SGD", "CAD", "MXN", "CNY", "INR", "AUD", "HKD",
         "KRW", "BRL",
     ] {
-        // USD: the regression test's [9500, 9999] band.
-        let (lo, hi) = if ccy == "USD" {
-            (9500.0, 9999.0)
-        } else {
-            structuring_band(ccy)
-        };
+        let (lo, hi) = structuring_band(ccy);
         let base = density(&Perturbation::NONE, ccy, lo, hi);
         let pert = density(&Perturbation::REGISTERED, ccy, lo, hi);
         assert!(

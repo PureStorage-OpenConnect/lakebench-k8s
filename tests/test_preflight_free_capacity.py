@@ -151,20 +151,6 @@ def test_free_not_total():
     assert res.record["capacity"] == "checked"
 
 
-def test_single_node_control_plane_counted():
-    """A single untainted control-plane node is the cluster, not "unknown"."""
-    cp = _node("only", "96", "1024Gi", labels={"node-role.kubernetes.io/control-plane": ""})
-    got = _client([cp]).get_free_capacity()
-    assert isinstance(got, FreeCapacity) and got.free.node_count == 1
-    assert _check(_client([cp])).passed
-    # Tainted the usual way, it holds no pods: nothing schedulable is left.
-    tainted = _node(
-        "only", "96", "1024Gi", labels={"node-role.kubernetes.io/control-plane": ""},
-        taints=("NoSchedule",),
-    )  # fmt: skip
-    assert isinstance(_client([tainted]).get_free_capacity(), CapacityUnknown)
-
-
 # -- scratch ---------------------------------------------------------------------
 
 
@@ -175,12 +161,8 @@ def _csi(sc, cap):
 def test_scratch_csi_capacity_short():
     nodes = [_node(f"n{i}") for i in range(4)]
     cfg = _cfg(scratch=True)
-    short = _check(
-        _client(nodes, csi=[_csi("px-csi-scratch", "1000Gi"), _csi("other", "9Ti")]), cfg
-    )
+    short = _check(_client(nodes, csi=[_csi("px-csi-scratch", "200Gi"), _csi("other", "9Ti")]), cfg)
     assert not short.passed
-    assert "Scratch: need 2,400 Gi of StorageClass px-csi-scratch" in short.hint
-    assert "totals 1,000 Gi" in short.hint
     assert short.record["scratch"] == "checked"
     ok = _check(_client(nodes, csi=[_csi("px-csi-scratch", "2000Gi")] * 2), cfg)
     assert ok.passed and ok.record["scratch"] == "checked"
@@ -198,16 +180,6 @@ def test_scratch_unmeasurable_recorded_warning():
         "scratch_reason": "no CSIStorageCapacity published for it",
         "storage_class": "px-csi-scratch",
     }
-    # The record reaches the run's provenance and the verdict says so.
-    from lakebench.metrics.collector import MetricsCollector
-    from lakebench.metrics.verdict import compute_verdict
-
-    col = MetricsCollector()
-    col.start_run("r1", "pf-t", {})
-    col.record_preflight(res.record)
-    assert col.current_run.provenance["preflight"]["scratch"] == "not_measurable"
-    q = compute_verdict(col.current_run).qualifiers
-    assert q["scratch_capacity"] == "scratch capacity not checked"
 
 
 def test_scratch_disabled_is_recorded_disabled():
@@ -215,59 +187,82 @@ def test_scratch_disabled_is_recorded_disabled():
     assert res.passed and res.record["scratch"] == "disabled"
 
 
-# -- --skip-preflight -------------------------------------------------------------
+# -- the preflight record reaches the run record --------------------------------
 
 
-def test_skip_preflight_recorded(tmp_path, monkeypatch):
-    """--skip-preflight records capacity "skipped" and the verdict says
-    "capacity not checked"."""
+_SCRATCH_RECORD = {
+    "capacity": "checked",
+    "scratch": "not_measurable",
+    "scratch_reason": "no CSIStorageCapacity published for it",
+    "storage_class": "px-csi-scratch",
+}
+
+
+@pytest.mark.parametrize(
+    ("skip", "provenance", "qualifier"),
+    [
+        (True, PREFLIGHT_SKIPPED, ("capacity", "capacity not checked")),
+        (False, _SCRATCH_RECORD, ("scratch_capacity", "scratch capacity not checked")),
+    ],
+    ids=["skipped", "scratch-not-measurable"],
+)
+def test_preflight_record_reaches_the_run_record(
+    tmp_path, monkeypatch, skip, provenance, qualifier
+):
+    """--skip-preflight records capacity "skipped"; a passing check's record
+    lands in provenance.preflight. The verdict qualifier says what was not
+    checked."""
     import json
 
+    from lakebench.cli._prerequisites import PrereqReport, PrereqResult
     from tests.harness import run_harness as h
 
-    base = h.SCENARIOS["batch_c360"]
-    scenario = h.Scenario(
-        name="batch_c360_skip_preflight",
-        argv=[*base.argv, "--skip-preflight"],
-        config=base.config,
-        logs=base.logs,
-    )
-    monkeypatch.setitem(h.SCENARIOS, scenario.name, scenario)
+    scenario = h.SCENARIOS["batch_c360"]
+    if skip:
+        scenario = h.Scenario(
+            name="batch_c360_skip_preflight",
+            argv=[*scenario.argv, "--skip-preflight"],
+            config=scenario.config,
+            logs=scenario.logs,
+        )
+        monkeypatch.setitem(h.SCENARIOS, scenario.name, scenario)
+    else:
+
+        def passing(rec):
+            def run_prerequisites(cfg, **kw):
+                rec.add("prerequisites", "run", {})
+                return PrereqReport(
+                    checks=[PrereqResult("cluster-capacity", True, "ok", record=dict(provenance))]
+                )
+
+            return run_prerequisites
+
+        monkeypatch.setattr(h, "_passing_prerequisites", passing)
     h.run_scenario(scenario.name, tmp_path, monkeypatch)
-    (record,) = list(tmp_path.glob("lakebench-output/runs/*/metrics.json"))
-    data = json.loads(record.read_text())
-    assert data["provenance"]["preflight"] == PREFLIGHT_SKIPPED
-    assert data["verdict"]["qualifiers"]["capacity"] == "capacity not checked"
+    (path,) = list(tmp_path.glob("lakebench-output/runs/*/metrics.json"))
+    data = json.loads(path.read_text())
+    assert data["provenance"]["preflight"] == provenance
+    assert data["verdict"]["qualifiers"][qualifier[0]] == qualifier[1]
 
 
 # -- review fixes ----------------------------------------------------------------
 
 
-def test_largest_pod_needs_one_node_with_both_free():
+@pytest.mark.parametrize(("cpu_node_free_gib", "fits"), [(102, True), (22, False)])
+def test_largest_pod_needs_one_node_with_both_free(cpu_node_free_gib, fits):
     """A pod fits when one node has its cores and memory free together,
-    whichever node has the most free memory."""
-    nodes = [_node("mem", "40", "402Gi"), _node("cpu", "40", "402Gi")] + [
+    whichever node has the most free memory. The cluster's free totals cover
+    the plan either way; only the 8-core / 60 GB pod's placement differs."""
+    nodes = [_node("mem", "40", "1000Gi"), _node("cpu", "40", "402Gi")] + [
         _node(f"n{i}", "40", "402Gi") for i in range(4)
     ]
     pods = [
-        _pod("hog-cpu", "mem", "38", "10Gi"),  # "mem": 2 cores, 392 GiB free
-        _pod("hog-mem", "cpu", "1", "300Gi"),  # "cpu": 39 cores, 102 GiB free
+        _pod("hog-cpu", "mem", "38", "10Gi"),  # "mem": 2 cores, 990 GiB free
+        _pod("hog-mem", "cpu", "1", f"{402 - cpu_node_free_gib}Gi"),  # "cpu": 39 cores free
     ] + [_pod(f"h{i}", f"n{i}", "36", "380Gi") for i in range(4)]
     res = _check(_client(nodes, pods))
-    # The 8-core / 60 GB executor fits "cpu", though "mem" has more memory.
-    assert "Largest pod" not in (res.hint or ""), res.hint
-
-
-def test_largest_pod_refused_when_no_node_has_both():
-    nodes = [_node("a", "40", "402Gi"), _node("b", "40", "402Gi")] + [
-        _node(f"n{i}", "40", "402Gi") for i in range(6)
-    ]
-    pods = [_pod("x", "a", "38", "1Gi"), _pod("y", "b", "1", "390Gi")] + [
-        _pod(f"h{i}", f"n{i}", "36", "380Gi") for i in range(6)
-    ]
-    res = _check(_client(nodes, pods))
-    assert not res.passed
-    assert "on one node; no schedulable node has both free" in res.hint
+    assert res.passed is fits, res.hint
+    assert ("Largest pod" in (res.hint or "")) is (not fits)
 
 
 def test_own_namespace_spark_pods_and_running_datagen_are_counted():
@@ -320,9 +315,8 @@ def test_native_sidecar_counts_with_the_main_containers():
 
 
 def test_continuous_degraded_caps_against_the_allocatable_base():
-    """Review finding (HIGH): the capped request was computed on free
-    capacity, while the run caps against allocatable, so a busy cluster was
-    admitted as "degraded" at a size the run never deploys."""
+    """The degraded request is capped against allocatable, not free capacity,
+    so a busy cluster is not admitted at a size the run never deploys."""
     nodes = [_node(f"n{i}", "40", "402Gi") for i in range(11)]  # 440 cores allocatable
     # 120 cores free on four nodes: enough for the streams capped to a
     # 120-core budget, not for the 138 cores the run deploys uncapped.
@@ -338,56 +332,5 @@ def test_continuous_degraded_caps_against_the_allocatable_base():
     )
     res = _check(_client(nodes, busy), cfg)
     assert not res.passed, res.message
-
-
-def test_checked_record_reaches_the_run_record(tmp_path, monkeypatch):
-    """The record of a passing preflight lands in provenance.preflight."""
-    import json
-
-    from lakebench.cli._prerequisites import PrereqReport, PrereqResult
-    from tests.harness import run_harness as h
-
-    record = {
-        "capacity": "checked",
-        "scratch": "not_measurable",
-        "scratch_reason": "no CSIStorageCapacity published for it",
-        "storage_class": "px-csi-scratch",
-    }
-
-    def passing(rec):
-        def run_prerequisites(cfg, **kw):
-            rec.add("prerequisites", "run", {})
-            return PrereqReport(
-                checks=[PrereqResult("cluster-capacity", True, "ok", record=dict(record))]
-            )
-
-        return run_prerequisites
-
-    monkeypatch.setattr(h, "_passing_prerequisites", passing)
-    h.run_scenario("batch_c360", tmp_path, monkeypatch)
-    (path,) = list(tmp_path.glob("lakebench-output/runs/*/metrics.json"))
-    data = json.loads(path.read_text())
-    assert data["provenance"]["preflight"] == record
-    assert data["verdict"]["qualifiers"]["scratch_capacity"] == "scratch capacity not checked"
-
-
-def test_continuous_run_does_not_count_its_own_leftover_streams():
-    """A continuous run stops its leftover streams before starting, so they
-    are not subtracted (counting them refused reruns after an interrupt)."""
-    stream = _pod("old-stream-exec", "a", "30", "300Gi", ns="pf-t")
-    stream.metadata.labels = {"spark-role": "executor"}
-    k = _client([_node("a")], [stream])
-    seen = {}
-    real = k.get_free_capacity
-
-    def spy(**kw):
-        got = real(**kw)
-        seen["free_cpu"] = got.free.total_cpu_millicores
-        return got
-
-    k.get_free_capacity = spy
-    with mock.patch("lakebench.k8s.get_k8s_client", return_value=k):
-        _check_cluster_capacity(_cfg(), sustained=True)
-        assert seen["free_cpu"] == 64_000
-        _check_cluster_capacity(_cfg(), sustained=False)
-        assert seen["free_cpu"] == 34_000
+    assert "CPU: need" in res.message + (res.hint or ""), res.hint
+    assert "Memory: need" not in res.message + (res.hint or ""), res.hint

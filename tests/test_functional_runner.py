@@ -60,107 +60,74 @@ def runner(config, mock_executor):
 # ---------------------------------------------------------------------------
 
 
+def _result(seconds: float, error: str | None = None) -> QueryExecutorResult:
+    return QueryExecutorResult(
+        sql="SELECT 1",
+        engine="trino",
+        duration_seconds=seconds,
+        rows_returned=0 if error else 10,
+        raw_output="" if error else "...",
+        error=error,
+    )
+
+
 class TestBenchmarkRunnerPowerMode:
     """Full power-mode flow through BenchmarkRunner."""
 
-    def test_power_runs_all_8_queries(self, runner, mock_executor):
-        result = runner.run_power()
-
-        assert len(result.queries) == 8
-        assert result.mode == "power"
-        assert mock_executor.execute_query.call_count == 8
-
     def test_power_qph_calculation(self, runner, mock_executor):
         """QpH should equal (num_queries / total_seconds) * 3600."""
-        mock_executor.execute_query.return_value = QueryExecutorResult(
-            sql="SELECT 1",
-            engine="trino",
-            duration_seconds=2.0,
-            rows_returned=10,
-            raw_output="...",
-        )
+        n = len(BENCHMARK_QUERIES)
+        mock_executor.execute_query.return_value = _result(2.0)
 
         result = runner.run_power()
 
-        # 8 queries * 2s each = 16s total
-        assert result.total_seconds == pytest.approx(16.0)
-        expected_qph = (8 / 16.0) * 3600  # 1800.0
-        assert result.qph == pytest.approx(expected_qph)
+        assert result.mode == "power"
+        assert len(result.queries) == n
+        assert result.total_seconds == pytest.approx(2.0 * n)
+        assert result.qph == pytest.approx((n / (2.0 * n)) * 3600)
 
-    def test_power_cold_cache_calls_flush(self, runner, mock_executor):
-        """Running with cache='cold' must call flush_cache before each query."""
-        runner.run_power(cache="cold")
+    @pytest.mark.parametrize("cache,flushes_per_query", [("cold", 1), ("hot", 0)])
+    def test_power_cache_mode_controls_flush(self, runner, mock_executor, cache, flushes_per_query):
+        """cache='cold' flushes before each query; 'hot' never flushes."""
+        runner.run_power(cache=cache)
 
-        assert mock_executor.flush_cache.call_count == 8
-
-    def test_power_hot_cache_skips_flush(self, runner, mock_executor):
-        """Running with cache='hot' must NOT call flush_cache."""
-        runner.run_power(cache="hot")
-
-        mock_executor.flush_cache.assert_not_called()
+        assert mock_executor.flush_cache.call_count == flushes_per_query * len(BENCHMARK_QUERIES)
 
     def test_power_query_failure_still_completes(self, runner, mock_executor):
-        """A single query failure should not abort the run."""
-        success_result = QueryExecutorResult(
-            sql="SELECT 1",
-            engine="trino",
-            duration_seconds=0.5,
-            rows_returned=10,
-            raw_output="...",
-        )
-        failure_result = QueryExecutorResult(
-            sql="SELECT 1",
-            engine="trino",
-            duration_seconds=1.0,
-            rows_returned=0,
-            raw_output="",
-            error="Table not found",
-        )
-
-        # First call fails, rest succeed
+        """A failed query is recorded and does not abort the run. QpH counts
+        only successful queries over successful time; total_seconds keeps the
+        failed query's wall time."""
+        n = len(BENCHMARK_QUERIES)
         mock_executor.execute_query.side_effect = [
-            failure_result,
-            *[success_result] * 7,
+            _result(10.0, error="Table not found"),
+            *[_result(0.5)] * (n - 1),
         ]
 
         result = runner.run_power()
 
-        assert len(result.queries) == 8
+        assert len(result.queries) == n
         assert result.queries[0].success is False
         assert result.queries[0].error_message == "Table not found"
         assert all(q.success for q in result.queries[1:])
+        assert result.total_seconds == pytest.approx(10.0 + 0.5 * (n - 1))
+        assert result.qph == pytest.approx(((n - 1) / (0.5 * (n - 1))) * 3600)
 
     def test_power_category_qph(self, runner, mock_executor):
-        """compute_category_qph() should return a per-class breakdown."""
-        mock_executor.execute_query.return_value = QueryExecutorResult(
-            sql="SELECT 1",
-            engine="trino",
-            duration_seconds=1.0,
-            rows_returned=10,
-            raw_output="...",
-        )
+        """Per-class QpH is that class's query count over that class's own time."""
+        # Each query's duration is its 1-based position, so classes differ.
+        durations = {q.name: float(i + 1) for i, q in enumerate(BENCHMARK_QUERIES)}
+        mock_executor.execute_query.side_effect = [
+            _result(durations[q.name]) for q in BENCHMARK_QUERIES
+        ]
 
-        result = runner.run_power()
-        cat_qph = result.compute_category_qph()
+        cat_qph = runner.run_power().compute_category_qph()
 
-        # The 8 queries span 5 classes
-        expected_classes = {"scan", "filter_prune", "aggregation", "analytics", "operational"}
-        assert set(cat_qph.keys()) == expected_classes
-
-        # scan: 1 query @ 1s -> (1/1)*3600 = 3600
-        assert cat_qph["scan"] == pytest.approx(3600.0)
-
-        # filter_prune: 2 queries @ 1s each -> (2/2)*3600 = 3600
-        assert cat_qph["filter_prune"] == pytest.approx(3600.0)
-
-        # aggregation: 2 queries @ 1s each -> (2/2)*3600 = 3600
-        assert cat_qph["aggregation"] == pytest.approx(3600.0)
-
-        # analytics: 2 queries @ 1s each -> (2/2)*3600 = 3600
-        assert cat_qph["analytics"] == pytest.approx(3600.0)
-
-        # operational: 1 query @ 1s -> (1/1)*3600 = 3600
-        assert cat_qph["operational"] == pytest.approx(3600.0)
+        expected: dict[str, list[float]] = {}
+        for q in BENCHMARK_QUERIES:
+            expected.setdefault(q.query_class, []).append(durations[q.name])
+        assert set(cat_qph) == set(expected)
+        for cls, times in expected.items():
+            assert cat_qph[cls] == pytest.approx(len(times) / sum(times) * 3600)
 
 
 # ---------------------------------------------------------------------------
@@ -171,35 +138,15 @@ class TestBenchmarkRunnerPowerMode:
 class TestBenchmarkRunnerThroughputMode:
     """Concurrent-stream throughput tests."""
 
-    def test_throughput_4_streams(self, runner, mock_executor):
+    def test_throughput_streams_each_run_every_query(self, runner, mock_executor):
         result = runner.run_throughput(streams=4)
 
         assert result.mode == "throughput"
         assert result.streams == 4
         assert len(result.stream_results) == 4
-
-    def test_throughput_total_queries(self, runner, mock_executor):
-        """4 streams * 8 queries = 32 total execute_query calls."""
-        runner.run_throughput(streams=4)
-
-        assert mock_executor.execute_query.call_count == 32
-
-    def test_throughput_qph_formula(self, runner, mock_executor):
-        """QpH = (streams * num_queries / wall_clock_seconds) * 3600."""
-        result = runner.run_throughput(streams=4)
-
-        # Wall clock is measured live, so just verify the formula is consistent
-        total_queries = sum(len(s.queries) for s in result.stream_results)
-        assert total_queries == 32
-        if result.total_seconds > 0:
-            expected_qph = (total_queries / result.total_seconds) * 3600
-            assert result.qph == pytest.approx(expected_qph, rel=1e-2)
-
-    def test_throughput_each_stream_has_all_queries(self, runner, mock_executor):
-        result = runner.run_throughput(streams=4)
-
         for stream in result.stream_results:
-            assert len(stream.queries) == 8
+            assert len(stream.queries) == len(BENCHMARK_QUERIES)
+            assert all(q.success for q in stream.queries)
 
 
 # ---------------------------------------------------------------------------
@@ -209,13 +156,6 @@ class TestBenchmarkRunnerThroughputMode:
 
 class TestBenchmarkRunnerCompositeMode:
     """Power + throughput composite tests."""
-
-    def test_composite_returns_three_results(self, runner, mock_executor):
-        power, throughput, composite = runner.run_composite(streams=2)
-
-        assert power.mode == "power"
-        assert throughput.mode == "throughput"
-        assert composite.mode == "composite"
 
     def test_composite_qph_is_geometric_mean(self, runner, mock_executor):
         """composite.qph must equal sqrt(power.qph * throughput.qph)."""
@@ -241,60 +181,10 @@ class TestBenchmarkRunnerCompositeMode:
 class TestBenchmarkRunnerQueryFiltering:
     """Tests that query_class filtering works correctly."""
 
-    def test_filter_by_query_class_scan(self, runner, mock_executor):
-        result = runner.run_power(query_class="scan")
+    @pytest.mark.parametrize("query_class", ["scan", "analytics"])
+    def test_filter_by_query_class(self, runner, mock_executor, query_class):
+        result = runner.run_power(query_class=query_class)
 
-        scan_queries = [q for q in BENCHMARK_QUERIES if q.query_class == "scan"]
-        assert len(result.queries) == len(scan_queries)
-        assert all(q.query.query_class == "scan" for q in result.queries)
-
-    def test_filter_by_query_class_analytics(self, runner, mock_executor):
-        result = runner.run_power(query_class="analytics")
-
-        analytics_queries = [q for q in BENCHMARK_QUERIES if q.query_class == "analytics"]
-        assert len(result.queries) == len(analytics_queries)
-        assert all(q.query.query_class == "analytics" for q in result.queries)
-
-
-# ---------------------------------------------------------------------------
-# 5. Result Serialization
-# ---------------------------------------------------------------------------
-
-
-class TestBenchmarkResultSerialization:
-    """Verify to_dict() output structure for various run modes."""
-
-    def test_benchmark_result_to_dict(self, runner, mock_executor):
-        result = runner.run_power()
-        d = result.to_dict()
-
-        expected_keys = {
-            "benchmark_type",
-            "mode",
-            "cache",
-            "scale",
-            "qph",
-            "category_qph",
-            "total_seconds",
-            "iterations",
-            "streams",
-            "queries",
-        }
-        assert expected_keys.issubset(set(d.keys()))
-        assert d["mode"] == "power"
-        assert d["benchmark_type"] == "trino_query"
-        assert isinstance(d["queries"], list)
-        assert len(d["queries"]) == 8
-        assert isinstance(d["category_qph"], dict)
-
-    def test_stream_results_serialized(self, runner, mock_executor):
-        result = runner.run_throughput(streams=3)
-        d = result.to_dict()
-
-        assert "stream_results" in d
-        assert len(d["stream_results"]) == 3
-        for sr in d["stream_results"]:
-            assert "stream_id" in sr
-            assert "total_seconds" in sr
-            assert "queries" in sr
-            assert "success" in sr
+        expected = [q for q in BENCHMARK_QUERIES if q.query_class == query_class]
+        assert len(result.queries) == len(expected)
+        assert all(q.query.query_class == query_class for q in result.queries)

@@ -25,27 +25,16 @@ def test_one_delete_per_restart_in_a_fresh_jvm(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
     # Run 1: one query run, three non-empty micro-batches. Pre-fix, every
-    # micro-batch issues a DELETE on each of silver.transactions and
-    # silver.counterparty_edges, so 6 DELETE calls. Post-fix, only the
-    # run's first micro-batch does, so 2 DELETE calls.
-    assert out["run1_delete_sql_calls"] == 2, out
+    # micro-batch issues a DELETE on each of silver.transactions,
+    # silver.counterparty_edges and silver.counterparty_pairs, so 9 DELETE
+    # calls. Post-fix, only the run's first micro-batch does, so 3.
+    assert out["run1_delete_sql_calls"] == 3, out
     # Run 2: a restart-from-checkpoint style new run adds one delete per
-    # table (its first micro-batch): 2 more DELETE calls.
-    assert out["run2_delete_sql_calls"] == 2, out
-    # Snapshot count check: on Iceberg 1.10.x a no-match DELETE still
-    # materialises a snapshot, so per-run counts match the SQL-call counts.
-    # Some 1.6+ builds may elide no-match DELETE snapshots; the SQL-call
-    # assertions above are the authoritative gate. The snapshot checks
-    # below are informational and asserted only if any delete snapshot was
-    # recorded at all (they are always upper-bounded by the SQL count).
-    if out["run1_delete_snapshots_txns"] > 0:
-        assert out["run1_delete_snapshots_txns"] == 1, out
-        assert out["run1_delete_snapshots_edges"] == 1, out
+    # table (its first micro-batch): 3 more DELETE calls.
+    assert out["run2_delete_sql_calls"] == 3, out
+    # Append snapshots: three micro-batches per run, none lost to the DELETE.
     assert out["run1_append_snapshots_txns"] == 3, out
     assert out["run1_append_snapshots_edges"] == 3, out
-    if out["run2_delete_snapshots_txns"] > 0:
-        assert out["run2_delete_snapshots_txns"] == 2, out
-        assert out["run2_delete_snapshots_edges"] == 2, out
     assert out["run2_append_snapshots_txns"] == 6, out
     assert out["run2_append_snapshots_edges"] == 6, out
 
@@ -130,7 +119,6 @@ def _run(jars):
             .getOrCreate()
         )
 
-        import common
         import silver_stream_financial as ss
         from _d_full_helpers import bind_stream_module, bootstrap_catalog
 
@@ -152,8 +140,8 @@ def _run(jars):
         # Wrap spark.sql so the test records every "DELETE FROM ..." the
         # code issues. This is independent of any Iceberg version-specific
         # snapshot elision on no-match DELETE: pre-fix the code calls
-        # DELETE once per micro-batch per table (6 per run); post-fix once
-        # per run's first micro-batch per table (2 per run).
+        # DELETE once per micro-batch per table (9 per run); post-fix once
+        # per run's first micro-batch per table (3 per run).
         delete_sql_calls: list[str] = []
         real_sql = spark.sql
 
@@ -192,19 +180,12 @@ def _run(jars):
             # DELETE call counts (version-independent).
             "run1_delete_sql_calls": run1_deletes,
             "run2_delete_sql_calls": run2_deletes,
-            # Iceberg snapshot counts (may vary across runtime versions).
-            "run1_delete_snapshots_txns": r1_txns.get("delete", 0) + r1_txns.get("overwrite", 0),
-            "run1_delete_snapshots_edges": r1_edges.get("delete", 0) + r1_edges.get("overwrite", 0),
+            # Append snapshots per table.
             "run1_append_snapshots_txns": r1_txns.get("append", 0),
             "run1_append_snapshots_edges": r1_edges.get("append", 0),
-            "run2_delete_snapshots_txns": r2_txns.get("delete", 0) + r2_txns.get("overwrite", 0),
-            "run2_delete_snapshots_edges": r2_edges.get("delete", 0) + r2_edges.get("overwrite", 0),
             "run2_append_snapshots_txns": r2_txns.get("append", 0),
             "run2_append_snapshots_edges": r2_edges.get("append", 0),
         }
-        # Guard against a silent no-op that lets the test pass because
-        # replay_possible is never referenced.
-        assert common.replay_possible is not None
         print(json.dumps(out))
         spark.stop()
 

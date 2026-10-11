@@ -74,8 +74,8 @@
   ],
   "ebb26f": [
     {
-      "text": "3 continuous jobs | 51,894,597 total rows processed",
-      "from": "streaming[*].total_rows_processed summed"
+      "text": "3 continuous jobs | rows in the window: 51,506,579 across stages",
+      "from": "streaming[*].window_input_rows summed (pipeline_benchmark.scores.total_rows_processed)"
     },
     {
       "text": "Continuous jobs: 3/3 passed",
@@ -130,8 +130,8 @@
   ],
   "1d17f4": [
     {
-      "text": "3 continuous jobs | 9,151,389 total rows processed",
-      "from": "streaming[*].total_rows_processed summed"
+      "text": "3 continuous jobs | rows in the window: 9,151,389 across stages",
+      "from": "streaming[*].window_input_rows summed (pipeline_benchmark.scores.total_rows_processed)"
     },
     {
       "text": "first round 283.7, last round 191.5 (-32.5%) over 4 rounds",

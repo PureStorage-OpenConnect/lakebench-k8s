@@ -7,7 +7,7 @@ xxhash64 per row, and the column types) over every column but the ones
 named, so two tables with the same rows in any order and file layout match,
 and one changed value does not. ``table_rows`` hands a small table's rows
 to the parent instead, for gold, whose rounded DOUBLE KPIs an exact hash
-cannot compare (``c360_gold_compare``, LB-267). Imported by Spark children,
+cannot compare (``c360_gold_compare``). Imported by Spark children,
 which have the Spark scripts on their path.
 """
 

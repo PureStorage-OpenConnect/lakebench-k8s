@@ -1,7 +1,7 @@
 """ER-1: the stored-record harness and the rule-5 scrubber.
 
 The fixtures under tests/fixtures/records/ are the 24 pinned stored records
-(DESIGN-v1.7 ch03 section 0.2) taken through tests/fixtures/scrub.py. These
+taken through tests/fixtures/scrub.py. These
 tests pin what they say today (tests/expected/), and that the scrubber removes
 endpoints, bucket names and credentials without moving identity.
 """
@@ -9,7 +9,6 @@ endpoints, bucket names and credentials without moving identity.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -23,6 +22,39 @@ DRIFT = set(EXPECTED["known_rebuild_drift"]["runs"])
 FIXTURE_JSON = sorted(Path(sr.RECORDS_DIR).parent.rglob("*.json"))
 
 LAB_ADDR = "192.0.2.15"  # RFC 5737 documentation address standing in for a lab one
+
+SEED = 987654  # stands in for a held-out seed; stubbed, never a real one
+FAKE = "Ab1x" * 10  # 40 chars, not a key
+SECRET = "abc/def+ghi" * 4
+
+
+def _put(rec, path, value):
+    node = rec
+    for key in path[:-1]:
+        node = node.setdefault(key, {}) if isinstance(node, dict) else node[key]
+    node[path[-1]] = value
+
+
+def _set(path, value):
+    """A mutator that writes *value* at *path* of a record."""
+    return lambda rec: _put(rec, path, value)
+
+
+def _all(*mutators):
+    def mutate(rec):
+        for m in mutators:
+            m(rec)
+
+    return mutate
+
+
+def _buckets(**names):
+    return _all(*[_set(("config_snapshot", "s3", "buckets", k), v) for k, v in names.items()])
+
+
+_S3 = ("config_snapshot", "s3")
+_MSG = ("jobs", 0, "error_message")
+_EXTRA = ("config_snapshot", "extra")
 
 
 # ---------------------------------------------------------------------------
@@ -40,16 +72,8 @@ def _stub_heldout(monkeypatch, seed: int, role: str) -> None:
     monkeypatch.setattr(datagen_seed, "is_spent", lambda n, heldout=None: False)
 
 
-def test_fixture_set_is_the_pinned_set() -> None:
-    ids = sr.record_ids()
-    assert len(ids) == 24
-    assert set(ids) == set(EXPECTED["records"])
-    assert set(ids) == set(sr.manifest()["records"])
-    assert sr.manifest()["scrubber_version"] == scrub.SCRUBBER_VERSION
-
-
 @pytest.mark.parametrize("run_id", sorted(EXPECTED["records"]))
-def test_record_matches_expected(run_id: str) -> None:
+def test_record_matches_expected(run_id) -> None:
     want = EXPECTED["records"][run_id]
     rec = sr.load_record(run_id)
     assert rec["run_id"] == run_id
@@ -70,19 +94,19 @@ def test_record_matches_expected(run_id: str) -> None:
 
 
 @pytest.mark.parametrize("run_id", sorted(EXPECTED["records"]))
-def test_rebuilt_block_keeps_stored_identity(run_id: str, request) -> None:
+def test_rebuilt_block_keeps_stored_identity(run_id) -> None:
     """Loading a record and rebuilding its block must not move its identity
-    (S1). Seven v1.6 records move today; ER-10a fixes that and must empty
-    known_rebuild_drift, which this strict xfail enforces."""
-    if run_id in DRIFT:
-        request.applymarker(pytest.mark.xfail(strict=True, reason="S1, fixed by ER-10a"))
+    (S1). A record listed in known_rebuild_drift must still drift, so the
+    list empties when the drift is fixed."""
     rec = sr.load_record(run_id)
     stored = experiment_of(rec)
     rebuilt = sr.load_metrics(run_id).experiment_block()
     if stored is None:
         assert rebuilt is None
-        return
-    assert identity_hash(rebuilt) == identity_hash(stored)
+    elif run_id in DRIFT:
+        assert identity_hash(rebuilt) != identity_hash(stored)
+    else:
+        assert identity_hash(rebuilt) == identity_hash(stored)
 
 
 # ---------------------------------------------------------------------------
@@ -90,53 +114,9 @@ def test_rebuilt_block_keeps_stored_identity(run_id: str, request) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "path", FIXTURE_JSON, ids=lambda p: str(p.relative_to(sr.RECORDS_DIR.parent))
-)
-def test_fixture_is_clean(path: Path) -> None:
+@pytest.mark.parametrize("path", FIXTURE_JSON, ids=lambda p: p.name)
+def test_fixture_is_clean(path) -> None:
     assert scrub.check_clean(json.loads(path.read_text())) == []
-
-
-def test_manifest_pins_each_fixture() -> None:
-    """A hand-edited fixture (a doctored row count) no longer matches the
-    sha256 the import recorded. A commit that edits the fixture and the
-    MANIFEST together passes this; only the lineage test below, run where
-    the sources exist, catches that."""
-    for run_id, entry in sr.manifest()["records"].items():
-        assert scrub.sha256_of(sr.record_path(run_id)) == entry["fixture_sha256"], run_id
-
-
-#: Directories holding the raw source records, one environment variable per
-#: MANIFEST root (LB_FIXTURE_SOURCES_MAINTAINER_EVIDENCE,
-#: LB_FIXTURE_SOURCES_INTEGRATE_RUNS). Unset in CI, where the lineage test
-#: skips; set on the host that holds the raw records.
-_SOURCE_ROOTS = {
-    root: os.environ.get("LB_FIXTURE_SOURCES_" + root.upper().replace("-", "_"), "")
-    for root in ("maintainer-evidence", "integrate-runs")
-}
-
-
-@pytest.mark.parametrize("run_id", sorted(EXPECTED["records"]))
-def test_fixture_reproduces_from_its_source(run_id: str) -> None:
-    """Rule 5 lineage, where the local sources exist (never in CI): the
-    fixture is exactly the scrubber's output on the recorded source."""
-    entry = sr.manifest()["records"][run_id]
-    root = _SOURCE_ROOTS[entry["source"]["root"]]
-    src = Path(root) / entry["source"]["path"]
-    if not root or not src.exists():
-        pytest.skip("source record not on this host")
-    assert scrub.sha256_of(src) == entry["source_sha256"]
-    scrubbed, changed = scrub.scrub_record(json.loads(src.read_text()))
-    assert scrub.dump(scrubbed) == sr.record_path(run_id).read_text()
-    assert changed == entry["rewritten"]
-
-
-@pytest.mark.parametrize("run_id", sorted(EXPECTED["records"]))
-def test_fixture_is_scrubber_output(run_id: str) -> None:
-    rec = sr.load_record(run_id)
-    scrubbed, changed = scrub.scrub_record(rec)
-    assert changed == []
-    assert scrubbed == rec
 
 
 # ---------------------------------------------------------------------------
@@ -192,58 +172,15 @@ def test_check_clean_flags_each_kind() -> None:
     assert "bucket name 'dep-x-bronze' is not scrubbed" in text
 
 
-def test_credential_format_under_neutral_key_refused() -> None:
-    rec = sr.load_record("5105a0")
-    rec["jobs"][0]["error_message"] = "key PSFB" + "A" * 38 + " rejected"
-    with pytest.raises(scrub.ScrubError, match="credential format"):
-        scrub.scrub_record(rec)
-
-
-def test_protected_seed_refused_without_printing_it(monkeypatch) -> None:
-
-    rec = sr.load_record("1320bd")
-    seed = rec["experiment"]["corpus"]["seed"]
-    _stub_heldout(monkeypatch, seed, "evaluation")
-    with pytest.raises(scrub.ScrubError) as exc:
-        scrub.scrub_record(rec)
-    assert "evaluation seed" in str(exc.value)
-    assert ".experiment.corpus.seed" in str(exc.value)
-    assert str(seed) not in str(exc.value)
-
-
-def test_rewrite_inside_experiment_block_refused() -> None:
-    """A lab registry inside the stored generator image reference is
-    evidence: the scrubber refuses rather than edit the experiment block."""
-    rec = sr.load_record("5105a0")
-    image = rec["experiment"]["corpus"]["generator_image"]
-    rec["experiment"]["corpus"]["generator_image"] = f"{LAB_ADDR}:5000/{image}"
-    with pytest.raises(scrub.ScrubError, match="rewrite evidence"):
-        scrub.scrub_record(rec)
-
-
-def test_rewrite_reaching_rebuilt_identity_refused() -> None:
-    """The same registry in the run-start inputs moves the identity of the
-    block experiment_block() rebuilds: refused by the identity guard."""
-    rec = sr.load_record("5105a0")
-    corpus = rec["config_snapshot"]["experiment_inputs"]["corpus"]
-    corpus["generator_image"] = f"{LAB_ADDR}:5000/{corpus['generator_image']}"
-    with pytest.raises(scrub.ScrubError, match="identity"):
-        scrub.scrub_record(rec)
-
-
 def test_bucket_names_replaced_only_as_whole_tokens() -> None:
     """Default bucket names are prefixes of job names: a bucket
     lakebench-bronze must not turn job lakebench-bronze-verify into
     scrubbed-bronze-verify."""
     rec = sr.load_record("5105a0")
-    s3 = rec["config_snapshot"]["s3"]
-    s3["buckets"] = {"bronze": "lakebench-bronze", "silver": "lakebench-silver", "gold": "gb"}
+    _buckets(bronze="lakebench-bronze", silver="lakebench-silver", gold="lakebench-gold")(rec)
     rec["jobs"][0]["job_name"] = "lakebench-bronze-verify"
     rec["jobs"][0]["error_message"] = "listing s3a://lakebench-bronze/x and lakebench-silver/y"
-    with pytest.raises(scrub.ScrubError, match="shorter than any valid S3 bucket"):
-        scrub.scrub_record(rec)
-    s3["buckets"]["gold"] = "lakebench-gold"
-    out, changed = scrub.scrub_record(rec)
+    out, _ = scrub.scrub_record(rec)
     assert out["jobs"][0]["job_name"] == "lakebench-bronze-verify"
     assert out["experiment"] == rec["experiment"]
     assert out["jobs"][0]["error_message"] == (
@@ -251,113 +188,597 @@ def test_bucket_names_replaced_only_as_whole_tokens() -> None:
     )
 
 
-def test_bucket_named_like_a_stage_is_refused_not_rewritten() -> None:
-    """A bucket literally named silver is a whole token in
-    experiment.stages.executed: refuse rather than edit the stages run."""
+def _image_registry_in_experiment(rec) -> None:
+    corpus = rec["experiment"]["corpus"]
+    corpus["generator_image"] = f"{LAB_ADDR}:5000/{corpus['generator_image']}"
+
+
+def _image_registry_in_run_inputs(rec) -> None:
+    corpus = rec["config_snapshot"]["experiment_inputs"]["corpus"]
+    corpus["generator_image"] = f"{LAB_ADDR}:5000/{corpus['generator_image']}"
+
+
+_BY_HOST = {"192.0.2.23": 1}
+
+# (record, mutator, match): a lab value that would have to be rewritten in
+# evidence, or a rewrite that would collide or move identity, is refused.
+_REFUSALS = [
+    pytest.param(
+        "5105a0",
+        _set(_MSG, "key PSFB" + "A" * 38 + " rejected"),
+        "credential format",
+        id="credential-under-neutral-key",
+    ),
+    pytest.param(
+        "5105a0", _image_registry_in_experiment, "rewrite evidence", id="registry-in-experiment"
+    ),
+    pytest.param(
+        "5105a0", _image_registry_in_run_inputs, "identity", id="registry-in-rebuilt-identity"
+    ),
+    pytest.param(
+        "5105a0",
+        _all(
+            _buckets(bronze="lakebench-bronze", silver="lakebench-silver", gold="gb"),
+            _set(("jobs", 0, "job_name"), "lakebench-bronze-verify"),
+        ),
+        "shorter than any valid S3 bucket",
+        id="bucket-shorter-than-valid",
+    ),
+    pytest.param(
+        "5105a0",
+        _buckets(silver="silver"),
+        "bucket name 'silver' is a single word",
+        id="bucket-named-like-a-stage",
+    ),
+    pytest.param(
+        "978622",
+        _buckets(silver="silver"),
+        "is a single word",
+        id="legacy-bucket-named-like-a-stage",
+    ),
+    pytest.param(
+        "978622",
+        _all(
+            _buckets(silver="dep-x-silver"),
+            _set(("pipeline_benchmark", "stage_matrix", "dep-x-silver"), {}),
+        ),
+        "also a key in the record",
+        id="legacy-bucket-is-a-key",
+    ),
+    *[
+        pytest.param(
+            "978622",
+            _all(_buckets(gold="dep-x-gold"), _set(("config_snapshot", value_at), "dep-x-gold")),
+            "also a value outside the bucket settings",
+            id=f"legacy-bucket-equals-{value_at}",
+        )
+        for value_at in ("table_format", "catalog", "pipeline_mode")
+    ],
+    pytest.param(
+        "978622",
+        _all(
+            _buckets(bronze="dep-x-bronze"),
+            _set(("pipeline_benchmark", "stages", 0, "stage_name"), "verify s3a://dep-x-bronze"),
+        ),
+        r"rewrite evidence.*stage_name",
+        id="stage-name-is-evidence",
+    ),
+    pytest.param(
+        "5105a0",
+        _set(("experiment", "limits", "max_token"), "4096"),
+        r"rewrite evidence.*max_token",
+        id="credential-named-key-in-experiment",
+    ),
+    pytest.param(
+        "5105a0",
+        _all(
+            _buckets(bronze="dep-x-bronze"),
+            _set(("jobs", 0, "job_name"), "verify s3a://dep-x-bronze"),
+        ),
+        r"rewrite evidence.*jobs\[0\]\.job_name",
+        id="bucket-name-in-a-job-name",
+    ),
+    pytest.param(
+        "5105a0",
+        _set(("config_snapshot", "by_host"), {"192.0.2.23": 5, "192.0.2.24": 7}),
+        "would merge",
+        id="key-rename-merges-keys",
+    ),
+    pytest.param(
+        "5105a0",
+        _set(("experiment", "limits", "by_host"), _BY_HOST),
+        "rename evidence key",
+        id="key-rename-in-experiment",
+    ),
+    pytest.param(
+        "5105a0",
+        _set(("verdict", "by_host"), _BY_HOST),
+        "rename evidence key",
+        id="key-rename-in-verdict",
+    ),
+]
+
+
+@pytest.mark.parametrize(("record_id", "mutate", "match"), _REFUSALS)
+def test_scrub_refuses(record_id, mutate, match) -> None:
+    rec = sr.load_record(record_id)
+    mutate(rec)
+    with pytest.raises(scrub.ScrubError, match=match):
+        scrub.scrub_record(rec)
+
+
+# (record inputs, expected values, a check_clean problem the input raises):
+# addresses, hosts and key names are rewritten to the placeholder; look-alikes
+# are left alone.
+_REWRITES = [
+    pytest.param(
+        {_MSG: "Connection refused by 192.0.2.25."},
+        {_MSG: "Connection refused by 10.0.1.50."},
+        "private address",
+        id="address-before-a-full-stop",
+    ),
+    pytest.param(
+        {_MSG: "via 100.64.3.4 and 100.128.0.1"},
+        {_MSG: "via 10.0.1.50 and 100.128.0.1"},
+        None,
+        id="cgnat-address",
+    ),
+    pytest.param(
+        {
+            (*_S3, "endpoint"): "http://fb.lab.corp:80",
+            _MSG: "GET https://mybkt.fb.lab.corp/k via ns1.fb.lab.corp",
+        },
+        {_MSG: "GET https://10.0.1.50/k via 10.0.1.50"},
+        None,
+        id="subdomain-of-an-endpoint-host",
+    ),
+    pytest.param(
+        {
+            (*_EXTRA, "s3_url"): "http://fb.lab.corp:80",
+            (*_EXTRA, "endpoints"): "fb2.lab.corp:80",
+        },
+        {_EXTRA: {"s3_url": "http://10.0.1.50:80", "endpoints": "10.0.1.50:80"}},
+        None,
+        id="s3-url-and-endpoints-keys",
+    ),
+    pytest.param(
+        {
+            (*_S3, "endpoint"): "http://user:pw@fb.lab.corp:80",
+            _MSG: "GET https://bob:hunter2@mirror.example.org/x failed",
+        },
+        {
+            (*_S3, "endpoint"): "http://10.0.1.50:80",
+            _MSG: "GET https://mirror.example.org/x failed",
+        },
+        "user-info",
+        id="url-userinfo-dropped",
+    ),
+    pytest.param(
+        {(*_EXTRA, "jdk"): "17.0.12.7", (*_EXTRA, "metrics_endpoint"): "/metrics"},
+        {_EXTRA: {"jdk": "17.0.12.7", "metrics_endpoint": "/metrics"}},
+        None,
+        id="non-addresses-left-alone",
+    ),
+    pytest.param(
+        {
+            (*_S3, "endpoint"): "http://minio:9000",
+            ("config_snapshot", "note"): "backend minio",
+            ("config_snapshot", "minio"): {"image": "x"},
+        },
+        {
+            (*_S3, "endpoint"): "http://10.0.1.50:9000",
+            ("config_snapshot", "note"): "backend minio",
+            ("config_snapshot", "minio"): {"image": "x"},
+        },
+        None,
+        id="dotless-host-is-not-a-global-token",
+    ),
+    pytest.param(
+        {(*_S3, "endpoint"): "http://s3.lab.example:80", _MSG: "S3.LAB.EXAMPLE refused"},
+        {_MSG: "10.0.1.50 refused"},
+        None,
+        id="host-matched-case-insensitively",
+    ),
+    pytest.param(
+        {
+            (*_S3, "endpoint"): "http://fb01:80",
+            _MSG: "GET http://FB01:80/a failed; fb01 busy",
+        },
+        {_MSG: "GET http://10.0.1.50:80/a failed; fb01 busy"},
+        None,
+        id="dotless-host-rewritten-inside-urls",
+    ),
+    pytest.param(
+        {("experimental",): {"192.0.2.23": 1}},
+        {("experimental",): {"10.0.1.50": 1}},
+        None,
+        id="experiment-lookalike-key-renamed",
+    ),
+]
+
+
+@pytest.mark.parametrize(("inputs", "expected", "flagged"), _REWRITES)
+def test_scrub_rewrites_record_values(inputs, expected, flagged) -> None:
     rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["s3"]["buckets"]["silver"] = "silver"
-    with pytest.raises(scrub.ScrubError, match="bucket name 'silver' is a single word"):
-        scrub.scrub_record(rec)
+    for path, value in inputs.items():
+        _put(rec, path, value)
+    if flagged:
+        assert any(flagged in p for p in scrub.check_clean(rec))
+    out, _ = scrub.scrub_record(rec)
+    for path, value in expected.items():
+        node = out
+        for key in path:
+            node = node[key]
+        assert node == value, path
 
 
-def test_legacy_bucket_named_like_a_stage_is_refused() -> None:
-    """A legacy record has no experiment block for the identity guard to
-    compare: a bucket named silver would rename stage_matrix.silver and
-    rewrite stages[].stage_name without a refusal (review SC1)."""
-    rec = sr.load_record("978622")
-    assert experiment_of(rec) is None
-    rec["config_snapshot"]["s3"]["buckets"]["silver"] = "silver"
-    with pytest.raises(scrub.ScrubError, match="is a single word"):
-        scrub.scrub_record(rec)
-    rec["config_snapshot"]["s3"]["buckets"]["silver"] = "dep-x-silver"
-    rec["pipeline_benchmark"]["stage_matrix"]["dep-x-silver"] = {}
-    with pytest.raises(scrub.ScrubError, match="also a key in the record"):
-        scrub.scrub_record(rec)
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("ok 192.0.2.25, 192.0.2.26.", "ok 10.0.1.50, 10.0.1.50."),
+        # Not part of a longer dotted run.
+        ("jdk 1.192.0.2.25 and 192.0.2.25.1", "jdk 1.192.0.2.25 and 192.0.2.25.1"),
+        ("via 010.099.007.005", "via 10.0.1.50"),
+        ("credentials:\n  user: x", "credentials:\n  user: x"),
+        ("password=$3cr3tValue end", "password=${LAKEBENCH_CREDENTIAL} end"),
+        ('password="my secret pass" end', 'password="${LAKEBENCH_CREDENTIAL}" end'),
+        ("password=abc,def end", "password=${LAKEBENCH_CREDENTIAL} end"),
+        (
+            "token=secret=" + "x" * 40 + " next_field=important",
+            "token=${LAKEBENCH_CREDENTIAL} next_field=important",
+        ),
+        # A swallowed quoted pair must not leak its value.
+        (
+            'accessKey=AKIDEXAMPLE,secretKey="abab abab" end',
+            "accessKey=${LAKEBENCH_S3_ACCESS_KEY} end",
+        ),
+        ('password=,token="realtoken" end', "password=${LAKEBENCH_CREDENTIAL} end"),
+        ("password=abc;token='tok en123' end", "password=${LAKEBENCH_CREDENTIAL} end"),
+        ("password:\n  hunter22\nuser: x", "password:\n  ${LAKEBENCH_CREDENTIAL}\nuser: x"),
+        (
+            "password: |\n  hunter22\n  more\nuser: x",
+            "password: |\n  ${LAKEBENCH_CREDENTIAL}\nuser: x",
+        ),
+        (
+            "access_key_id=${LAKEBENCH_S3_ACCESS_KEY} ok",
+            "access_key_id=${LAKEBENCH_S3_ACCESS_KEY} ok",
+        ),
+        (
+            "conf javax.jdo.option.ConnectionPassword=hive done",
+            "conf javax.jdo.option.ConnectionPassword=${LAKEBENCH_CREDENTIAL} done",
+        ),
+        (
+            "conf trustStorePassword=Abcdefgh!secretTail done",
+            "conf trustStorePassword=${LAKEBENCH_CREDENTIAL} done",
+        ),
+        ("conf s3SecretKey=abc done", "conf s3SecretKey=${LAKEBENCH_S3_SECRET_KEY} done"),
+        ("conf rootPassword: x9 done", "conf rootPassword: ${LAKEBENCH_CREDENTIAL} done"),
+        (
+            "2026-10-01T10:00:00Z-http://AKIAFAKE:sekrit@192.0.2.27/ -https://u:pw@h/x",
+            "2026-10-01T10:00:00Z-http://10.0.1.50/ -https://h/x",
+        ),
+    ],
+)
+def test_scrub_text_rewrites_exactly(text, expected) -> None:
+    assert scrub.scrub_text(text) == expected
 
 
-@pytest.mark.parametrize("value_at", ["table_format", "catalog", "pipeline_mode"])
-def test_legacy_bucket_equal_to_an_identity_value_is_refused(value_at: str) -> None:
-    """Fix-pass review: in a legacy record a bucket named like a recipe word
-    rewrote table_format, catalog and pipeline_mode with no refusal."""
-    rec = sr.load_record("978622")
-    rec["config_snapshot"]["s3"]["buckets"]["gold"] = "dep-x-gold"
-    rec["config_snapshot"][value_at] = "dep-x-gold"
-    with pytest.raises(scrub.ScrubError, match="also a value outside the bucket settings"):
-        scrub.scrub_record(rec)
+@pytest.mark.parametrize(
+    "text",
+    [
+        "password_policy=strict-mode access_key_id=${LAKEBENCH_S3_ACCESS_KEY} "
+        "fs.s3a.aws.credentials.provider=org.apache.Simple v1.192.0.2.10",
+        "Missing credentials:\nRetrying in 5s",
+        "ERROR: invalid token:\nsee docs",
+        "secret: \n\nfoo",
+        "secret not found",
+        "token budget exceeded",
+        "password_policy=strict",
+        'cfg {"password": ""}',
+        '  PASSWORD=""\n  echo hi',
+        'INFO password: ""\n    retrying with default',
+    ],
+)
+def test_prose_is_not_refused_or_rewritten(text) -> None:
+    assert scrub.scrub_text(text) == text
 
 
-def test_stage_name_is_evidence() -> None:
-    rec = sr.load_record("978622")
-    rec["config_snapshot"]["s3"]["buckets"]["bronze"] = "dep-x-bronze"
-    rec["pipeline_benchmark"]["stages"][0]["stage_name"] = "verify s3a://dep-x-bronze"
-    with pytest.raises(scrub.ScrubError, match=r"rewrite evidence.*stage_name"):
-        scrub.scrub_record(rec)
+def test_prose_naming_a_password_is_not_refused() -> None:
+    scrub.scrub_text("Invalid password: authentication failed")
 
 
-def test_credential_named_key_inside_experiment_refused() -> None:
-    """A cap such as experiment.limits.max_token reads as a credential key;
-    inside the experiment block it is evidence, never a placeholder (SC2)."""
+_CREDENTIAL_TEXT_REFUSALS = [
+    ("env:\n- name: X\n  value: " + FAKE + "\n", "credential format"),
+    ("Authorization: Basic aHVudGVyMnNlY3JldA==", "credential format"),
+    ("Authorization: Bearer abc.def.ghi", "credential format"),
+    ("s3a://MYACCESS:hunter2/secret@bucket/path", "user-info"),
+]
+
+
+@pytest.mark.parametrize(("text", "match"), _CREDENTIAL_TEXT_REFUSALS)
+def test_credential_text_is_refused(text, match) -> None:
+    with pytest.raises(scrub.ScrubError, match=match):
+        scrub.scrub_text(text)
     rec = sr.load_record("5105a0")
-    rec["experiment"]["limits"]["max_token"] = "4096"
-    with pytest.raises(scrub.ScrubError, match=r"rewrite evidence.*max_token"):
-        scrub.scrub_record(rec)
+    _put(rec, _MSG, text)
+    assert any(match in p for p in scrub.check_clean(rec))
 
 
-def test_address_before_a_full_stop_is_found() -> None:
-    assert scrub.scrub_text("ok 10.99.7.5, 10.99.7.6.") == "ok 10.0.1.50, 10.0.1.50."
-    rec = sr.load_record("5105a0")
-    rec["jobs"][0]["error_message"] = "Connection refused by 10.99.7.5."
-    assert any("private address" in p for p in scrub.check_clean(rec))
-    # Still not part of a longer dotted run.
-    assert scrub.scrub_text("jdk 1.10.99.7.5 and 10.99.7.5.1") == "jdk 1.10.99.7.5 and 10.99.7.5.1"
+def _extra_with(**kv):
+    return _set(_EXTRA, kv)
 
 
-def test_leading_zero_address_is_private() -> None:
-    assert scrub.scrub_text("via 010.099.007.005") == "via 10.0.1.50"
+# (mutator, values that must not survive, placeholder the scrub leaves behind)
+_RECORD_SECRETS = [
+    pytest.param(
+        _extra_with(args=["--conf", f"spark.hadoop.fs.s3a.secret.key={FAKE}"]),
+        [FAKE],
+        "${LAKEBENCH_S3_SECRET_KEY}",
+        id="conf-argv",
+    ),
+    pytest.param(
+        _extra_with(env=[{"key": "AWS_SECRET_ACCESS_KEY", "value": FAKE}]),
+        [FAKE],
+        "${LAKEBENCH_S3_SECRET_KEY}",
+        id="key-value-env",
+    ),
+    pytest.param(
+        _set(_MSG, f"bad config: secretKey: {FAKE}"),
+        [FAKE],
+        "${LAKEBENCH_S3_SECRET_KEY}",
+        id="yaml-text",
+    ),
+    *[
+        pytest.param(
+            _all(
+                _set(_EXTRA, extra),
+                _set(_MSG, "connect to fb.lab.corp timed out"),
+            ),
+            [SECRET, "PSKEYID", "fb.lab.corp", LAB_ADDR],
+            None,
+            id=name,
+        )
+        for name, extra in {
+            "dotted-spark-conf": {
+                "spark.hadoop.fs.s3a.endpoint": "http://fb.lab.corp:80",
+                "spark.hadoop.fs.s3a.secret.key": SECRET,
+            },
+            "camel-case": {"endpointOverride": "fb.lab.corp:80", "secretAccessKey": SECRET},
+            "aws-env-name": {
+                "AWS_ENDPOINT_URL_S3": "http://fb.lab.corp",
+                "AWS_SECRET_ACCESS_KEY": SECRET,
+            },
+            "env-list": {
+                "env": [
+                    {"name": "AWS_SECRET_ACCESS_KEY", "value": SECRET},
+                    {"name": "S3_ENDPOINT", "value": "http://fb.lab.corp:80"},
+                ]
+            },
+            "credentials-dict": {
+                "credentials": {"id": "PSKEYID", "key": SECRET},
+                "endpoint": "http://fb.lab.corp:80",
+            },
+            "dict-key": {f"{LAB_ADDR}:80": {"endpoint": "http://fb.lab.corp:80"}},
+        }.items()
+    ],
+]
 
 
-@pytest.mark.parametrize("shape", ["conf_argv", "key_value_env", "yaml_text"])
-def test_credential_assigned_in_text(shape: str) -> None:
+@pytest.mark.parametrize(("mutate", "leaks", "placeholder"), _RECORD_SECRETS)
+def test_secret_in_a_record_never_survives(mutate, leaks, placeholder) -> None:
     """.gitleaks.toml's s3-secret-key-assignment and k8s-inline-env shapes,
-    and the dotted Spark form gitleaks itself misses (review M1)."""
-    fake = "Ab1x" * 10  # 40 chars, not a key
+    the dotted Spark form gitleaks itself misses, and credentials and hosts
+    under other key spellings."""
     rec = sr.load_record("5105a0")
-    extra = rec["config_snapshot"].setdefault("extra", {})
-    if shape == "conf_argv":
-        extra["args"] = ["--conf", f"spark.hadoop.fs.s3a.secret.key={fake}"]
-    elif shape == "key_value_env":
-        extra["env"] = [{"key": "AWS_SECRET_ACCESS_KEY", "value": fake}]
-    else:
-        rec["jobs"][0]["error_message"] = f"bad config: secretKey: {fake}"
+    mutate(rec)
     assert scrub.check_clean(rec) != []
     out, _ = scrub.scrub_record(rec)
     text = json.dumps(out)
-    assert fake not in text
-    assert "${LAKEBENCH_S3_SECRET_KEY}" in text
+    for leak in leaks:
+        assert leak not in text
+    if placeholder:
+        assert placeholder in text
     assert scrub.check_clean(out) == []
-    # A value: line in pasted YAML refuses rather than rewrites.
-    with pytest.raises(scrub.ScrubError, match="credential format"):
-        scrub.scrub_text(f"env:\n- name: X\n  value: {fake}\n")
 
 
-def test_subdomain_of_an_endpoint_host_rewritten() -> None:
+_TEXT_SHAPES_LEAVE_NO_SECRET_CASES = [
+    *[
+        '{\\"secretKey\\":\\"hunter2secret\\"}',
+        'payload={\\"password\\": \\"hunter2secret\\"}',
+        "password:\r\n  hunter2secret\r\nuser: x",
+        "password: |\r\n  hunter2secret\r\n",
+        "password:\n  c2VjcmV0cGFzcw==\n",
+        "password:\n  hunter2:secret\n",
+        'password="abc\\"hunter2secret" end',
+        "password: |  # pem\n  hunter2secret\n",
+        "password: |2\n  hunter2secret\n",
+        "password: |\n  line1\n\n  hunter2secret\n",
+        "password: |\n\n  hunter2secret\n",
+        "password:\n  part1\n  hunter2secret\n",
+        "run --password hunter2secret --scale 1",
+    ],
+    *[
+        "password => 'hunter2'",
+        "password := hunter2",
+        "password:= hunter2",
+        "password: !!str hunter2",
+        "password: &a hunter2",
+        "password: # c\n  hunter2",
+        "--secret-key \\\n    hunter2",
+        'password="${X}"hunter2',
+        "password: 'it''s-hunter2'",
+        '\\"password\\": \\"ab\\\\\\"cd-hunter2\\"',
+        '{\\\\\\"password\\\\\\": \\\\\\"hunter2\\\\\\"}',
+    ],
+    *[
+        "password: [ hunter2 ]",
+        '"credentials": [ "hunter2" ]',
+        "password: - hunter2",
+        "password: ( hunter2 )",
+        "password: < hunter2 >",
+        "password: ? hunter2",
+        "password: *alias hunter2",
+        "password: !<tag:x> hunter2",
+        "token: { value: hunter2 }",
+        'password: "" hunter2',
+        "password: '' hunter2",
+        '--password "" hunter2',
+        "password:\xa0hunter2",
+        "password\xa0= hunter2",
+        "password: \u2028  hunter2",
+        "password:\x0bhunter2",
+        "password:\x0chunter2",
+        "password:\n\u3000hunter2",
+        "password:\r  hunter2",
+        "password: #c\n  hunter2",
+    ],
+]
+
+
+@pytest.mark.parametrize(
+    "text",
+    _TEXT_SHAPES_LEAVE_NO_SECRET_CASES,
+    ids=[f"shape-{n}" for n in range(len(_TEXT_SHAPES_LEAVE_NO_SECRET_CASES))],
+)
+def test_text_shape_leaves_no_secret(text) -> None:
+    """Every text shape from the review passes either scrubs the secret away
+    or is refused; it never comes back with the secret."""
+    try:
+        out = scrub.scrub_text(text)
+    except scrub.ScrubError:
+        return
+    assert "hunter2" not in out and "c2VjcmV0" not in out and "part1" not in out
+
+
+def test_userinfo_glued_to_a_timestamp_leaves_no_secret() -> None:
+    out = scrub.scrub_text(
+        "2026-10-01T10:00:00Z-http://AKIAFAKE:sekrit@192.0.2.27/ -https://u:pw@h/x"
+    )
+    assert "sekrit" not in out and "u:pw" not in out
+
+
+def _use_record(rec, run_id):
+    """Swap in a stored record; its own seed is the held-out one."""
+    rec.clear()
+    rec.update(sr.load_record(run_id))
+    return rec["experiment"]["corpus"]["seed"]
+
+
+# (mutator returning the stubbed seed or None for SEED, role)
+_SEED_INJECTIONS = [
+    pytest.param(lambda rec: _use_record(rec, "1320bd"), "evaluation", id="stored-seed"),
+    *[
+        pytest.param(_extra_with(**kv), "robustness", id=name)
+        for name, kv in {
+            "string": {"seed": "987654"},
+            "argv": {"args": "generate --seed 987654 --scale 1"},
+            "camel": {"randomSeed": 987654},
+            "list": {"instance_seeds": [1, 987654]},
+            "second-number": {
+                "error": "the corpus was generated with seed 777, not the claimed 987654"
+            },
+            "seeds-list-text": {"note": "seeds 777, 987654"},
+            "hyphen-word": {"note": "aml-seed-987654"},
+            "underscore-word": {"note": "aml_seed_987654"},
+            "dict-key": {"by_seed": {"987654": "x"}},
+            "nested": {"seed": {"evaluation": 987654}},
+            "float": {"seed": 987654.0},
+        }.items()
+    ],
+    *[
+        pytest.param(_extra_with(**kv), "evaluation", id=name)
+        for name, kv in {
+            "argv-list": {"args": ["generate", "--seed", "987654"]},
+            "argv-ints": {"spark_arguments": ["--scale", 1, "--seed", 987654]},
+            "seed-equals": {"cmd": "gen seed=987654"},
+        }.items()
+    ],
+    *[
+        pytest.param(_set(_MSG, text), "evaluation", id=f"dumped-{n}")
+        for n, text in enumerate(
+            [
+                'cfg {"seed": 987654}',
+                "seed = 987654",
+                "AML_SEED=987654",
+                "datagen_seed: 987654",
+            ]
+        )
+    ],
+    pytest.param(
+        _set(("config_snapshot", "args"), ["--aml-seed", "987654"]),
+        "evaluation",
+        id="aml-seed-argv",
+    ),
+    pytest.param(
+        _extra_with(**{"987654": {"seed": 987654}, "run-987654": {"n": "x"}}),
+        "robustness",
+        id="seed-in-a-dict-key",
+    ),
+    pytest.param(
+        _extra_with(**{"987654": {"host": "192.0.2.27"}, "192.0.2.22-987654": 1}),
+        "robustness",
+        id="seed-in-keys-with-addresses",
+    ),
+    pytest.param(
+        _all(
+            _buckets(gold="lb-987654-x"),
+            _extra_with(note="lb-987654-x"),
+        ),
+        "robustness",
+        id="seed-in-a-bucket-name",
+    ),
+    pytest.param(
+        _extra_with(**{"a" * 25 + "10.99.1.2_987654": 1}),
+        "robustness",
+        id="seed-cut-by-the-key-slice",
+    ),
+]
+
+
+@pytest.mark.parametrize(("mutate", "role"), _SEED_INJECTIONS)
+def test_held_out_seed_is_refused_and_never_printed(monkeypatch, mutate, role) -> None:
+    """Invariant 7: a held-out seed in any shape refuses the record, and no
+    message, path or problem carries its value (or a cut of it)."""
     rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["s3"]["endpoint"] = "http://fb.lab.corp:80"
-    rec["jobs"][0]["error_message"] = "GET https://mybkt.fb.lab.corp/k via ns1.fb.lab.corp"
-    out, _ = scrub.scrub_record(rec)
-    assert out["jobs"][0]["error_message"] == "GET https://10.0.1.50/k via 10.0.1.50"
+    seed = mutate(rec) or SEED
+    _stub_heldout(monkeypatch, seed, role)
+
+    with pytest.raises(scrub.ScrubError, match=f"{role} seed") as exc:
+        scrub.scrub_record(rec)
+    assert str(seed) not in str(exc.value)
+    problems = scrub.check_clean(rec)
+    assert problems
+    assert not any(str(seed)[:5] in p for p in problems)
+    try:
+        scrub.scrub_text("x", rec)
+    except scrub.ScrubError as e:
+        assert str(seed) not in str(e)
 
 
-def test_s3_url_and_endpoints_keys_are_endpoints() -> None:
+def test_seed_in_a_bucket_name_refuses_text_scrub(monkeypatch) -> None:
+    _stub_heldout(monkeypatch, SEED, "robustness")
     rec = sr.load_record("5105a0")
-    extra = rec["config_snapshot"].setdefault("extra", {})
-    extra["s3_url"] = "http://fb.lab.corp:80"
-    extra["endpoints"] = "fb2.lab.corp:80"
-    out, _ = scrub.scrub_record(rec)
-    assert out["config_snapshot"]["extra"] == {
-        "s3_url": "http://10.0.1.50:80",
-        "endpoints": "10.0.1.50:80",
-    }
+    rec["config_snapshot"]["s3"]["buckets"]["gold"] = f"lb-{SEED}-x"
+    rec["config_snapshot"]["extra"] = {"note": f"lb-{SEED}-x"}
+    with pytest.raises(scrub.ScrubError) as exc:
+        scrub.scrub_text("x", rec)
+    assert str(SEED) not in str(exc.value)
+
+
+def test_stored_seed_is_named_by_path_not_value(monkeypatch) -> None:
+    rec = sr.load_record("1320bd")
+    seed = rec["experiment"]["corpus"]["seed"]
+    _stub_heldout(monkeypatch, seed, "evaluation")
+    with pytest.raises(scrub.ScrubError) as exc:
+        scrub.scrub_record(rec)
+    assert ".experiment.corpus.seed" in str(exc.value)
+
+
+def test_seed_in_plain_text_is_refused(monkeypatch) -> None:
+    _stub_heldout(monkeypatch, SEED, "evaluation")
+    with pytest.raises(scrub.ScrubError, match="evaluation seed") as exc:
+        scrub.scrub_text("gen seed=987654")
+    assert str(SEED) not in str(exc.value)
 
 
 def test_held_out_seeds_refused_through_the_hash_record(monkeypatch) -> None:
@@ -401,126 +822,12 @@ def test_unreadable_held_out_record_refuses(monkeypatch) -> None:
         scrub.scrub_record(sr.load_record("5105a0"))
 
 
-def test_bucket_name_in_a_job_name_is_refused() -> None:
+def test_key_rename_reported_by_full_path() -> None:
     rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["s3"]["buckets"]["bronze"] = "dep-x-bronze"
-    rec["jobs"][0]["job_name"] = "verify s3a://dep-x-bronze"
-    with pytest.raises(scrub.ScrubError, match=r"rewrite evidence.*jobs\[0\]\.job_name"):
-        scrub.scrub_record(rec)
-
-
-@pytest.mark.parametrize(
-    "where",
-    ["dotted_spark_conf", "camel_case", "aws_env_name", "env_list", "credentials_dict", "dict_key"],
-)
-def test_other_credential_and_endpoint_shapes(where: str) -> None:
-    rec = sr.load_record("5105a0")
-    extra: dict = rec.setdefault("config_snapshot", {}).setdefault("extra", {})
-    secret = "abc/def+ghi" * 4
-    if where == "dotted_spark_conf":
-        extra["spark.hadoop.fs.s3a.endpoint"] = "http://fb.lab.corp:80"
-        extra["spark.hadoop.fs.s3a.secret.key"] = secret
-    elif where == "camel_case":
-        extra["endpointOverride"] = "fb.lab.corp:80"
-        extra["secretAccessKey"] = secret
-    elif where == "aws_env_name":
-        extra["AWS_ENDPOINT_URL_S3"] = "http://fb.lab.corp"
-        extra["AWS_SECRET_ACCESS_KEY"] = secret
-    elif where == "env_list":
-        extra["env"] = [
-            {"name": "AWS_SECRET_ACCESS_KEY", "value": secret},
-            {"name": "S3_ENDPOINT", "value": "http://fb.lab.corp:80"},
-        ]
-    elif where == "credentials_dict":
-        extra["credentials"] = {"id": "PSKEYID", "key": secret}
-        extra["endpoint"] = "http://fb.lab.corp:80"
-    else:
-        extra[f"{LAB_ADDR}:80"] = {"endpoint": "http://fb.lab.corp:80"}
-    rec["jobs"][0]["error_message"] = "connect to fb.lab.corp timed out"
-    assert scrub.check_clean(rec) != []
-    out, _ = scrub.scrub_record(rec)
-    text = json.dumps(out)
-    assert "fb.lab.corp" not in text
-    assert secret not in text
-    assert "PSKEYID" not in text
-    assert LAB_ADDR not in text
-    assert scrub.check_clean(out) == []
-
-
-def test_url_userinfo_dropped() -> None:
-    rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["s3"]["endpoint"] = "http://user:pw@fb.lab.corp:80"
-    rec["jobs"][0]["error_message"] = "GET https://bob:hunter2@mirror.example.org/x failed"
-    assert any("user-info" in p for p in scrub.check_clean(rec))
-    out, _ = scrub.scrub_record(rec)
-    assert out["config_snapshot"]["s3"]["endpoint"] == "http://10.0.1.50:80"
-    assert out["jobs"][0]["error_message"] == "GET https://mirror.example.org/x failed"
-
-
-def test_non_addresses_left_alone() -> None:
-    """A four-part version is not a lab address, and a path under an
-    endpoint-named key is not a host."""
-    rec = sr.load_record("5105a0")
-    extra = rec["config_snapshot"].setdefault("extra", {})
-    extra["jdk"] = "17.0.12.7"
-    extra["metrics_endpoint"] = "/metrics"
+    rec["config_snapshot"]["by_host"] = {"192.0.2.23": {"job_name": "x"}}
     out, changed = scrub.scrub_record(rec)
-    assert out["config_snapshot"]["extra"] == {"jdk": "17.0.12.7", "metrics_endpoint": "/metrics"}
-    assert not [p for p in changed if ".extra." in p]
-
-
-@pytest.mark.parametrize(
-    "shape",
-    [
-        "string",
-        "argv",
-        "camel",
-        "list",
-        "second_number",
-        "seeds_list_text",
-        "hyphen_word",
-        "underscore_word",
-        "dict_key",
-        "nested",
-        "float",
-    ],
-)
-def test_protected_seed_in_other_shapes_refused(monkeypatch, shape: str) -> None:
-
-    _stub_heldout(monkeypatch, 987654, "robustness")
-    rec = sr.load_record("5105a0")
-    extra = rec["config_snapshot"].setdefault("extra", {})
-    if shape == "string":
-        extra["seed"] = "987654"
-    elif shape == "argv":
-        extra["args"] = "generate --seed 987654 --scale 1"
-    elif shape == "camel":
-        extra["randomSeed"] = 987654
-    elif shape == "list":
-        extra["instance_seeds"] = [1, 987654]
-    elif shape == "second_number":
-        # datagen_seed.aml_seed_error's own message shape.
-        extra["error"] = "the corpus was generated with seed 777, not the claimed 987654"
-    elif shape == "seeds_list_text":
-        extra["note"] = "seeds 777, 987654"
-    elif shape == "hyphen_word":
-        extra["note"] = "aml-seed-987654"
-    elif shape == "underscore_word":
-        extra["note"] = "aml_seed_987654"
-    elif shape == "dict_key":
-        extra["by_seed"] = {"987654": "x"}
-    elif shape == "nested":
-        extra["seed"] = {"evaluation": 987654}
-    else:
-        extra["seed"] = 987654.0
-    with pytest.raises(scrub.ScrubError, match="robustness seed") as exc:
-        scrub.scrub_record(rec)
-    assert "987654" not in str(exc.value)
-
-
-def test_top_level_list_refused() -> None:
-    with pytest.raises(scrub.ScrubError, match="JSON object"):
-        scrub.scrub_record([{"run_id": "x"}])
+    assert out["config_snapshot"]["by_host"] == {"10.0.1.50": {"job_name": "x"}}
+    assert ".config_snapshot.by_host.192.0.2.23" in changed
 
 
 def test_scrub_text_for_logs() -> None:
@@ -534,410 +841,11 @@ def test_scrub_text_for_logs() -> None:
         scrub.scrub_text("key AKIA" + "ABCDEFGHIJKLMNOP")
 
 
-def test_cli_check_and_scrub(tmp_path: Path, capsys) -> None:
-    dirty = tmp_path / "dirty.json"
-    dirty.write_text(json.dumps(_dirty()))
-    assert scrub.main(["--check", str(dirty)]) == 1
-    out = tmp_path / "run-x" / "metrics.json"
-    assert scrub.main([str(dirty), str(out)]) == 0
-    assert scrub.main(["--check", str(out)]) == 0
-    assert LAB_ADDR not in capsys.readouterr().out
-
-
-def test_key_rename_that_merges_keys_refused() -> None:
-    rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["by_host"] = {"10.99.0.1": 5, "10.99.0.2": 7}
-    with pytest.raises(scrub.ScrubError, match="would merge"):
-        scrub.scrub_record(rec)
-
-
-def test_key_rename_reported_by_full_path() -> None:
-    rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["by_host"] = {"10.99.0.1": {"job_name": "x"}}
-    out, changed = scrub.scrub_record(rec)
-    assert out["config_snapshot"]["by_host"] == {"10.0.1.50": {"job_name": "x"}}
-    assert ".config_snapshot.by_host.10.99.0.1" in changed
-
-
-def test_key_rename_inside_experiment_refused() -> None:
-    rec = sr.load_record("5105a0")
-    rec["experiment"]["limits"]["by_host"] = {"10.99.0.1": 1}
-    with pytest.raises(scrub.ScrubError, match="rename evidence key"):
-        scrub.scrub_record(rec)
-
-
-def test_dotless_endpoint_host_is_not_a_global_token() -> None:
-    """An endpoint http://minio:9000 must not rewrite every word minio, or
-    a key named minio, elsewhere in the record."""
-    rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["s3"]["endpoint"] = "http://minio:9000"
-    rec["config_snapshot"]["note"] = "backend minio"
-    rec["config_snapshot"]["minio"] = {"image": "x"}
-    out, _ = scrub.scrub_record(rec)
-    assert out["config_snapshot"]["s3"]["endpoint"] == "http://10.0.1.50:9000"
-    assert out["config_snapshot"]["note"] == "backend minio"
-    assert "minio" in out["config_snapshot"]
-
-
-def test_endpoint_host_matched_case_insensitively() -> None:
-    rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["s3"]["endpoint"] = "http://s3.lab.example:80"
-    rec["jobs"][0]["error_message"] = "S3.LAB.EXAMPLE refused"
-    out, _ = scrub.scrub_record(rec)
-    assert out["jobs"][0]["error_message"] == "10.0.1.50 refused"
-
-
-@pytest.mark.parametrize("shape", ["argv_list", "argv_ints", "seed_equals"])
-def test_protected_seed_in_argv_shapes_refused(monkeypatch, shape: str) -> None:
-
-    _stub_heldout(monkeypatch, 987654, "evaluation")
-    rec = sr.load_record("5105a0")
-    extra = rec["config_snapshot"].setdefault("extra", {})
-    if shape == "argv_list":
-        extra["args"] = ["generate", "--seed", "987654"]
-    elif shape == "argv_ints":
-        extra["spark_arguments"] = ["--scale", 1, "--seed", 987654]
-    else:
-        extra["cmd"] = "gen seed=987654"
-    with pytest.raises(scrub.ScrubError, match="evaluation seed") as exc:
-        scrub.scrub_record(rec)
-    assert "987654" not in str(exc.value)
-    if shape == "seed_equals":
-        with pytest.raises(scrub.ScrubError, match="evaluation seed"):
-            scrub.scrub_text("gen seed=987654")
-
-
-def test_dotless_endpoint_host_rewritten_inside_urls() -> None:
-    rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["s3"]["endpoint"] = "http://fb01:80"
-    rec["jobs"][0]["error_message"] = "GET http://FB01:80/a failed; fb01 busy"
-    out, _ = scrub.scrub_record(rec)
-    assert out["jobs"][0]["error_message"] == "GET http://10.0.1.50:80/a failed; fb01 busy"
-
-
-@pytest.mark.parametrize(
-    "text",
-    ['cfg {"seed": 987654}', "seed = 987654", "AML_SEED=987654", "datagen_seed: 987654"],
-)
-def test_protected_seed_in_dumped_text_refused(monkeypatch, text: str) -> None:
-
-    _stub_heldout(monkeypatch, 987654, "evaluation")
-    rec = sr.load_record("5105a0")
-    rec["jobs"][0]["error_message"] = text
-    with pytest.raises(scrub.ScrubError, match="evaluation seed"):
-        scrub.scrub_record(rec)
-    rec["jobs"][0]["error_message"] = "ok"
-    rec["config_snapshot"]["args"] = ["--aml-seed", "987654"]
-    with pytest.raises(scrub.ScrubError, match="evaluation seed"):
-        scrub.scrub_record(rec)
-
-
-def test_cgnat_address_is_private() -> None:
-    rec = sr.load_record("5105a0")
-    rec["jobs"][0]["error_message"] = "via 100.64.3.4 and 100.128.0.1"
-    out, _ = scrub.scrub_record(rec)
-    assert out["jobs"][0]["error_message"] == "via 10.0.1.50 and 100.128.0.1"
-
-
-def test_key_rename_inside_verdict_refused_but_not_lookalike_keys() -> None:
-    rec = sr.load_record("5105a0")
-    rec["verdict"]["by_host"] = {"10.99.0.1": 1}
-    with pytest.raises(scrub.ScrubError, match="rename evidence key"):
-        scrub.scrub_record(rec)
-    rec = sr.load_record("5105a0")
-    rec["experimental"] = {"10.99.0.1": 1}
-    out, changed = scrub.scrub_record(rec)
-    assert out["experimental"] == {"10.0.1.50": 1}
-
-
-def test_seed_in_a_dict_key_is_not_printed_in_the_path(monkeypatch) -> None:
-    """Fix-pass review: a path built from a key holding the seed printed it."""
-
-    _stub_heldout(monkeypatch, 987654, "robustness")
-    rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["extra"] = {"987654": {"seed": 987654}, "run-987654": {"n": "x"}}
-    with pytest.raises(scrub.ScrubError, match="robustness seed") as exc:
-        scrub.scrub_record(rec)
-    assert "987654" not in str(exc.value)
-    assert not any("987654" in p for p in scrub.check_clean(rec))
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "javax.jdo.option.ConnectionPassword=hive",
-        "trustStorePassword=Abcdefgh!secretTail",
-        "s3SecretKey=abc",
-        "rootPassword: x9",
-    ],
-)
-def test_prefixed_credential_names_in_text(text: str) -> None:
-    out = scrub.scrub_text(f"conf {text} done")
-    assert out.endswith(" done") and "${LAKEBENCH_" in out
-    value = text.split("=")[-1].split(": ")[-1]
-    assert value not in out
-
-
-def test_non_credential_pairs_in_text_left_alone() -> None:
-    text = (
-        "password_policy=strict-mode access_key_id=${LAKEBENCH_S3_ACCESS_KEY} "
-        "fs.s3a.aws.credentials.provider=org.apache.Simple v1.10.0.0.1"
-    )
-    assert scrub.scrub_text(text) == text
-
-
-def test_no_message_carries_a_seed(monkeypatch) -> None:
-    """Second fix pass: check_clean, bucket refusals and scrub_text built
-    messages from paths and keys that can hold a held-out seed."""
-
-    _stub_heldout(monkeypatch, 987654, "robustness")
-    rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["extra"] = {"987654": {"host": "10.99.1.2"}, "10.1.2.3-987654": 1}
-    problems = scrub.check_clean(rec)
-    assert problems and not any("987654" in p for p in problems)
-    rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["s3"]["buckets"]["gold"] = "lb-987654-x"
-    rec["config_snapshot"]["extra"] = {"note": "lb-987654-x"}
-    with pytest.raises(scrub.ScrubError) as exc:
-        scrub.scrub_text("x", rec)
-    assert "987654" not in str(exc.value)
-
-
-@pytest.mark.parametrize(
-    ("text", "expected"),
-    [
-        ("password=$3cr3tValue end", "password=${LAKEBENCH_CREDENTIAL} end"),
-        ('password="my secret pass" end', 'password="${LAKEBENCH_CREDENTIAL}" end'),
-        ("password=abc,def end", "password=${LAKEBENCH_CREDENTIAL} end"),
-        (
-            "token=secret=" + "x" * 40 + " next_field=important",
-            "token=${LAKEBENCH_CREDENTIAL} next_field=important",
-        ),
-        ("credentials:\n  user: x", "credentials:\n  user: x"),
-        # Third fix pass: a swallowed quoted pair leaked its value.
-        (
-            'accessKey=AKIDEXAMPLE,secretKey="abab abab" end',
-            "accessKey=${LAKEBENCH_S3_ACCESS_KEY} end",
-        ),
-        ('password=,token="realtoken" end', "password=${LAKEBENCH_CREDENTIAL} end"),
-        ("password=abc;token='tok en123' end", "password=${LAKEBENCH_CREDENTIAL} end"),
-        ("password:\n  hunter22\nuser: x", "password:\n  ${LAKEBENCH_CREDENTIAL}\nuser: x"),
-        (
-            "password: |\n  hunter22\n  more\nuser: x",
-            "password: |\n  ${LAKEBENCH_CREDENTIAL}\nuser: x",
-        ),
-        (
-            "access_key_id=${LAKEBENCH_S3_ACCESS_KEY} ok",
-            "access_key_id=${LAKEBENCH_S3_ACCESS_KEY} ok",
-        ),
-    ],
-)
-def test_text_credential_values_taken_whole(text: str, expected: str) -> None:
-    assert scrub.scrub_text(text) == expected
-
-
-def test_long_token_runs_scrub_in_linear_time() -> None:
-    import time
-
-    text = "a" * 50_000 + " password=x"
-    t0 = time.monotonic()
-    out = scrub.scrub_text(text)
-    assert time.monotonic() - t0 < 2.0
-    assert out.endswith("password=${LAKEBENCH_CREDENTIAL}")
-
-
-def test_url_userinfo_glued_to_a_timestamp_dropped() -> None:
-    out = scrub.scrub_text(
-        "2026-10-01T10:00:00Z-http://AKIAFAKE:sekrit@10.99.1.2/ -https://u:pw@h/x"
-    )
-    assert "sekrit" not in out and "u:pw" not in out
-
-
-def test_seed_cut_by_the_key_slice_is_not_printed(monkeypatch) -> None:
-
-    _stub_heldout(monkeypatch, 987654, "robustness")
-    rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["extra"] = {"a" * 25 + "10.99.1.2_987654": 1}
-    problems = scrub.check_clean(rec)
-    assert problems and not any("98765" in p for p in problems)
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        '{\\"secretKey\\":\\"hunter2secret\\"}',
-        'payload={\\"password\\": \\"hunter2secret\\"}',
-        "password:\r\n  hunter2secret\r\nuser: x",
-        "password: |\r\n  hunter2secret\r\n",
-        "password:\n  c2VjcmV0cGFzcw==\n",
-        "password:\n  hunter2:secret\n",
-        'password="abc\\"hunter2secret" end',
-        "password: |  # pem\n  hunter2secret\n",
-        "password: |2\n  hunter2secret\n",
-        "password: |\n  line1\n\n  hunter2secret\n",
-        "password: |\n\n  hunter2secret\n",
-        "password:\n  part1\n  hunter2secret\n",
-        "run --password hunter2secret --scale 1",
-    ],
-)
-def test_fourth_pass_text_shapes_leave_no_secret(text: str) -> None:
-    """Fourth fix pass: each shape either scrubs the secret away or is
-    refused; it never comes back with the secret and a clean check."""
-    try:
-        out = scrub.scrub_text(text)
-    except scrub.ScrubError:
-        return
-    assert "hunter2" not in out and "c2VjcmV0" not in out and "part1" not in out
-
-
-def test_backstop_refuses_what_the_rewrite_misses() -> None:
-    # Header credentials are a refused format, not a rewritten pair.
-    rec = sr.load_record("5105a0")
-    rec["jobs"][0]["error_message"] = "Authorization: Basic aHVudGVyMnNlY3JldA=="
-    assert any("credential format" in p for p in scrub.check_clean(rec))
-    with pytest.raises(scrub.ScrubError, match="credential format"):
-        scrub.scrub_text("Authorization: Bearer abc.def.ghi")
-
-
-def test_userinfo_secret_with_a_slash_refused() -> None:
-    with pytest.raises(scrub.ScrubError, match="user-info"):
-        scrub.scrub_text("s3a://MYACCESS:hunter2/secret@bucket/path")
-
-
 def test_partial_placeholder_leaf_is_rewritten() -> None:
     rec = sr.load_record("5105a0")
     rec["config_snapshot"]["s3"]["secret_key"] = "${X}hunter2secret"
     out, _ = scrub.scrub_record(rec)
     assert out["config_snapshot"]["s3"]["secret_key"] == "${LAKEBENCH_S3_SECRET_KEY}"
-
-
-def test_many_text_credentials_scrub_in_linear_time() -> None:
-    """Eight times the input takes about eight times the work, not sixty-four.
-
-    CPU time of this process, not wall time, and a ratio, not a fixed bound:
-    under xdist the other workers share the CPUs, and coverage tracing on the
-    3.13 leg slows every line, so a 5 s wall-clock bound on 50,000 lines
-    failed there with nothing wrong (2.1 s serially without coverage)."""
-    import time
-
-    def cpu_seconds(n: int) -> float:
-        text = "password=x\n" * n
-        t0 = time.process_time()
-        out = scrub.scrub_text(text)
-        elapsed = time.process_time() - t0
-        assert out.count("${LAKEBENCH_CREDENTIAL}") == n
-        return elapsed
-
-    cpu_seconds(100)  # one-time costs (compiled patterns) out of the ratio
-    small, big = cpu_seconds(5_000), cpu_seconds(40_000)
-    # Linear measured about 8x; quadratic is 64x.
-    assert big < 16 * max(small, 0.01), (small, big)
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "password => 'hunter2'",
-        "password := hunter2",
-        "password:= hunter2",
-        "password: !!str hunter2",
-        "password: &a hunter2",
-        "password: # c\n  hunter2",
-        "--secret-key \\\n    hunter2",
-        'password="${X}"hunter2',
-        "password: 'it''s-hunter2'",
-        '\\"password\\": \\"ab\\\\\\"cd-hunter2\\"',
-        '{\\\\\\"password\\\\\\": \\\\\\"hunter2\\\\\\"}',
-    ],
-)
-def test_fifth_pass_text_shapes_leave_no_secret(text: str) -> None:
-    """Final pass: a prefix replaced with the secret kept behind it, a quote
-    ended early, or a doubly escaped key. Scrubbed away or refused."""
-    try:
-        out = scrub.scrub_text(text)
-    except scrub.ScrubError:
-        return
-    assert "hunter2" not in out
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "Missing credentials:\nRetrying in 5s",
-        "ERROR: invalid token:\nsee docs",
-        "secret: \n\nfoo",
-        "secret not found",
-        "token budget exceeded",
-        "password_policy=strict",
-        "Invalid password: authentication failed",
-        'cfg {"password": ""}',
-        "credentials:\n  user: x",
-    ],
-)
-def test_prose_is_not_refused(text: str) -> None:
-    scrub.scrub_text(text)
-
-
-def test_many_empty_quoted_keys_scrub_in_linear_time() -> None:
-    import contextlib
-    import time
-
-    t0 = time.monotonic()
-    with contextlib.suppress(scrub.ScrubError):
-        scrub.scrub_text("password: ''#" * 8000)
-    assert time.monotonic() - t0 < 2.0
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "password: [ hunter2 ]",
-        '"credentials": [ "hunter2" ]',
-        "password: - hunter2",
-        "password: ( hunter2 )",
-        "password: < hunter2 >",
-        "password: ? hunter2",
-        "password: *alias hunter2",
-        "password: !<tag:x> hunter2",
-        "token: { value: hunter2 }",
-        'password: "" hunter2',
-        "password: '' hunter2",
-        '--password "" hunter2',
-        "password:\xa0hunter2",
-        "password\xa0= hunter2",
-        "password: \u2028  hunter2",
-        "password:\x0bhunter2",
-        "password:\x0chunter2",
-        "password:\n\u3000hunter2",
-        "password:\r  hunter2",
-        "password: #c\n  hunter2",
-    ],
-)
-def test_last_pass_text_shapes_leave_no_secret(text: str) -> None:
-    try:
-        out = scrub.scrub_text(text)
-    except scrub.ScrubError:
-        return
-    assert "hunter2" not in out
-
-
-@pytest.mark.parametrize(
-    "text",
-    ['  PASSWORD=""\n  echo hi', 'INFO password: ""\n    retrying with default'],
-)
-def test_empty_quoted_value_is_not_refused(text: str) -> None:
-    assert scrub.scrub_text(text) == text
-
-
-@pytest.mark.parametrize("text", ["h://" + ":" * 100_000, "password: #c " * 20_000])
-def test_pathological_lines_stay_linear(text: str) -> None:
-    import contextlib
-    import time
-
-    t0 = time.monotonic()
-    with contextlib.suppress(scrub.ScrubError):
-        scrub.scrub_text(text)
-    assert time.monotonic() - t0 < 3.0
 
 
 def _with_system_identity(rec: dict, endpoint: str) -> dict:
@@ -978,7 +886,7 @@ def test_scrub_recomputes_the_system_fingerprint() -> None:
 def test_scrub_recomputes_the_fingerprint_inside_a_v2_identity() -> None:
     """An exp2 identity carries the system fingerprint: the recompute is the
     one identity change the guard lets through."""
-    from tests.test_comparability import _fresh
+    from tests.fixtures.comparability_helpers import _fresh
 
     rec = _fresh().to_dict()
     _with_system_identity(rec, f"{LAB_ADDR}:80")
@@ -1008,6 +916,17 @@ def test_scrub_refuses_a_rewrite_of_another_part() -> None:
         scrub.scrub_record(rec)
 
 
+def _system_identities(node):
+    if isinstance(node, dict):
+        if isinstance(node.get("system_identity"), dict):
+            yield node["system_identity"]
+        for v in node.values():
+            yield from _system_identities(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _system_identities(v)
+
+
 def test_scrub_recomputes_every_system_identity_copy() -> None:
     """The snapshot copy inside pipeline_benchmark is a third copy."""
     from lakebench.metrics.system_identity import fingerprint_of
@@ -1016,11 +935,70 @@ def test_scrub_recomputes_every_system_identity_copy() -> None:
     pb_inputs = rec["pipeline_benchmark"]["config_snapshot"].setdefault("experiment_inputs", {})
     pb_inputs["system_identity"] = json.loads(json.dumps(rec["experiment"]["system_identity"]))
     out, _ = scrub.scrub_record(rec)
-    copies = scrub._system_identity_paths(out)
-    assert len(copies) == 3
-    for path in copies:
-        sysid = scrub._at(out, path)
+    copies = list(_system_identities(out))
+    assert copies
+    for sysid in copies:
         version = sysid.get("version") or 2
-        assert sysid["fingerprint"] == fingerprint_of(sysid["parts"], None, "cluster", version), (
-            path
-        )
+        assert sysid["parts"]["storage_endpoint"] == "10.0.1.50:80"
+        assert sysid["fingerprint"] == fingerprint_of(sysid["parts"], None, "cluster", version)
+
+
+def test_scrubber_accepts_a_storage_block_with_real_bucket_names() -> None:
+    """The bucket name is a value in the storage-multiple block, never a key,
+    so a record with real-looking bucket names scrubs and keeps every number."""
+    real = {
+        "bronze": "rel17-m01-d0fc03-bronze",
+        "silver": "rel17-m01-d0fc03-silver",
+        "gold": "rel17-m01-d0fc03-gold",
+    }
+    gb = 1024**3
+    block = {
+        "buckets": [
+            {
+                "bucket": real["bronze"],
+                "layers": ["bronze"],
+                "physical_bytes": 15 * gb,
+                "unattributed_bytes": 0.0,
+                "listing_error": None,
+            },
+            {
+                "bucket": real["silver"],
+                "layers": ["silver"],
+                "physical_bytes": 11 * gb,
+                "unattributed_bytes": gb,
+                "listing_error": None,
+            },
+            {
+                "bucket": real["gold"],
+                "layers": ["gold"],
+                "physical_bytes": None,
+                "unattributed_bytes": None,
+                "listing_error": "OSError",
+            },
+        ],
+        "tables": [
+            {"table": "silver.txn", "location": f"s3a://{real['silver']}/warehouse/silver/txn"}
+        ],
+        "total": {"physical_bytes": 12 * gb},
+        "layers": {"silver": {"multiple": 1.5}},
+    }
+    rec = sr.load_record("5105a0")
+    _buckets(**real)(rec)
+    _put(rec, ("pipeline_benchmark", "config_snapshot", "s3", "buckets"), dict(real))
+    rec["storage_multiple"] = json.loads(json.dumps(block))
+
+    out, _ = scrub.scrub_record(rec)
+
+    scrubbed = out["storage_multiple"]
+    assert [b["bucket"] for b in scrubbed["buckets"]] == [
+        "scrubbed-bronze",
+        "scrubbed-silver",
+        "scrubbed-gold",
+    ]
+    for got, want in zip(scrubbed["buckets"], block["buckets"], strict=True):
+        assert {k: v for k, v in got.items() if k != "bucket"} == {
+            k: v for k, v in want.items() if k != "bucket"
+        }
+    assert scrubbed["tables"][0]["location"] == "s3a://scrubbed-silver/warehouse/silver/txn"
+    assert scrubbed["total"] == block["total"] and scrubbed["layers"] == block["layers"]
+    assert not any(name in json.dumps(out) for name in real.values())

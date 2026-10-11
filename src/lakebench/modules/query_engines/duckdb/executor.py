@@ -6,15 +6,16 @@ using a Python one-liner with the duckdb module.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import re
 import subprocess
 import time
-from pathlib import Path
 
-from lakebench.benchmark.fingerprint import last_json_line, unusable
-from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
+from lakebench.benchmark.result import (
+    QueryExecutorResult,
+    last_json_line,
+    summarise_engine_error,
+)
 from lakebench.k8s import pinned_kubectl
 
 logger = logging.getLogger(__name__)
@@ -52,23 +53,6 @@ FETCH_ROWS = (
 SESSION_SETTINGS = (
     "conn.execute('SET enable_progress_bar = false'); conn.execute(\"SET TimeZone = 'UTC'\")"
 )
-
-
-def fingerprint_statement(approx_columns: dict[int, float] | None) -> str:
-    """Python statements, run in the query process after FETCH_ROWS, that
-    fingerprint ``rows`` with this tree's benchmark.fingerprint (its source
-    is shipped in the script) and print ``{"rows": n, "fingerprint": fp}``,
-    so the rows never cross kubectl."""
-    from lakebench.benchmark import fingerprint
-
-    src = Path(fingerprint.__file__).read_text()
-    approx = {int(k): float(v) for k, v in (approx_columns or {}).items()}
-    return (
-        "_lbfp = {}; "
-        f"exec({src!r}, _lbfp); "
-        f"fp = _lbfp['fingerprint_or_reason'](rows, {approx!r}, 'duckdb'); "
-        "print(json.dumps({'rows': len(rows), 'fingerprint': fp}))"
-    )
 
 
 class DuckDBExecutor:
@@ -139,15 +123,11 @@ class DuckDBExecutor:
         self._pod = pod
         return pod
 
-    def _build_python_script(
-        self, sql: str, timeout: int | None = None, result_statement: str | None = None
-    ) -> str:
+    def _build_python_script(self, sql: str, timeout: int | None = None) -> str:
         """Build a Python one-liner that executes SQL via duckdb.
 
         With *timeout*, the process terminates itself (SIGALRM) a few seconds
         before the client timeout so no orphan outlives it in the pod.
-        *result_statement* replaces the default JSON print (the fingerprint
-        path uses it).
         """
         sql = " ".join(sql.split())
         escaped_sql = sql.replace("'", "\\'")
@@ -175,10 +155,7 @@ class DuckDBExecutor:
             f"{SESSION_SETTINGS}; "
             f"rel = conn.sql('{escaped_sql}'); "
             f"{FETCH_ROWS}; "
-            + (
-                result_statement
-                or "print(json.dumps({'rows': len(rows), 'data': [str(r) for r in rows[:100]]}))"
-            )
+            "print(json.dumps({'rows': len(rows), 'data': [str(r) for r in rows[:100]]}))"
         )
 
     def execute_query(self, sql: str, timeout: int = 300) -> QueryExecutorResult:
@@ -253,36 +230,6 @@ class DuckDBExecutor:
             rows_returned=payload["rows"],
             raw_output=output,
         )
-
-    def fingerprint_query(
-        self, sql: str, timeout: int = 300, approx_columns: dict[int, float] | None = None
-    ) -> QueryExecutorResult:
-        """Run *sql* once, untimed, and fingerprint the rows in the pod."""
-        pod = self._discover_pod()
-        script = self._build_python_script(
-            sql, timeout=timeout, result_statement=fingerprint_statement(approx_columns)
-        )
-        cmd = [
-            *self._kubectl_prefix(),
-            "exec",
-            pod,
-            "-n",
-            self.namespace,
-            "--",
-            "python",
-            "-c",
-            script,
-        ]
-        start = time.monotonic()
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)  # noqa: S603
-        except subprocess.TimeoutExpired:
-            error = f"fingerprint query timed out ({timeout}s)"
-            return _fp_result(sql, start, unusable("error", error, "duckdb"), error)
-        if result.returncode != 0:
-            error = summarise_engine_error(result.stderr or "")
-            return _fp_result(sql, start, unusable("error", error, "duckdb"), error)
-        return _fp_result(sql, start, *fingerprint_from_payload(result.stdout or "", sql))
 
     def health_check(self) -> bool:
         try:
@@ -375,28 +322,3 @@ class DuckDBExecutor:
         expr = sql[start : i - 1]
         replacement = f"({expr} + INTERVAL {n} {unit})"
         return sql[: m.start()] + replacement + sql[i:]
-
-
-def fingerprint_from_payload(output: str, sql: str) -> tuple[dict, str | None]:
-    """(fingerprint, error) from a fingerprint script's stdout."""
-    payload = last_json_line(output)
-    fp = (payload or {}).get("fingerprint")
-    if not isinstance(fp, dict):
-        error = "fingerprint query produced no readable payload"
-        return unusable("error", error, "duckdb"), error
-    fp = dict(fp)
-    if "exact" in fp:
-        fp["adapted_sql_sha"] = hashlib.sha256(sql.encode()).hexdigest()[:16]
-    return fp, None
-
-
-def _fp_result(sql: str, start: float, fp: dict, error: str | None) -> QueryExecutorResult:
-    return QueryExecutorResult(
-        sql=sql,
-        engine="duckdb",
-        duration_seconds=time.monotonic() - start,
-        rows_returned=int(fp.get("rows") or 0),
-        raw_output="",
-        error=error,
-        fingerprint=fp,
-    )

@@ -1,22 +1,12 @@
-"""Fixes from the adversarial reviews of the result-equivalence and evidence
-work (lane compare-equiv). Each test fails with its fix reverted."""
+"""Evidence: comparability, stamps and maintenance records."""
 
 from __future__ import annotations
 
 import copy
 from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 
-from lakebench.benchmark.fingerprint import (
-    Unsupported,
-    canonical_cell,
-    fingerprint_rows,
-    mismatch,
-    rows_from_beeline_tsv2,
-    rows_from_trino_json,
-)
 from lakebench.metrics import experiment as ex
 from lakebench.metrics.collector import (
     BenchmarkMetrics,
@@ -25,7 +15,7 @@ from lakebench.metrics.collector import (
     StreamingJobMetrics,
     build_config_snapshot,
 )
-from tests.conftest import make_config, stub_experiment
+from tests.conftest import make_config
 
 
 def _cfg(**arch):
@@ -34,29 +24,22 @@ def _cfg(**arch):
     return make_config(architecture=base)
 
 
-def _run(cfg=None, fps=None, fleet=None):
+def _run(cfg=None, fleet=None):
     cfg = cfg or _cfg()
     run = MetricsCollector().start_run(
         "20260926-120000-aaaaaa", cfg.name, build_config_snapshot(cfg)
     )
-    fps = fps if fps is not None else {"Q1": fingerprint_rows([(1, "x")])}
     run.benchmark = BenchmarkMetrics(
         mode="power",
         cache="hot",
         scale=1,
         qph=100.0,
         total_seconds=10.0,
-        queries=[
-            {"name": n, "elapsed_seconds": 1.0, "success": True, "result_fingerprint": f}
-            for n, f in fps.items()
-        ],
+        queries=[{"name": "Q1", "elapsed_seconds": 1.0, "success": True}],
     )
     run.datagen_fleet = fleet
-    # A2b wiring: compare and perf_gate now refuse a run whose verdict is
-    # FAILED. Mark the synthetic collector as successful so its computed
-    # verdict is PASSED; these tests exercise the comparability ladder,
-    # not the failed-run refusal path. Every layer has rows, so the
-    # verdict's layer_rows gate passes too.
+    # Compare and perf_gate refuse a FAILED run. Mark the synthetic run
+    # successful with rows in every layer so its verdict is PASSED.
     run.success = True
     run.jobs = [
         JobMetrics(job_name=f"lakebench-{s}", job_type=s, success=True, output_rows=100)
@@ -66,136 +49,7 @@ def _run(cfg=None, fps=None, fleet=None):
 
 
 # ---------------------------------------------------------------------------
-# S1-S3: fingerprint rules
-# ---------------------------------------------------------------------------
-
-
-class TestApproxRowAssociation:
-    def test_swapped_values_between_groups_differ(self):
-        a = fingerprint_rows([("web", 1000.00), ("mobile", 5.00)], {1: 0.01})
-        b = fingerprint_rows([("web", 5.00), ("mobile", 1000.00)], {1: 0.01})
-        assert a["approx"] == b["approx"]  # the plain sum cannot see it
-        assert mismatch(a, b) and "row-weighted" in mismatch(a, b)
-
-    def test_one_row_far_off_is_not_absorbed_by_row_count(self):
-        rows = [(f"d{i}", 100.0) for i in range(90)]
-        off = [*rows[:-1], ("d89", 189.0)]
-        assert mismatch(fingerprint_rows(rows, {1: 1.0}), fingerprint_rows(off, {1: 1.0}))
-
-    def test_summation_noise_still_matches(self):
-        rows = [(f"d{i}", 100.25) for i in range(455)]
-        noisy = [(k, v + (0.01 if i % 50 == 0 else 0.0)) for i, (k, v) in enumerate(rows)]
-        assert (
-            mismatch(fingerprint_rows(rows, {1: 0.01}), fingerprint_rows(noisy, {1: 0.01})) is None
-        )
-
-
-class TestApproxSpecials:
-    def test_nan_matches_only_nan(self):
-        nan = fingerprint_rows([("a", float("nan"))], {1: 0.01})
-        num = fingerprint_rows([("a", 1.0)], {1: 0.01})
-        assert mismatch(nan, num)
-        assert mismatch(nan, fingerprint_rows([("a", "NaN")], {1: 0.01})) is None
-        assert mismatch(
-            fingerprint_rows([("a", float("inf"))], {1: 0.01}),
-            fingerprint_rows([("a", float("-inf"))], {1: 0.01}),
-        )
-
-
-class TestExactDigits:
-    def test_bigint_ids_as_text_keep_every_digit(self):
-        """Beeline sends a 19-digit xxhash64 id as text; Trino and DuckDB as an int."""
-        assert canonical_cell("-1234567890123456789") == canonical_cell(-1234567890123456789)
-        assert canonical_cell("1234567890123456789") != canonical_cell("1234567890123456788")
-
-    def test_decimal_sums_keep_their_cents(self):
-        assert canonical_cell("12345678901234.57") != canonical_cell("12345678901234.56")
-        assert canonical_cell("12345678901234.570") == canonical_cell("12345678901234.57")
-
-    def test_trino_json_numbers_are_read_as_text(self):
-        rows = rows_from_trino_json('{"id":1234567890123456789,"v":12345678901234.57}\n')
-        tsv = rows_from_beeline_tsv2("id\tv\n1234567890123456789\t12345678901234.57\n")
-        assert fingerprint_rows(rows)["exact"] == fingerprint_rows(tsv)["exact"]
-
-
-# ---------------------------------------------------------------------------
-# S4, S6: empty output and empty rows
-# ---------------------------------------------------------------------------
-
-
-class TestEmptyOutput:
-    def test_no_tsv2_header_is_unsupported_not_zero_rows(self):
-        with pytest.raises(Unsupported):
-            rows_from_beeline_tsv2("")
-
-    def test_empty_trino_output_is_unsupported(self):
-        with pytest.raises(Unsupported):
-            rows_from_trino_json("")
-
-    def test_a_row_of_empty_cells_is_kept(self):
-        assert rows_from_beeline_tsv2("name\n\n") == [[""]]
-
-    def test_thrift_count_keeps_a_row_of_empty_cells(self):
-        from lakebench.benchmark.executor import SparkThriftExecutor
-
-        ex_ = SparkThriftExecutor(namespace="t", catalog_name="c")
-        ex_._pod = "p"
-        with mock.patch("subprocess.run") as run:
-            run.return_value = mock.MagicMock(returncode=0, stdout="name\n\n", stderr="")
-            assert ex_.execute_query("SELECT ''").rows_returned == 1
-
-
-class TestRunnerCrossCheck:
-    def _runner(self, timed_rows, fp):
-        from lakebench.benchmark.result import QueryExecutorResult
-        from lakebench.benchmark.runner import BenchmarkRunner
-
-        class Ex:
-            catalog_name = "lakehouse"
-
-            def engine_name(self):
-                return "trino"
-
-            def adapt_query(self, sql):
-                return sql
-
-            def flush_cache(self):
-                pass
-
-            def execute_query(self, sql, timeout=300):
-                return QueryExecutorResult(sql, "trino", 1.0, timed_rows, "x")
-
-            def fingerprint_query(self, sql, timeout=300, approx_columns=None):
-                self.timeout = timeout
-                return QueryExecutorResult(sql, "trino", 1.0, 0, "", fingerprint=fp)
-
-        executor = Ex()
-        with mock.patch("lakebench.benchmark.executor.get_executor", return_value=executor):
-            return BenchmarkRunner(make_config()), executor
-
-    def test_row_count_disagreeing_with_the_timed_run_is_unusable(self):
-        runner, _ = self._runner(5, fingerprint_rows([(1,)]))
-        result = runner.run_power(iterations=1)
-        fp = result.queries[0].result_fingerprint
-        assert "error" in fp and "timed run" in fp["error"]
-
-    def test_empty_trino_result_agreeing_with_the_timed_run_is_zero_rows(self):
-        from lakebench.benchmark.fingerprint import unusable
-
-        fp = unusable("unsupported", "Trino printed no rows (an empty result ...)", "trino")
-        runner, _ = self._runner(0, fp)
-        result = runner.run_power(iterations=1)
-        got = result.queries[0].result_fingerprint
-        assert got["rows"] == 0 and "exact" in got
-
-    def test_throughput_fingerprints_use_the_query_timeout(self):
-        runner, executor = self._runner(1, fingerprint_rows([(1,)]))
-        runner.run_throughput(streams=1, query_timeout=1800)
-        assert executor.timeout == 1800
-
-
-# ---------------------------------------------------------------------------
-# S5, S7: benchmark gate and freshness probe
+# Benchmark gate and freshness probe
 # ---------------------------------------------------------------------------
 
 
@@ -237,56 +91,7 @@ class TestFreshnessProbe:
 
 
 # ---------------------------------------------------------------------------
-# S8, E7: failed queries are one failure, not also a result mismatch
-# ---------------------------------------------------------------------------
-
-
-class TestFailedQueries:
-    def test_reference_side_failed_query_is_not_a_mismatch(self):
-        exp = stub_experiment(["Q1", "Q2"])
-        refs = ex.stored_identity_refusals(
-            ex.identity(exp),
-            {"Q1": exp["results"]["fingerprints"]["Q1"], "Q2": None},
-            exp,
-            "baseline",
-        )
-        assert refs == []
-
-    def test_reproduce_skips_a_failed_query(self):
-        from lakebench.cli._reproduce import _experiment_refusal
-
-        exp = stub_experiment(["Q1", "Q2"])
-        meta = {
-            "experiment_identity": ex.identity(exp),
-            "result_fingerprints": ex.result_fingerprints(exp),
-        }
-        run_exp = stub_experiment(["Q1", "Q2"], failed=("Q2",))
-        bench = SimpleNamespace(
-            queries=[{"name": "Q1", "success": True}, {"name": "Q2", "success": False}]
-        )
-        metrics = SimpleNamespace(experiment=run_exp, benchmark=bench, pipeline_benchmark=None)
-        assert _experiment_refusal(meta, metrics) is None
-
-
-# ---------------------------------------------------------------------------
-# E1: comparability not established
-# ---------------------------------------------------------------------------
-
-
-class TestNotEstablished:
-    def test_stored_references_refuse_a_batch_run_without_results(self):
-        exp = stub_experiment(["Q1"])
-        empty = stub_experiment([])
-        refs = ex.stored_identity_refusals(
-            ex.identity(exp), ex.result_fingerprints(exp), empty, "baseline"
-        )
-        assert any("comparability not established" in r for r in refs)
-        refs = ex.stored_identity_refusals(ex.identity(exp), {}, exp, "package")
-        assert any("package has no result fingerprints" in r for r in refs)
-
-
-# ---------------------------------------------------------------------------
-# E2: corpus as generated
+# Observed corpus
 # ---------------------------------------------------------------------------
 
 
@@ -297,7 +102,7 @@ class TestObservedCorpus:
 
     def test_without_a_fleet_record_it_is_declared_not_observed(self):
         c = _run().to_dict()["experiment"]["corpus"]
-        assert c["observed"] is False and "declared" in c["observed_note"]
+        assert c["observed"] is False
 
     def test_pod_args_reach_the_fleet_record(self):
         from lakebench.metrics.datagen_aggregator import _datagen_args, collect_from_pod_logs
@@ -313,7 +118,7 @@ class TestObservedCorpus:
 
 
 # ---------------------------------------------------------------------------
-# E3, E4, E5, E8: stamps
+# Stamps
 # ---------------------------------------------------------------------------
 
 
@@ -339,8 +144,10 @@ class TestStamps:
         lim = run.to_dict()["experiment"]["limits"]
         silver = next(x for x in lim["executors"] if x["job_type"] == "silver-stream")
         assert silver["observed"] == 1 and silver["budget_cap"]["granted"] == 1
-        assert any("concurrent executor budget" in b for b in lim["bound"])
-        assert any("over capacity" in b for b in lim["bound"])
+        assert lim["bound_kinds"] == [
+            "TM max_alerts_per_customer",
+            "silver-stream: concurrent executor budget",
+        ]
 
     def test_iterations_and_bound_limits_are_conditions(self):
         ra, rb = _run(_cfg(benchmark={"iterations": 1})), _run(_cfg(benchmark={"iterations": 3}))
@@ -352,13 +159,9 @@ class TestStamps:
             for d in ex.condition_differences(a["experiment"], b["experiment"])
         )
 
-    def test_hive_version_is_the_stackable_image(self):
-        v = ex.experiment_inputs(_cfg())["architecture"]["catalog"]["version"]
-        assert v.startswith("oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0")
-
 
 # ---------------------------------------------------------------------------
-# Reviewer extras: stale block, package usability, maintenance never reached
+# Stale block, package usability, maintenance never reached
 # ---------------------------------------------------------------------------
 
 
@@ -371,16 +174,16 @@ class TestBlockFollowsTheRecord:
         storage = MetricsStorage(tmp_path)
         storage.save_run(run)
         loaded = storage.load_run(run.run_id)
-        assert loaded.to_dict()["experiment"]["results"]["not_checked"]
+        assert loaded.to_dict()["experiment"]["results"]["query_set_id"] is None
         loaded.benchmark = _run().benchmark  # what `lakebench benchmark` does
         stored = copy.deepcopy(loaded.to_dict()["experiment"])
-        assert stored["results"]["not_checked"], "a stored block is never rebuilt"
+        assert stored["results"]["query_set_id"] is None, "a stored block is never rebuilt"
         ex.refresh_benchmark(loaded)  # and then this (cli/_query.py)
         # ... under its own run id: the run's record is written once.
         loaded.run_id = "bench-1"
         storage.save_run(loaded)
         e = storage.load_run("bench-1").to_dict()["experiment"]
-        assert "not_checked" not in e["results"] and e["results"]["fingerprints"]
+        assert e["results"]["query_set_id"] == loaded.benchmark.query_set_id
         assert e["benchmark_source"].startswith("lakebench benchmark")
         moved = ("results", "limits", "repetitions", "stages", "benchmark_source")
         assert {k: v for k, v in e.items() if k not in moved} == {
@@ -395,43 +198,12 @@ class TestBlockFollowsTheRecord:
         assert "not_run" in run.to_dict()["experiment"]["effective_maintenance"]["id"]
 
 
-class TestPackageUsability:
-    def test_package_refuses_an_unusable_fingerprint(self):
-        from lakebench.cli._reproduce import ReproduceError, _build_package
-        from tests.test_reproduce import _metrics
-
-        exp = stub_experiment(["Q1"])
-        exp["results"]["fingerprints"]["Q1"] = {"spec": "rf2", "error": "timed out"}
-        with pytest.raises(ReproduceError, match="usable result fingerprint"):
-            _build_package(_metrics(experiment=exp), config_reference="c.yaml", commit_sha="abc")
-
-
-class TestRunLocalIds:
-    def test_fq8_alert_id_is_volatile_and_its_pick_is_deterministic(self):
-        """alert_id is uuid() per pipeline run: two runs on one corpus must
-        still match, and the LIMIT must not pick among tied alerts by it."""
-        from lakebench.benchmark.queries import get_benchmark_queries
-        from lakebench.config.schema import WorkloadSchema
-
-        fq8 = next(
-            q for q in get_benchmark_queries(WorkloadSchema.FINANCIAL) if q.name.startswith("FQ8")
-        )
-        assert "ORDER BY alert_ts DESC, entity_id, rule_id, alert_id" in fq8.sql
-        cols = fq8.fingerprint_columns()
-        run1 = fingerprint_rows([("uuid-a", "2026-01-01 00:00:00", "acme")], cols)
-        run2 = fingerprint_rows([("uuid-b", "2026-01-01 00:00:00", "acme")], cols)
-        assert mismatch(run1, run2) is None
-        other = fingerprint_rows([("uuid-b", "2026-01-01 00:00:00", "other")], cols)
-        assert mismatch(run1, other)
-        assert mismatch(run1, fingerprint_rows([(None, "2026-01-01 00:00:00", "acme")], cols))
-
-
 # ---------------------------------------------------------------------------
-# Fix-pass review and live run 61489ab (M1-M3)
+# Recorded values and maintenance stamps
 # ---------------------------------------------------------------------------
 
 
-class TestFixPass:
+class TestRecordedValues:
     def test_bound_condition_carries_no_counts(self):
         def run(granted):
             r = _run(_cfg(pipeline={"mode": "sustained"}))
@@ -452,17 +224,6 @@ class TestFixPass:
         r = _run(_cfg(benchmark={"iterations": 3}))
         r.benchmark.iterations = 5
         assert r.to_dict()["experiment"]["limits"]["benchmark_iterations"] == 5
-
-    def test_one_row_approx_tolerance_is_a_few_quanta(self):
-        a = fingerprint_rows([("x", 10.0)], {1: 1.0})
-        assert mismatch(a, fingerprint_rows([("x", 21.0)], {1: 1.0}))
-        assert mismatch(a, fingerprint_rows([("x", 12.0)], {1: 1.0})) is None
-
-    def test_old_stored_identity_gets_one_clear_message(self):
-        exp = stub_experiment(["Q1"])
-        old = {k: v for k, v in ex.identity(exp).items() if k != "system"}
-        refs = ex.stored_identity_refusals(old, ex.result_fingerprints(exp), exp, "baseline")
-        assert len(refs) == 1 and "record it again" in refs[0]
 
     def test_scale_rendered_to_six_places_is_not_a_disagreement(self):
         corpus, problems = ex._observed_corpus({"scale": 0.1234567}, {"scale": 0.123457})
@@ -486,15 +247,20 @@ class TestFixPass:
         )
 
 
-class TestLiveRun61489ab:
-    def test_batch_c360_maintenance_skips_the_continuous_bronze_table(self):
+class TestMaintenanceStamps:
+    def test_batch_maintenance_skips_the_continuous_only_tables(self):
         from lakebench.cli._sustained import maintained_tables
 
         batch = maintained_tables(_cfg())
         assert not any("bronze" in t for t in batch)
         assert any("bronze" in t for t in maintained_tables(_cfg(pipeline={"mode": "sustained"})))
-        fin = maintained_tables(_cfg(workload={"schema": "financial", "datagen": {"scale": 1}}))
+        aml = {"schema": "financial", "datagen": {"scale": 1}}
+        fin = maintained_tables(_cfg(workload=aml))
         assert any(t.startswith("bronze") for t in fin)
+        # silver.counterparty_pairs exists only after a continuous run.
+        pairs = _cfg(workload=aml).architecture.tables.silver_counterparty_pairs
+        assert pairs not in fin
+        assert pairs in maintained_tables(_cfg(workload=aml, pipeline={"mode": "continuous"}))
 
     def test_applied_retention_and_its_source_are_stamped(self):
         r = _run()

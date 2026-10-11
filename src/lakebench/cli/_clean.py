@@ -134,7 +134,7 @@ def clean(
     try:
         cfg = load_config(
             config_file, purpose=LoadPurpose.MUTATE, allow_long_names=True
-        )  # LB-153: cleanup path
+        )  # cleanup path accepts long names
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(ExitCode.USAGE)  # noqa: B904

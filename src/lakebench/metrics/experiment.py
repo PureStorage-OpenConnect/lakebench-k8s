@@ -5,14 +5,11 @@ invariant 5): the workload and its version, the corpus that was generated
 (generator image and digest, seed, corpus role, scale), the architecture
 composition and component versions, the mode, the table-maintenance policy,
 the stages and detection rules that ran or were skipped, the limits
-Lakebench imposed on the run, and a result fingerprint per benchmark query
-(benchmark.fingerprint).
+Lakebench imposed on the run, and the benchmark query set id.
 
-``reproduce`` reads it (``stored_identity_refusals``): two
-runs whose workload, corpus, seed, scale or mode differ, or whose benchmark
-queries returned different results, are not compared on performance
-(invariant 2). A record without the block (written before it existed) is
-"not comparable: no provenance".
+Two runs whose workload, corpus, seed, scale or mode differ are not
+compared on performance (invariant 2). A record without the block (written
+before it existed) has no provenance.
 
 The block is assembled in two halves. ``experiment_inputs(cfg)`` runs when
 the run starts and is stored in ``config_snapshot["experiment_inputs"]``
@@ -58,6 +55,12 @@ nothing measured under this one):
   leaves the cycles' datagen out. The release takes ``c360-3``, never
   ``c360-2`` again, so no release record shares an identity with a pre-``dev1`` one
   (2026-10-03).
+- ``aml-3``: W3 and W17 treat an account as a hub (not an intermediary)
+  only in the weeks it sends more than ``max_out_degree`` transfers, not
+  for the whole corpus once any week does, so their alerts, recall and
+  false positives change in batch and continuous alike. Hub status is then
+  local in time, which lets continuous gold re-detect only the weeks new
+  rows can reach (2026-10-08).
 
 Identity versions. A block is stamped ``exp2``
 (``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is
@@ -94,7 +97,7 @@ V2_REQUIRED_INPUTS = ("corpus id v2", "identity version", "system identity")
 
 WORKLOAD_VERSIONS: dict[str, str] = {
     "customer360": "c360-2.dev1",
-    "financial": "aml-2",
+    "financial": "aml-3",
     "custom": "custom-1",
 }
 
@@ -103,12 +106,10 @@ WORKLOAD_VERSIONS: dict[str, str] = {
 #: no model version of its own; its identity is the image reference, whose
 #: tag is the datagen_rs commit it was built from.
 DATAGEN_MODEL_VERSIONS: dict[str, str | None] = {
-    "financial": "datagen-v2-rs-0.3",
+    "financial": "datagen-v2-rs-0.4",
     "customer360": None,
     "custom": None,
 }
-
-NO_PROVENANCE = "not comparable: no provenance"
 
 # Batch and continuous Spark job types -> snapshot executor-override key.
 
@@ -155,18 +156,10 @@ def _batch_retention(cfg: Any) -> str | None:
 
 def effective_trickle(cfg: Any) -> int | None:
     """max_files_per_trigger as a continuous run of *cfg* uses it: the config
-    value, or the auto value for its run_duration (cli/_sustained
-    resolve_trickle). A continuous run resolves it onto the config before
-    anything is recorded; this covers records built from a config directly."""
-    value = cfg.architecture.pipeline.sustained.max_files_per_trigger
-    if value is not None:
-        return value
-    try:
-        from lakebench.cli._sustained import resolve_trickle
-
-        return resolve_trickle(cfg, cfg.architecture.pipeline.sustained.run_duration)["value"]
-    except Exception:  # noqa: BLE001
-        return None
+    value, or None (no limit) under the run's own continuous datagen
+    (cli/_sustained resolve_trickle). A continuous run resolves it onto the
+    config before anything is recorded."""
+    return cfg.architecture.pipeline.sustained.max_files_per_trigger
 
 
 def _stackable_hive(cfg: Any) -> str:
@@ -454,7 +447,8 @@ def experiment_inputs(
                 }
             ),
         },
-        "mode": arch.pipeline.mode.value,
+        # The config file's mode; run_mode is what the command line ran.
+        "mode": (arch.pipeline._configured_mode or arch.pipeline.mode).value,
         **({"run_mode": _canonical_mode(run_mode)} if run_mode else {}),
         "support": _frozen_support(cfg, run_mode, system),
         "config_limits": {
@@ -499,6 +493,9 @@ def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> li
         if snapshot.get("local")
         else ((snapshot.get("spark") or {}).get("executor_overrides")) or {}
     )
+    # A continuous stage's planned count includes its balance need and may
+    # use grown executors (job.streaming_shape).
+    shapes = (snapshot.get("spark") or {}).get("streaming_shape") or {}
     out = []
     job_types = [j.job_type for j in metrics.jobs] + [s.job_type for s in metrics.streaming]
     for job_type in dict.fromkeys(job_types):
@@ -506,6 +503,9 @@ def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> li
         if not profile or "base_executors" not in profile:
             continue
         uncapped = executor_count(profile, scale, capped=False)
+        shape = shapes.get(job_type)
+        if shape:
+            uncapped = int(shape.get("uncapped") or uncapped)
         override = overrides.get(EXECUTOR_OVERRIDE_FIELDS.get(job_type, ("", ""))[1])
         cap = int(profile["max_executors"])
         observed = next(
@@ -581,6 +581,15 @@ def _rules(metrics: Any) -> dict[str, Any]:
     for s in metrics.streaming:
         for rule in s.ttd_by_rule or {}:
             ran.setdefault(rule, 0)
+    if metrics.streaming:
+        from lakebench.metrics.verdict import scored_rule_status
+
+        # Continuous: the rules behind the scored alerts, not every rule that
+        # alerted on some tick.
+        scored = scored_rule_status(metrics)
+        if scored is not None:
+            ran = dict.fromkeys(scored[0], 0)
+            skipped, errors = scored[1], scored[2]
     if not (ran or skipped or errors):
         return {}
     return {
@@ -615,36 +624,27 @@ def _benchmark_queries(metrics: Any) -> list[dict[str, Any]]:
 
 
 def _continuous_results(metrics: Any) -> dict[str, Any]:
-    """A continuous run's results: the fingerprints of the result check the
-    CLI runs once the whole corpus has passed through the pipeline and the
-    streams have stopped (cli/_sustained.py). The tables are then a function
-    of the corpus, except the layout of AML's counterparty_edges rows (one
-    per pair per micro-batch) and account_statements running balances
-    (arrival order), which no benchmark query reads raw: FQ3 and IQ3 sum the
-    edges per pair and FQ4 recomputes the balance in ledger order. The
-    in-stream rounds read tables still being written and are never
-    fingerprinted.
+    """A continuous run's results: the query set id of every query its
+    in-stream rounds ran, failed ones included, so a tolerated Q9 failure
+    in one round does not move the run's identity (for AML the 12-query
+    set once a round ran the investigator queries), None when no round ran.
+    The QpH basis is ``benchmark.query_set_id``, which may read
+    ``blended``.
 
     An AML run also carries ``alert_set_continuous``: the alert-set
     fingerprint of gold.alerts at the scored tick's commit, computed once
     after the drain by
     the covered score (cli/_aml_post.py), never per tick. Diagnostic only:
     continuous alerts depend on when ticks ran."""
-    check = (getattr(metrics, "continuous", None) or {}).get("result_check") or {}
-    fps = dict(check.get("fingerprints") or {})
-    if fps and not check.get("not_checked"):
-        out: dict[str, Any] = {
-            "query_set_id": check.get("query_set_id"),
-            "fingerprints": fps,
-            "basis": "continuous result check after the corpus settled",
-        }
-    else:
-        out = {
-            "query_set_id": check.get("query_set_id"),
-            "fingerprints": {},
-            "not_checked": "continuous: "
-            + str(check.get("not_checked") or "no end-of-run result check was recorded"),
-        }
+    from lakebench.benchmark.queries import query_set_id
+
+    names = {
+        str(q.get("name") or q.get("query_name"))
+        for r in getattr(metrics, "benchmark_rounds", None) or []
+        for q in getattr(r, "queries", None) or []
+        if isinstance(q, dict) and (q.get("name") or q.get("query_name"))
+    }
+    out: dict[str, Any] = {"query_set_id": query_set_id(names) if names else None}
     scoring = getattr(metrics, "financial_scoring", None) or {}
     if (
         scoring.get("mode") == "covered"
@@ -677,21 +677,8 @@ def _results(metrics: Any, mode: str) -> dict[str, Any]:
     bench = metrics.benchmark
     if bench is None and metrics.pipeline_benchmark is not None:
         bench = metrics.pipeline_benchmark.query_benchmark
-    if bench is None:
-        return {
-            "query_set_id": None,
-            "fingerprints": {},
-            "not_checked": "no benchmark ran",
-            **_alert_set_results(metrics),
-        }
-    fps: dict[str, Any] = {}
-    for q in _benchmark_queries(metrics):
-        name = q.get("name") or q.get("query_name")
-        if name:
-            fps[str(name)] = q.get("result_fingerprint")
     return {
         "query_set_id": getattr(bench, "query_set_id", None),
-        "fingerprints": fps,
         **_alert_set_results(metrics),
     }
 
@@ -797,7 +784,7 @@ def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[
 def support_state(
     workload: str | None, arch: Mapping[str, Any], mode: str | None, *, system: str = "cluster"
 ) -> dict[str, Any]:
-    """The DESIGN 6.5 support state of a run's workload x architecture x mode,
+    """The support state of a run's workload x architecture x mode,
     computed by lakebench.config.support from layers 1-3 and the release
     validation record (config/validated_combinations.yaml), at the Spark
     minor and table format version the architecture block names."""
@@ -916,7 +903,7 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     if mode == "sustained":
         limits["intake_limit"] = getattr(pb, "intake_limit", None)
         # Rounds behind the continuous QpH median: benchmark iterations are
-        # an execution condition (DESIGN 2.4), and a median over 4 rounds
+        # an execution condition, and a median over 4 rounds
         # does not stand like-for-like against one over 5.
         limits["benchmark_rounds"] = sum(
             1 for r in getattr(pb, "benchmark_rounds", None) or [] if (r.qph or 0) > 0
@@ -951,6 +938,10 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         limits["trickle_bound"] = trickle_bound(metrics)
         if limits["trickle_bound"] is not None:
             limits["bound"].append(trickle_line(limits["trickle_bound"]))
+        from lakebench.metrics.bounds import trigger_lines
+
+        trickled = ((getattr(metrics, "continuous", None) or {}).get("trickle") or {}).get("value")
+        limits["trigger_bound"] = trigger_lines(snapshot, trickle=bool(trickled))
     bench = metrics.benchmark
     if bench is None and metrics.pipeline_benchmark is not None:
         bench = metrics.pipeline_benchmark.query_benchmark
@@ -1113,17 +1104,16 @@ def refresh_benchmark(metrics: Any) -> None:
     """Bring a stored block's benchmark half up to date after ``lakebench
     benchmark`` replaced the record's benchmark (``cli/_query.py``).
 
-    A stored block is never rebuilt, so without this its result
-    fingerprints, benchmark iterations and mode would still describe the
-    benchmark that was replaced. Only those keys, the sample count, the
+    A stored block is never rebuilt, so without this its query set id,
+    benchmark iterations and mode would still describe the benchmark that
+    was replaced. Only those keys, the sample count, the
     "benchmark (not run)" entry of the skipped stages and a
     ``benchmark_source`` note change; schema, corpus, architecture and every
     other key stay as stored. The identity digest moves with the benchmark
     iterations and mode (and on exp2 the query set id), as the record now
     describes a different benchmark. A record with no stored block is left alone
-    (its block is built from the record when it is saved). For a continuous
-    record the results stay its end-of-run result check, which a later
-    benchmark does not change."""
+    (its block is built from the record when it is saved). A continuous
+    record's results stay those of its in-stream rounds."""
     exp = getattr(metrics, "experiment", None)
     if not isinstance(exp, dict) or not exp.get("schema"):
         return
@@ -1134,8 +1124,9 @@ def refresh_benchmark(metrics: Any) -> None:
     if mode != "sustained":
         old = exp.get("results") or {}
         new = _results(metrics, mode)
-        # Keys another writer put in results stay; the benchmark's own
-        # three are replaced.
+        # Keys another writer put in results stay; the benchmark's own are
+        # replaced, and an older block's fingerprints and not_checked go
+        # with the benchmark they described.
         exp["results"] = {
             **{
                 k: v
@@ -1297,49 +1288,6 @@ def _identity_v2(exp: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-#: Identity keys that are execution conditions (the Conditions group of
-#: metrics/comparability.py, its one definition): a difference makes a pair
-#: comparable but not like-for-like. ``system`` and ``query access path``
-#: moved out in 1.7 (System and Architecture groups); ``compaction
-#: operation`` is a read-time key, not an identity() key.
-CONDITION_KEYS = frozenset(_cmp.CONDITION_KEYS)
-
-#: Conditions that are also outcomes of the run: the in-stream round count
-#: depends on how long each round took, so a slower build fits fewer rounds,
-#: and the investigator sessions that ran depend on the cases open.
-#: A difference is not like-for-like; reproduce does not
-#: refuse on it, or a regression that costs a round would
-#: read as "not comparable" instead of a regression.
-OUTCOME_CONDITION_KEYS = _cmp.OUTCOME_CONDITION_KEYS
-
-
-def corpus_problems(exp: Mapping[str, Any] | None) -> list[str]:
-    """Why a run's corpus is not one known corpus (see _observed_corpus)."""
-    return list(((exp or {}).get("corpus") or {}).get("problems") or [])
-
-
-def results_established(exp: Mapping[str, Any] | None, *, alert_set: bool = True) -> bool | str:
-    """True when the run recorded benchmark results that can be checked for
-    equivalence, else the reason they cannot (DESIGN 6.5: comparable means
-    the results are equivalent, which needs results). An AML batch record
-    written by 1.7 also needs its alert set; *alert_set* False
-    asks about the benchmark results alone (ladder step 0's query set id)."""
-    res = (exp or {}).get("results") or {}
-    if res.get("not_checked"):
-        return str(res["not_checked"])
-    if not res.get("fingerprints"):
-        return "no benchmark query results were recorded"
-    if not alert_set:
-        return True
-    from lakebench.metrics.alert_set import alert_set_missing
-
-    missing = alert_set_missing(exp)
-    if missing:
-        # An exp2 AML batch record must carry its alert set.
-        return missing
-    return True
-
-
 def identity_hash(exp: Mapping[str, Any]) -> str:
     """The identity digest of a block as stored (``identity`` minus the
     generator digest). For exp1 blocks it is the v1.6 digest unchanged."""
@@ -1358,26 +1306,6 @@ def experiment_of(record: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
     if not isinstance(exp, Mapping) or _cmp.generation(record) == _cmp.LEGACY:
         return None
     return exp
-
-
-def diff_identities(ia: Mapping[str, Any], ib: Mapping[str, Any], keys: Any = None) -> list[str]:
-    """Differences between two ``identity`` dicts, one line per field
-    (only *keys*, when given)."""
-    out = []
-    for key in dict.fromkeys([*ia, *ib]):
-        if keys is not None and key not in keys:
-            continue
-        va, vb = ia.get(key), ib.get(key)
-        if key == "generator digest" and (va is None or vb is None):
-            continue
-        if va != vb:
-            if key == "seed":
-                # Never a seed in a refusal: either side may be a held-out
-                # seed the caller has not checked.
-                out.append(f"{key} differs (values withheld)")
-            else:
-                out.append(f"{key} differs ({va!r} vs {vb!r})")
-    return out
 
 
 def identity_differences(
@@ -1411,197 +1339,3 @@ def condition_differences(
 
     ca, cb = cmp.classify(a, record_a), cmp.classify(b, record_b)
     return [str(d) for d in cmp.diff_group(ca, cb, cmp.CONDITIONS)]
-
-
-def result_fingerprints(exp: Mapping[str, Any]) -> dict[str, Any]:
-    return dict((exp.get("results") or {}).get("fingerprints") or {})
-
-
-def diff_fingerprints(
-    ra: Mapping[str, Any],
-    rb: Mapping[str, Any],
-    label_a: str = "A",
-    label_b: str = "B",
-) -> list[str]:
-    """One line per benchmark query whose results are not shown equal,
-    naming both fingerprints. Empty when every query matches."""
-    from lakebench.benchmark.fingerprint import describe, mismatch
-
-    out = []
-    for name in sorted(set(ra) | set(rb)):
-        fa, fb = ra.get(name), rb.get(name)
-        if name not in ra or name not in rb:
-            out.append(
-                f"{name} ran in only one run ({label_a}: {describe(fa) if name in ra else 'absent'}; "
-                f"{label_b}: {describe(fb) if name in rb else 'absent'})"
-            )
-            continue
-        why = mismatch(fa, fb)
-        if why:
-            out.append(
-                f"{name} results not shown equal, {why} "
-                f"({label_a}: {describe(fa)}; {label_b}: {describe(fb)})"
-            )
-    return out
-
-
-def stored_identity_refusals(
-    expected_identity: Mapping[str, Any] | None,
-    expected_fingerprints: Mapping[str, Any] | None,
-    actual: Mapping[str, Any] | None,
-    what: str,
-    failed: Any = (),
-) -> list[str]:
-    """Refusals for a run (*actual*: its experiment block) checked against a
-    stored reference, a reproduction package, which
-    keeps only the identity and the result fingerprints. *what* names the
-    reference in messages ("baseline", "package"). Every identity field
-    counts here, execution conditions included: a reference is only matched
-    like-for-like. The exception is OUTCOME_CONDITION_KEYS (the in-stream
-    round count), which the run's own speed decides.
-
-    *failed* names queries that failed in the run. The caller already fails
-    the run for them (a regression, not a different experiment), so they are
-    left out of the result check rather than reported twice. A query that
-    succeeded but could not be fingerprinted still refuses."""
-    if actual is None:
-        return [f"{NO_PROVENANCE} (the run has no experiment block)"]
-    if not expected_identity:
-        return [f"{NO_PROVENANCE} (the {what} was recorded without an experiment identity)"]
-    full_actual = identity(actual)
-    version_refusal = _identity_version_refusal(expected_identity, full_actual, actual, what)
-    if version_refusal:
-        return [version_refusal]
-    unobserved = (
-        _unobserved_system(expected_identity.get("system fingerprint"), actual)
-        if full_actual.get("identity version") == IDENTITY_VERSION
-        else None
-    )
-    if unobserved:
-        return [f"not comparable: {unobserved}; the {what} cannot be matched to a system"]
-    actual_identity = {k: v for k, v in full_actual.items() if k not in OUTCOME_CONDITION_KEYS}
-    # An optional key (set only when non-default) absent from the reference
-    # is a difference in that key, not an older identity.
-    missing = [
-        k
-        for k in actual_identity
-        if k not in expected_identity and k not in _cmp.OPTIONAL_IDENTITY_KEYS
-    ]
-    if missing:
-        return [
-            f"not comparable: the {what} was recorded with an older experiment identity "
-            f"(no {', '.join(missing)}); record it again from a current run"
-        ]
-    expected = {k: v for k, v in expected_identity.items() if k not in OUTCOME_CONDITION_KEYS}
-    reasons = [f"{r} from the {what}" for r in diff_identities(expected, actual_identity)]
-    # The count itself may differ, but not the estimator: with no in-stream
-    # round composite_qph is the post-stream benchmark (streams stopped),
-    # which must not stand against an in-stream median, or a regression that
-    # empties every round would read as a pass.
-    r_ref, r_run = (
-        expected_identity.get("benchmark rounds"),
-        identity(actual).get("benchmark rounds"),
-    )
-    if r_ref is not None and r_run is not None and (r_ref > 0) != (r_run > 0):
-        reasons.append(
-            f"continuous QpH estimator differs: the {what}'s is a median of {r_ref} in-stream "
-            f"round(s), the run's of {r_run} (0 means the post-stream benchmark)"
-        )
-    # The number of investigator sessions that ran may differ (an outcome),
-    # but not whether the run put investigator load on the pipeline at all
-    # (none configured, or none ran): load is never matched to no load, as
-    # an in-stream QpH median is never matched to the post-stream estimator.
-    s_ref = expected_identity.get("investigator sessions")
-    s_run = full_actual.get("investigator sessions")
-
-    def _loaded(v: Any) -> bool:
-        # 0: configured, but no session ran (skipped round): no load either.
-        return isinstance(v, int) and not isinstance(v, bool) and v > 0
-
-    if _loaded(s_ref) != _loaded(s_run):
-        reasons.append(
-            f"investigator load differs: the {what} "
-            + ("ran no investigator sessions" if not s_ref else f"ran {s_ref} session(s)")
-            + ", the run "
-            + ("none" if not s_run else f"{s_run}")
-            + " (architecture.benchmark.investigator_sessions)"
-        )
-    reasons.extend(f"run: {p}" for p in corpus_problems(actual))
-    established = results_established(actual)
-    if established is not True:
-        # Nothing shows the run returned the reference's results.
-        reasons.append(f"comparability not established (run: {established})")
-        return reasons
-    if not expected_fingerprints:
-        reasons.append(f"comparability not established (the {what} has no result fingerprints)")
-        return reasons
-    # Queries that failed in the run, and queries the reference recorded as
-    # failed (no fingerprint), have no pair of results to compare.
-    skip = set(failed or ()) | {n for n, f in (expected_fingerprints or {}).items() if f is None}
-    got = {n: f for n, f in result_fingerprints(actual).items() if n not in skip}
-    want = {n: f for n, f in (expected_fingerprints or {}).items() if n not in skip}
-    reasons.extend(diff_fingerprints(want, got, what, "run"))
-    return reasons
-
-
-def _unobserved_system(expected_fingerprint: Any, actual: Mapping[str, Any]) -> str | None:
-    """Why a v2 reference or run names no observed system, or None. The
-    fingerprint of an identity with no observed part is one constant per
-    system type, so two such runs on different clusters would match."""
-    from lakebench.metrics.system_identity import PARTS, fingerprint_of, observed_parts
-
-    sysid = actual.get("system_identity")
-    if isinstance(sysid, Mapping) and not observed_parts(sysid.get("parts") or {}):
-        return "the run observed no part of its system"
-    blank = {
-        fingerprint_of({p: {"not_observed": ""} for p in PARTS}, system_type=t)
-        for t in ("cluster", "local")
-    }
-    if expected_fingerprint in blank:
-        return "the reference observed no part of its system"
-    return None
-
-
-def _identity_version_refusal(
-    expected: Mapping[str, Any], actual_identity: Mapping[str, Any], actual: Any, what: str
-) -> str | None:
-    """One refusal naming both identity versions when a stored reference
-    and a run were recorded under different ones (L8), else None. A v1
-    reference against a v2 run is refused, and so is the reverse: the
-    workload version bumps of 1.7 make them different experiments anyway."""
-    want = expected.get("identity version", 1)
-    got = actual_identity.get("identity version", 1)
-    if want == got:
-        return None
-    if want < got:
-        return (
-            f"not comparable: the {what} was recorded with experiment identity v{want} and "
-            f"this run is v{got}; record the {what} again from a current run"
-        )
-    missing = list((actual or {}).get("v2_unavailable") or [])
-    why = (
-        "its corpus has no generator marker; re-run it on the current datagen image"
-        if "corpus id v2" in missing
-        else (
-            f"it recorded no {', '.join(missing)}; re-run it with the current Lakebench"
-            if missing
-            else "re-run it with the current Lakebench"
-        )
-    )
-    return (
-        f"not comparable: the {what} was recorded with experiment identity v{want} and "
-        f"this run is v{got} ({why})"
-    )
-
-
-def failed_queries(record: Mapping[str, Any] | None) -> set[str]:
-    """Names of the benchmark queries a metrics.json dict records as failed."""
-    rec = record or {}
-    bench = rec.get("benchmark") or (rec.get("pipeline_benchmark") or {}).get("query_benchmark")
-    out = set()
-    for q in (bench or {}).get("queries") or []:
-        if isinstance(q, Mapping) and not q.get("success", True):
-            name = q.get("name") or q.get("query_name")
-            if name:
-                out.add(str(name))
-    return out

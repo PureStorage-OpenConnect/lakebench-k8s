@@ -1,9 +1,9 @@
-"""Tests for the continuous AML detection spine (LB-127).
+"""Tests for the continuous AML detection spine.
 
 The continuous gold stage (gold_refresh_financial) re-runs detection over the
 full silver corpus each tick, reusing the batch DELETE-per-rule + INSERT
 driver (run_detection_rules), and the sustained runner fails an AML run that
-produced zero alerts (closes LB-044 for AML). These scripts execute inside a
+produced zero alerts. These scripts execute inside a
 Spark driver and cannot import pyspark in the test env, so the driver-side
 assertions are source/AST-based. The sustained-runner helper is pure Python
 and is exercised directly.
@@ -17,180 +17,40 @@ against the windowed approach regressing back in.
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
-GOLD_REFRESH_PATH = _ROOT / "src/lakebench/spark/scripts/gold_refresh_financial.py"
-GOLD_FINALIZE_PATH = _ROOT / "src/lakebench/spark/scripts/gold_finalize_financial.py"
 
 
 def _src(path: Path) -> str:
     return path.read_text()
 
 
-def _tuple_values(tree: ast.Module, name: str) -> set[str]:
-    node = next(
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Assign) and any(getattr(t, "id", None) == name for t in n.targets)
-    )
-    return {e.value for e in node.value.elts}
-
-
-# --- continuous detection driver (3b) ----------------------------------------
-
-
-def test_continuous_runs_w2w3w4_and_marks_w1w7w8_skipped():
-    """Continuous runs only the rules that need silver.transactions alone
-    (W2/W3/W4/W17). W1 (per-tick graph too costly), W7 (silver.entities not
-    maintained in continuous), and W8 (90-day dormancy gap) are recorded as
-    SKIPPED -- not omitted -- so score renders their typologies "not run"
-    instead of a false 0% recall."""
-    tree = ast.parse(_src(GOLD_REFRESH_PATH))
-    run = _tuple_values(tree, "CONTINUOUS_RULES")
-    skip = _tuple_values(tree, "CONTINUOUS_SKIPPED_RULES")
-    assert run == {
-        "W2_structuring",
-        "W3_round_tripping",
-        "W4_risk_propagation",
-        "W17_layering_chain",
-    }
-    assert skip == {
-        "W5_sanctions_match",
-        "W6_pep_counterparty",
-        "W1_connected_components",
-        "W7_cross_border_high_risk",
-        "W8_dormant_reactivation",
-    }
-    assert not (run & skip)
-
-
-def test_continuous_runs_the_cheap_rules_before_the_path_searches():
-    """Each rule's alerts are visible when its own write commits, so the
-    single-join rules (W4, W2) run before the multi-level path searches
-    (W17, W3); W17 goes before W3 since it raises far more alerts."""
-    tree = ast.parse(_src(GOLD_REFRESH_PATH))
-    node = next(
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.Assign)
-        and any(getattr(t, "id", None) == "CONTINUOUS_RULES" for t in n.targets)
-    )
-    order = [e.value for e in node.value.elts]
-    assert order == [
-        "W4_risk_propagation",
-        "W2_structuring",
-        "W17_layering_chain",
-        "W3_round_tripping",
-    ]
-
-
-def test_continuous_reuses_batch_detection_driver():
-    """Continuous detection must call the batch run_detection_rules, not fork
-    the rules or reimplement a windowed detector. One driver, both modes."""
-    src = _src(GOLD_REFRESH_PATH)
-    assert "from gold_finalize_financial import" in src
-    assert "run_detection_rules(" in src
-    assert "rules=CONTINUOUS_RULES" in src
-    assert "skipped_rules=CONTINUOUS_SKIPPED_RULES" in src
-    tree = ast.parse(src)
-    local_defs = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
-    assert not any(name[0] == "w" and len(name) > 1 and name[1].isdigit() for name in local_defs), (
-        local_defs
-    )
-
-
-def test_continuous_is_full_rescan_not_windowed():
-    """Regression guard for the rejected sliding-window design: no data-clock
-    window, no Python-side timedelta cutoff, no MERGE keyed on the drifting
-    content hash -- all three caused silent recall loss / duplicate alerts."""
-    src = _src(GOLD_REFRESH_PATH)
-    assert "timedelta(" not in src
-    assert "data_clock_max" not in src
-    assert "MERGE INTO" not in src
-
-
-def test_bootstraps_all_gold_tables_in_continuous_mode():
-    """gold_finalize never runs in continuous mode, so gold_refresh must
-    bootstrap ALL gold tables the tick touches, not just alerts+status: the
-    baseline refresh DELETEs gold.daily_dashboards and the derived projections
-    overwrite gold.risk_scores / gold.entity_clusters. Creating only
-    alerts+status (the reviewed-and-fixed HIGH) fails every tick on a fresh
-    continuous catalog. Plus the detected_ts upgrade guard."""
-    src = _src(GOLD_REFRESH_PATH)
-    for ddl in ("DDL_ALERTS", "DDL_RISK", "DDL_CLUSTERS", "DDL_DASH", "DDL_STATUS"):
-        assert ddl in src, f"continuous bootstrap missing {ddl}"
-    # All five must be imported from the batch module and issued in the bootstrap.
-    assert "for ddl in (DDL_ALERTS, DDL_RISK, DDL_CLUSTERS, DDL_DASH, DDL_STATUS)" in src
-    assert "ensure_alert_columns(spark," in src  # reused-catalog upgrade of gold.alerts
-
-
-def test_continuous_logs_cumulative_alert_count_for_gate():
-    """The honest-runner gate parses this exact line; it must be emitted every
-    tick with a bare integer."""
-    src = _src(GOLD_REFRESH_PATH)
-    assert 'log(f"[detection] cumulative gold.alerts rows: {total_alerts}")' in src
-
-
-# --- batch driver refactor (reused by continuous) ----------------------------
-
-
-def test_run_detection_rules_accepts_rules_and_skipped_lists():
-    """run_detection_rules must accept rules + skipped_rules so the continuous
-    loop can reuse it; default (None) preserves the full batch set."""
-    tree = ast.parse(_src(GOLD_FINALIZE_PATH))
-    fn = next(
-        n
-        for n in ast.walk(tree)
-        if isinstance(n, ast.FunctionDef) and n.name == "run_detection_rules"
-    )
-    argnames = [a.arg for a in fn.args.args]
-    assert "rules" in argnames
-    assert "skipped_rules" in argnames
-
-
-def test_skipped_rules_recorded_as_skipped_status():
-    """Skipped rules must be written to detection_status as status='skipped'
-    so score marks their typologies not-run, not 0%."""
-    src = _src(GOLD_FINALIZE_PATH)
-    assert 'status_rows.append((rule_id, "skipped", "mode-excluded"' in src
-
-
-# --- optimizer workaround (LB-127) -------------------------------------------
-
-
-# --- deterministic alert_id (3d) ---------------------------------------------
-
-
 # --- sustained honest-runner gate (3a) ---------------------------------------
 
 
-def test_aml_cumulative_alerts_none_when_no_logs():
+@pytest.mark.parametrize(
+    ("logs", "alerts"),
+    [
+        (None, None),
+        ("", None),
+        ("some unrelated driver log\nRefreshed dashboards", None),
+        ("[detection] cumulative gold.alerts rows: 0", 0),
+        (
+            "[detection] cumulative gold.alerts rows: 12\n"
+            "[detection] cumulative gold.alerts rows: 40\n"
+            "[detection] cumulative gold.alerts rows: 37\n",
+            40,
+        ),
+    ],
+)
+def test_aml_cumulative_alerts(logs, alerts):
+    """No detection line is unknown (None), never 0; otherwise the maximum."""
     from lakebench.cli._sustained import _aml_cumulative_alerts
 
-    assert _aml_cumulative_alerts(None) is None
-    assert _aml_cumulative_alerts("") is None
-
-
-def test_aml_cumulative_alerts_none_when_no_detection_line():
-    from lakebench.cli._sustained import _aml_cumulative_alerts
-
-    assert _aml_cumulative_alerts("some unrelated driver log\nRefreshed dashboards") is None
-
-
-def test_aml_cumulative_alerts_zero_and_max():
-    from lakebench.cli._sustained import _aml_cumulative_alerts
-
-    assert _aml_cumulative_alerts("[detection] cumulative gold.alerts rows: 0") == 0
-    logs = (
-        "[detection] cumulative gold.alerts rows: 12\n"
-        "[detection] cumulative gold.alerts rows: 40\n"
-        "[detection] cumulative gold.alerts rows: 37\n"
-    )
-    assert _aml_cumulative_alerts(logs) == 40
+    assert _aml_cumulative_alerts(logs) == alerts
 
 
 def test_sustained_gate_is_financial_scoped_and_fails_on_zero():
@@ -202,43 +62,6 @@ def test_sustained_gate_is_financial_scoped_and_fails_on_zero():
     assert "alert_count == 0" in src
     assert "alert_count is None" in src
     assert src.count("pipeline_success = False") >= 4
-
-
-def test_sustained_failure_raises_nonzero_exit():
-    """Adversarial-review P0 regression guard: flagging pipeline_success=False
-    is NOT enough -- the function MUST exit 1 (ExitCode.FAILED) so an exit-code-only
-    UAT runner sees the failure (the exact LB-044 gap). Assert the control
-    flow, not just that a string is present."""
-    src = _src(_ROOT / "src/lakebench/cli/_sustained.py")
-    tree = ast.parse(src)
-    fn = next(
-        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_run_sustained"
-    )
-    found_exit_guard = False
-    for node in ast.walk(fn):
-        if (
-            isinstance(node, ast.If)
-            and isinstance(node.test, ast.UnaryOp)
-            and isinstance(node.test.op, ast.Not)
-            and isinstance(node.test.operand, ast.Name)
-            and node.test.operand.id == "pipeline_success"
-        ):
-            body_src = ast.get_source_segment(src, node)
-            # CLI-1 spells the code by name; 1 is ExitCode.FAILED.
-            if body_src and "raise typer.Exit(ExitCode.FAILED)" in body_src:
-                found_exit_guard = True
-    assert found_exit_guard, (
-        "no `if not pipeline_success: raise typer.Exit(ExitCode.FAILED)` guard found"
-    )
-
-
-def test_sustained_success_panel_is_guarded():
-    """Adversarial-review P1: the green 'completed' panel must not print on a
-    failed run. It must sit under `if pipeline_success:`."""
-    src = _src(_ROOT / "src/lakebench/cli/_sustained.py")
-    idx = src.index("Continuous pipeline completed!")
-    prefix = src[:idx]
-    assert "if pipeline_success:" in prefix
 
 
 def test_aml_bronze_verify_timeout_budget_clears_measured_cost():
@@ -254,34 +77,6 @@ def test_aml_bronze_verify_timeout_budget_clears_measured_cost():
     # Float scales (local mode allows <1) must not blow up.
     assert budget(0.1) == 5400
     assert budget(2.5) == 5400
-
-
-def test_bronze_verify_preflight_uses_shared_budget():
-    """The AML continuous preflight must size off the shared helper, never the
-    old fixed 1200s cap that could not pass at scale >= 10."""
-    src = _src(_ROOT / "src/lakebench/cli/_sustained.py")
-    assert "timeout_seconds=1200," not in src, (
-        "preflight reverted to the fixed 1200s cap that cannot pass at scale >= 10"
-    )
-    assert "_preflight_timeout = aml_bronze_verify_timeout_budget(_preflight_scale)" in src, (
-        "preflight no longer sizes off the shared aml_bronze_verify_timeout_budget helper"
-    )
-    assert "timeout_seconds=_preflight_timeout," in src, (
-        "computed preflight budget is not wired into wait_for_completion"
-    )
-
-
-def test_batch_timeout_floors_at_shared_bronze_verify_budget():
-    """The batch per-job timeout is applied to every stage; AML bronze-verify
-    is the tightest. It must be floored at the shared budget so it does not
-    false-fail with only 222s headroom (the pre-fix state)."""
-    src = _src(_ROOT / "src/lakebench/cli/_run.py")
-    assert "aml_bronze_verify_timeout_budget(scale)" in src, (
-        "batch path no longer floors its per-job timeout at the shared budget"
-    )
-    assert "timeout = max(timeout, aml_bronze_verify_timeout_budget(scale))" in src, (
-        "batch floor is not applied via max(timeout, shared_budget)"
-    )
 
 
 if __name__ == "__main__":

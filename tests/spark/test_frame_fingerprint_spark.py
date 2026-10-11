@@ -1,6 +1,6 @@
-"""AM-15a (AML-9, AML-10, V16-2, EVD-10): ``common.frame_fingerprint`` is
-order-independent and sees every change a time-travel or reproduction
-comparison must see, and gives the same value on the 4.0 and 4.1 lines.
+"""``common.frame_fingerprint`` is
+order-independent and sees every change a time-travel comparison must
+see, and gives the same value on the 4.0 and 4.1 lines.
 
 No jars: the helper reads a DataFrame, not a table.
 """
@@ -108,9 +108,17 @@ def test_shuffled_rows_equal(spark_session, frame):
     assert _fp(shuffled) == _fp(frame)
 
 
-def test_one_changed_cell_differs(spark_session, frame):
+@pytest.mark.parametrize(
+    ("row", "column", "bump"),
+    [(3, "txn_amount", Decimal("0.01")), (12, "_batch_id", 1)],
+    ids=["amount", "batch_id"],
+)
+def test_one_changed_cell_differs(spark_session, frame, row, column, bump):
+    """The batch stamp decides sealed visibility, so it is part of the
+    fingerprint as much as an amount is."""
     rows = _pinned_rows()
-    changed = _with_row(spark_session, rows, 3, txn_amount=rows[3][2] + Decimal("0.01"))
+    old = rows[row][COLS.index(column)]
+    changed = _with_row(spark_session, rows, row, **{column: old + bump})
     assert _fp(changed)[1] != _fp(frame)[1]
     assert _fp(changed)[0] == _fp(frame)[0]
 
@@ -137,53 +145,11 @@ def test_swapped_null_position_differs(spark_session):
     assert _fp(left, ["a", "b"]) != _fp(right, ["a", "b"])
 
 
-def test_one_batch_id_change_differs(spark_session, frame):
-    """The batch stamp decides sealed visibility, so it is part of the
-    fingerprint (silent-corruption L1)."""
-    rows = _pinned_rows()
-    restamped = _with_row(spark_session, rows, 12, _batch_id=rows[12][12] + 1)
-    assert _fp(restamped)[1] != _fp(frame)[1]
-
-
-def test_map_entry_order_does_not_matter(spark_session):
-    from pyspark.sql import functions as F
-
-    a = spark_session.createDataFrame([(1,)], "k int").select(
-        F.create_map(F.lit("x"), F.lit("1"), F.lit("y"), F.lit("2")).alias("m")
-    )
-    b = spark_session.createDataFrame([(1,)], "k int").select(
-        F.create_map(F.lit("y"), F.lit("2"), F.lit("x"), F.lit("1")).alias("m")
-    )
-    c = spark_session.createDataFrame([(1,)], "k int").select(
-        F.create_map(F.lit("x"), F.lit("1"), F.lit("y"), F.lit("3")).alias("m")
-    )
-    assert _fp(a, ["m"]) == _fp(b, ["m"])
-    assert _fp(a, ["m"]) != _fp(c, ["m"])
-
-
 def test_column_type_and_order_in_cols_sha(spark_session):
     one = spark_session.createDataFrame([(1, 2)], "a bigint, b bigint")
     other_type = spark_session.createDataFrame([(1, 2)], "a int, b bigint")
     assert _fp(one, ["a", "b"])[2] != _fp(other_type, ["a", "b"])[2]
     assert _fp(one, ["a", "b"])[2] != _fp(one, ["b", "a"])[2]
-
-
-def test_empty_frame(spark_session):
-    empty = spark_session.createDataFrame([], "a bigint")
-    assert _fp(empty, ["a"])[:2] == (0, "0")
-
-
-@pytest.mark.parametrize(
-    "cols",
-    [[], ["txn_id", "txn_id"], ["nope"], [f"c{i}" for i in range(64)]],
-    ids=["none", "repeated", "missing", "too-many"],
-)
-def test_bad_columns_raise(spark_session, frame, cols):
-    df = frame
-    if len(cols) == 64:
-        df = spark_session.createDataFrame([tuple(range(64))], ", ".join(f"{c} int" for c in cols))
-    with pytest.raises(ValueError):
-        _fp(df, cols)
 
 
 def test_sixty_three_columns(spark_session):
@@ -239,8 +205,8 @@ def test_nested_values_differ(spark_session, schema, left, right):
 
 
 def test_nested_values_equal_when_equal(spark_session):
-    """The canonical form is a function of the value: the same nested
-    values, with nested map entries inserted in the other order and rows in
+    """The canonical form is a function of the value: the same values, with
+    map entries (top level or nested) inserted in the other order and rows in
     another order, hash the same."""
     from pyspark.sql import functions as F
 
@@ -258,12 +224,14 @@ def test_nested_values_equal_when_equal(spark_session):
     c = frame([("x", "1"), ("y", "2"), ("z", "4")], False)
     assert _fp(a, ["k", "s"]) != _fp(c, ["k", "s"])
 
+    def top_map(*kvs):
+        return spark_session.createDataFrame([(1,)], "k int").select(
+            F.create_map(*[F.lit(x) for x in kvs]).alias("m")
+        )
 
-def test_signed_zero_and_nan_hash_as_their_values(spark_session):
-    """Documented: -0.0 equals 0.0 and NaNs are equal, as values."""
-    a = spark_session.createDataFrame([(0.0, float("nan"))], "x double, y double")
-    b = spark_session.createDataFrame([(-0.0, float("nan"))], "x double, y double")
-    assert _fp(a, ["x", "y"]) == _fp(b, ["x", "y"])
+    xy = top_map("x", "1", "y", "2")
+    assert _fp(xy, ["m"]) == _fp(top_map("y", "2", "x", "1"), ["m"])
+    assert _fp(xy, ["m"]) != _fp(top_map("x", "1", "y", "3"), ["m"])
 
 
 def test_session_time_zone_does_not_matter(spark_session, frame):

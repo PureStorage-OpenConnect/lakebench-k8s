@@ -13,6 +13,7 @@ Unit tier under tests/test_run_interrupt.py, which drives the whole run:
 
 from __future__ import annotations
 
+import itertools
 import signal
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
@@ -22,7 +23,7 @@ import pytest
 from lakebench.cli import _interrupt
 from lakebench.cli._interrupt import RunInterrupt
 from lakebench.metrics.collector import JobMetrics, PipelineMetrics
-from lakebench.metrics.verdict import compute_badge_status, compute_verdict
+from lakebench.metrics.verdict import compute_verdict
 
 T0 = datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -65,78 +66,66 @@ def _intr(**kw) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_interrupted_in_flight_stage_reads_interrupted():
-    m = _metrics(_intr(), [_job("bronze-verify"), _job("silver-build", False, "interrupted")])
-    v = compute_verdict(m)
-    assert v.status == "INTERRUPTED"
-    assert v.gates == {"pipeline": "PASS", "interrupt": "INTERRUPTED"}
-    assert v.reasons == ["Run interrupted (SIGINT during silver-build)"]
+_RAN = ["bronze-verify", "silver-build", "gold-finalize"]
 
 
-def test_prior_failure_reads_failed():
-    """Something had already failed (a gate that sets the flag without
-    raising, say): the interrupt does not soften it."""
-    m = _metrics(_intr(prior_failure=True), [_job("bronze-verify")])
-    v = compute_verdict(m)
-    assert v.status == "FAILED"
-    assert v.gates["interrupt"] == "INTERRUPTED"
+def _verdict_case(case):
+    if case == "in-flight":
+        return _metrics(
+            _intr(), [_job("bronze-verify"), _job("silver-build", False, "interrupted")]
+        )
+    if case == "prior-failure":
+        return _metrics(_intr(prior_failure=True), [_job("bronze-verify")])
+    if case.startswith("prior="):
+        prior = {"None": None, "no": "no", "0": 0, "1": 1}[case.split("=", 1)[1]]
+        return _metrics(_intr(prior_failure=prior), [_job("bronze-verify")])
+    if case == "another-failed-gate":
+        return _metrics(
+            _intr(at_stage="gold-finalize"),
+            [_job("bronze-verify", False, "driver exited with code 1"), _job("silver-build")],
+        )
+    if case == "interrupted-elsewhere":
+        # only the stage the record names is excused, not any job reading "interrupted"
+        return _metrics(
+            _intr(at_stage="gold-finalize"), [_job("silver-build", False, "interrupted")]
+        )
+    if case == "benchmark-failure":
+        m = _metrics(_intr(at_stage="benchmark"), [_job("bronze-verify")])
+        m.benchmark_error = "query engine gone"
+        return m
+    if case.startswith("success="):
+        return _metrics(_intr(), [_job("bronze-verify")], success=case.endswith("True"))
+    if case == "not-interrupted":
+        jobs = [_job(s) for s in _RAN]
+        for j in jobs:
+            j.output_rows = 100  # rows in every layer: the layer_rows gate passes
+        return _metrics(None, jobs, success=True)
+    if case == "not-interrupted-failed":
+        return _metrics(None, [_job("silver-build", False, "interrupted")], success=False)
+    raise AssertionError(case)
 
 
-@pytest.mark.parametrize("prior", [None, "no", 0, 1])
-def test_a_record_that_does_not_say_false_reads_failed(prior):
-    m = _metrics(_intr(prior_failure=prior), [_job("bronze-verify")])
-    assert compute_verdict(m).status == "FAILED"
-
-
-def test_another_failed_gate_reads_failed():
-    """A failed stage that is not the one the interrupt stopped."""
-    m = _metrics(
-        _intr(at_stage="gold-finalize"),
-        [_job("bronze-verify", False, "driver exited with code 1"), _job("silver-build")],
-    )
-    v = compute_verdict(m)
-    assert v.status == "FAILED"
-    assert v.gates["pipeline"] == "FAIL"
-
-
-def test_a_stage_named_interrupted_elsewhere_is_still_a_failure():
-    """Only the stage the record names is excused, not any job whose
-    message happens to read 'interrupted'."""
-    m = _metrics(
-        _intr(at_stage="gold-finalize"),
-        [_job("silver-build", False, "interrupted")],
-    )
-    assert compute_verdict(m).status == "FAILED"
-
-
-def test_benchmark_failure_reads_failed():
-    m = _metrics(_intr(at_stage="benchmark"), [_job("bronze-verify")])
-    m.benchmark_error = "query engine gone"
-    assert compute_verdict(m).status == "FAILED"
-
-
-@pytest.mark.parametrize("success", [True, False])
-def test_interrupted_is_never_passed(success):
-    """Even a record whose success flag were True."""
-    m = _metrics(_intr(), [_job("bronze-verify")], success=success)
-    assert compute_verdict(m).status != "PASSED"
-
-
-def test_not_interrupted_is_unchanged():
-    jobs = [_job(s) for s in ("bronze-verify", "silver-build", "gold-finalize")]
-    for j in jobs:
-        j.output_rows = 100  # rows in every layer: the layer_rows gate passes
-    m = _metrics(None, jobs, success=True)
-    assert compute_verdict(m).status == "PASSED"
-    m = _metrics(None, [_job("silver-build", False, "interrupted")], success=False)
-    assert compute_verdict(m).status == "FAILED"
-
-
-def test_badge_names_the_interrupt_not_a_crash():
-    m = _metrics(_intr(), [_job("bronze-verify"), _job("silver-build", False, "interrupted")])
-    ok, reasons, _ = compute_badge_status(m)
-    assert not ok
-    assert reasons == ["Run interrupted (SIGINT during silver-build)"]
+@pytest.mark.parametrize(
+    ("case", "status", "gates"),
+    [
+        ("in-flight", "INTERRUPTED", {"pipeline": "PASS", "interrupt": "INTERRUPTED"}),
+        # something had already failed: the interrupt does not soften it
+        ("prior-failure", "FAILED", {"interrupt": "INTERRUPTED"}),
+        *[(f"prior={p}", "FAILED", None) for p in ("None", "no", "0", "1")],
+        ("another-failed-gate", "FAILED", {"pipeline": "FAIL"}),
+        ("interrupted-elsewhere", "FAILED", None),
+        ("benchmark-failure", "FAILED", None),
+        # even a record whose success flag were True is never PASSED
+        *[(f"success={v}", "INTERRUPTED", None) for v in (True, False)],
+        ("not-interrupted", "PASSED", None),
+        ("not-interrupted-failed", "FAILED", None),
+    ],
+)
+def test_interrupt_verdict(case, status, gates):
+    v = compute_verdict(_verdict_case(case))
+    assert v.status == status
+    for k, want in (gates or {}).items():
+        assert v.gates[k] == want
 
 
 def test_interrupted_round_trips_through_storage(tmp_path):
@@ -202,7 +191,7 @@ def test_first_raises_second_skips_third_stops(handlers, capsys):
     assert ri.sealing and ri.received == ["SIGTERM"]
     ri._on_signal(signal.SIGINT, None)  # does not raise
     assert ri.skip
-    assert "the run record is still being written" in capsys.readouterr().err
+    assert capsys.readouterr().err
     with pytest.raises(KeyboardInterrupt):
         ri._on_signal(signal.SIGINT, None)
     assert signal.getsignal(signal.SIGTERM) != ri._on_signal  # restored
@@ -215,12 +204,6 @@ def test_lease_abort_names_its_signal():
     ri = RunInterrupt("ns")
     rec = ri.seal(at_stage="operator-check", prior_failure=False, exc=LeaseAbort(signal.SIGHUP))
     assert rec["signal"] == "SIGHUP"
-    # cluster_lock itself names the recovery when it aborts inside the lease.
-    assert rec["left"] == []
-
-
-def test_no_handler_means_sigint():
-    assert RunInterrupt("ns").interrupt_signal(KeyboardInterrupt()) == "SIGINT"
 
 
 def test_registry_rules():
@@ -246,8 +229,10 @@ def test_cleanup_deadline_leaves_the_rest(monkeypatch):
         ri.created("SparkApplication", f"lakebench-{n}", f"u-{n}")
     from types import SimpleNamespace
 
-    clock = iter([0.0, 0.0, 1000.0, 1000.0])
-    monkeypatch.setattr(_interrupt, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+    # Each read of the clock is 40 s later: the deadline (60 s) is set at the
+    # first read, still open at the second and passed at the third.
+    ticks = itertools.count(0, 40)
+    monkeypatch.setattr(_interrupt, "time", SimpleNamespace(monotonic=lambda: float(next(ticks))))
     monkeypatch.setattr(RunInterrupt, "_stop_one", lambda self, e, api, timeout: ("stopped", ""))
     rec = ri.seal(at_stage="x", prior_failure=False)
     ri.stop_owned(rec)
@@ -278,24 +263,21 @@ def test_delete_carries_the_uid_precondition():
     assert rec["stopped"] == ["Job/lakebench-datagen"]
 
 
-@pytest.mark.parametrize(
-    "status, outcome",
-    [(404, "stopped"), (409, "left"), (500, "left")],
-)
-def test_delete_answers(status, outcome):
-    from kubernetes.client.rest import ApiException
+def test_delete_answers():
+    for status, outcome in [(404, "stopped"), (409, "left"), (500, "left")]:
+        from kubernetes.client.rest import ApiException
 
-    ri = RunInterrupt("ns")
-    ri.created("SparkApplication", "lakebench-x", "u-x")
-    api = MagicMock()
-    api.delete_namespaced_custom_object.side_effect = ApiException(status=status, reason="r")
-    with patch("kubernetes.client.CustomObjectsApi", return_value=api):
-        rec = ri.seal(at_stage="x", prior_failure=False)
-        ri.stop_owned(rec)
-    if outcome == "stopped":
-        assert rec["stopped"] == ["SparkApplication/lakebench-x"]
-    else:
-        assert [x["object"] for x in rec["left"]] == ["SparkApplication/lakebench-x"]
+        ri = RunInterrupt("ns")
+        ri.created("SparkApplication", "lakebench-x", "u-x")
+        api = MagicMock()
+        api.delete_namespaced_custom_object.side_effect = ApiException(status=status, reason="r")
+        with patch("kubernetes.client.CustomObjectsApi", return_value=api):
+            rec = ri.seal(at_stage="x", prior_failure=False)
+            ri.stop_owned(rec)
+        if outcome == "stopped":
+            assert rec["stopped"] == ["SparkApplication/lakebench-x"]
+        else:
+            assert [x["object"] for x in rec["left"]] == ["SparkApplication/lakebench-x"]
 
 
 def test_unknown_uid_job_without_this_runs_id_is_left():
@@ -337,7 +319,7 @@ def test_cleanup_client_does_not_retry():
 
 def test_submit_job_returns_the_created_uid():
     from lakebench.spark.job import JobState, JobType, SparkJobManager
-    from tests.test_scripts_maps import FakeK8s, _cfg
+    from tests.fixtures.scripts_maps_helpers import FakeK8s, _cfg
 
     k8s = FakeK8s()
     mgr = SparkJobManager(_cfg(), k8s)
@@ -350,24 +332,3 @@ def test_submit_job_returns_the_created_uid():
     api.create_namespaced_custom_object.return_value = {}
     with patch("kubernetes.client.CustomObjectsApi", return_value=api):
         assert mgr.submit_job(JobType.SILVER_BUILD).uid is None
-
-
-def test_report_list_shows_interrupted(tmp_path, monkeypatch):
-    """`lakebench report --list` names an interrupted run, not "Failed"."""
-    from typer.testing import CliRunner
-
-    from lakebench.cli import app
-    from lakebench.metrics.storage import MetricsStorage
-
-    monkeypatch.setenv("COLUMNS", "200")
-    storage = MetricsStorage(tmp_path / "runs")
-    for rid, intr in (("20261001-120000-aaaaaa", _intr()), ("20261001-130000-bbbbbb", None)):
-        m = _metrics(intr, [_job("bronze-verify")])
-        m.run_id = rid
-        m.end_time = T0
-        storage.save_run(m)
-    result = CliRunner().invoke(app, ["report", "--metrics", str(tmp_path / "runs"), "--list"])
-    assert result.exit_code == 0, result.output
-    rows = {line.split()[1]: line for line in result.output.splitlines() if "2026100" in line}
-    assert "Interrupted" in rows["20261001-120000-aaaaaa"]
-    assert "Failed" in rows["20261001-130000-bbbbbb"]

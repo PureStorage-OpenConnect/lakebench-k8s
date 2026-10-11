@@ -1,20 +1,10 @@
-"""E1: 5-batch stream produces the same silver.entities and silver.accounts
-as a single batch build against the same bronze.
+"""A 5-batch stream produces the same silver.entities and silver.accounts as
+a single batch build against the same bronze.
 
-Batch mode runs ``silver_build_financial.build_entities`` /
-``build_accounts`` over the full corpus and picks per-column ``min()``
-across every row. Continuous mode, pre-E1, appended dimension rows the
-FIRST batch introduced them in and never updated them; a scale-10
-stream against identical bronze produced a different silver.entities
-from batch. E1's MERGE with ``coalesce(least(t, s), t, s)`` on the
-dimension columns collapses that gap.
-
-Split the same bronze corpus into 5 chunks, run the stream MERGE 5
-times, and assert row-hash equality against a single-shot batch build
-on the MAINTAINED tables. D-safe skips ``silver.account_statements``,
-``silver.accounts.current_balance`` and ``silver.entity_profiles`` in
-continuous mode -- those are covered by the D-safe refusal test, not
-here.
+Splits one bronze corpus into 5 chunks, runs the stream MERGE per chunk and
+compares row hashes with a single-shot batch build on the maintained columns.
+Statements, ``accounts.current_balance`` and ``entity_profiles`` are not
+compared here.
 
 Runs in a Spark child (``spark_subprocess``) with the Iceberg jar from
 ``LB_SPARK_TEST_JARS`` and the Iceberg SQL extension on the JVM from launch.
@@ -103,11 +93,10 @@ _ENTITIES = [
 _IBANS = [f"IBAN-{i:03d}" for i in range(len(_ENTITIES))]
 
 
-def _row(spark, txn_id, ts, dbtr_i, cdtr_i, iban_dbtr=None, iban_cdtr=None):
+def _row(txn_id, ts, dbtr_i, cdtr_i, iban_dbtr=None, iban_cdtr=None):
     """One pacs.008 row. ``iban_dbtr`` / ``iban_cdtr`` override the default
-    entity-index iban so the corpus can carry the same iban across dbtr and
-    cdtr sides on different entities (E1 BLOCKER 2 cross-side blending
-    fixture)."""
+    entity-index iban so one iban can sit on both sides, on different
+    entities."""
     d_name, d_ctry, d_city, d_lei = _ENTITIES[dbtr_i]
     c_name, c_ctry, c_city, c_lei = _ENTITIES[cdtr_i]
     dbtr = (d_name, d_ctry, (d_city, "MAIN ST"), (d_lei,))
@@ -133,7 +122,7 @@ def _row(spark, txn_id, ts, dbtr_i, cdtr_i, iban_dbtr=None, iban_cdtr=None):
     )
 
 
-# 20 payments across the 10 entities, plus 4 cross-side-blending fixtures.
+# 20 payments across the 10 entities, plus 4 cross-side shared-iban rows.
 # Pairs cycle so each entity appears in both roles and multiple chunks
 # (batch's per-column min() is meaningful only when an entity_id appears
 # multiple times). Format: (dbtr_i, cdtr_i, iban_dbtr_override,
@@ -159,22 +148,13 @@ _PAIRS = [
     (1, 3, None, None),
     (3, 1, None, None),
     (8, 9, None, None),
-    # BLOCKER 2 fixture (E1 review). Two ibans (SHARED-A, SHARED-B)
-    # appear on BOTH dbtr and cdtr sides across DIFFERENT entities, so
-    # each iban's target row is a genuine tiebreak between two observed
-    # rows with DIFFERENT holder_entity_id AND different bank_bic. Per-
-    # column LEAST would synthesise a row that appears on neither side
-    # (debtor's holder + creditor's bank_bic + a third row's opened_date);
-    # row_number-1 by (holder, bic, opened_date) asc_nulls_last picks
-    # exactly one actual observed row, which is what batch does.
-    #
-    # For SHARED-A: dbtr=0 (LEI-ACME) with bank_bic MERIUS2L; then
-    # cdtr=8 (name-hash of JOSE PEREZ) with bank_bic NRTHGB3X. The two
-    # rows differ on ALL four dimension columns.
+    # Two ibans (SHARED-A, SHARED-B) appear on both the debtor and creditor
+    # side across different entities, so each iban's row is a tiebreak between
+    # two observed rows that differ on holder, bank_bic and opened_date. Both
+    # paths must pick one actual observed row, not a per-column blend.
     (0, 3, "SHARED-A", None),
     (7, 8, None, "SHARED-A"),
-    # SHARED-B: cdtr=0 first, dbtr=5 (LEI-CHARLIE) later; different
-    # holder, different bank_bic, different opened_date.
+    # SHARED-B: creditor first, debtor later.
     (5, 0, None, "SHARED-B"),
     (5, 3, "SHARED-B", None),
 ]
@@ -184,15 +164,13 @@ def _full_bronze(spark):
     from pyspark.sql import Row  # noqa: F401 -- readability
 
     ts0 = datetime(2024, 6, 1)
-    rows = [_row(spark, f"T{ix}", ts0 + timedelta(hours=ix), *tup) for ix, tup in enumerate(_PAIRS)]
+    rows = [_row(f"T{ix}", ts0 + timedelta(hours=ix), *tup) for ix, tup in enumerate(_PAIRS)]
     return spark.createDataFrame(rows, _PACS_SCHEMA)
 
 
 def _chunks(bronze, n=5):
     """Split by cre_dt_tm hour into n contiguous groups. ``per`` is rounded
-    UP so the last chunk absorbs any remainder -- otherwise a corpus of 24
-    rows with n=5 would drop the last 4 rows and silently skip the E1
-    BLOCKER 2 fixture."""
+    UP so the last chunk absorbs any remainder instead of dropping rows."""
     import math
 
     rows = bronze.collect()
@@ -201,25 +179,10 @@ def _chunks(bronze, n=5):
 
 
 def _run(jars):
-    from pyspark.sql import SparkSession
+    from _d_full_helpers import build_spark
 
     with tempfile.TemporaryDirectory() as work:
-        spark = (
-            SparkSession.builder.master("local[1]")
-            .config("spark.ui.enabled", "false")
-            .config("spark.jars", jars)
-            .config("spark.sql.shuffle.partitions", "2")
-            .config(
-                "spark.sql.extensions",
-                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-            )
-            .config("spark.sql.catalog.lh", "org.apache.iceberg.spark.SparkCatalog")
-            .config("spark.sql.catalog.lh.type", "hadoop")
-            .config("spark.sql.catalog.lh.cache-enabled", "false")
-            .config("spark.sql.catalog.lh.warehouse", f"file://{work}/wh")
-            .config("spark.sql.session.timeZone", "UTC")
-            .getOrCreate()
-        )
+        spark = build_spark(work, jars)
 
         import silver_build_financial as sb
         import silver_stream_financial as ss
@@ -259,9 +222,7 @@ def _run(jars):
             ss.append_new_dimensions(spark, chunk, txns_chunk, None)
 
         # ---- Compare on the maintained columns only. KYC and screening
-        # columns are NULL on both sides (kyc=None), so the row-hash on
-        # (entity_id, entity_type, name, legal_name, country) captures the
-        # E1 semantics. Row order fixed by ORDER BY so a partition shuffle
+        # columns are NULL on both sides (kyc=None). Row order fixed by ORDER BY so a partition shuffle
         # cannot make the comparison flap.
         ent_cols = "entity_id, entity_type, name, legal_name, country"
         ents_batch_rows = spark.sql(
@@ -308,7 +269,4 @@ def _run(jars):
 if __name__ == "__main__":
     # Run by spark_subprocess, which puts the scripts on PYTHONPATH; argv[1]
     # is the comma-separated jar classpath.
-    import _parity_mutation
-
-    _parity_mutation.install()
     _run(sys.argv[1])

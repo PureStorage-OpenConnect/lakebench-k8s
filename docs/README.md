@@ -1,79 +1,94 @@
 # Lakebench Documentation
 
-Lakebench deploys a lakehouse stack to Kubernetes from a single YAML, runs
-a workload end to end, and records evidence of what produced each number.
+Documentation for configuring, executing and interpreting Lakebench
+workload experiments.
 
 ## Getting Started
 
-- [Getting Started](getting-started.md) -- prerequisites, install, first deployment
-- [Prerequisites](prerequisites.md) -- cluster checklist, generated from the checks `plan` runs
-- [Recipes](recipes.md) -- the 11 recipes (plus the `default` alias) with decision guidance
-- [Polaris Quickstart](quickstart-polaris.md) -- switch from Hive Metastore to Apache Polaris
+- [Getting Started](getting-started.md): prerequisites, install, first run,
+  first report, teardown
+- [Deployment](deployment.md): installing the CLI, deploy, status, destroy
+- [Prerequisites](prerequisites.md): every cluster check and its fix
+- [Upgrading to 1.7](../UPGRADING-1.7.md): every breaking change from 1.6
 
-## Core Workflow
+## Workloads
 
-- [Configuration](configuration.md) -- full YAML reference, generated from the schema
-- [Deployment](deployment.md) -- deploy, status, and destroy lifecycle
-- [Data Generation](data-generation.md) -- `generate` command, scale factors, monitoring
-- [Running Pipelines](running-pipelines.md) -- pipeline stages, batch and continuous modes
-- [Operations](operations.md) -- shared-cluster setup, ownership, parallel deployments, cleanup
+- [Customer 360](benchmarks/C360.md): data model, pipeline stages, queries,
+  metrics and comparability
+- [AML](benchmarks/AML.md): data model, seed policy, detection rules,
+  scoring and comparability
+- [AML Scoring](aml-scoring.md): how to read recall and precision, what
+  the numbers mean and how to cite them
+- [Data Generation](data-generation.md): scale factors, batch and
+  continuous corpora, re-running and reuse
+- [Custom Datagen Images](datagen-custom-images.md): building, pushing and
+  configuring a datagen image
 
-## Data Generation
+## Architecture & Configuration
 
-- [Datagen Schema](datagen-schema.md) -- Customer 360 schema, 41 columns, 7 realism features
-- [Custom Datagen Images](datagen-custom-images.md) -- build, push, configure custom images
+- [Recipes](recipes.md): the 11 supported architectural compositions and
+  how to choose a catalog, table format and engine
+- [Configuration](configuration.md): every YAML field and its default
+- [Architecture](architecture.md): how catalogs, table formats, pipeline
+  engines and query engines fit together
+- [Compatibility Matrix](compatibility-matrix.md): support states, component
+  versions and images
+- [Sizing](sizing.md): minimum cluster per workload, mode and scale
 
-## Benchmarks and Scoring
+## Running Experiments
 
-- [Benchmarking](benchmarking.md) -- pipeline scorecard, query benchmark, QpH scoring
-- [Query Reference](query-reference.md) -- per-query reference with categories and expected output
-- [Customer 360 benchmark](benchmarks/C360.md) -- data model, pipeline, correctness checks, queries, metrics, comparability
-- [AML benchmark](benchmarks/AML.md) -- data model, seed policy, pipeline, detection rules, scoring, comparability
-- [AML Scoring](aml-scoring.md) -- what precision and recall measure, the leakage gate, the reference detector
-- [Financial Benchmark Baselines](financial-benchmark-baselines.md) -- published Financial numbers per scale
+- [Running Pipelines](running-pipelines.md): pipeline stages, batch and
+  continuous modes
+- [Operations](operations.md): shared clusters, shared components,
+  ownership, parallel deployments, cleanup
+- [Tuning a continuous pipeline](benchmarking/continuous-tuning.md): levers
+  when a stage falls behind
+- [Storage Backends](storage-backends.md): S3 configuration, path style,
+  validated stores
 
-## Components
+## Results & Comparison
 
-### Query Engines
+- [Benchmarking](benchmarking.md): overview of what Lakebench measures
+- [Batch scorecard](benchmarking/scorecard.md): stage timing, throughput,
+  efficiency
+- [Continuous scores](benchmarking/continuous.md): freshness, sustained
+  throughput, time-to-detect
+- [Query benchmark](benchmarking/query-benchmark.md): per-query latency and
+  QpH
+- [Verdict](benchmarking/verdict.md): pass criteria and what they check
+- [Maintenance and limits](benchmarking/maintenance.md): compaction, expiry,
+  executor caps
+- [Comparing runs](benchmarking/comparing.md): comparability rules and
+  disclosed differences
+- [Run records](benchmarking/records.md): provenance and the experiment
+  block
+- [HTML report layout](benchmarking/html-report.md): sections and how to
+  read them
 
-- [Trino](component-trino.md) -- distributed query engine, coordinator and worker sizing, catalog integration
-- [Spark Thrift Server](component-spark-thrift.md) -- Spark-native query engine, single pod, beeline interface
-- [DuckDB](component-duckdb.md) -- single-pod engine, development and small-scale runs
+## Technical Reference
 
-### Catalogs
+Commands and configuration:
 
-- [Hive Metastore](component-hive.md) -- Stackable operator, thrift settings, PostgreSQL backend
-- [Apache Polaris](component-polaris.md) -- REST catalog, OAuth2 authentication, bootstrap lifecycle
-- [Operators and Catalogs](operators-and-catalogs.md) -- Spark Operator and Hive Metastore deep dive
+- [CLI Reference](cli-reference.md): every command and flag
+- [Exit Codes](exit-codes.md): what each exit code means
+- [Glossary](glossary.md): terms used in reports and records
 
-### Infrastructure
+Components:
 
-- [Spark](component-spark.md) -- Spark Operator, driver and executor resources, per-job profiles, S3A tuning
-- [S3 Storage](component-s3.md) -- endpoint, credentials, buckets, FlashBlade specifics
-- [Storage Backends](storage-backends.md) -- validated S3 backends and conformance checks
-- [PostgreSQL](component-postgres.md) -- metadata store, storage classes, deployment order
-- [Observability](component-observability.md) -- Prometheus, Grafana, local metrics, HTML reports
-- [Supported Components](supported-components.md) -- versions, images, recipe matrix
-- [Compatibility Matrix](compatibility-matrix.md) -- Spark, Iceberg, Delta version support
-
-## Architecture and Reference
-
-- [Architecture](architecture.md) -- component topology, medallion layers, catalog pluggability
-- [DESIGN.md](DESIGN.md) -- design authority: what Lakebench measures, invariants, owner decisions
-- [Internals](internals.md) -- why the sizing, versions and catalog handling are built this way
-- [CLI Reference](cli-reference.md) -- every command and flag
-- [Exit Codes](exit-codes.md) -- what each exit code means and which paths produce it
-- [Troubleshooting](troubleshooting.md) -- common errors and fixes, by symptom
-
-## Reproductions and Upgrades
-
-- [Reproduction Packages](reproductions/README.md) -- recorded packages, how `reproduce` runs one
-- [Reproduce Deep Dive](deep-dive/reproduce.md) -- the reproduction contract
-- [Datagen Metrics Deep Dive](deep-dive/datagen-metrics.md) -- how datagen numbers are measured
-- [Upgrading to 1.7](../UPGRADING-1.7.md) -- every breaking change with its fix
+- Query engines: [Trino](component-trino.md),
+  [Spark Thrift Server](component-spark-thrift.md),
+  [DuckDB](component-duckdb.md)
+- Catalogs: [Hive Metastore](component-hive.md),
+  [Apache Polaris](component-polaris.md)
+- Infrastructure: [Spark](component-spark.md),
+  [PostgreSQL](component-postgres.md),
+  [Observability](component-observability.md)
+- [Troubleshooting](troubleshooting.md): errors and fixes, by symptom
 
 ## Development
 
-- [Development Guide](development.md) -- architecture map, test and CI wiring, adding a recipe or workload
-- [Design Notes](design/README.md) -- long-form design records (namespace isolation, others)
-- [Contributing](../CONTRIBUTING.md) -- setup, test tiers, pull requests, review and style
+- [Contributing](../CONTRIBUTING.md): setup, test tiers, pull requests and
+  style
+- [Development Guide](development.md): code map, CI, extension points
+- [Releasing](../RELEASING.md): cutting a release
+- [Security](../SECURITY.md): reporting a vulnerability

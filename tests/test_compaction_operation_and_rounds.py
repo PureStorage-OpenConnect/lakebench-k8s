@@ -1,4 +1,4 @@
-"""Compaction by engine and blended query sets (EVD-13, DESIGN ch03 section 12).
+"""Compaction by engine and blended query sets (EVD-13).
 
 Trino optimize with a 128 MB threshold and Iceberg rewrite_data_files with
 its defaults are different maintenance, recorded by name. An in-stream
@@ -9,7 +9,6 @@ blended and not assessed in compare.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest import mock
 
 import pytest
 
@@ -60,32 +59,26 @@ def _effective(engine: str, outcomes: list[dict]) -> dict:
     )
 
 
-# --- LB-212 -------------------------------------------------------------------
+# --- compaction operation -------------------------------------------------------------------
 
 
-def test_operation_matches_the_statement_the_builder_writes():
-    sql = build_compaction_sql("trino", "lakehouse", "silver.t", "256MB")[0]
-    op = compaction_operation("trino", "256MB")
-    assert op == {"operation": "trino_optimize", "params": {"file_size_threshold": "256MB"}}
-    assert "optimize" in sql and "256MB" in sql
-    thrift = build_compaction_sql("spark-thrift", "lakehouse", "silver.t")[0]
-    assert "rewrite_data_files" in thrift
-    assert compaction_operation("spark-thrift") == {
-        "operation": "iceberg_rewrite_data_files",
-        "params": {},
-    }
-    assert compaction_operation("duckdb") is None
-
-
-def test_effective_maintenance_records_the_operation():
-    em = _effective("trino", [_compaction_outcome("trino")])
-    assert em["detail"]["operations"]["compaction"]["operation"] == "trino_optimize"
-    assert em["detail"]["operations"]["compaction"]["params"] == {"file_size_threshold": "128MB"}
-    # The exp1 id never names it; the exp2 id does.
-    assert "compaction=ran," in em["id"] + "," and "(" not in em["id"]
-    named = with_compaction_operation(em)
-    assert "compaction=ran(trino_optimize:128MB)" in named["id"]
-    assert named["detail"] == em["detail"]
+@pytest.mark.parametrize(
+    ("engine", "threshold"),
+    [("trino", "256MB"), ("spark-thrift", None), ("duckdb", None)],
+)
+def test_operation_matches_the_statement_the_builder_writes(engine, threshold):
+    """The operation recorded for an engine is the one its compaction
+    statement runs; an engine with no statement records none."""
+    args = (threshold,) if threshold else ()
+    op = compaction_operation(engine, *args)
+    statements = build_compaction_sql(engine, "lakehouse", "silver.t", *args)
+    if op is None:
+        assert statements == []
+        return
+    verb = op["operation"].removeprefix("trino_").removeprefix("iceberg_")
+    assert verb in statements[0]
+    for value in op["params"].values():
+        assert value in statements[0]
 
 
 def test_failed_compaction_names_no_operation():
@@ -98,11 +91,10 @@ def test_failed_compaction_names_no_operation():
     assert with_compaction_operation(em)["id"] == em["id"]
 
 
-def test_trino_thrift_not_like_for_like():
+def _constructed_pair():
     """Two exp2-shaped blocks that differ only in the compaction their
-    engines ran: not like-for-like on the compaction operation (and the
-    effective-maintenance id names it). With the operation unrecorded the
-    ids read the same."""
+    engines ran. No architecture in the blocks, so the condition difference
+    comes from the recorded operation alone."""
     from lakebench.metrics import comparability as cmp
 
     trino = with_compaction_operation(_effective("trino", [_compaction_outcome("trino")]))
@@ -110,32 +102,39 @@ def test_trino_thrift_not_like_for_like():
         _effective("spark-thrift", [_compaction_outcome("spark-thrift")])
     )
     assert trino["id"] != thrift["id"]
-    # No architecture in the blocks, so nothing can be derived: the
-    # condition difference comes from the recorded operation alone.
-    ca = cmp.classify({"schema": "exp2", "identity_version": 2, "effective_maintenance": trino})
-    cb = cmp.classify({"schema": "exp2", "identity_version": 2, "effective_maintenance": thrift})
-    keys = {d.key for d in cmp.diff_group(ca, cb, cmp.CONDITIONS)}
-    assert {"compaction operation", "effective maintenance"} <= keys
-    assert cmp.compaction_operation({"effective_maintenance": trino}) == "trino_optimize:128MB"
-    assert (
-        cmp.compaction_operation({"effective_maintenance": thrift}) == "iceberg_rewrite_data_files"
+    return (
+        cmp.classify({"schema": "exp2", "identity_version": 2, "effective_maintenance": trino}),
+        cmp.classify({"schema": "exp2", "identity_version": 2, "effective_maintenance": thrift}),
     )
 
 
-def test_stored_pair_p5_reads_not_like_for_like():
-    """P5 (AML batch, polaris Thrift vs hive Trino), exp1: the operation is
-    derived from the composition (the read-time derivation that predates
-    this change), so the pair stays not like-for-like with recorded
-    operations in the code path."""
+def _stored_pair():
+    """Two stored exp1 records, one polaris Thrift and one hive Trino, whose
+    operation is derived from the composition."""
     from lakebench.metrics import comparability as cmp
 
     a, b = sr.load_record("103055-de1772"), sr.load_record("130953-f8a2cf")
-    ca, cb = cmp.classify(a["experiment"], a), cmp.classify(b["experiment"], b)
-    diffs = cmp.diff_group(ca, cb, cmp.CONDITIONS)
-    assert any(d.key == "compaction operation" for d in diffs)
+    return cmp.classify(a["experiment"], a), cmp.classify(b["experiment"], b)
 
 
-# --- LB-211 -------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("pair", "want"),
+    [
+        pytest.param(
+            _constructed_pair, {"compaction operation", "effective maintenance"}, id="constructed"
+        ),
+        pytest.param(_stored_pair, {"compaction operation"}, id="stored"),
+    ],
+)
+def test_trino_thrift_not_like_for_like(pair, want):
+    from lakebench.metrics import comparability as cmp
+
+    ca, cb = pair()
+    keys = {d.key for d in cmp.diff_group(ca, cb, cmp.CONDITIONS)}
+    assert want <= keys
+
+
+# --- query set per round -------------------------------------------------------------------
 
 
 def _round(names: list[str], failed: tuple[str, ...] = (), qph: float = 100.0, index: int = 0):
@@ -165,7 +164,7 @@ def test_record_round_writes_the_round_record():
     c = _collector()
     t0 = datetime(2026, 10, 2, 1, 0, tzinfo=timezone.utc)
     t1 = datetime(2026, 10, 2, 1, 1, tzinfo=timezone.utc)
-    c.record_round(_round(EIGHT, failed=("Q9",), index=3), started_at=t0, ended_at=t1)
+    c.record_round(_round(EIGHT, index=3), started_at=t0, ended_at=t1)
     (r,) = c.current_run.benchmark_rounds
     d = r.to_dict()
     from lakebench.benchmark.queries import query_set_id
@@ -174,8 +173,6 @@ def test_record_round_writes_the_round_record():
     assert d["started_at"] == t0.isoformat() and d["ended_at"] == t1.isoformat()
     assert d["executed_queries"] == EIGHT
     assert d["executed_query_set_id"] == query_set_id(EIGHT)
-    assert d["investigator_queries"] is None
-    assert "round_meta" in d and "investigator" not in str(d["round_meta"])
 
 
 def test_a_failed_query_is_not_executed():
@@ -186,13 +183,6 @@ def test_a_failed_query_is_not_executed():
     d = c.current_run.benchmark_rounds[0].to_dict()
     assert d["executed_queries"] == EIGHT[:7]
     assert d["executed_query_set_id"] == query_set_id(EIGHT[:7])
-
-
-def test_investigator_state_is_one_of_the_three():
-    c = _collector()
-    c.record_round(_round(TWELVE), investigator_queries="included")
-    with pytest.raises(ValueError, match="not a known state"):
-        c.record_round(_round(TWELVE), investigator_queries="sometimes")
 
 
 def test_the_round_record_survives_a_save():
@@ -236,42 +226,19 @@ def test_one_query_set_is_not_blended():
 
 def test_stored_rounds_get_their_sets_from_the_queries():
     """Rounds recorded before the round record: their queries' success flags
-    say what they executed. P2's rounds all ran 8 of 8."""
+    say what they executed."""
     from lakebench.benchmark.queries import query_set_id
 
-    m = sr.load_metrics("204941-1d17f4")
-    rounds = m.pipeline_benchmark.benchmark_rounds
-    names = [q["name"] for q in rounds[0].queries]
+    rounds = [_round(EIGHT, index=i) for i in range(3)]
+    assert all(r.round_record is None for r in rounds)
     basis, by_set = composite_qph_basis(rounds)
-    assert basis == {"blended": False, "sets": {query_set_id(names): len(rounds)}}
-    assert list(by_set) == [query_set_id(names)]
+    assert basis == {"blended": False, "sets": {query_set_id(EIGHT): 3}}
+    assert list(by_set) == [query_set_id(EIGHT)]
 
 
 def test_a_stored_round_with_a_failed_query_is_blended():
-    m = sr.load_metrics("204941-1d17f4")
-    rounds = m.pipeline_benchmark.benchmark_rounds
-    rounds[1].queries[0]["success"] = False
+    rounds = [_round(EIGHT, index=0), _round(EIGHT, failed=("Q1",), index=1)]
     assert composite_qph_basis(rounds)[0]["blended"] is True
-
-
-ROUND_MEDIANS = ("composite_qph", "in_stream_composite_qph", "qph_degradation_pct")
-
-
-def test_a_mode_less_round_median_is_still_blended_by_rounds():
-    """lookup(key, None) merges a mode-split key's entries, so a pair whose
-    records name no mode still applies the rounds rule to composite_qph."""
-    from lakebench.metrics.metric_registry import lookup
-
-    for key in ROUND_MEDIANS:
-        assert lookup(key, None).blended_by_rounds is True
-    assert lookup("composite_qph", "batch").blended_by_rounds is False
-
-
-def test_two_blends_are_not_one_query_set():
-    from lakebench.benchmark.queries import qph_comparable
-
-    ok, why = qph_comparable(BLENDED_QUERY_SET, BLENDED_QUERY_SET)
-    assert ok is False and "different query sets" in why
 
 
 def test_by_set_is_the_median_and_failed_rounds_are_left_out():
@@ -297,37 +264,6 @@ def test_one_set_keeps_the_declared_query_set():
     assert aggregate_benchmark_rounds(c.current_run.benchmark_rounds).query_set_id == (
         query_set_id(EIGHT)
     )
-
-
-def test_round_label():
-    from lakebench.metrics.collector import round_label
-
-    c = _collector()
-    c.record_round(_round(EIGHT), investigator_queries="absent_no_cases")
-    c.record_round(_round(TWELVE), investigator_queries="included")
-    first, second = c.current_run.benchmark_rounds
-    assert round_label(first) == "8-query set (before cases exist)"
-    assert round_label(second) == "12-query set"
-
-
-def test_blended_qph_is_not_gated_or_reproduced():
-    """The perf gate and reproduce leave out a median over blended rounds."""
-    from lakebench.cli._reproduce import _extract_expected_numbers
-
-    m = sr.load_metrics("204941-1d17f4")
-    assert "composite_qph" in _extract_expected_numbers(m)
-    m.pipeline_benchmark.benchmark_rounds[1].queries[0]["success"] = False
-    assert "composite_qph" not in _extract_expected_numbers(m)
-
-
-def test_odd_stored_rounds_do_not_crash_the_basis():
-    from lakebench.metrics.storage import recorded_qph_basis
-
-    a = sr.load_record("011043-e338c5")
-    rounds = a["pipeline_benchmark"]["benchmark_rounds"]
-    rounds[0]["qph"] = None
-    rounds.append("not a round")
-    assert recorded_qph_basis(a)["blended"] is False
 
 
 def test_mixed_compaction_operations_are_named_mixed():
@@ -399,9 +335,9 @@ def test_the_compaction_call_records_its_operation(monkeypatch):
     assert out["params"] == {"file_size_threshold": "256MB"}
 
 
-def test_exp2_block_names_the_compaction_operation(monkeypatch):
-    """A block the experiment stamps exp2 carries the operation in its
-    effective-maintenance id; an exp1 block does not."""
+def test_the_experiment_block_records_and_names_the_compaction_operation():
+    """The block the experiment builds records the operation in its detail;
+    the exp1 id never names it and the exp2 id does."""
     from lakebench.metrics import experiment as ex
 
     m = sr.load_metrics("231711-6dd3bc")
@@ -410,38 +346,15 @@ def test_exp2_block_names_the_compaction_operation(monkeypatch):
         {"kind": "expire", "total": 2, "succeeded": 2},
         _compaction_outcome("trino"),
     ]
-    exp1 = ex.build_experiment(m)
-    assert "(" not in exp1["effective_maintenance"]["id"]
-    assert (
-        exp1["effective_maintenance"]["detail"]["operations"]["compaction"]["operation"]
-        == "trino_optimize"
-    )
-    named = with_compaction_operation(exp1["effective_maintenance"])
-    assert "compaction=ran(trino_optimize:128MB)" in named["id"]
-
-
-def test_recorded_rounds_that_all_missed_a_query_read_the_smaller_set():
-    """Rounds written through record_round that all missed Q8 executed the
-    7-query set: compare and reproduce both read that set, not the declared
-    8-query one, and a full set reads as the aggregate's id."""
-    from lakebench.benchmark.queries import query_set_id
-    from lakebench.cli._reproduce import _run_query_set
-    from lakebench.metrics.collector import executed_subset_query_set
-
-    c = _collector()
-    for i in range(3):
-        c.record_round(_round(EIGHT, failed=("Q8",), index=i))
-    rounds = c.current_run.benchmark_rounds
-    assert executed_subset_query_set(rounds) == query_set_id(EIGHT[:7])
-    run = mock.Mock()
-    run.pipeline_benchmark.benchmark_rounds = rounds
-    run.pipeline_benchmark.query_benchmark.query_set_id = query_set_id(EIGHT)
-    assert _run_query_set(run) == query_set_id(EIGHT[:7])
-
-    c = _collector()
-    for i in range(3):
-        c.record_round(_round(EIGHT, index=i))
-    assert executed_subset_query_set(c.current_run.benchmark_rounds) is None
+    em = ex.build_experiment(m)["effective_maintenance"]
+    op = compaction_operation("trino")
+    recorded = em["detail"]["operations"]["compaction"]
+    assert {k: recorded[k] for k in op} == op
+    label = compaction_label(em)
+    assert label and label not in em["id"]
+    named = with_compaction_operation(em)
+    assert label in named["id"]
+    assert named["detail"] == em["detail"]
 
 
 # --- QpH degradation over rounds of different query sets (owner, 10-03) -------

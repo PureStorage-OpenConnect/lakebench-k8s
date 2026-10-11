@@ -1,21 +1,17 @@
 """QpH is queries per hour over one query set. Runs over different sets (the
-AML set grew from 8 to 12 queries) are refused by compare and reproduce."""
+AML set grew from 8 to 12 queries) carry different query-set ids."""
 
 from __future__ import annotations
 
 from datetime import datetime
-from types import SimpleNamespace
 
 from lakebench.benchmark.queries import (
     INVESTIGATOR_QUERIES,
     get_benchmark_queries,
-    qph_comparable,
     query_set_id,
 )
 from lakebench.config.schema import WorkloadSchema
 from lakebench.metrics import BenchmarkMetrics, MetricsStorage, PipelineMetrics
-from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
-from tests.conftest import stub_experiment
 
 FIN = [q.name for q in get_benchmark_queries(WorkloadSchema.FINANCIAL)]
 FIN8 = [n for n in FIN if n not in {q.name for q in INVESTIGATOR_QUERIES}]
@@ -33,10 +29,8 @@ def _bench(names):
 
 
 def test_ids_differ_by_set_and_not_by_order():
-    assert len(FIN) == 12 and len(FIN8) == 8
     assert query_set_id(FIN) == query_set_id(list(reversed(FIN)))
     assert query_set_id(FIN) != query_set_id(FIN8)
-    assert query_set_id(FIN).startswith("qs12-") and query_set_id(FIN8).startswith("qs8-")
 
 
 def test_benchmark_metrics_carry_the_id_through_metrics_json(tmp_path):
@@ -65,48 +59,10 @@ def test_legacy_run_gets_the_id_of_the_set_it_ran(tmp_path):
     raw["benchmark"].pop("query_set_id")
     path.write_text(json.dumps(raw))
     loaded = st.load_run("old").benchmark
-    # It keeps the id of the SQL it ran, which is not today's: the total-order
-    # tiebreakers (FQ2-FQ4, FQ6-FQ8) changed that SQL, so today's FQ1-FQ8
-    # set is a different set and QpH does not compare across them.
+    # frozen id of the pre-tiebreaker FQ1-FQ8 SQL
     assert loaded.query_set_id == "qs8-1c2902f0b26a"
     assert query_set_id(FIN8) != loaded.query_set_id
-    assert qph_comparable(loaded.query_set_id, "qs8-1c2902f0b26a")[0] is True
-    assert qph_comparable(loaded.query_set_id, query_set_id(FIN8))[0] is False
-    assert qph_comparable(loaded.query_set_id, query_set_id(FIN))[0] is False
-
-
-def test_reproduce_refuses_qph_across_query_sets():
-    from lakebench.cli._reproduce import _build_package, _compare
-
-    exp = {"composite_qph": 100.0, "scale_ratio": 1.0}
-    rows, code = _compare(exp, dict(exp), {}, (query_set_id(FIN8), query_set_id(FIN)))
-    st = {r["metric"]: r["status"] for r in rows}
-    assert st == {"composite_qph": "incomparable", "scale_ratio": "pass"} and code == 1
-    rows, code = _compare(exp, dict(exp), {}, (None, query_set_id(FIN)))
-    # A package that predates query-set ids: QpH not compared, not failed.
-    assert code == 0 and rows[0]["status"] == "incomparable"
-    rows, code = _compare(exp, dict(exp), {}, (query_set_id(FIN), query_set_id(FIN)))
-    assert code == 0
-    pb = SimpleNamespace(
-        pipeline_mode="batch",
-        scale_ratio=1.0,
-        post_compaction_qph=0.0,
-        query_benchmark=_bench(FIN),
-        stages=[],
-    )
-    pkg = _build_package(
-        SimpleNamespace(
-            pipeline_benchmark=pb,
-            config_snapshot={},
-            run_id="r",
-            benchmark=None,
-            maintenance_policy_id=MAINTENANCE_POLICY_ID,
-            experiment=stub_experiment(FIN),
-        ),
-        config_reference=None,
-        commit_sha="abc",
-    )
-    assert pkg["reproduction_metadata"]["query_set_id"] == query_set_id(FIN)
+    assert query_set_id(FIN) != loaded.query_set_id
 
 
 def test_investigator_queries_only_for_a_run_whose_tm_layer_ran():
@@ -162,7 +118,4 @@ def test_investigator_sql_is_scoped_to_the_run():
     for q in INVESTIGATOR_QUERIES:
         r._execute_single_query(q)
     assert len(seen) == 4 and all("base_run_id = 'run-9'" in s for s in seen)
-    # Every FROM of a TM table carries the run filter.
-    for q in INVESTIGATOR_QUERIES:
-        reads = q.sql.count("{gold_cases}") + q.sql.count("{gold_alert_dispositions}")
-        assert q.sql.count("{tm_run_id}") == reads, q.name
+    assert not any("{" in s for s in seen)

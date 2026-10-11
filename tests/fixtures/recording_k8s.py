@@ -1,95 +1,47 @@
-"""Recording fake of the cluster: the oracle for SAF-4 and DEP-3 (G-3, SD-9).
+"""Recording fake of the cluster, the oracle for destroy and deploy safety.
 
-What it replaces, for the duration of one test:
+For one test it replaces every ``kubernetes.client.*Api`` class, the kubeconfig
+loaders, ``subprocess.run``/``Popen`` and ``boto3.client`` with an in-memory
+store (namespaces, CRDs, custom objects, helm releases, buckets with objects
+and tags, the lease ConfigMap) that real code can run against. Every call is
+recorded as a :class:`Call` and classified:
 
-- every ``kubernetes.client.*Api`` class (``CoreV1Api``, ``AppsV1Api``,
-  ``CustomObjectsApi`` and the rest, including ones added later),
-  ``kubernetes.stream.stream`` and the kubeconfig loaders;
-- ``subprocess.run`` and ``subprocess.Popen`` (and so ``check_output``,
-  ``call`` and the ``lakebench.k8s._pinned`` helpers): no process starts;
-- ``boto3.client``.
-
-What it does not see: HTTP clients aimed at in-cluster services (``httpx``
-reads of Prometheus), raw sockets, anything a child process does, and calls a
-test mocks out above these entry points (``patch.object(SparkOperatorManager,
-"_run")``). A child ``lakebench`` process and any unrecognised command are
-therefore violations, not silent passes. A test patch that replaces one of
-the entry points again (``patch("subprocess.run")``, ``patch.object(_pinned,
-"subprocess")``, ``monkeypatch.setattr``) is a violation too: ``mock.patch``
-is caught when entered, a monkeypatch still in place at the assert. Consumers
-prove their run reached the mutation under test with
-:meth:`K8sRecorder.assert_recorded` (invariant 3: exit 0 is not a pass).
-
-Every call is recorded as a :class:`Call` and classified:
-
-- **read**: never a violation on its own.
-- **local**: ``git``, ``podman``, ``docker`` and shell no-ops (``echo``, ``sleep``).
-- **own**: a mutation in the config's namespace of a kind known to be
-  namespaced, of the config's namespace object, of the config's two
-  SecretClasses (``lakebench-s3-credentials-<ns>``,
-  ``lakebench-s3-ca-cert-<ns>``, exact names), or of one of the config's
-  buckets this deployment provably owns: its ``lakebench.deployment`` tag, a
-  create in this test, or the namespace's created-buckets or
-  adopted-empty-buckets annotation. Tagging an untagged config bucket (deploy
-  adopting it) is own; deleting a bucket needs proof this deployment created
-  it. A config bucket with no such proof is shared (``ownership.py`` refuses
-  legacy buckets).
-- **lease**: a mutation of the lease ConfigMap
-  ``lakebench-system/lakebench-cluster-lock``, or the bootstrap create of the
+- **read**: never a violation.
+- **local**: ``git``, ``podman``, ``docker``, shell no-ops.
+- **own**: a mutation of the config's namespace, its namespaced kinds, its two
+  SecretClasses, or a config bucket this deployment provably owns (its
+  ``lakebench.deployment`` tag, a create in this test, or the namespace's
+  created-buckets or adopted-empty-buckets annotation).
+- **lease**: a mutation of ``lakebench-system/lakebench-cluster-lock`` or the
   ``lakebench-system`` namespace that holds it.
-- **shared**: every other mutation: any cluster-scoped kind not named above,
-  any other namespace, every mutating ``helm`` verb (a chart can carry
-  cluster-scoped objects whatever ``-n`` says), every mutating ``oc adm``
-  verb, and anything whose target cannot be proven own (a kind the fixture
-  does not know, a missing ``-n``, a custom kind with no namespaced CRD).
+- **shared**: every other mutation, including every mutating ``helm`` verb and
+  anything whose target cannot be proven own.
 
-Violations, raised by :meth:`K8sRecorder.assert_clean` (and by the pytest
-fixture at teardown):
+:meth:`K8sRecorder.assert_clean` (run by the fixture at teardown) raises on:
 
-- a shared mutation made while the calling thread does not hold the lease;
-- a delete outside the config's namespace, held lease or not, unless the
-  test names the target in ``allow_delete`` (``kubectl replace --force``,
-  ``apply --prune`` and ``drain`` count as deletes);
-- a write to a bucket the config does not own, or a delete of a config
-  bucket this deployment did not create;
-- taking over or deleting a live lease another process (or thread) holds,
-  and any CLI mutation of the lease ConfigMap (``cluster_lock`` is API-only);
-- a test patch over one of the recorder's entry points;
+- a shared mutation made without holding the lease;
+- a delete outside the config's namespace not named in ``allow_delete``
+  (``replace --force``, ``apply --prune`` and ``drain`` count as deletes);
+- a write to a bucket the config does not own, or a delete of one this
+  deployment did not create;
+- taking over a live lease, or any CLI mutation of the lease ConfigMap;
+- a test patch over one of the entry points above;
 - a child ``lakebench`` process or an unrecognised external command;
 - a cluster read the fake could not answer (script it with
-  :meth:`K8sRecorder.on_command`), because real code that gets a made-up
-  answer takes an error path and skips the mutations under test.
+  :meth:`K8sRecorder.on_command`), or an S3 method it does not implement.
 
-A mutation is recorded before it runs, so an attempt counts even when the
-fake answers 404 or 409. ``lease_held`` is true for calls from the thread
-that created (or took over, after expiry) the lease ConfigMap through the
-Kubernetes API, until that lease is deleted.
-
-The in-memory store lets real code run: namespaces, the lease ConfigMap,
-Deployments and pods (the Spark Operator with its ``--namespaces=`` args),
-CRDs with their scope, custom objects, helm releases with their values, and
-buckets with objects and tags. Create answers 409 on an existing object and
-404 on a missing namespace or CRD; replace and delete honour resourceVersion
-and uid preconditions. ``helm get values``, ``list``, ``status``,
-``upgrade --set`` (which also rewrites the operator's ``--namespaces=``),
-``install`` and ``uninstall`` work on the release store; ``kubectl get -o
-json`` and simple ``-o jsonpath=`` reads, and ``api-resources``, come from the
-store. Other ``kubectl`` mutations answer success and do not change the store.
-Namespace deletes are immediate (no Terminating phase). ``s3_tagging = False``
-makes the bucket-tagging calls answer ``NotImplemented`` (FlashBlade), and
-:meth:`K8sRecorder.fail_s3` and :meth:`K8sRecorder.fail` inject errors.
+Not seen: HTTP clients aimed at in-cluster services, raw sockets, what a child
+process does, and calls a test mocks above these entry points. A mutation is
+recorded before it runs. Consumers prove their run reached the mutation under
+test with :meth:`K8sRecorder.assert_recorded`.
 
 Usage::
 
     def test_destroy_only_touches_its_namespace(recording_k8s, cfg):
         recording_k8s.for_config(cfg)
         recording_k8s.add_namespace(cfg.get_namespace())
-        recording_k8s.add_spark_operator(watched=[cfg.get_namespace()])
         ...  # run the code under test
         recording_k8s.assert_recorded(api="helm", verb="upgrade", lease_held=True)
-        # teardown calls recording_k8s.assert_clean()
-
-The fixture is registered for every test in ``tests/conftest.py``.
 """
 
 from __future__ import annotations
@@ -1341,7 +1293,11 @@ class _FakeS3:
         def method(*a: Any, **kw: Any) -> dict[str, Any]:
             bucket = kw.get("Bucket", next((x for x in a if isinstance(x, str)), None))
             self._record(attr, bucket, kw.get("Key"))
-            return {}
+            if not attr.startswith(self._MUTATING_PREFIXES):
+                # Real code given a made-up answer takes an error path and skips
+                # the mutation under test: flag the read, as for kubectl.
+                self._r._annotate(len(self._r.calls) - 1, "unscripted")
+            raise NotImplementedError(f"recording_k8s fakes no S3 method {attr!r}")
 
         return method
 
@@ -1417,24 +1373,6 @@ class K8sRecorder:
         self._op_pods: dict[str, bool] = {}
 
     # -- configuration -----------------------------------------------------
-
-    def configure(
-        self,
-        *,
-        namespace: str | None = None,
-        buckets: Iterable[str] | None = None,
-        allow_delete: Iterable[str] | None = None,
-        deployment: str | None = None,
-    ) -> K8sRecorder:
-        if namespace is not None:
-            self.namespace = namespace
-        if buckets is not None:
-            self.buckets = set(buckets)
-        if allow_delete is not None:
-            self.allow_delete = list(allow_delete)
-        if deployment is not None:
-            self.deployment = deployment
-        return self
 
     def for_config(self, cfg: Any) -> K8sRecorder:
         """Scope to a ``LakebenchConfig``: namespace, deployment name, buckets."""
@@ -1645,22 +1583,6 @@ class K8sRecorder:
         self.add_crd("secretclasses", "secrets.stackable.tech", "SecretClass", scope="Cluster")
         for op in ("commons-operator", "listener-operator", "secret-operator", "hive-operator"):
             self.add_helm_release(op, "stackable", chart=op, version="25.7.0")
-
-    def add_openshift(self, version: str = "4.16.0") -> None:
-        """Seed what Lakebench's OpenShift detection reads (CRDs, ClusterVersion)."""
-        self.add_crd(
-            "securitycontextconstraints",
-            "security.openshift.io",
-            "SecurityContextConstraints",
-            scope="Cluster",
-        )
-        self.add_crd("routes", "route.openshift.io", "Route")
-        self.add_crd("projects", "project.openshift.io", "Project", scope="Cluster")
-        self.add_crd("clusterversions", "config.openshift.io", "ClusterVersion", scope="Cluster")
-        self.add(
-            "clusterversions",
-            {"metadata": {"name": "version"}, "status": {"history": [{"version": version}]}},
-        )
 
     def add_bucket(
         self,
@@ -2076,8 +1998,7 @@ class K8sRecorder:
             return SimpleNamespace(git_version="v1.30.0", major="1", minor="30", platform="")
         if kind_snake in _META_KINDS:
             # API-group discovery (``ApisApi.get_api_versions``) serves the
-            # groups of the seeded CRDs, as a real api-server does, so
-            # platform detection by group sees an ``add_openshift`` seed.
+            # groups of the seeded CRDs, as a real api-server does.
             groups = sorted(
                 {
                     str(_get(obj, "spec", "group"))
@@ -2748,7 +2669,8 @@ def recording(
     allow_delete: Iterable[str] = (),
     deployment: str | None = None,
 ) -> Iterator[K8sRecorder]:
-    """Install a recorder for a ``with`` block (no teardown assertion)."""
+    """Install a recorder for a ``with`` block (no teardown assertion: the caller
+    asserts on ``violations()`` itself)."""
     with pytest.MonkeyPatch.context() as mp:
         rec = K8sRecorder(
             namespace, buckets=buckets, allow_delete=allow_delete, deployment=deployment

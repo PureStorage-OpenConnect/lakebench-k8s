@@ -234,6 +234,10 @@ _INSTEAD: dict[str, str] = {
         "it is set per job from the executor count; change platform.compute.spark.<job>_executors"
     ),
     "spark.executor.instances": "change platform.compute.spark.<job>_executors",
+    "spark.executor.cores": (
+        "change platform.compute.spark.<job>_executor_cores (bronze_ingest, "
+        "silver_stream, gold_refresh)"
+    ),
     "spark.driver.memory": "change platform.compute.spark.driver_memory",
     "spark.driver.cores": "change platform.compute.spark.driver_cores",
     "spark.hadoop.fs.s3a.endpoint": "change platform.storage.s3.endpoint",

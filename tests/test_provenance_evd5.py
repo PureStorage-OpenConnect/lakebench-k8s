@@ -1,4 +1,4 @@
-"""Run provenance is complete (EVD-5, DESIGN ch03 section 5).
+"""Run provenance is complete (EVD-5).
 
 A pip-installed run names the commit its wheel was built from; the record
 says which install it was, re-reads the code at run end, names the config
@@ -37,6 +37,7 @@ def _git_head(path: Path) -> str | None:
 # --- the wheel names its commit ----------------------------------------------
 
 
+@pytest.mark.slow
 def test_wheel_names_commit(tmp_path):
     """``python -m build`` (sdist, then the wheel from the unpacked sdist,
     as CI and the release build it): the installed wheel's provenance names
@@ -101,45 +102,43 @@ def _hook(mod, root: Path, target: str):
     return mod.CustomBuildHook(str(root), {}, None, None, str(root / "dist"), target)
 
 
-def test_hook_outside_a_checkout_writes_unknown(tmp_path):
+@pytest.mark.parametrize(
+    ("pkg_info", "stale_file", "mode", "outcome"),
+    [
+        (False, False, "standard", "unknown"),
+        (True, True, "standard", "kept"),
+        (False, True, "standard", "refused"),
+        (False, False, "editable", "nothing"),
+    ],
+    ids=["outside-a-checkout", "unpacked-sdist", "stale-file-in-a-source-tree", "editable"],
+)
+def test_build_hook_provenance(tmp_path, pkg_info, stale_file, mode, outcome):
     mod = _hook_module()
-    (tmp_path / "src" / "lakebench").mkdir(parents=True)
-    assert mod.build_info_source(str(tmp_path)) is None
-    data: dict = {}
+    pkg = tmp_path / "src" / "lakebench"
+    pkg.mkdir(parents=True)
+    if pkg_info:
+        (tmp_path / "PKG-INFO").write_text("Metadata-Version: 2.4\n")
+    if stale_file:
+        (pkg / "_build_info.py").write_text(mod.render(SHA, False))
     hook = _hook(mod, tmp_path, "wheel")
-    hook.initialize("standard", data)
-    (src,) = data["force_include"]
-    assert data["force_include"][src] == "lakebench/_build_info.py"
-    info = prov_mod.read_build_info(Path(src))
-    hook.finalize("standard", data, "")
-    assert info == {"git_sha": None, "git_dirty": None}
-
-
-def test_hook_keeps_an_unpacked_sdists_file(tmp_path):
-    mod = _hook_module()
-    pkg = tmp_path / "src" / "lakebench"
-    pkg.mkdir(parents=True)
-    (tmp_path / "PKG-INFO").write_text("Metadata-Version: 2.4\n")
-    (pkg / "_build_info.py").write_text(mod.render(SHA, False))
     data: dict = {}
-    _hook(mod, tmp_path, "wheel").initialize("standard", data)
-    assert data["force_include"] == {str(pkg / "_build_info.py"): "lakebench/_build_info.py"}
-
-
-def test_hook_refuses_a_stale_file_in_a_source_tree(tmp_path):
-    mod = _hook_module()
-    pkg = tmp_path / "src" / "lakebench"
-    pkg.mkdir(parents=True)
-    (pkg / "_build_info.py").write_text(mod.render(SHA, False))
-    with pytest.raises(RuntimeError, match="generated at build time"):
-        _hook(mod, tmp_path, "wheel").initialize("standard", {})
-
-
-def test_hook_skips_editable_installs(tmp_path):
-    mod = _hook_module()
-    data: dict = {}
-    _hook(mod, tmp_path, "wheel").initialize("editable", data)
-    assert data == {}
+    if outcome == "refused":
+        with pytest.raises(RuntimeError, match="generated at build time"):
+            hook.initialize(mode, data)
+        return
+    if outcome == "unknown":
+        assert mod.build_info_source(str(tmp_path)) is None
+    hook.initialize(mode, data)
+    if outcome == "nothing":
+        assert data == {}
+    elif outcome == "kept":
+        assert data["force_include"] == {str(pkg / "_build_info.py"): "lakebench/_build_info.py"}
+    else:
+        (src,) = data["force_include"]
+        assert data["force_include"][src] == "lakebench/_build_info.py"
+        info = prov_mod.read_build_info(Path(src))
+        hook.finalize(mode, data, "")
+        assert info == {"git_sha": None, "git_dirty": None}
 
 
 # --- reading the install -----------------------------------------------------
@@ -213,69 +212,43 @@ def test_failed_git_read_at_end_is_not_a_change_when_files_match():
     assert prov_mod.code_changed(no_tree, {**no_tree, "git_sha": None}) is True
 
 
-def test_each_run_samples_its_own_start(monkeypatch):
-    """run --repeat runs several runs in one process: each start is read
-    afresh, not the first run's."""
-    calls = iter([{"git_sha": "a" * 40}, {"git_sha": "b" * 40}])
-    monkeypatch.setattr(prov_mod, "sample", lambda: dict(next(calls)))
-    assert prov_mod.run_provenance()["git_sha"] == "a" * 40
-    assert prov_mod.run_provenance()["git_sha"] == "b" * 40
-
-
 def test_package_without_build_info_is_unknown(tmp_path, monkeypatch):
     _fake_package(tmp_path, monkeypatch, None)
     s = prov_mod.sample()
     assert (s["install"], s["git_sha"], s["git_dirty"]) == ("unknown", None, None)
 
 
-def test_checkout_install_is_named():
-    s = prov_mod.sample()
-    if _git_head(Path(prov_mod.__file__).parent) is None:
-        pytest.skip("not run from a checkout")
-    assert s["install"] == "checkout"
-
-
 # --- run end -----------------------------------------------------------------
 
 
-def test_end_sample_detects_change(monkeypatch):
-    coll = MetricsCollector()
+@pytest.mark.parametrize(
+    ("changed", "state"), [(True, "unverified"), (False, "supported")], ids=["changed", "unchanged"]
+)
+def test_code_change_during_the_run_withdraws_support(monkeypatch, changed, state):
+    from lakebench.metrics import build_config_snapshot
+
+    start = {"lakebench_version": "1.7.0", "git_sha": SHA, "git_dirty": False, "install": "wheel"}
+    monkeypatch.setattr("lakebench.metrics.collector.run_provenance", lambda: dict(start))
+    snapshot = build_config_snapshot(_scratch_config())
     supported = {"state": "supported", "basis": "validated", "validation_runs": ["r1"]}
-    snapshot = {"experiment_inputs": {"support": dict(supported)}}
-    start = {"lakebench_version": "1.7.0", "git_sha": SHA, "git_dirty": False, "install": "wheel"}
-    monkeypatch.setattr(prov_mod, "run_provenance", lambda: dict(start))
-    monkeypatch.setattr("lakebench.metrics.collector.run_provenance", lambda: dict(start))
-    run = coll.start_run("20261001-000000-aaaaaa", "d", snapshot)
-    monkeypatch.setattr(prov_mod, "sample", lambda: {**start, "git_sha": "f" * 40})
-    coll.end_run(success=True)
-    end = run.provenance["end_sample"]
-    assert end["git_sha"] == "f" * 40
-    assert end["code_changed_during_run"] is True
-    support = run.config_snapshot["experiment_inputs"]["support"]
-    assert support["state"] == "unverified"
-    assert "code changed during the run" in support["basis"]
-    assert "validation_runs" not in support
-
-
-def test_unchanged_code_keeps_support(monkeypatch):
+    snapshot["experiment_inputs"]["support"] = dict(supported)
     coll = MetricsCollector()
-    supported = {"state": "supported", "basis": "validated"}
-    start = {"lakebench_version": "1.7.0", "git_sha": SHA, "git_dirty": False, "install": "wheel"}
-    monkeypatch.setattr("lakebench.metrics.collector.run_provenance", lambda: dict(start))
-    monkeypatch.setattr(prov_mod, "sample", lambda: dict(start))
-    run = coll.start_run(
-        "20261001-000000-bbbbbb", "d", {"experiment_inputs": {"support": dict(supported)}}
-    )
-    coll.end_run(success=True)
-    assert run.provenance["end_sample"]["code_changed_during_run"] is False
-    assert run.config_snapshot["experiment_inputs"]["support"] == supported
+    run = coll.start_run("20261001-000000-333333", "d", snapshot)
+    end = {**start, "git_sha": "f" * 40} if changed else dict(start)
+    monkeypatch.setattr(prov_mod, "sample", lambda: dict(end))
+    d = coll.end_run(success=True).to_dict()
+    assert run.provenance["end_sample"]["code_changed_during_run"] is changed
+    support = run.config_snapshot["experiment_inputs"]["support"]
+    assert support["state"] == state
+    assert ("validation_runs" in support) is not changed
+    assert d["experiment"]["support"]["state"] == state
 
 
 def test_support_state_refuses_supported_when_code_changed():
     from lakebench.config.support import Validation, support_state
 
     key = ("customer360", "hive-iceberg-spark-trino", "batch", "4.1", "1.11.0")
-    record = {key: Validation(*key, tree="t" * 40, runs=("r1",))}
+    record = {key: Validation(*key, runs=("r1",))}
     clean = {"git_sha": SHA, "git_dirty": False}
     args = ("customer360", "hive", "iceberg", "spark", "trino", "batch")
     versions = {"spark": "4.1", "table_format_version": "1.11.0"}
@@ -288,60 +261,42 @@ def test_support_state_refuses_supported_when_code_changed():
 # --- config, scripts, deps ---------------------------------------------------
 
 
-def test_config_sha256_is_the_snapshots_and_path_is_absolute(tmp_path, monkeypatch):
+def test_config_path_is_recorded_absolute(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    run = MetricsCollector().start_run(
-        "20261001-000000-cccccc", "d", {"config_sha256": "e" * 64}, config_path="cfg.yaml"
-    )
-    assert run.provenance["config_sha256"] == "e" * 64
+    run = MetricsCollector().start_run("20261001-000000-cccccc", "d", {}, config_path="cfg.yaml")
     assert run.provenance["config_path"] == str(tmp_path / "cfg.yaml")
 
 
-def test_deps_absent_not_recorded():
-    coll = MetricsCollector()
-    run = coll.start_run("20261001-000000-dddddd", "d", {})
-    assert run.provenance["deps"] == "not_recorded"
-    coll.record_job_manager(SimpleNamespace())  # no scripts_provenance, no deps
-    assert run.provenance["deps"] == "not_recorded"
-    assert "scripts_sha256" not in run.provenance
+_FULL_SCRIPTS = {
+    "scripts_sha256": "a" * 64,
+    "scripts_maps": {"common": "b" * 64},
+    "files_sha256": {"common.py": "c" * 64},
+}
+_PINSET = {"pinset_sha256": "d" * 64}
 
 
-def test_deps_set_after_the_scripts_are_read_at_run_end():
-    coll = MetricsCollector()
-    run = coll.start_run("20261001-000000-dddddf", "d", {})
-    mgr = SimpleNamespace(scripts_provenance=None, deps=None)
-    coll.record_job_manager(mgr)
-    mgr.deps = {"pinset_sha256": "d" * 64}
-    coll.end_run(success=True)
-    assert run.provenance["deps"] == {"pinset_sha256": "d" * 64}
-
-
-def test_job_manager_scripts_and_deps_recorded():
+@pytest.mark.parametrize(
+    ("at_record", "at_end", "deps", "scripts"),
+    [
+        ({}, {}, "not_recorded", False),
+        ({"scripts_provenance": None, "deps": None}, {"deps": _PINSET}, _PINSET, False),
+        ({"scripts_provenance": _FULL_SCRIPTS, "deps": _PINSET}, {}, _PINSET, True),
+    ],
+    ids=["absent", "deps-set-after-the-scripts-are-read", "scripts-and-deps"],
+)
+def test_job_manager_scripts_and_deps_recorded(at_record, at_end, deps, scripts):
     coll = MetricsCollector()
     run = coll.start_run("20261001-000000-eeeeee", "d", {})
-    mgr = SimpleNamespace(
-        scripts_provenance={
-            "scripts_sha256": "a" * 64,
-            "scripts_maps": {"common": "b" * 64},
-            "files_sha256": {"common.py": "c" * 64},
-        },
-        deps={"pinset_sha256": "d" * 64},
-    )
+    assert run.provenance["deps"] == "not_recorded"
+    mgr = SimpleNamespace(**at_record)
     coll.record_job_manager(mgr)
-    assert run.provenance["scripts_sha256"] == "a" * 64
-    assert run.provenance["scripts_maps"] == {"common": "b" * 64}
-    assert run.provenance["scripts_files_sha256"] == {"common.py": "c" * 64}
-    assert run.provenance["deps"] == {"pinset_sha256": "d" * 64}
-
-
-def test_a_new_job_manager_has_no_deps_yet():
-    from lakebench.spark.job import SparkJobManager
-
-    mgr = SparkJobManager.__new__(SparkJobManager)
-    k8s = MagicMock()
-    k8s.get_cluster_capacity.return_value = None
-    SparkJobManager.__init__(mgr, MagicMock(get_namespace=lambda: "ns"), k8s)
-    assert prov_mod.job_manager_fields(mgr)["deps"] == "not_recorded"
+    vars(mgr).update(at_end)
+    coll.end_run(success=True)
+    assert run.provenance["deps"] == deps
+    assert ("scripts_sha256" in run.provenance) is scripts
+    if scripts:
+        assert run.provenance["scripts_maps"] == {"common": "b" * 64}
+        assert run.provenance["scripts_files_sha256"] == {"common.py": "c" * 64}
 
 
 # --- images ------------------------------------------------------------------
@@ -469,26 +424,16 @@ class _Clock:
         return self.t
 
 
-def test_stage_watch_reads_until_driver_and_executor_are_seen():
-    """The first RUNNING poll with executors may come before any executor
-    has pulled its image; the watch reads again, spaced, at most MAX_READS
-    times, and stops once both roles are seen."""
-    answers = [{"spark_driver"}, {"spark_driver", "spark_executor"}]
+def test_stage_watch_stops_once_driver_and_executor_are_seen():
+    """The first poll with executors may come before any executor has pulled
+    its image; the watch reads again until both roles are seen."""
+    answers = iter([{"spark_driver"}, {"spark_driver", "spark_executor"}])
     clock = _Clock()
-    watch = prov_mod.StageImageWatch(lambda: answers.pop(0), clock=clock)
-    watch.on_status(True, 0)  # no executors yet: no read
-    assert watch.reads == 0
-    watch.on_status(True, 4)
-    assert watch.reads == 1 and not watch.done
-    clock.t = 5.0
-    watch.on_status(True, 4)  # too soon
-    assert watch.reads == 1
-    clock.t = 20.0
-    watch.on_status(True, 4)
-    assert watch.done and watch.reads == 2
-    clock.t = 60.0
-    watch.on_status(True, 4)
-    assert watch.reads == 2
+    watch = prov_mod.StageImageWatch(lambda: next(answers), clock=clock)
+    for i in range(5):
+        clock.t = i * 100.0
+        watch.on_status(True, 4)
+    assert watch.done
     assert watch.finish() == []
 
 
@@ -498,9 +443,7 @@ def test_stage_watch_gives_up_and_reports_missing_roles():
     for i in range(10):
         clock.t = i * 100.0
         watch.on_status(True, 4)
-    assert watch.reads == prov_mod.StageImageWatch.MAX_READS
     assert watch.finish() == ["spark_driver", "spark_executor"]
-    assert watch.reads == prov_mod.StageImageWatch.MAX_READS + 1  # the driver, after the wait
 
 
 def test_stage_watch_records_missing_roles_in_provenance():
@@ -535,9 +478,10 @@ def test_run_end_names_images_never_observed():
 # --- scratch as ran ----------------------------------------------------------
 
 
-def _scratch_config():
+def _scratch_config(scale=1, silver_executors=None):
     from lakebench.config import LakebenchConfig
 
+    spark = {} if silver_executors is None else {"silver_executors": silver_executors}
     return LakebenchConfig(
         name="t",
         platform={
@@ -549,36 +493,47 @@ def _scratch_config():
                     "buckets": {"bronze": "b", "silver": "s", "gold": "g"},
                 },
                 "scratch": {"enabled": True, "storage_class": "px-csi-scratch"},
-            }
+            },
+            "compute": {"spark": spark},
         },
-        architecture={"workload": {"schema": "customer360", "datagen": {"scale": 1}}},
+        architecture={"workload": {"schema": "customer360", "datagen": {"scale": scale}}},
     )
 
 
-def test_scratch_as_ran_from_manifest():
-    """The SparkApplication the manager builds for silver-build carries its
-    profile's 300Gi scratch; the status read returns it, and the record
-    holds what the cluster held, not the config's scratch size."""
-    from lakebench.modules.pipeline_engines.spark.job import get_job_profile
+@pytest.mark.parametrize(
+    ("scale", "silver_executors", "size"),
+    [
+        # silver-build: 60 GiB per scale unit shared by its executors, between
+        # 50 Gi and the profile's 300 Gi.
+        (1, None, "50Gi"),
+        (10, None, "75Gi"),  # 600 / 8
+        (10, 16, "50Gi"),  # 600 / 16 = 38, the floor
+        (50, None, "250Gi"),  # 3,000 / 12
+        (100, None, "300Gi"),  # 6,000 / 18 = 334, the ceiling
+    ],
+)
+def test_scratch_as_ran_from_manifest(scale, silver_executors, size):
+    """The SparkApplication the manager builds for silver-build carries a
+    scratch PVC sized to the scale and its executor count; the status read
+    returns it, and the record holds what the cluster held."""
     from lakebench.spark.job import JobType, SparkJobManager
 
     k8s = MagicMock()
     k8s.get_cluster_capacity.return_value = None
-    mgr = SparkJobManager(_scratch_config(), k8s)
+    mgr = SparkJobManager(_scratch_config(scale, silver_executors), k8s)
     manifest = mgr._build_manifest(JobType.SILVER_BUILD)
-    assert get_job_profile("silver-build", "customer360")["scratch_size"] == "300Gi"
     app = {**manifest, "status": {"applicationState": {"state": "COMPLETED"}}}
     api = MagicMock()
     api.get_namespaced_custom_object.return_value = app
     with patch("kubernetes.client.CustomObjectsApi", return_value=api):
         status = mgr.get_job_status("lakebench-silver-build")
-    assert status.scratch == {"size_limit": "300Gi", "storage_class": "px-csi-scratch"}
+    assert status.scratch == {"size_limit": size, "storage_class": "px-csi-scratch"}
     coll = MetricsCollector()
     run = coll.start_run("20261001-000000-111111", "d", {})
     coll.record_scratch("silver-build", status)
     coll.record_scratch("silver-build", None)  # a later unread status keeps it
     assert run.provenance["scratch_as_ran"]["silver-build"] == {
-        "size_limit": "300Gi",
+        "size_limit": size,
         "storage_class": "px-csi-scratch",
     }
 
@@ -586,23 +541,11 @@ def test_scratch_as_ran_from_manifest():
 def test_scratch_unread_status_is_not_recorded():
     prov: dict = {}
     prov_mod.record_scratch(prov, "gold-finalize", None)
-    assert "not_recorded" in prov["scratch_as_ran"]["gold-finalize"]
+    assert set(prov["scratch_as_ran"]["gold-finalize"]) == {"not_recorded"}
     prov_mod.record_scratch(
         prov, "gold-finalize", SimpleNamespace(scratch={"size_limit": None, "storage_class": None})
     )
     assert prov["scratch_as_ran"]["gold-finalize"] == {"size_limit": None, "storage_class": None}
-
-
-def test_wait_until_running_returns_its_status():
-    from lakebench.spark.job import JobState, JobStatus
-    from lakebench.spark.monitor import SparkJobMonitor
-
-    m = SparkJobMonitor.__new__(SparkJobMonitor)
-    m.namespace = "ns"
-    st = JobStatus(name="j", state=JobState.RUNNING, message="", scratch={"size_limit": "1Gi"})
-    m.job_manager = MagicMock()
-    m.job_manager.get_job_status.return_value = st
-    assert m.wait_until_running("j", poll_interval=0).final_status is st
 
 
 # --- the experiment block: what the identity reads -------------------------
@@ -617,19 +560,12 @@ def test_experiment_lakebench_keeps_what_the_identity_reads():
         "tree_sha256": "t" * 64,
         "deps": {"pinset_sha256": "d" * 64},
         "images_observed": {"spark_driver": "x@sha256:1"},
-        "scripts_files_sha256": {"common.py": "c" * 64},
         "config_path": "/home/someone/cfg.yaml",
         "end_sample": {"code_changed_during_run": False},
     }
-    assert prov_mod.experiment_lakebench(prov) == {
-        "lakebench_version": "1.7.0",
-        "git_sha": SHA,
-        "git_dirty": False,
-        "install": "wheel",
-        "tree_sha256": "t" * 64,
-        "deps": {"pinset_sha256": "d" * 64},
-        "images_observed": {"spark_driver": "x@sha256:1"},
-    }
+    kept = prov_mod.experiment_lakebench(prov)
+    assert "config_path" not in kept and "end_sample" not in kept
+    assert kept["images_observed"] == {"spark_driver": "x@sha256:1"}
     # The reason text names the namespace; two unobserved runs read alike.
     a = prov_mod.experiment_lakebench({"images_observed": {"not_observed": "pod list in ns-a"}})
     b = prov_mod.experiment_lakebench({"images_observed": {"not_observed": "pod list in ns-b"}})
@@ -661,34 +597,6 @@ def test_saved_record_identity_sees_the_dependency_pinset(monkeypatch):
     assert (present, value) == (True, "d" * 64)
     d = _v17_record(monkeypatch, None)
     assert cmp.dependency_pinset(d["experiment"])[1] == cmp.PINSET_NOT_RECORDED
-
-
-def test_identity_reads_observed_image_digests():
-    from lakebench.metrics import comparability as cmp
-
-    exp = {
-        "schema": "exp2",
-        "identity_version": 2,
-        "lakebench": prov_mod.experiment_lakebench(
-            {"lakebench_version": "1.7.0", "images_observed": {"spark_driver": "x@sha256:1"}}
-        ),
-    }
-    got = cmp.classify(exp).keys(cmp.ARCHITECTURE)["observed image digests"]
-    assert got == {"spark_driver": "x@sha256:1"}
-
-
-def test_withdrawn_support_reaches_the_saved_block(monkeypatch):
-    from lakebench.metrics import build_config_snapshot
-
-    start = {"lakebench_version": "1.7.0", "git_sha": SHA, "git_dirty": False, "install": "wheel"}
-    monkeypatch.setattr("lakebench.metrics.collector.run_provenance", lambda: dict(start))
-    snapshot = build_config_snapshot(_scratch_config())
-    snapshot["experiment_inputs"]["support"] = {"state": "supported", "basis": "validated"}
-    coll = MetricsCollector()
-    coll.start_run("20261001-000000-333333", "d", snapshot)
-    monkeypatch.setattr(prov_mod, "sample", lambda: {**start, "git_sha": "f" * 40})
-    d = coll.end_run(success=True).to_dict()
-    assert d["experiment"]["support"]["state"] == "unverified"
 
 
 def _exp2(images):

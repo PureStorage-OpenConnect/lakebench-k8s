@@ -428,7 +428,7 @@ class ConformanceRunner:
         Not a REQUIRED defect. Lakebench uses bucket tags as the primary
         S3-side ownership signal (see ``deploy/ownership.py``). Backends
         that return ``NotImplemented`` on ``GetBucketTagging`` /
-        ``PutBucketTagging`` (LB-088: FlashBlade) work fine with lakebench;
+        ``PutBucketTagging`` (e.g. FlashBlade) work fine with lakebench;
         deploy and destroy fall back to matching the bucket name against
         the deployment name. Reporting this here lets a user see the
         weaker ownership discipline they will get on this backend before
@@ -542,7 +542,7 @@ class ConformanceRunner:
         """Record whether the backend validates the sigv4 region scope.
 
         Not a defect either way. It determines whether Spark needs
-        ``fs.s3a.endpoint.region`` set explicitly (LB-052).
+        ``fs.s3a.endpoint.region`` set explicitly.
         """
         wrong = "eu-west-1" if self.region != "eu-west-1" else "us-east-2"
         try:

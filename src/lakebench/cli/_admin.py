@@ -11,7 +11,7 @@ different workstations cannot race the same Helm upgrade or the same
 cluster-scoped resource rename. Non-mutating commands (``status``,
 ``doctor``) do not take the lease.
 
-See ``docs/design/namespace-isolation.md`` for the design
+See ``docs/internal/namespace-isolation.md`` for the design
 rationale.
 """
 
@@ -110,7 +110,7 @@ def _load_cfg(config_file: Path | None, file_option: Path | None):
     """Load a lakebench config with the same error path other commands use.
 
     Admin commands repair or reclaim existing deployments, so they skip the
-    derived-name length check (LB-153) that deploy relies on.
+    derived-name length check that deploy relies on.
     """
     path = resolve_config_path(config_file, file_option)
     try:

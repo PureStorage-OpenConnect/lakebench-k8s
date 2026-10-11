@@ -59,9 +59,11 @@ def test_operator_retry_of_a_committed_cycle_is_still_a_no_op(result):
     assert case["held_after_retry"] == case["held"], _why(case)
 
 
-def test_the_deciding_reads_come_from_a_checkpoint(result):
-    """The cycle that would collide reads its keys with a checkpoint already
-    in the log (checkpointInterval 2), as on a long-lived table."""
+def test_precondition_deciding_reads_come_from_a_checkpoint(result):
+    """Scenario precondition, not product behaviour: the cycle that would
+    collide reads its keys with a checkpoint already in the log
+    (checkpointInterval 2), as on a long-lived table, so the scenarios above
+    exercise the checkpoint read path."""
     reset = result["epoch_reset"]["log"][-1]
     assert reset["cycle"] == 1 and reset["checkpoints_before"] >= 1
     stale = [e for e in result["stale_cycle"]["log"] if e["epoch"] == 0 and e["cycle"] == 1][-1]

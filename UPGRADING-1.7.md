@@ -1,8 +1,10 @@
 # Upgrading to Lakebench 1.7
 
-Every change in 1.7 that can break a 1.6 config, command line, script or
-comparison, with what to do. The list is `docs/upgrading/breaking-1.7.yaml`;
-a unit test checks it against the code, this file and the CHANGELOG. The
+Guide: every change in 1.7 that can break a 1.6 config, command line, script or comparison, with what to do.
+
+The list is `docs/upgrading/breaking-1.7.yaml`;
+`python3.11 scripts/upgrading.py missing` prints any code change the list
+lacks. The
 full exit-code table is [docs/exit-codes.md](docs/exit-codes.md), and the
 renamed and refused commands are listed in
 [docs/cli-reference.md](docs/cli-reference.md#renamed-refused-and-deprecated-commands).
@@ -10,14 +12,11 @@ renamed and refused commands are listed in
 Before anything else: redeploy each deployment once with `lakebench deploy
 CONFIG` (see [run needs a 1.7 deploy](#run-needs-a-17-deploy)), and give
 every config a `name:` and a `recipe:`. `lakebench init --from OLD.yaml -o
-NEW.yaml` does both for a 1.6 config: it keeps the deployment's name (from
-the config, or the one 1.6 recorded in `.lakebench/state.json`) and its
-bucket names, writes the recipe the config resolves to, drops the removed
-keys with their fix text, moves plaintext secrets to `${VAR}` references,
-and writes nothing unless the new file loads to the same settings as the
-old one (docs/configuration.md, "Converting an older config"). A
-Customer 360 deployment whose pipeline ran under 1.6 keeps its silver and
-gold tables; its first 1.7 batch run rebuilds them, so pass
+NEW.yaml` does both for a 1.6 config, keeping its name and buckets
+([Converting a 1.6 config with `init --from`](#converting-a-16-config-with-init---from)).
+
+A Customer 360 deployment whose pipeline ran under 1.6 keeps its silver and
+gold tables. Its first 1.7 batch run rebuilds them, so pass
 `--force-rebuild` (the refusal names it), as any repeat run on a
 deployment needs.
 
@@ -88,7 +87,7 @@ The keys:
 
 `lakebench compare` exits 2 with any arguments: comparing runs is left to the reader, and each report states the corpus, components, result fingerprints and caps needed to judge a comparison.
 
-**What to do:** Run each configuration with `lakebench run`, then read the two reports side by side (`lakebench report CONFIG`); see Comparing Runs in docs/benchmarking.md.
+**What to do:** Run each configuration with `lakebench run`, then read the two reports side by side (`lakebench report CONFIG`); see [docs/benchmarking/comparing.md](docs/benchmarking/comparing.md).
 
 ### init refuses credential values
 
@@ -178,12 +177,6 @@ A declined or unanswerable confirmation exits 5 (was 1 or 3).
 
 **What to do:** Treat 6 as "safe to re-run"; check `kubectl get ns` before redeploying the name.
 
-### reproduce drift exits 14
-
-`reproduce` exits 14 (was 2) for metric drift or commit drift without `--allow-commit-drift`.
-
-**What to do:** Treat 14 as "requirement unmet".
-
 ### A datagen timeout exits 1
 
 A `run` whose datagen did not finish in time exits 1 (was 5); the record says "datagen timed out".
@@ -198,33 +191,33 @@ Customer 360 gold is never silently incremental and a multi-cycle run takes one 
 
 **What to do:** Re-run a Customer 360 baseline under 1.7 before comparing; `spark.lb.gold.strategy=incremental` is refused.
 
-### AML records are workload version aml-2
+### AML records are workload version aml-3
 
-AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carry workload version `aml-2` and do not compare with `aml-1`.
+1.7.0 capped AML alert evidence at 1,000 ids per W4 alert (workload version `aml-2`). 1.7.1 changes the W3 and W17 hub rule (workload version `aml-3`, rule version 1.1.0). Records at `aml-3` do not compare with `aml-1` or `aml-2`.
 
-**What to do:** Re-run an AML baseline under 1.7 before comparing; read the bounded-recall labels in the score.
+**What to do:** Re-run an AML baseline under 1.7.1 before comparing; read the bounded-recall labels in the score.
 
 ### System and access path are not execution conditions
 
-Experiment identity v2: the system and the query access path are architecture and system groups, no longer conditions that make a pair not like-for-like.
+The system and query access path moved to architecture/system groups and no longer affect like-for-like status.
 
-**What to do:** Re-run a baseline under 1.7 before comparing; when the architecture and the system both differ, no difference can be put down to either.
+**What to do:** Re-run baselines under 1.7 before comparing.
 
 ### Continuous pairs with different round counts are not like-for-like
 
-A continuous record without a stored round count reads it from its rounds; the stored C360 Trino vs Thrift pair (runs 011043-e338c5, 073533-9de9c9) is now not like-for-like.
+A pair with different round counts is not like-for-like.
 
-**What to do:** Compare continuous runs with the same number of in-stream rounds; no identity digest moves.
+**What to do:** Compare continuous runs with the same number of in-stream rounds.
 
 ### Perf gate removed
 
-`scripts/perf_gate.py`, its pinned configs (`benchmarks/perf/`) and the baseline store are gone.
+`scripts/perf_gate.py`, its pinned configs and the baseline store are gone.
 
-**What to do:** Read `lakebench report` for each run side by side; `lakebench reproduce` re-runs a record.
+**What to do:** Read `lakebench report` for each run side by side.
 
 ### Readers take the strictest verdict
 
-`report` reads the stricter of a record's stored verdict and the one recomputed from it: three stored AML batch records without a watchlist now read FAILED, and their Hive-versus-Polaris pair (011123-497f02, 011355-7ad7ad) is not comparable.
+`report` reads the stricter of a record's stored verdict and the one recomputed from it. A stored AML batch record without a watchlist now reads FAILED.
 
 **What to do:** Re-run a record that now reads FAILED; `report --json` shows `verdict_stored` and `verdict_recomputed` beside the `verdict` it heads with.
 
@@ -236,143 +229,151 @@ The Hive recipes now default to Spark 4.1.1. A config that does not set `images.
 
 **What to do:** Pin `images.spark: apache/spark:4.0.2-python3` to keep 4.0.2. A config that writes `delta.version: 4.0.0` keeps Spark 4.0.2.
 
-### The default datagen image is the v1.7 look image
+### The default datagen image is lb-datagen:5d7ce61a
 
-The default datagen image is `lb-datagen:2a36ae21`, pinned by digest: the v1.7 look image. A config that does not set `images.datagen` generates with it where v1.6 used `lb-datagen:1.6.0`; its output on the five byte-compare cases is byte-identical to 1.6.0, and the lineage table maps it to the 1.6.0 root.
+The default datagen image is `lb-datagen:5d7ce61a`, pinned by digest. 1.7.0 shipped `lb-datagen:2a36ae21`; v1.6 used `lb-datagen:1.6.0`. Neither older tag is in the registry. The new image has no lineage row, so its corpora get a corpus id of their own.
 
-**What to do:** Nothing for most configs. A config that pins `images.datagen: docker.io/sillidata/lb-datagen:1.6.0` keeps the 1.6 image, which writes no corpus markers and refuses a registered corpus; remove the pin to take the 1.7 image.
+**What to do:** Remove any `images.datagen` pin to an older tag.
+
+## Changes in 1.7.1
+
+### Continuous stages run back to back by default
+
+`bronze_trigger_interval`, `silver_trigger_interval` and `gold_refresh_interval` default to `0 seconds` (were 30 s, 60 s and 5 minutes). Freshness now runs from file landing.
+
+**What to do:** Set the intervals in the config to keep 1.7.0 timing. Do not compare continuous freshness with 1.7.0 records.
+
+### A bare "0" trigger interval is refused
+
+The three trigger intervals must be a whole number and a unit (`"0 seconds"`, `"5 minutes"`). A bare `"0"` is refused at load.
+
+**What to do:** Write `"0 seconds"`.
+
+### A set datagen.parallelism is used exactly
+
+The autosizer no longer cuts a configured `datagen.parallelism` to fit the cluster or raises it to the AML 8-pod floor; it warns. A continuous run that cannot place the pods is refused at preflight.
+
+**What to do:** Unset `datagen.parallelism` to let the autosizer size it, or set a count the cluster can run.
 
 ## Changed behaviour and defaults
 
 ### Removed keys are refused by commands that change data
 
-A removed config key is refused by the commands that change data; read and teardown commands drop it with a note.
+Commands that change data refuse a removed config key; read and teardown commands drop it with a note.
 
 **What to do:** Delete the keys the refusal names; `destroy`, `status` and `report` still load the old config.
 
 ### Deploy generates the Polaris client secret
 
-A new deployment generates its own Polaris client secret and database passwords; 1.6 used fixed values for every install.
+New deployments generate their own Polaris client secret and database passwords.
 
 **What to do:** Leave `architecture.catalog.polaris.client_secret` unset; an existing deployment keeps its stored secret.
 
 ### run needs a 1.7 deploy
 
-Jobs take every jar and wheel from the deployment's dependency server; `run` on a deployment made by 1.6 exits 4.
+`run` on a deployment made by 1.6 exits 4.
 
 **What to do:** Run `lakebench deploy CONFIG` once after upgrading.
 
 ### stop drains AML detection first
 
-`stop` on an AML deployment waits up to 300 s for gold-refresh to finish its detection tick before it deletes the jobs; a continuous AML run ends with the same drain (up to 1800 s) and a score job, and fails when the drain times out.
+`stop` on an AML deployment waits up to 300 s for gold-refresh to finish before deleting jobs.
 
 **What to do:** Allow for the wait. Ctrl-C ends it and `stop` still deletes the jobs; a run whose drain fails is a failed run, so rerun it.
 
 ### continuous AML runs end with time-travel reads
 
-A continuous AML run that passed its gates ends with one more Spark job after the score job: it re-reads every transactions snapshot the detection ticks recorded (two full scans of each that is still live, and one of the current snapshot), bounded by the per-job timeout; its check is reported beside the verdict and never fails the run.
+A continuous AML run adds one Spark job after the score job to re-read transactions snapshots.
 
 **What to do:** Allow for the extra job at the end of the run; it grows with the corpus and the number of live snapshots, and stops starting scans before the per-job timeout.
 
-### financial reproduce reruns the alert's rule on what gold read
-
-`financial reproduce` reproduces the alert from the snapshots its run's gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 2 when this host has no record of the run, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 after every reproduction it waited for (it could not reproduce), and 0 after a submit with `--no-wait`, which now refuses first when the record cannot drive a reproduction.
-
-**What to do:** Reproduce alerts of 1.7 AML batch runs; `--run RUN_ID` picks a run other than the deployment's latest.
-
 ### AML bronze-verify stops on a spent or unverifiable corpus
 
-An AML run over a corpus with no manifest (batch, continuous with `--skip-generate`, or a `run --stage` subset), or over a bucket that holds a corpus from a held-out or spent seed (such as 42), stops at bronze-verify with exit 2; 1.6 only warned about a missing manifest and refused a spent corpus only at reference scoring.
+An AML run stops at bronze-verify (exit 2) on a corpus with no manifest or from a held-out or spent seed.
 
 **What to do:** Regenerate the corpus with `lakebench run CONFIG --generate --regenerate` (the calibration seed when `datagen.seed` is unset).
 
 ### A protected AML corpus is refused outside its look
 
-`run`, `benchmark`, `query`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.
+Commands refuse an evaluation or robustness AML corpus (exit 2) before any cluster call.
 
 **What to do:** Use the calibration seed or another unregistered seed. A registered look runs only through `scripts/aml_gate.py --registered`, and its corpus is generated only by `lakebench generate --registered-corpus`.
 
 ### Executor overrides are bounded and counted
 
-Executor overrides take 1 to 28 (`driver_cores` 1 to 16), count in the capacity check, and keep a run out of release evidence.
+Executor overrides take 1 to 28 (`driver_cores` 1 to 16) and keep a run out of release evidence.
 
 **What to do:** Lower overrides above 28; leave counts unset for evidence runs.
 
 ### benchmark writes its own record
 
-`benchmark` saves a record of its own (`record_kind: benchmark`) instead of rewriting the run's; `query` writes no record.
+`benchmark` writes its own record (`record_kind: benchmark`); `query` writes no record.
 
 **What to do:** Read a benchmark by the run id it prints: `lakebench report RUN_ID`.
 
 ### run refuses arguments it used to ignore
 
-`run` exits 2 before any cluster call on a flag its mode does not use (the list is under `run` in docs/cli-reference.md).
+`run` exits 2 on a flag its mode does not use.
 
 **What to do:** Drop the flag the mode does not use.
 
-### reproduce never destroys before its run
-
-`reproduce` refuses (exit 3) an existing namespace or bucket instead of destroying it, and destroys only what it created.
-
-**What to do:** Run `lakebench destroy CONFIG` first to reuse a deployment's name.
-
 ### init writes a first-day config
 
-`init` writes a 12-line config: a new name per `init`, recipe `polaris-iceberg-spark-trino` (was Hive), scale 1 (was 10), `${VAR}` credentials.
+`init` writes a 12-line config: recipe `polaris-iceberg-spark-trino` (was Hive), scale 1 (was 10), `${VAR}` credentials.
 
 **What to do:** Set `--scale`, `--recipe` or `--name` on `init`; `--overwrite` is the new spelling of `--force`.
 
 ### A component that contradicts its recipe is refused
 
-A catalog, format or engine that contradicts `recipe:` is refused at load by the commands that change data; 1.6 let it win silently.
+A component contradicting `recipe:` is refused at load; 1.6 let it win silently.
 
 **What to do:** Remove the component keys, or change `recipe:` to the components you mean.
 
 ### VAR is substituted per value
 
-`${VAR}` is substituted per value, not in the file text: an environment value is no longer parsed as YAML.
+`${VAR}` is substituted per value, not in the file text.
 
 **What to do:** Quote references inside flow syntax (`["${A}", "${B}"]`) and close every `${VAR:-default}`.
 
 ### A config with no recipe is deprecated
 
-A config with no `recipe:`, or `recipe: default`, loads with a note; v1.8 requires `recipe:`.
+A config with no `recipe:` loads with a note; v1.8 requires it.
 
 **What to do:** Add the recipe the note names.
 
 ### Flat top-level keys are deprecated
 
-Flat top-level keys (`endpoint:`, `scale:` and the rest) load with a note naming the nested key.
+Flat top-level keys load with a note naming the nested key.
 
 **What to do:** Write the nested key the note names.
 
 ### Deploy never installs a shared component
 
-`deploy` only checks the scratch StorageClass, Spark Operator, Stackable and observability stack; `operator.install: true` is refused.
+`deploy` only checks shared components; `operator.install: true` is refused.
 
 **What to do:** A cluster admin runs `lakebench admin install --component all CONFIG` once per cluster.
 
 ### admin install never changes an installed component
 
-`admin install` installs only what is missing and refuses a version change (exit 2, or 3 with `--allow-version-change`).
+`admin install` installs only what is missing and refuses a version change.
 
 **What to do:** Change a shared component's version by hand, after reading what `--allow-version-change` lists.
 
 ### Watch-list edits pin the installed chart
 
-`deploy`, `run` and `destroy` edit the Spark Operator watch list on the installed chart, or refuse when it cannot be read.
+`deploy`, `run` and `destroy` edit the Spark Operator watch list on the installed chart.
 
 **What to do:** Re-run once `helm list` answers; a refused removal keeps the namespace.
 
 ### admin doctor exits 1 on a failed check
 
-`admin doctor` runs the prerequisite checks and exits 1 when one fails or cannot run.
+`admin doctor` exits 1 when a check fails or cannot run.
 
 **What to do:** Fix what it names, or ignore its code where you only wanted the report.
 
 ### A config needs a name to change data
 
-A config with no `name:` is refused by the commands that change data, and reads or tears down only a deployment it can prove is its own.
+A nameless config is refused by commands that change data.
 
 **What to do:** Add `name:` with the deployment's name; the refusal names it.
 
@@ -432,13 +433,26 @@ A new shared observability install gets a generated Grafana password; an existin
 
 ### A run passes only when its record shows it
 
-A PASSED verdict also needs rows in every layer, the expected AML rules (W1 giant-component or vertex-cap and W3 or W17 path-cap allowed), a batch scale ratio of at least 0.95 and no empty answer; `run` exits 1 when its record does not read PASSED.
+A PASSED verdict also needs:
 
-**What to do:** Read `verdict.reasons` and `verdict.gates` in `metrics.json`; a run that exited 0 under 1.6 with an empty layer or a skipped rule now exits 1 and says which.
+- rows in every layer;
+- the expected AML rules (W1 giant-component or vertex-cap and W3 or W17 path-cap allowed);
+- a batch scale ratio of at least 0.95;
+- no empty answer.
+
+`run` exits 1 when its record does not read PASSED.
+
+**What to do:** Read `verdict.reasons` and `verdict.gates` in `metrics.json`. A run that exited 0 under 1.6 with an empty layer or a skipped rule now exits 1 and says which.
 
 ### The datagen generator refuses arguments it cannot read
 
-The 1.7 datagen image (pinned before the release) exits 2 on an unknown, repeated, valueless or unparseable flag, a stray argument, a non-finite float or a Customer 360 `--cycle` without `--cycles`; 1.6 dropped them or used a default.
+The 1.7 datagen image (pinned before the release) exits 2 on:
+
+- an unknown, repeated, valueless or unparseable flag;
+- a stray argument or a non-finite float;
+- a Customer 360 `--cycle` without `--cycles`.
+
+1.6 dropped them or used a default.
 
 **What to do:** Lakebench's own Jobs pass valid arguments; correct scripts and manual Jobs that call the image directly (`--node-id abc` used to run as node 0).
 
@@ -450,12 +464,66 @@ Building the datagen image needs `--build-arg LB_BUILD_COMMIT=<commit>`; a plain
 
 ### Datagen pods honour path style, TLS and CA settings
 
-Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always); a value they cannot read exits 2, and with `ca_cert` set datagen trusts only the CAs in that file.
+Datagen pods on the 1.7 image honour `platform.storage.s3.path_style`, `verify_ssl` and `ca_cert`, which 1.6 ignored (path-style, plain HTTP and the system CAs always). A value they cannot read exits 2. With `ca_cert` set, datagen trusts only the CAs in that file.
 
 **What to do:** Keep `path_style: true` for FlashBlade and MinIO, and give `ca_cert` a file the pod can load for an HTTPS endpoint with a private CA; leave `ca_cert` unset for an endpoint a public CA signs.
 
 ### Multi-cycle runs and reused corpora check a corpus series marker
 
-A run that reuses bronze exits 3 when its corpus series marker is unfinished or made for another cycle count, window or generation, or is missing on a multi-cycle config or over later cycles' files (4 when bronze cannot be read); a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`; `generate` or `run --generate-only` on a multi-cycle config and `run --skip-generate` on a multi-cycle AML config exit 2.
+1.7 validates the corpus series marker on multi-cycle and reused-bronze runs. A mismatch or missing marker exits 3; a non-empty bucket needs `--regenerate`.
 
-**What to do:** Keep a finished multi-cycle corpus with `run --skip-generate`; otherwise let `run` generate it, with `--regenerate` (single-cycle: `--generate --regenerate`) on a bucket this deployment created, after `lakebench admin reclaim-bucket` on any other. An AML multi-cycle run generates every cycle.
+**What to do:** Run `lakebench run CONFIG --regenerate` on a non-empty bucket this deployment created. Keep a finished multi-cycle corpus with `--skip-generate`. See [docs/running-pipelines.md](docs/running-pipelines.md).
+
+## Nameless configs and deploy state
+
+Every config needs a `name:` and a `recipe:`. Commands that change data
+refuse a nameless config; teardown commands refuse one they cannot prove
+owns the deployment. Use `lakebench init --from OLD.yaml -o NEW.yaml` to
+convert a 1.6 config: it keeps the deployment's name and buckets, moves
+old spellings to current keys, drops removed keys, and replaces plaintext
+credentials with `${VAR}` references.
+
+A 1.6 config before conversion:
+
+```yaml
+# 1.6 (nameless, flat keys)
+endpoint: http://10.0.1.50:80
+scale: 10
+architecture:
+  catalog: polaris
+  table_format: iceberg
+  pipeline: spark
+  query_engine: trino
+```
+
+After `init --from`:
+
+```yaml
+# 1.7 (named, nested, recipe)
+name: my-deployment
+recipe: polaris-iceberg-spark-trino
+workload:
+  schema: customer360
+  scale: 10
+platform:
+  storage:
+    s3:
+      endpoint: http://10.0.1.50:80
+      access_key: ${LAKEBENCH_S3_ACCESS_KEY}
+      secret_key: ${LAKEBENCH_S3_SECRET_KEY}
+```
+
+Deploy records a per-deploy nonce in `.lakebench/<name>.json` beside the
+config. A copied directory, or one deployed from another host, is refused
+(exit 3). Use `python -m lakebench.config.deploy_state relocate CONFIG
+NEWDIR` to move a deployment's directory.
+
+See [docs/configuration.md](docs/configuration.md#minimum-viable-config)
+for which commands require `name:` and for edge cases.
+
+## spark.conf defaults before 1.7
+
+Before 1.7 the job defaults (`SPARK_CONF_DEFAULTS`) were the schema default
+of `spark.conf`, so setting any key there dropped all of them. They now
+stay. A config that still carries the 1.6 default map loads with a note for
+the Lakebench-set keys in it (they were overwritten then too).

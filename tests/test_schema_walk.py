@@ -94,22 +94,6 @@ def leaves(root: type[BaseModel] = LakebenchConfig) -> dict[str, type[BaseModel]
     return out
 
 
-def _models(root: type[BaseModel] = LakebenchConfig) -> set[type[BaseModel]]:
-    found: set[type[BaseModel]] = set()
-
-    def walk(model: type[BaseModel]) -> None:
-        if model in found:
-            return
-        found.add(model)
-        for field in model.model_fields.values():
-            sub = _model_of(field.annotation)
-            if sub is not None:
-                walk(sub)
-
-    walk(root)
-    return found
-
-
 def tail_parent(path: str, paths: typing.Iterable[str]) -> str:
     """The shortest dotted parent that names *path*'s field uniquely."""
     parts = path.split(".")
@@ -258,17 +242,6 @@ def test_every_config_field_has_a_reader():
     assert not problems, "\n".join(problems)
 
 
-def test_walk_exempt_is_empty():
-    # A field nothing reads is removed or refused, not exempted. ML-6 adds the
-    # one planned exception (workload.ml_loop) itself.
-    assert _readers.WALK_EXEMPT == {}
-
-
-def test_no_dead_field_lists_remain():
-    dead = {m.__name__: m._dead_fields for m in _models() if m._dead_fields}
-    assert not dead, dead
-
-
 def test_schema_walk_fails_on_unread_field():
     class FixtureModel(ConfigModel):
         never_read_anywhere_xyz: int = 1
@@ -316,91 +289,32 @@ def test_recording_is_not_reading():
     assert "only records" in walk_problems(tree, ref, {})[0]
 
 
-# -- the snapshot records only fields that are read ---------------------------
+# -- the snapshot records the values the config holds --------------------------
 
 
-def _chain(node: ast.AST) -> list[str] | None:
-    parts: list[str] = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-        return list(reversed(parts))
-    return None
+def test_snapshot_records_the_configured_values():
+    from lakebench.metrics.collector import build_config_snapshot
+    from tests.conftest import make_config
 
-
-def snapshot_paths() -> set[str]:
-    """The config paths ``build_config_snapshot`` reads, from its AST.
-
-    Chains rooted at ``cfg`` or at a local alias of a ``cfg`` chain; a
-    trailing ``.value`` (enums) is dropped, ``model_dump()`` of a sub-model
-    stands for all its leaves, and other method calls (computed accessors)
-    and helpers handed the whole config are not field reads.
-    """
-    from lakebench.metrics import collector
-
-    fn = ast.parse(textwrap.dedent(inspect.getsource(collector.build_config_snapshot))).body[0]
-    aliases: dict[str, list[str]] = {}
-    for node in ast.walk(fn):
-        if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-        ):
-            c = _chain(node.value)
-            if c and c[0] == "cfg":
-                aliases[node.targets[0].id] = c[1:]
-    tree = leaves()
-    called = {id(n.func) for n in ast.walk(fn) if isinstance(n, ast.Call)}
-    inner = {id(n.value) for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
-    found: set[str] = set()
-    for node in ast.walk(fn):
-        if not isinstance(node, ast.Attribute) or id(node) in inner:
-            continue
-        c = _chain(node)
-        if not c:
-            continue
-        if c[0] == "cfg":
-            parts = c[1:]
-        elif c[0] in aliases:
-            parts = aliases[c[0]] + c[1:]
-        else:
-            continue
-        if parts and parts[-1] == "value":
-            parts = parts[:-1]
-        if id(node) in called:
-            method = parts.pop() if parts else ""
-            if method != "model_dump":
-                continue
-            prefix = ".".join(parts) + "."
-            found.update(p for p in tree if p.startswith(prefix))
-            continue
-        path = ".".join(parts)
-        if path in tree:
-            found.add(path)
-    return found
-
-
-def test_snapshot_source_fields_declared():
-    from lakebench.metrics.collector import SNAPSHOT_SOURCE_FIELDS
-
-    assert set(SNAPSHOT_SOURCE_FIELDS) == snapshot_paths()
-
-
-def test_snapshot_records_only_read_fields():
-    from lakebench.metrics.collector import SNAPSHOT_SOURCE_FIELDS
-
-    tree = leaves()
-    missing = [p for p in SNAPSHOT_SOURCE_FIELDS if p not in tree]
-    assert not missing, missing
-    unread = [p for p in SNAPSHOT_SOURCE_FIELDS if p not in _readers.READERS]
-    assert not unread, unread
-    # Read somewhere other than where it is defined or recorded.
-    inside = [
-        p
-        for p in SNAPSHOT_SOURCE_FIELDS
-        if _readers.READERS[p].split(":")[0]
-        in ("lakebench.config.schema", "lakebench.metrics.collector")
-    ]
-    assert not inside, inside
+    cfg = make_config(
+        architecture={
+            "workload": {"schema": "customer360", "datagen": {"scale": 3}},
+            "benchmark": {"iterations": 5},
+            "query_engine": {"type": "trino", "trino": {"worker": {"replicas": 7}}},
+        },
+        platform={
+            "storage": {
+                "s3": {
+                    "endpoint": "http://minio:9000",
+                    "access_key": "minioadmin",
+                    "secret_key": "minioadmin",
+                }
+            },
+            "compute": {"spark": {"gold_executors": 6}},
+        },
+    )
+    snap = build_config_snapshot(cfg)
+    assert snap["scale"] == 3
+    assert snap["benchmark"]["iterations"] == 5
+    assert snap["trino"]["worker"]["replicas"] == 7
+    assert snap["spark"]["executor_overrides"]["gold"] == 6

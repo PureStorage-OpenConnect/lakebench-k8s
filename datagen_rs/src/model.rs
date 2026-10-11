@@ -28,7 +28,7 @@ use crate::world as W;
 /// pep_match instances) and the answer keys moved out of the party zone
 /// (no sanctions_status, pep_status or initial_risk_score; crr ignores PEP).
 /// A pre-freeze corpus carries 0.2 and must not pass as current.
-pub const MODEL_VERSION: &str = "datagen-v2-rs-0.3";
+pub const MODEL_VERSION: &str = "datagen-v2-rs-0.4";
 
 /// The static per-entity world. It holds only the sampler
 /// inputs; every attribute column is recomputed on demand (see the methods
@@ -158,8 +158,8 @@ impl World {
         }
         let iid = id as u64;
         match self.ty(id) {
-            W::TYPE_PERSON => R::person_name(iid, self.seed),
-            W::TYPE_COMPANY => R::company_name(iid, self.country(id), self.seed),
+            W::TYPE_PERSON => R::person_name(iid, self.seed, self.population),
+            W::TYPE_COMPANY => R::company_name(iid, self.country(id), self.seed, self.population),
             _ => R::fi_name(iid, self.seed),
         }
     }

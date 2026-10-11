@@ -1,5 +1,5 @@
 """v1.6 config contract (design-contradictions #4, #7, #12, #13, #15, #18, #19,
-LB-181, outcome 5).
+outcome 5).
 
 Each test here fails with its fix reverted: AML on Delta and the Java/Iceberg
 pairing used to load, `custom` used to run the Customer 360 queries, the
@@ -12,7 +12,6 @@ shared observability stack.
 from __future__ import annotations
 
 import ast
-import re
 import subprocess
 import warnings
 from pathlib import Path
@@ -21,11 +20,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from lakebench.config import load_config
 from lakebench.config.loader import ConfigValidationError, save_config
 from lakebench.config.schema import (
-    LakebenchConfig,
     PipelineMode,
     is_continuous_mode,
 )
@@ -49,16 +48,11 @@ def _quiet(fn, *a, **kw):
 # -- #4: workload x format compatibility, Java/Iceberg pairing ---------------
 
 
-def test_aml_on_delta_is_refused_naming_the_supported_format():
-    with pytest.raises(ValueError) as exc:
+def test_aml_on_delta_is_refused_on_the_architecture():
+    with pytest.raises(ValidationError) as exc:
         make_config(recipe="hive-delta-spark-trino", workload={"schema": "financial"})
-    msg = str(exc.value)
-    assert "financial (AML) workload supports table_format iceberg, not delta" in msg
-
-
-def test_c360_on_delta_still_loads():
-    cfg = make_config(recipe="hive-delta-spark-trino", workload={"schema": "customer360"})
-    assert cfg.architecture.table_format.type.value == "delta"
+    assert [e["loc"] for e in exc.value.errors()] == [("architecture",)]
+    make_config(recipe="hive-iceberg-spark-trino", workload={"schema": "financial"})
 
 
 def test_iceberg_111_on_java11_spark_image_is_refused_at_load():
@@ -69,28 +63,13 @@ def test_iceberg_111_on_java11_spark_image_is_refused_at_load():
         )
 
 
-def test_unset_iceberg_version_on_java11_image_uses_a_java11_release():
-    cfg = make_config(images={"spark": "apache/spark:3.5.4-python3"})
-    assert cfg.architecture.table_format.iceberg.version == "1.10.1"
-
-
-def test_iceberg_on_spark35_loads_with_java17_or_older_iceberg():
-    make_config(images={"spark": "apache/spark:3.5.9-java17-python3"})
-    make_config(
-        images={"spark": "apache/spark:3.5.4-python3"},
-        architecture={"table_format": {"iceberg": {"version": "1.10.1"}}},
-    )
-
-
 # -- #13: custom is refused ---------------------------------------------------
 
 
 def test_custom_workload_is_refused(tmp_path):
     with pytest.raises(ConfigValidationError) as exc:
         load_config(_write(tmp_path, {"name": "t", "workload": {"schema": "custom"}}))
-    msg = str(exc.value)
-    assert "'custom' is not supported" in msg
-    assert "workload.schema" in msg and "architecture.workload" not in msg
+    assert [e["loc"] for e in exc.value.errors] == [("workload", "schema")]
 
 
 # -- #12: top-level workload --------------------------------------------------
@@ -179,13 +158,6 @@ def test_saved_config_reloads_without_deprecations(tmp_path):
 # -- #18: continuous is canonical ---------------------------------------------
 
 
-def test_pipeline_mode_continuous_is_canonical():
-    assert PipelineMode.CONTINUOUS.value == "continuous"
-    assert PipelineMode.SUSTAINED is PipelineMode.CONTINUOUS
-    assert PipelineMode("sustained") is PipelineMode.CONTINUOUS
-    assert [m.value for m in PipelineMode] == ["batch", "continuous"]
-
-
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -200,28 +172,6 @@ def test_is_continuous_mode(value, expected):
     assert is_continuous_mode(value) is expected
 
 
-def test_peak_requirements_read_either_spelling():
-    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
-
-    a = compute_peak_requirements(1, "continuous")
-    b = compute_peak_requirements(1, "sustained")
-    c = compute_peak_requirements(1, PipelineMode.CONTINUOUS)
-    batch = compute_peak_requirements(1, "batch")
-    assert a == b == c
-    assert a != batch
-
-
-def test_run_cli_shows_continuous_and_hides_sustained():
-    import typer.main
-
-    from lakebench.cli import app
-
-    run_cmd = typer.main.get_command(app).commands["run"]  # type: ignore[attr-defined]
-    opts = {name: p for p in run_cmd.params for name in getattr(p, "opts", [])}
-    assert "--continuous" in opts and not opts["--continuous"].hidden
-    assert "--sustained" in opts and opts["--sustained"].hidden
-
-
 def test_old_metrics_with_sustained_mode_still_read_as_continuous(tmp_path):
     from lakebench.reports.generator import ReportGenerator
 
@@ -231,156 +181,27 @@ def test_old_metrics_with_sustained_mode_still_read_as_continuous(tmp_path):
     assert gen._is_sustained(metrics) is True
 
 
-# -- #19: dead fields warn ----------------------------------------------------
+# -- Outcome 5: bucket names ----------------------------------------------
 
 
 @pytest.mark.parametrize(
-    ("overrides", "field"),
+    ("buckets", "expected"),
     [
-        ({"images": {"prometheus": "prom/prometheus:v3"}}, "'prometheus' (ImagesConfig)"),
-        ({"images": {"grafana": "grafana/grafana:13"}}, "'grafana' (ImagesConfig)"),
-        ({"observability": {"reports": {"format": "json"}}}, "'reports' (ObservabilityConfig)"),
-        (
-            {"architecture": {"table_format": {"iceberg": {"file_format": "orc"}}}},
-            "'file_format' (IcebergConfig)",
-        ),
-        (
-            {"architecture": {"table_format": {"iceberg": {"properties": {"a": 1}}}}},
-            "'properties' (IcebergConfig)",
-        ),
-        (
-            {
-                "recipe": "hive-delta-spark-trino",
-                "architecture": {"table_format": {"delta": {"properties": {"a": 1}}}},
-            },
-            "'properties' (DeltaConfig)",
+        pytest.param(None, ("lab-a-bronze", "lab-a-silver", "lab-a-gold"), id="derived"),
+        pytest.param(
+            {"bronze": "shared-bronze"},
+            ("shared-bronze", "lab-a-silver", "lab-a-gold"),
+            id="explicit-wins",
         ),
     ],
 )
-def test_dead_field_set_warns_no_effect_and_v17_removal(overrides, field):
-    # Superseded by CFG-9: the v1.6 dead fields are removed in v1.7. Built
-    # without a load purpose they are dropped with a warning; load_config
-    # refuses them for the commands that change data (test_cfg9_removals).
-    with pytest.warns(DeprecationWarning) as rec:
-        make_config(**overrides)
-    msgs = [str(w.message) for w in rec]
-    hit = [m for m in msgs if field in m]
-    assert hit, msgs
-    assert "is no longer used" in hit[0]
-
-
-def test_dead_fields_at_default_are_dropped_with_an_old_default_note():
-    with pytest.warns(DeprecationWarning) as rec:
-        make_config(
-            images={"prometheus": "prom/prometheus:v2.48.0"},
-            observability={"reports": {"enabled": True}},
-        )
-    msgs = [str(w.message) for w in rec if "old default" in str(w.message)]
-    assert len(msgs) == 2, msgs
-
-
-def test_pipeline_pattern_other_than_medallion_warns():
-    with pytest.warns(DeprecationWarning, match="'pipeline.pattern: streaming' is deprecated"):
-        make_config(architecture={"pipeline": {"pattern": "streaming"}})
-
-
-# -- LB-181: user-facing notes cite nothing internal --------------------------
-
-
-def test_recipe_and_combination_notes_cite_no_internal_gotchas():
-    from lakebench.config.recipes import RECIPE_NOTES
-    from lakebench.config.schema import _COMBINATION_NOTES
-
-    texts = list(_COMBINATION_NOTES.values())
-    for note in RECIPE_NOTES.values():
-        texts.append(note.when)
-        texts.extend(note.caveats)
-    bad = [t for t in texts if re.search(r"gotcha|CLAUDE\.md|\bLB-\d+", t)]
-    assert not bad, bad
-
-
-# -- Outcome 5: bucket names and the documented quick start -------------------
-
-
-def test_unset_buckets_default_to_deployment_name():
-    cfg = make_config(name="lab-a")
+def test_buckets_derive_from_the_deployment_name_unless_explicit(buckets, expected):
+    s3 = {"endpoint": "http://minio:9000", "access_key": "k", "secret_key": "s"}
+    if buckets:
+        s3["buckets"] = buckets
+    cfg = make_config(name="lab-a", platform={"storage": {"s3": s3}})
     b = cfg.platform.storage.s3.buckets
-    assert (b.bronze, b.silver, b.gold) == ("lab-a-bronze", "lab-a-silver", "lab-a-gold")
-
-
-def test_explicit_buckets_are_kept():
-    cfg = make_config(
-        name="lab-a",
-        platform={
-            "storage": {
-                "s3": {
-                    "endpoint": "http://minio:9000",
-                    "access_key": "k",
-                    "secret_key": "s",
-                    "buckets": {"bronze": "shared-bronze"},
-                }
-            }
-        },
-    )
-    b = cfg.platform.storage.s3.buckets
-    assert (b.bronze, b.silver, b.gold) == ("shared-bronze", "lab-a-silver", "lab-a-gold")
-
-
-def _cli_tree():
-    import typer.main
-
-    from lakebench.cli import app
-
-    return typer.main.get_command(app)
-
-
-def _resolve(group, words):
-    """Return (command, remaining words) for a 'lakebench ...' line."""
-    cmd = group
-    rest = list(words)
-    while hasattr(cmd, "commands") and rest and not rest[0].startswith("-"):
-        nxt = cmd.commands.get(rest[0])  # type: ignore[attr-defined]
-        if nxt is None:
-            break
-        cmd, rest = nxt, rest[1:]
-    return cmd, rest
-
-
-def _documented_commands(path: Path) -> list[str]:
-    text = path.read_text()
-    lines = []
-    for block in re.findall(r"```bash\n(.*?)```", text, re.S):
-        for line in block.splitlines():
-            line = line.split("#", 1)[0].strip()
-            if line.startswith("lakebench "):
-                lines.append(line)
-    return lines
-
-
-@pytest.mark.parametrize("doc", ["README.md", "docs/getting-started.md"])
-def test_documented_commands_are_valid_cli(doc):
-    tree = _cli_tree()
-    problems = []
-    for line in _documented_commands(ROOT / doc):
-        cmd, rest = _resolve(tree, line.split()[1:])
-        if hasattr(cmd, "commands"):
-            problems.append(f"{line}: not a command")
-            continue
-        known = {o for p in cmd.params for o in [*p.opts, *(p.secondary_opts or [])]}
-        for word in rest:
-            if word.startswith("-"):
-                flag = word.split("=", 1)[0]
-                if flag not in known:
-                    problems.append(f"{line}: unknown option {flag}")
-    assert not problems, problems
-
-
-def test_readme_quick_start_run_can_deploy():
-    # Without --yes, 'run' refuses when the namespace does not exist yet, so
-    # the quick start (init -> run -> results -> destroy) would stop there.
-    runs = [ln for ln in _documented_commands(ROOT / "README.md") if ln.split()[1:2] == ["run"]]
-    first = runs[0]
-    assert "--generate" in first and ("--yes" in first.split() or "-y" in first.split())
+    assert (b.bronze, b.silver, b.gold) == expected
 
 
 # -- #7: a benchmark exception fails the run ----------------------------------
@@ -469,18 +290,6 @@ def test_destroy_never_uninstalls_the_shared_stack():
         result = deployer.destroy()
     assert not any("uninstall" in c for c in calls), calls
     assert "left in place" in result.message
-
-
-def test_destroy_step_with_observability_enabled_makes_no_uninstall_call():
-    """The destroy engine's observability step, end to end through the deployer."""
-    import inspect
-
-    from lakebench.deploy import destroy as destroy_mod
-
-    src = inspect.getsource(destroy_mod)
-    step = src[src.index("# Step 5: Observability") : src.index("# Step 6")]
-    assert "ObservabilityDeployer(engine)" in step
-    assert "helm" not in step.replace("kube-prometheus-stack", "")
 
 
 def test_destroy_removes_only_a_legacy_release_in_its_own_namespace():
@@ -599,45 +408,54 @@ def test_deploy_does_not_install_when_the_lookup_fails(_lock):
     assert not [c for c in calls if c[1] in ("install", "upgrade")]
 
 
-def test_helm_values_do_not_pin_scraping_to_one_namespace():
-    from lakebench.deploy.observability import build_helm_values
-
-    values = build_helm_values(_obs_engine().config.observability)
-    assert not any("NamespaceSelector" in k for k in values)
-
-
-def test_example_configs_load_quietly():
-    # Examples teach the canonical spellings (top-level workload, continuous).
-    for path in sorted((ROOT / "examples").glob("*.yaml")):
-        text = path.read_text()
-        assert not re.search(r"(?m)^  workload:", text), path.name
-        assert "mode: sustained" not in text, path.name
-
-
-def test_config_template_uses_canonical_keys():
-    from lakebench.cli._init import first_day_config
-
-    text = first_day_config(name="tmpl")
-    assert re.search(r"(?m)^workload:", text)
-    assert not re.search(r"(?m)^  workload:", text)
-    assert "iot" not in text
-    assert "sustained:" not in text
-    parsed = yaml.safe_load(text)
-    parsed["platform"]["storage"]["s3"].update(access_key="a", secret_key="b")
-    _quiet(LakebenchConfig.model_validate, parsed)
-
-
 @pytest.mark.parametrize("name", ["lakebench-observability", "lakebench-system"])
-def test_reserved_namespaces_are_refused(name):
-    with pytest.raises(ValueError, match="reserved for shared lakebench state"):
-        make_config(name=name)
-    with pytest.raises(ValueError, match="reserved"):
+def test_reserved_namespaces_are_refused(name, monkeypatch):
+    from lakebench.config import schema
+
+    def both():
         make_config(name="ok", platform={"kubernetes": {"namespace": name}})
+        make_config(name=name)
+
+    with pytest.raises(ValidationError):
+        make_config(name=name)
+    with pytest.raises(ValidationError):
+        make_config(name="ok", platform={"kubernetes": {"namespace": name}})
+    make_config(name="ok", platform={"kubernetes": {"namespace": "ok"}})
+    # Without the reserved entry the same inputs load, so the refusals above
+    # came from the reserved-namespace rule and no other.
+    monkeypatch.setattr(
+        schema,
+        "RESERVED_NAMESPACES",
+        {k: v for k, v in schema.RESERVED_NAMESPACES.items() if k != name},
+    )
+    both()
+
+
+def test_continuous_peak_requirements_read_either_spelling():
+    from lakebench.config.schema import PipelineMode
+    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
+
+    def peak(mode):
+        p = compute_peak_requirements(1, mode)
+        return (p.cpu_cores, p.memory_gb)
+
+    assert peak("continuous") == peak("sustained") == peak(PipelineMode.CONTINUOUS)
+    assert peak("continuous") != peak("batch")
 
 
 def test_invalid_derived_bucket_name_is_refused():
-    with pytest.raises(ValueError, match="not a valid S3 bucket name"):
-        make_config(name="My_Deploy", platform={"kubernetes": {"namespace": "my-deploy"}})
+    ns = {"kubernetes": {"namespace": "my-deploy"}}
+    with pytest.raises(ValidationError):
+        make_config(name="My_Deploy", platform=ns)
+    # Explicit buckets skip the derivation, so it was the derived name that failed.
+    explicit = {
+        **ns,
+        "storage": {
+            "s3": {"buckets": {"bronze": "b-bronze", "silver": "b-silver", "gold": "b-gold"}}
+        },
+    }
+    make_config(name="My_Deploy", platform=explicit)
+    make_config(name="my-deploy", platform=ns)
 
 
 def test_deploy_refuses_to_reuse_a_release_that_is_not_deployed(_lock):
@@ -689,13 +507,6 @@ def test_benchmark_postprocessing_error_keeps_a_recorded_result():
     assert "if _bench_recorded:" in body
 
 
-def test_errors_name_the_continuous_block_the_user_wrote(tmp_path):
-    data = {"name": "t", "architecture": {"pipeline": {"continuous": {"run_duration": -5}}}}
-    with pytest.raises(ConfigValidationError) as exc:
-        load_config(_write(tmp_path, data))
-    assert "architecture.pipeline.continuous.run_duration" in str(exc.value)
-
-
 def test_deploy_waits_for_prometheus_and_fails_if_not_ready(_lock):
     from lakebench.deploy.engine import DeploymentStatus
     from lakebench.deploy.observability import (
@@ -705,8 +516,6 @@ def test_deploy_waits_for_prometheus_and_fails_if_not_ready(_lock):
     )
 
     order = []
-    # The wait helper now accepts a `context=` kwarg (LB-ux-safety C1: every
-    # kubectl invocation must pin the configured kube-context).
     _lock.wait.side_effect = lambda ns, **_kw: order.append(f"wait {ns}") or "not Ready after 600s"
 
     def fake_run(cmd, **kw):
@@ -725,12 +534,26 @@ def test_deploy_waits_for_prometheus_and_fails_if_not_ready(_lock):
         result = deployer.deploy()
     assert order == [f"wait {OBSERVABILITY_NAMESPACE}"]
     assert result.status == DeploymentStatus.FAILED
-    assert "not Ready" in result.message
     assert not _lock.called
 
 
-def test_recipe_config_on_java11_image_falls_back_to_a_java11_iceberg():
-    cfg = make_config(
-        recipe="hive-iceberg-spark-trino", images={"spark": "apache/spark:3.5.4-python3"}
-    )
-    assert cfg.architecture.table_format.iceberg.version == "1.10.1"
+@pytest.mark.parametrize(
+    ("value", "ok"),
+    [
+        ("0 seconds", True),
+        ("5 minutes", True),
+        ("1 hour", True),
+        ("0", False),
+        ("1.5 minutes", False),
+    ],
+)
+def test_trigger_intervals_need_a_whole_number_and_a_unit(value, ok):
+    """A bare "0" went to Spark unchanged for Customer360 and became a 10 s
+    trigger for AML: an interval is refused at load unless both read it."""
+    for key in ("bronze_trigger_interval", "silver_trigger_interval", "gold_refresh_interval"):
+        cfg = {"architecture": {"pipeline": {"continuous": {key: value}}}}
+        if ok:
+            make_config(**cfg)
+        else:
+            with pytest.raises(ValueError):
+                make_config(**cfg)

@@ -94,7 +94,8 @@ const POSITIONS: [&str; 7] = [
     "ambassador",
 ];
 
-/// Whole-token romanisation alternatives for names in the world pools.
+/// Whole-token romanisation alternatives. Surnames are synthetic, so only the
+/// given-name entries match a generated name.
 const TRANSLIT: [(&str, &str); 30] = [
     ("Mohammed", "Muhammad"),
     ("Ahmed", "Ahmad"),
@@ -243,7 +244,8 @@ fn pick<'a>(rng: &mut Rng, pool: &'a [&'a str]) -> &'a str {
     pool[rng.below(pool.len() as u64) as usize]
 }
 
-fn person_name(rng: &mut Rng) -> (String, String, String) {
+/// The surname pool grows with `population`.
+fn person_name(rng: &mut Rng, population: usize) -> (String, String, String) {
     let first = pick(rng, R::FIRST);
     let mut middle = pick(rng, R::FIRST);
     for _ in 0..8 {
@@ -252,26 +254,28 @@ fn person_name(rng: &mut Rng) -> (String, String, String) {
         }
         middle = pick(rng, R::FIRST);
     }
-    let last = pick(rng, R::LAST);
-    (first.to_string(), middle.to_string(), last.to_string())
+    let last = R::surname(rng.below(R::surname_pool(population)));
+    (first.to_string(), middle.to_string(), last)
 }
 
-fn company_name(rng: &mut Rng, cc: &str, id: u64) -> (String, String, String, &'static str) {
-    let h1 = pick(rng, R::CORP_HEAD);
-    let mut h2 = pick(rng, R::CORP_HEAD);
+/// The company-head pool grows with `population`.
+fn company_name(
+    rng: &mut Rng,
+    cc: &str,
+    id: u64,
+    population: usize,
+) -> (String, String, String, &'static str) {
+    let pool = R::corp_head_pool(population);
+    let h1 = R::corp_head(rng.below(pool));
+    let mut h2 = R::corp_head(rng.below(pool));
     for _ in 0..8 {
         if h2 != h1 {
             break;
         }
-        h2 = pick(rng, R::CORP_HEAD);
+        h2 = R::corp_head(rng.below(pool));
     }
     let d = pick(rng, R::CORP_DESC);
-    (
-        h1.to_string(),
-        h2.to_string(),
-        d.to_string(),
-        R::legal_suffix(cc, id),
-    )
+    (h1, h2, d.to_string(), R::legal_suffix(cc, id))
 }
 
 /// One edit inside a token of four or more letters: substitute, transpose,
@@ -370,7 +374,7 @@ pub fn build(population: usize, seed: i64, start_us: i64, end_us: i64) -> Screen
         let country = W::HOME_CODES[W::home_country_idx(k as u64 + 1, seed ^ 0x5C4E)];
         let is_person = list_type == "pep" || rng.unit() < 0.7;
         let (name, aliases) = if is_person {
-            let (f, m, l) = person_name(&mut rng);
+            let (f, m, l) = person_name(&mut rng, population);
             let name = format!("{f} {m} {l}");
             let mut aliases = Vec::new();
             if list_type == "sanctions" && rng.unit() < 0.4 {
@@ -380,7 +384,7 @@ pub fn build(population: usize, seed: i64, start_us: i64, end_us: i64) -> Screen
             }
             (name, aliases)
         } else {
-            let (h1, h2, d, sfx) = company_name(&mut rng, country, first + k as u64);
+            let (h1, h2, d, sfx) = company_name(&mut rng, country, first + k as u64, population);
             let name = format!("{h1} {h2} {d} {sfx}");
             let mut aliases = Vec::new();
             if rng.unit() < 0.3 {
@@ -484,10 +488,10 @@ pub fn build(population: usize, seed: i64, start_us: i64, end_us: i64) -> Screen
         let mut rng = stream(seed, 6, k as u64);
         let country = W::HOME_CODES[W::home_country_idx(next, seed ^ 0x5C4E)];
         let name = if rng.unit() < 0.7 {
-            let (f, m, l) = person_name(&mut rng);
+            let (f, m, l) = person_name(&mut rng, population);
             format!("{f} {m} {l}")
         } else {
-            let (h1, h2, d, sfx) = company_name(&mut rng, country, next);
+            let (h1, h2, d, sfx) = company_name(&mut rng, country, next, population);
             format!("{h1} {h2} {d} {sfx}")
         };
         background.push(account(next, name, "background", country, seed));

@@ -23,7 +23,7 @@ The Financial set adds an ``investigator`` class (IQ1-IQ4, GOALS P10 stage
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
 from lakebench.config.schema import WorkloadSchema
 
@@ -32,12 +32,8 @@ from lakebench.config.schema import WorkloadSchema
 class BenchmarkQuery:
     """A single benchmark query definition.
 
-    ``approx_columns`` maps a 0-based output column computed from a DOUBLE
-    aggregate to the quantum its values are compared at in the result
-    fingerprint (benchmark.fingerprint): summation order moves the digits a
-    ``ROUND(.., 2)`` keeps, so those columns cannot match exactly across
-    engines. ``allow_empty`` marks a query whose result may legitimately be
-    empty; any other query that returns no rows fails the benchmark gate.
+    ``allow_empty`` marks a query whose result may legitimately be empty;
+    any other query that returns no rows fails the benchmark gate.
 
     Every ``ORDER BY`` feeding a ``LIMIT`` or ``ROW_NUMBER`` ends in keys that
     make the order total, so every engine returns the same rows.
@@ -47,19 +43,7 @@ class BenchmarkQuery:
     display_name: str
     query_class: str  # scan, filter_prune, aggregation, analytics, operational, investigator
     sql: str
-    approx_columns: dict[int, float] = field(default_factory=dict, compare=False, hash=False)
     allow_empty: bool = False
-    # 0-based output columns whose values are generated per pipeline run
-    # (a uuid), so two runs on one corpus differ there by construction: the
-    # fingerprint records only whether they are NULL.
-    volatile_columns: tuple[int, ...] = ()
-
-    def fingerprint_columns(self) -> dict[int, float]:
-        """approx_columns plus volatile_columns (as fingerprint.VOLATILE),
-        the form the executors' fingerprint_query takes."""
-        from lakebench.benchmark.fingerprint import VOLATILE
-
-        return {**self.approx_columns, **dict.fromkeys(self.volatile_columns, VOLATILE)}
 
 
 # ---------------------------------------------------------------------------
@@ -70,6 +54,10 @@ _Q1 = BenchmarkQuery(
     name="Q1_full_aggregation_scan",
     display_name="Full aggregation scan",
     query_class="scan",
+    # avg_transaction is the mean value of a transaction: datagen writes
+    # transaction_amount 0.0 on every non-purchase row (82% of rows), so an
+    # average over all rows read about 5.5x low. Same definition as gold
+    # avg_transaction_value (a transaction is a row with amount > 0).
     sql="""\
 SELECT
   COUNT(*) AS total_records,
@@ -78,11 +66,6 @@ SELECT
   ROUND(SUM(transaction_amount), 2) AS total_revenue,
   ROUND(AVG(CASE WHEN transaction_amount > 0 THEN transaction_amount END), 2) AS avg_transaction
 FROM {catalog}.{silver_table}""",
-    # avg_transaction is the mean value of a transaction: datagen writes
-    # transaction_amount 0.0 on every non-purchase row (82% of rows), so an
-    # average over all rows read about 5.5x low. Same definition as gold
-    # avg_transaction_value (a transaction is a row with amount > 0).
-    approx_columns={3: 0.01, 4: 0.01},
 )
 
 _Q2 = BenchmarkQuery(
@@ -102,7 +85,6 @@ WHERE interaction_date >= (SELECT MIN(interaction_date) FROM {catalog}.{silver_t
     (SELECT MIN(interaction_date) FROM {catalog}.{silver_table}))
 GROUP BY interaction_date, interaction_type
 ORDER BY interaction_date, revenue DESC""",
-    approx_columns={4: 0.01},
 )
 
 _Q3 = BenchmarkQuery(
@@ -121,7 +103,6 @@ FROM {catalog}.{silver_table}
 WHERE transaction_amount > 0
 GROUP BY customer_value_tier, channel_preference
 ORDER BY total_spend DESC""",
-    approx_columns={3: 0.01, 4: 0.01, 5: 0.01},
 )
 
 _Q4 = BenchmarkQuery(
@@ -142,7 +123,6 @@ WHERE churn_risk_indicator IN ('high_risk', 'medium_risk')
 GROUP BY churn_risk_indicator, customer_journey_stage, device_category
 HAVING COUNT(DISTINCT customer_id) > 10
 ORDER BY at_risk_customers DESC, churn_risk_indicator, customer_journey_stage, device_category""",
-    approx_columns={5: 0.01, 6: 0.01},
 )
 
 # ---------------------------------------------------------------------------
@@ -179,7 +159,6 @@ SELECT
 FROM daily
 ORDER BY interaction_date DESC
 LIMIT 90""",
-    approx_columns={2: 0.01, 4: 0.01, 5: 1.0},
 )
 
 _Q6 = BenchmarkQuery(
@@ -216,7 +195,6 @@ SELECT
 FROM customer_rfm
 GROUP BY 1
 ORDER BY avg_spend DESC""",
-    approx_columns={2: 0.01, 3: 0.1, 4: 1.0},
 )
 
 _Q7 = BenchmarkQuery(
@@ -241,7 +219,6 @@ SELECT
 FROM {catalog}.{silver_table}
 GROUP BY channel
 ORDER BY channel_revenue DESC""",
-    approx_columns={6: 0.01, 7: 0.01, 8: 0.01},
 )
 
 # ---------------------------------------------------------------------------
@@ -269,7 +246,6 @@ SELECT
 FROM {catalog}.{gold_table}
 ORDER BY interaction_date DESC
 LIMIT 30""",
-    approx_columns={6: 0.01, 7: 0.1},
 )
 
 # ---------------------------------------------------------------------------
@@ -318,7 +294,6 @@ SELECT
   ROUND(SUM(txn_amount_usd), 2) AS total_volume_usd,
   ROUND(AVG(txn_amount_usd), 2) AS avg_txn_usd
 FROM {catalog}.{silver_table}""",
-    approx_columns={4: 0.01},
 )
 
 _FQ2 = BenchmarkQuery(
@@ -423,7 +398,6 @@ SELECT
 FROM {catalog}.{gold_alerts}
 GROUP BY rule_id, priority, status
 ORDER BY alerts DESC""",
-    approx_columns={5: 0.001},
 )
 
 _FQ6 = BenchmarkQuery(
@@ -478,7 +452,6 @@ GROUP BY originator_bank_bic, beneficiary_bank_bic
 HAVING SUM(txn_amount_usd) > 0
 ORDER BY xborder_usd DESC, originator_bank_bic, beneficiary_bank_bic
 LIMIT 100""",
-    approx_columns={4: 0.001},
 )
 
 _FQ8 = BenchmarkQuery(
@@ -501,8 +474,6 @@ SELECT
 FROM recent_alerts a
 LEFT JOIN {catalog}.{silver_entities} e ON a.entity_id = e.entity_id
 ORDER BY a.alert_ts DESC, a.alert_id""",
-    # alert_id is uuid() per pipeline run (detection_rules.py).
-    volatile_columns=(0,),
 )
 
 
@@ -762,8 +733,7 @@ def query_set_id(names) -> str:
 
     QpH is queries per hour over a set; two runs over different sets (the
     Financial set grew from 8 to 12 queries with the investigator class, or a
-    query's SQL changed) do not have comparable QpH, and reproduce refuses
-    to put them side by side.
+    query's SQL changed) do not have comparable QpH.
     """
     import hashlib
 
@@ -843,22 +813,6 @@ def legacy_query_set_id(queries, recorded_at=None) -> str:
     return (
         pinned[0] if when.astimezone(timezone.utc) >= since.astimezone(timezone.utc) else "unknown"
     )
-
-
-def qph_comparable(a: str | None, b: str | None) -> tuple[bool, str]:
-    """Whether QpH over query sets ``a`` and ``b`` may be compared, and why not."""
-    if not a or not b or a == "unknown" or b == "unknown":
-        return False, (
-            f"query set not recorded ({a or 'none'} vs {b or 'none'}); "
-            "the run predates query-set ids"
-        )
-    if a == "blended" or b == "blended":
-        return False, (
-            f"rounds ran different query sets ({a} vs {b}); a median over them is not one QpH"
-        )
-    if a != b:
-        return False, f"different query sets ({a} vs {b})"
-    return True, ""
 
 
 # Backward-compatible alias. New code should call

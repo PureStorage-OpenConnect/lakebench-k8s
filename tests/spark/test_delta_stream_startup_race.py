@@ -33,10 +33,6 @@ def _ran(result):
     assert result["errors"] == [], result
 
 
-def test_no_errors(result):
-    assert result["errors"] == [], result
-
-
 def test_both_racers_wrote(result):
     """Both racers commit non-zero rows: neither is Delta-deduped by
     (appId, version) because they used distinct app ids."""
@@ -47,16 +43,9 @@ def test_both_racers_wrote(result):
 
 
 def test_no_data_loss(result):
-    """After both writes settle, the table holds both racers' rows."""
+    """After both writes settle, the table holds both racers' rows, and the
+    I6 stream-id column shows both: the not-exists branch wrote through the
+    append path rather than an overwrite that would have squashed one."""
     _ran(result)
     assert result["table_rows"] == result["written"]["A"] + result["written"]["B"], result
-
-
-def test_both_stream_ids_visible(result):
-    """The I6 columns let operators see both racers' rows partitioned by
-    stream id -- proves the not-exists branch wrote through the append
-    path (which carries _stream_id) rather than an overwrite that would
-    have squashed one racer's rows."""
-    _ran(result)
-    per = result["per_stream_rows"]
-    assert per.get("qA", 0) > 0 and per.get("qB", 0) > 0, per
+    assert set(result["per_stream_rows"]) == {"qA", "qB"}, result["per_stream_rows"]

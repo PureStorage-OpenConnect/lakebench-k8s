@@ -1,20 +1,9 @@
-"""I1 (silver-plan): build_entity_profiles emits ``profile_updated_ts``
-derived from the resolved data clock, not from wall-clock.
-
-Rationale: rebuilding entity_profiles with ``current_timestamp()`` makes
-every silver rebuild write a different value into a per-entity column,
-so a byte-identical silver rebuild becomes impossible even when the
-input bronze has not changed. Deriving ``profile_updated_ts`` from the
-resolved data clock keeps rebuilds byte-identical for a fixed bronze.
-
-The first two tests are text checks; the signature and runtime tests
-import the script, which needs pyspark, so the file is in the Spark tier
-(CI's unit legs have no pyspark and skip the whole module).
+"""build_entity_profiles emits ``profile_updated_ts`` derived from the
+resolved data clock, not from wall-clock, so a silver rebuild over unchanged
+bronze is byte-identical.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import pytest
 
@@ -22,58 +11,7 @@ import pytest
 # the spark_session fixture.
 pytest.importorskip("pyspark")
 
-_SCRIPTS = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
-
 pytestmark = pytest.mark.usefixtures("load_script")
-
-
-def test_build_entity_profiles_does_not_call_current_timestamp():
-    """Static: the source line that used to set profile_updated_ts must no
-    longer read current_timestamp(). Byte-identical rebuilds require a
-    fixed clock, not wall-clock."""
-    text = (_SCRIPTS / "silver_build_financial.py").read_text(encoding="utf-8")
-    seen_alias = False
-    for line in text.splitlines():
-        if 'alias("profile_updated_ts")' in line or ".alias('profile_updated_ts')" in line:
-            seen_alias = True
-            assert "current_timestamp()" not in line, (
-                f"profile_updated_ts still derived from current_timestamp: {line.strip()}"
-            )
-    assert seen_alias, "build_entity_profiles no longer emits profile_updated_ts"
-
-
-def test_main_passes_data_clock_to_build_entity_profiles():
-    """Static: silver_build_financial.main() calls build_entity_profiles
-    with a resolved data_clock, not the transactions frame alone."""
-    text = (_SCRIPTS / "silver_build_financial.py").read_text(encoding="utf-8")
-    # The main-side call must include a second positional or the keyword
-    # data_clock. Loose textual check; the runtime test below asserts the
-    # behaviour end to end.
-    for line in text.splitlines():
-        stripped = line.strip()
-        if (
-            stripped.startswith("build_entity_profiles(")
-            or "build_entity_profiles(txns" in stripped
-        ):
-            # Either build_entity_profiles(txns, data_clock) or (txns, data_clock=...)
-            assert (
-                "data_clock" in stripped or "build_entity_profiles(txns_df, data_clock" in stripped
-            ), f"main() call is missing a data_clock argument: {stripped}"
-
-
-def test_build_entity_profiles_signature_takes_data_clock():
-    """Runtime: the function's signature includes a data_clock parameter."""
-    import inspect
-
-    import silver_build_financial as sbf
-
-    sig = inspect.signature(sbf.build_entity_profiles)
-    params = list(sig.parameters)
-    assert "data_clock" in params, (
-        "build_entity_profiles must take a data_clock parameter so "
-        "profile_updated_ts is deterministic across rebuilds "
-        f"(got parameters={params})"
-    )
 
 
 def test_build_entity_profiles_uses_data_clock_expression(spark_session):

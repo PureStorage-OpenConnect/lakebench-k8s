@@ -17,27 +17,16 @@ from pathlib import Path
 
 import pytest
 
+from tests.fixtures.sigterm_sentinel import sentinel_sigterm
 from tests.harness.run_harness import SCENARIOS, Recorder, invoke_scenario
+
+__all__ = ["sentinel_sigterm"]
 
 SCOPE = "customer/interactions/"
 CORPUS = {
     f"{SCOPE}part-0000.parquet": (1000, "e0"),
     f"{SCOPE}part-0001.parquet": (1000, "e1"),
 }
-
-
-@pytest.fixture(autouse=True)
-def sentinel_sigterm():
-    def handler(signum, frame):
-        raise AssertionError("SIGTERM reached the test process")
-
-    previous = signal.signal(signal.SIGTERM, handler)
-    previous_int = signal.getsignal(signal.SIGINT)
-    try:
-        yield handler
-    finally:
-        signal.signal(signal.SIGTERM, previous)
-        signal.signal(signal.SIGINT, previous_int)
 
 
 def _series(tmp_path, monkeypatch, *, argv=None, after=None, objects=None, **changes):
@@ -192,21 +181,6 @@ def test_repeat_manifest_carries_the_stale_bronze_note(tmp_path, monkeypatch):
     result, rec, records, manifest = _series(tmp_path, monkeypatch)
     assert result.exit_code == 0, result.output
     assert manifest["corpus"]["stale_bronze"] == note
-
-
-def test_repeat_stops_on_bronze_change(tmp_path, monkeypatch):
-    """One object rewritten after repetition 1 with the same size: the
-    series stops with 3 before repetition 2 submits anything."""
-
-    def rewrite(rec):
-        rec.bronze_objects[f"{SCOPE}part-0001.parquet"] = (1000, "e1-rewritten")
-
-    result, rec, records, manifest = _series(tmp_path, monkeypatch, after={1: rewrite})
-    assert result.exit_code == 3, result.output
-    assert len(records) == 1
-    assert len(_submits(rec, "bronze-verify")) == 1
-    assert manifest["stopped_reason"].startswith("series.corpus_changed")
-    assert manifest["attempted"] == 1
 
 
 def test_repeat_change_during_a_repetition_is_not_a_member(tmp_path, monkeypatch):
@@ -372,65 +346,31 @@ def test_a_late_signal_in_a_failed_rep_stops_the_series(tmp_path, monkeypatch):
     assert len(records) == 1
 
 
-@pytest.mark.parametrize(
-    "argv, message",
-    [
-        (["--continuous", "--repeat", "2"], "--repeat does not apply to a continuous run"),
-        (["--stage", "silver-build", "--repeat", "2"], "--repeat runs the whole batch pipeline"),
-        (["--local", "--repeat", "2"], "--repeat runs the whole batch pipeline"),
-        (["--deploy-only", "--repeat", "2"], "--repeat runs the whole batch pipeline"),
-        (["--generate-only", "--repeat", "2"], "--repeat runs the whole batch pipeline"),
-    ],
-)
-def test_repeat_refusals(tmp_path, monkeypatch, argv, message):
-    result, rec, records, manifest = _series(tmp_path, monkeypatch, argv=[*argv, "--yes"])
-    assert result.exit_code == 2, result.output
-    assert message in result.output
-    assert records == [] and manifest is None and rec.submits == []
-
-
-def test_repeat_refused_multicycle(tmp_path, monkeypatch):
-    from tests.harness.run_harness import base_config
-
-    result, rec, records, manifest = _series(
-        tmp_path,
-        monkeypatch,
-        config=base_config(architecture={"pipeline": {"mode": "batch", "cycles": 2}}),
-    )
-    assert result.exit_code == 2, result.output
-    assert "--repeat does not apply to a multi-cycle run" in result.output
-    assert records == []
-
-
-def test_repeat_out_of_range_is_a_usage_error(tmp_path, monkeypatch):
-    result, rec, records, manifest = _series(
-        tmp_path, monkeypatch, argv=["--skip-generate", "--yes", "--repeat", "21"]
-    )
-    assert result.exit_code == 2
-    assert records == []
-
-
-def test_no_repeat_writes_no_series(tmp_path, monkeypatch):
-    """A plain run is unchanged: no series field, no manifest."""
-    result, rec, records, manifest = _series(
-        tmp_path, monkeypatch, argv=["--skip-generate", "--yes"]
-    )
-    assert result.exit_code == 0, result.output
-    assert len(records) == 1 and "series" not in records[0]
-    assert manifest is None
-    assert not Path(tmp_path / "lakebench-output" / "series").exists()
-
-
 def _rewrite(rec):
     rec.bronze_objects[f"{SCOPE}part-0001.parquet"] = (1000, "e1-rewritten")
 
 
-def test_repeat_change_after_rep2_stops_before_rep3(tmp_path, monkeypatch):
-    result, rec, records, manifest = _series(tmp_path, monkeypatch, after={2: _rewrite})
+@pytest.mark.parametrize(
+    ("argv", "after_rep", "reason"),
+    [
+        (None, 1, "series.corpus_changed"),
+        (None, 2, "before repetition 3"),
+        # --generate: D1 comes from repetition 1's saved record.
+        (["--generate", "--yes", "--repeat", "3"], 1, "series.corpus_changed"),
+    ],
+    ids=["after-rep1", "after-rep2", "generated-after-rep1"],
+)
+def test_repeat_stops_on_bronze_change(tmp_path, monkeypatch, argv, after_rep, reason):
+    """One object rewritten after repetition k with the same size: the series
+    stops with 3 before repetition k+1 submits anything."""
+    result, rec, records, manifest = _series(
+        tmp_path, monkeypatch, argv=argv, after={after_rep: _rewrite}
+    )
     assert result.exit_code == 3, result.output
-    assert len(records) == 2 and len(_submits(rec, "bronze-verify")) == 2
-    assert manifest["passed"] == 2
-    assert "before repetition 3" in manifest["stopped_reason"]
+    assert len(records) == after_rep
+    assert len(_submits(rec, "bronze-verify")) == after_rep
+    assert manifest["attempted"] == after_rep
+    assert reason in manifest["stopped_reason"]
 
 
 def test_repeat_change_during_rep1_is_caught(tmp_path, monkeypatch):
@@ -452,16 +392,6 @@ def test_repeat_change_during_rep1_is_caught(tmp_path, monkeypatch):
     assert len(records) == 1
     assert manifest["runs"][0]["member"] is False and manifest["passed"] == 0
     assert "during repetition 1" in manifest["stopped_reason"]
-
-
-def test_repeat_generated_corpus_changed_after_rep1(tmp_path, monkeypatch):
-    """--generate: D1 comes from repetition 1's saved record, so a rewrite
-    right after it is caught before repetition 2."""
-    result, rec, records, manifest = _series(
-        tmp_path, monkeypatch, argv=["--generate", "--yes", "--repeat", "3"], after={1: _rewrite}
-    )
-    assert result.exit_code == 3, result.output
-    assert len(records) == 1
 
 
 def test_repeat_never_auto_deploys_after_rep1(tmp_path, monkeypatch):
@@ -492,75 +422,75 @@ def test_repeat_datagen_not_finished_stops(tmp_path, monkeypatch, state):
     assert state in manifest["stopped_reason"]
 
 
-def test_repeat_leftover_application_stops(tmp_path, monkeypatch):
-    """A stage of repetition 1 still running (a timeout left it): repetition 2
-    does not start alongside it."""
+@pytest.mark.parametrize("leftover_before", [True, False], ids=["before-rep1", "after-rep1"])
+def test_repeat_leftover_application_stops(tmp_path, monkeypatch, leftover_before):
+    """A stage still running (an earlier run's, or repetition 1's after a
+    timeout): the next repetition does not start alongside it."""
+    from tests.harness import run_harness
 
-    def leave_running(rec):
-        rec.running_apps.add("lakebench-silver-build")
+    after = None
+    if leftover_before:
+        real_install = run_harness.install_fakes
 
-    result, rec, records, manifest = _series(tmp_path, monkeypatch, after={1: leave_running})
+        def install(mp, rec, scenario):
+            out = real_install(mp, rec, scenario)
+            rec.apps["lakebench-gold-finalize"] = "uid-old"
+            rec.running_apps.add("lakebench-gold-finalize")
+            return out
+
+        monkeypatch.setattr(run_harness, "install_fakes", install)
+    else:
+
+        def leave_running(rec):
+            rec.running_apps.add("lakebench-silver-build")
+
+        after = {1: leave_running}
+    result, rec, records, manifest = _series(tmp_path, monkeypatch, after=after)
     assert result.exit_code == 1, result.output
-    assert len(records) == 1
-    assert "still running" in manifest["stopped_reason"]
+    if leftover_before:
+        assert records == [] and rec.submits == []
+        assert "before repetition 1" in manifest["stopped_reason"]
+    else:
+        assert len(records) == 1
+        assert "still running" in manifest["stopped_reason"]
 
 
-def test_repeat_interrupt_escaping_a_repetition_stops(tmp_path, monkeypatch):
-    import lakebench.cli._run as run_mod
-
-    real = run_mod._run_once
-    seen = [0]
-
-    def once(*a, **k):
-        seen[0] += 1
-        if seen[0] == 2:
-            raise KeyboardInterrupt
-        return real(*a, **k)
-
-    monkeypatch.setattr(run_mod, "_run_once", once)
-    result, rec, records, manifest = _series(tmp_path, monkeypatch)
-    assert result.exit_code == 130, result.output
-    assert manifest["stopped_reason"] == "interrupted" and manifest["attempted"] == 2
-
-
-def test_repeat_error_in_a_repetition_is_recorded(tmp_path, monkeypatch):
-    import lakebench.cli._run as run_mod
-
-    real = run_mod._run_once
-    seen = [0]
-
-    def once(*a, **k):
-        seen[0] += 1
-        if seen[0] == 2:
-            raise RuntimeError("boom")
-        return real(*a, **k)
-
-    monkeypatch.setattr(run_mod, "_run_once", once)
-    result, rec, records, manifest = _series(tmp_path, monkeypatch)
-    assert result.exit_code == 1, result.output
-    assert manifest["attempted"] == 2 and manifest["runs"][1]["run_id"] is None
-    assert "RuntimeError" in manifest["stopped_reason"]
-
-
-def test_repeat_refusal_in_a_repetition_keeps_its_code(tmp_path, monkeypatch):
-    """An escaping refusal (kubeconfig changed between repetitions) is
-    recorded with the code the CLI exits with (3), not 1."""
-    import lakebench.cli._run as run_mod
+def _context_conflict():
     from lakebench.k8s.target import ContextConflictError
 
+    return ContextConflictError("one cluster context per process: A is active")
+
+
+@pytest.mark.parametrize(
+    ("make_exc", "code", "reason"),
+    [
+        (KeyboardInterrupt, 130, "interrupted"),
+        (lambda: RuntimeError("boom"), 1, "RuntimeError"),
+        # An escaping refusal (kubeconfig changed between repetitions) is
+        # recorded with the code the CLI exits with, not 1.
+        (_context_conflict, 3, "ContextConflictError"),
+    ],
+    ids=["interrupt", "error", "refusal"],
+)
+def test_repeat_exception_escaping_a_repetition_keeps_its_code(
+    tmp_path, monkeypatch, make_exc, code, reason
+):
+    import lakebench.cli._run as run_mod
+
     real = run_mod._run_once
     seen = [0]
 
     def once(*a, **k):
         seen[0] += 1
         if seen[0] == 2:
-            raise ContextConflictError("one cluster context per process: A is active")
+            raise make_exc()
         return real(*a, **k)
 
     monkeypatch.setattr(run_mod, "_run_once", once)
     result, rec, records, manifest = _series(tmp_path, monkeypatch)
-    assert result.exit_code == 3, result.output
-    assert manifest["attempted"] == 2 and manifest["runs"][1]["exit_code"] == 3
+    assert result.exit_code == code, result.output
+    assert manifest["attempted"] == 2 and manifest["runs"][1]["exit_code"] == code
+    assert reason in manifest["stopped_reason"]
 
 
 def _client_raises(monkeypatch, exc):
@@ -660,16 +590,6 @@ def test_member_rules():
     assert not member_of_series(_rec("r2", digest=None, id_v2="X"), rep1, D1)[0]
 
 
-def test_interrupt_scope_restores_a_leaked_handler(sentinel_sigterm):
-    from lakebench.cli._interrupt import RunInterrupt, interrupt_scope
-
-    with interrupt_scope():
-        leaked = RunInterrupt("ns")
-        leaked.install()  # never restored, as by a run whose finally raised
-    assert signal.getsignal(signal.SIGTERM) is sentinel_sigterm
-    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
-
-
 def test_interrupt_scope_maps_a_default_sigterm_to_an_interrupt():
     """In a child process (a default SIGTERM would end this one): inside the
     scope SIGTERM raises KeyboardInterrupt; after it, the default is back."""
@@ -694,25 +614,6 @@ def test_interrupt_scope_maps_a_default_sigterm_to_an_interrupt():
         [sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=60
     )
     assert out.stdout.split() == ["interrupted", "True"], out.stdout + out.stderr
-
-
-def test_repeat_leftover_before_rep1_stops(tmp_path, monkeypatch):
-    """A stage an earlier run left running: repetition 1 does not start."""
-    from tests.harness import run_harness
-
-    real_install = run_harness.install_fakes
-
-    def install(mp, rec, scenario):
-        out = real_install(mp, rec, scenario)
-        rec.apps["lakebench-gold-finalize"] = "uid-old"
-        rec.running_apps.add("lakebench-gold-finalize")
-        return out
-
-    monkeypatch.setattr(run_harness, "install_fakes", install)
-    result, rec, records, manifest = _series(tmp_path, monkeypatch)
-    assert result.exit_code == 1, result.output
-    assert records == [] and rec.submits == []
-    assert "before repetition 1" in manifest["stopped_reason"]
 
 
 def test_repeat_signal_after_save_stops_the_series(tmp_path, monkeypatch):

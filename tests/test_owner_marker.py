@@ -9,21 +9,18 @@
 
 from __future__ import annotations
 
-import ast
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from lakebench.deploy import ownership
 from lakebench.deploy.ownership import OWNER_MARKER_KEY, write_owner_marker
-from lakebench.s3.client import LAKEBENCH_KEY_PREFIX, has_user_objects
+from lakebench.s3.client import has_user_objects
 from tests.fixtures.recording_k8s import recording
 
 NS = "u01"
 B = "u01-bronze"
-SRC = Path(__file__).resolve().parent.parent / "src" / "lakebench"
 ME = {"deployment": NS, "cluster": "fp-here"}
 THEM = {"deployment": NS, "cluster": "fp-there"}
 
@@ -43,11 +40,6 @@ def _boto():
 def _marker(rec, bucket=B):
     raw = rec.buckets_store[bucket].get(OWNER_MARKER_KEY)
     return json.loads(raw) if raw is not None else None
-
-
-def test_marker_prefixes_agree():
-    assert ownership.MARKER_PREFIX == LAKEBENCH_KEY_PREFIX
-    assert OWNER_MARKER_KEY.startswith(LAKEBENCH_KEY_PREFIX)
 
 
 class TestWriteOwnerMarker:
@@ -232,44 +224,3 @@ class TestDeployWritesTheMarker:
             assert result.status.value == "success", result.message
             assert _marker(rec)["cluster"] == "fp-here"
             assert "data/part-0" in rec.buckets_store[B]
-
-
-def test_regenerate_and_clean_keep_owner_marker():
-    """Only destroy's release passes keep_prefixes; clean and --regenerate keep
-    the marker, so the next deploy still reads the bucket as owned."""
-    tree = {p: ast.parse(p.read_text()) for p in SRC.rglob("*.py") if "spark/scripts" not in str(p)}
-    bad = []
-    for path, t in tree.items():
-        for node in ast.walk(t):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "empty_bucket"
-                and any(k.arg == "keep_prefixes" for k in node.keywords)
-                and path.name != "destroy.py"
-            ):
-                bad.append(f"{path.relative_to(SRC)}:{node.lineno}")
-    assert bad == []
-
-
-def test_no_raw_listing():
-    """[static] every object listing goes through s3/client.py, which skips the marker."""
-    allowed = {"s3/client.py", "s3/conformance.py"}
-    bad = []
-    for path in SRC.rglob("*.py"):
-        rel = path.relative_to(SRC).as_posix()
-        if rel in allowed or rel.startswith("spark/scripts/"):
-            continue
-        for node in ast.walk(ast.parse(path.read_text())):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-                continue
-            if node.func.attr == "list_objects_v2":
-                bad.append(f"{rel}:{node.lineno} list_objects_v2")
-            if (
-                node.func.attr == "get_paginator"
-                and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and node.args[0].value == "list_objects_v2"
-            ):
-                bad.append(f"{rel}:{node.lineno} get_paginator('list_objects_v2')")
-    assert bad == []

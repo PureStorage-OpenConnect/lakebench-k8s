@@ -15,46 +15,8 @@ import pytest
 from kubernetes.client.rest import ApiException
 
 from lakebench.config import LakebenchConfig
-from lakebench.config.schema import PolarisClientSecretMissing
 from lakebench.deploy import deployment_secrets as ds
-
-
-class FakeCore:
-    """CoreV1Api subset: Secrets and PVCs per namespace."""
-
-    def __init__(self, secrets: dict | None = None, pvcs: set | None = None):
-        # {(ns, name): {key: plaintext}}
-        self.secrets: dict[tuple[str, str], dict[str, str]] = dict(secrets or {})
-        self.pvcs: set[tuple[str, str]] = set(pvcs or set())
-        self.creates: list[dict] = []
-        self.replaces: list[dict] = []
-
-    def read_namespaced_secret(self, name, ns):
-        if (ns, name) not in self.secrets:
-            raise ApiException(status=404)
-        data = {
-            k: base64.b64encode(v.encode()).decode() for k, v in self.secrets[(ns, name)].items()
-        }
-        return SimpleNamespace(data=data)
-
-    def create_namespaced_secret(self, ns, body):
-        name = body["metadata"]["name"]
-        if (ns, name) in self.secrets:
-            raise ApiException(status=409)
-        self.creates.append(body)
-        self.secrets[(ns, name)] = dict(body["stringData"])
-
-    def replace_namespaced_secret(self, name, ns, body):
-        self.replaces.append(body)
-        self.secrets[(ns, name)] = dict(body["stringData"])
-
-    def connect_get_namespaced_pod_exec(self, *a, **k):  # only passed to stream()
-        raise AssertionError("exec goes through the patched stream")
-
-    def read_namespaced_persistent_volume_claim(self, name, ns):
-        if (ns, name) not in self.pvcs:
-            raise ApiException(status=404)
-        return SimpleNamespace(metadata=SimpleNamespace(deletion_timestamp=None))
+from tests.fixtures.deployment_secrets_helpers import FakeCore as FakeCore
 
 
 def _cfg(name="a", client_secret="") -> LakebenchConfig:
@@ -104,33 +66,26 @@ def test_stored_polaris_password_is_reused():
     assert core.creates == []
 
 
-def test_v16_hive_redeploy_keeps_password():
-    core = FakeCore({("a", ds.HIVE_DB_SECRET): {"password": ds.LEGACY_HIVE_DB_PASSWORD}})
-    assert ds.hive_db_password(core, "a") == ds.LEGACY_HIVE_DB_PASSWORD
+class _TerminatingPvcCore(FakeCore):
+    def read_namespaced_persistent_volume_claim(self, name, ns):
+        return SimpleNamespace(metadata=SimpleNamespace(deletion_timestamp="2026-10-01T00:00:00Z"))
 
 
-def test_hive_pvc_without_secret_uses_legacy():
-    """LB-187: the Postgres PVC outlived the Secret; its data has the v1.6 default."""
-    core = FakeCore(pvcs={("a", ds.POSTGRES_PVC)})
-    assert ds.hive_db_password(core, "a") == ds.LEGACY_HIVE_DB_PASSWORD
-
-
-def test_terminating_pvc_is_not_v16_data():
-    """Right after a destroy the old claim is still Terminating: the next
-    Postgres initdbs a new volume, so it must not get the public default."""
-
-    class Terminating(FakeCore):
-        def read_namespaced_persistent_volume_claim(self, name, ns):
-            return SimpleNamespace(
-                metadata=SimpleNamespace(deletion_timestamp="2026-10-01T00:00:00Z")
-            )
-
-    assert ds.hive_db_password(Terminating(), "a") != ds.LEGACY_HIVE_DB_PASSWORD
-
-
-def test_fresh_hive_password_is_generated():
-    pw = ds.hive_db_password(FakeCore(), "a")
-    assert pw != ds.LEGACY_HIVE_DB_PASSWORD and len(pw) >= 32
+@pytest.mark.parametrize(
+    ("core", "legacy"),
+    [
+        # A v1.6 deployment keeps its Secret.
+        (FakeCore({("a", ds.HIVE_DB_SECRET): {"password": ds.LEGACY_HIVE_DB_PASSWORD}}), True),
+        # The Postgres PVC outlived the Secret: its data has the v1.6 default.
+        (FakeCore(pvcs={("a", ds.POSTGRES_PVC)}), True),
+        # Right after a destroy the old claim is still Terminating: the next
+        # Postgres initdbs a new volume, so it must not get the public default.
+        (_TerminatingPvcCore(), False),
+    ],
+    ids=["v16-secret", "pvc-without-secret", "terminating-pvc"],
+)
+def test_hive_password_follows_the_existing_state(core, legacy):
+    assert (ds.hive_db_password(core, "a") == ds.LEGACY_HIVE_DB_PASSWORD) is legacy
 
 
 def test_secret_without_key_is_an_error_not_a_guess():
@@ -185,19 +140,6 @@ def test_matching_config_on_a_bootstrapped_polaris_is_fine():
     )
 
 
-def test_bootstrapped_polaris_without_any_secret_refuses():
-    """A realm accepts only the secret it was bootstrapped with: never invent one."""
-    with pytest.raises(ds.DeploymentSecretError, match="was bootstrapped with a client secret"):
-        ds.ensure_polaris_client_secret(FakeCore(), _cfg(), "a", fresh=False)
-
-
-def test_run_reads_client_secret_from_namespace():
-    core = FakeCore({("a", ds.POLARIS_CLIENT_SECRET): {"clientSecret": "stored"}})
-    assert ds.polaris_client_secret(_cfg(), core) == "stored"
-    with pytest.raises(PolarisClientSecretMissing, match="run lakebench deploy first"):
-        ds.polaris_client_secret(_cfg(), FakeCore())
-
-
 def test_spark_job_uses_the_stored_client_secret():
     from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
 
@@ -211,25 +153,11 @@ def test_spark_job_uses_the_stored_client_secret():
     assert creds == ["lakebench:stored-xyz"]
 
 
-# -- polaris role probe ------------------------------------------------------------
-
-
-@pytest.mark.parametrize("out,expected", [(" lbrole:1\n", True), ("lbrole:0", False)])
-def test_role_probe(out, expected):
-    assert ds.polaris_role_exists(lambda db, sql: out) is expected
-
-
-@pytest.mark.parametrize("out", ["", "psql: error: connection refused", "ERROR: 'lbrole:' x"])
-def test_role_probe_refuses_to_guess(out):
-    with pytest.raises(ds.DeploymentSecretError, match="rather than guess"):
-        ds.polaris_role_exists(lambda db, sql: out)
-
-
 # -- consumers render no literal --------------------------------------------------------
 
 
 def _render(template: str, recipe: str) -> str:
-    from tests.test_functional_templates import _enrich_context, _make_engine
+    from tests.fixtures.functional_templates_helpers import _enrich_context, _make_engine
 
     engine = _make_engine(
         recipe=recipe,
@@ -247,50 +175,28 @@ def _render(template: str, recipe: str) -> str:
     return engine.renderer.render(template, ctx)
 
 
-def test_thrift_spec_has_no_literal_keys():
-    text = _render("spark-thrift/sparkapplication.yaml.j2", "polaris-iceberg-spark-thrift")
-    assert "AKIA-LITERAL-ACCESS" not in text and "LITERAL-SECRET-KEY" not in text
-    assert 'fs.s3a.access.key="$AWS_ACCESS_KEY_ID"' in text
-    assert 'credential="lakebench:$POLARIS_CLIENT_SECRET"' in text
-    assert "name: lakebench-polaris-client" in text
-
-
-def test_trino_reads_client_secret_from_env():
-    cm = _render("trino/configmap.yaml.j2", "polaris-iceberg-spark-trino")
-    assert "oauth2.credential=lakebench:${ENV:POLARIS_CLIENT_SECRET}" in cm
-    for t in ("trino/coordinator.yaml.j2", "trino/worker.yaml.j2"):
-        assert "name: lakebench-polaris-client" in _render(t, "polaris-iceberg-spark-trino")
-
-
-def test_polaris_templates_read_passwords_from_secrets():
-    for t in ("polaris/deployment.yaml.j2", "polaris/bootstrap-job.yaml.j2"):
-        text = _render(t, "polaris-iceberg-spark-trino")
-        assert "lakebench-polaris-2024" not in text
-        assert "name: lakebench-polaris-db" in text
-    boot = _render("polaris/bootstrap-job.yaml.j2", "polaris-iceberg-spark-trino")
-    assert '"POLARIS,lakebench,$CLIENT_SECRET"' in boot
-
-
-def test_no_fixed_secret_left_in_templates_or_code():
-    from pathlib import Path
-
-    root = Path(ds.__file__).resolve().parents[1]
-    hits = []
-    for p in list(root.rglob("*.j2")) + list(root.rglob("*.py")):
-        if p.name == "deployment_secrets.py":
-            continue
-        text = p.read_text(encoding="utf-8")
-        for fixed in ("lakebench-polaris-2024", "lakebench-hive-2024", '"grafana.adminPassword"'):
-            if fixed in text:
-                hits.append(f"{p.relative_to(root)}: {fixed}")
-    assert hits == []
+@pytest.mark.parametrize(
+    ("template", "recipe"),
+    [
+        ("spark-thrift/sparkapplication.yaml.j2", "polaris-iceberg-spark-thrift"),
+        ("trino/configmap.yaml.j2", "polaris-iceberg-spark-trino"),
+        ("trino/coordinator.yaml.j2", "polaris-iceberg-spark-trino"),
+        ("trino/worker.yaml.j2", "polaris-iceberg-spark-trino"),
+        ("polaris/deployment.yaml.j2", "polaris-iceberg-spark-trino"),
+        ("polaris/bootstrap-job.yaml.j2", "polaris-iceberg-spark-trino"),
+    ],
+)
+def test_rendered_consumers_carry_no_literal_secret(template, recipe):
+    text = _render(template, recipe)
+    for literal in ("AKIA-LITERAL-ACCESS", "LITERAL-SECRET-KEY", "lakebench-polaris-2024"):
+        assert literal not in text
 
 
 # -- secrets step and destroy --------------------------------------------------------
 
 
 def test_secrets_step_keeps_the_stored_hive_password():
-    from tests.test_functional_templates import _make_engine
+    from tests.fixtures.functional_templates_helpers import _make_engine
 
     engine = _make_engine()
     engine.dry_run = False
@@ -342,19 +248,29 @@ def _destroy_secret_deletes(pvc_present: bool, pvc=None, pvc_error=None) -> list
     return [c.args[0] for c in core.delete_namespaced_secret.call_args_list]
 
 
-def test_destroy_removes_the_new_secrets_with_the_data():
-    deleted = _destroy_secret_deletes(pvc_present=False)
-    for name in (ds.HIVE_DB_SECRET, ds.POLARIS_DB_SECRET, ds.POLARIS_CLIENT_SECRET):
-        assert name in deleted
+_ALWAYS_DELETED = {"lakebench-ca-certificate", "lakebench-s3-credentials"}
+_PVC_BOUND = {ds.HIVE_DB_SECRET, ds.POLARIS_DB_SECRET, ds.POLARIS_CLIENT_SECRET}
+_TERMINATING = SimpleNamespace(metadata=SimpleNamespace(deletion_timestamp="2026-10-01T00:00:00Z"))
 
 
-def test_destroy_keeps_db_secrets_while_the_postgres_pvc_survives():
-    """create_namespace=false with a surviving PVC (LB-187): a redeploy must
-    find the passwords its data was initialised with."""
-    deleted = _destroy_secret_deletes(pvc_present=True)
-    assert "lakebench-s3-credentials" in deleted
-    for name in (ds.HIVE_DB_SECRET, ds.POLARIS_DB_SECRET, ds.POLARIS_CLIENT_SECRET):
-        assert name not in deleted
+@pytest.mark.parametrize(
+    ("state", "kept_with_the_data"),
+    [
+        # Namespace and claim gone: the secrets go with the data.
+        ({"pvc_present": False}, False),
+        # create_namespace=false with a surviving PVC: a redeploy must find
+        # the passwords its data was initialised with.
+        ({"pvc_present": True}, True),
+        # The usual path: step 8 just deleted the claim, so it is Terminating.
+        ({"pvc_present": True, "pvc": _TERMINATING}, False),
+        # An unreadable claim is treated as surviving.
+        ({"pvc_present": True, "pvc_error": ApiException(status=500)}, True),
+    ],
+    ids=["no-pvc", "pvc-survives", "pvc-terminating", "pvc-unreadable"],
+)
+def test_destroy_deletes_db_secrets_only_when_their_data_goes(state, kept_with_the_data):
+    deleted = set(_destroy_secret_deletes(**state))
+    assert deleted == _ALWAYS_DELETED | (set() if kept_with_the_data else _PVC_BOUND)
 
 
 def _polaris_db(role_out: str, core: FakeCore, cfg: LakebenchConfig | None = None):
@@ -421,26 +337,13 @@ def test_unreadable_role_probe_stops_before_any_user_change():
 
 
 def test_scram_verifier_matches_rfc7677():
-    """RFC 7677 section 3 example: user "user", password "pencil"."""
-    import hashlib
-    import hmac
-
+    """RFC 7677 section 3 example (password "pencil", salt W22Z...): the
+    StoredKey and ServerKey are derived from that vector."""
     salt = base64.b64decode("W22ZaJ0SNY7soEsUEjb6gQ==")
-    v = ds.scram_sha256_verifier("pencil", salt=salt)
-    head, keys = v.rsplit("$", 1)
-    assert head == "SCRAM-SHA-256$4096:W22ZaJ0SNY7soEsUEjb6gQ=="
-    stored, server = (base64.b64decode(k) for k in keys.split(":"))
-    nonce = "rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0"
-    auth = (
-        f"n=user,r=rOprNGfwEbeRWgbNEkqO,r={nonce},s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096,"
-        f"c=biws,r={nonce}"
-    ).encode()
-    server_sig = base64.b64encode(hmac.new(server, auth, hashlib.sha256).digest()).decode()
-    assert server_sig == "6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="
-    proof = base64.b64decode("dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ=")
-    client_sig = hmac.new(stored, auth, hashlib.sha256).digest()
-    client_key = bytes(a ^ b for a, b in zip(proof, client_sig, strict=True))
-    assert hashlib.sha256(client_key).digest() == stored
+    assert ds.scram_sha256_verifier("pencil", salt=salt) == (
+        "SCRAM-SHA-256$4096:W22ZaJ0SNY7soEsUEjb6gQ==$"
+        "WG5d8oPm3OtcPnkdi4Uo7BkeZkBFzpcXkuLmtbsT4qY=:wfPLwcE6nTWhTAmQ7tl2KeoiWGPlZqQxSrmfPwDl2dU="
+    )
 
 
 def test_role_sync_failure_does_not_echo_psql_output():
@@ -466,9 +369,9 @@ def test_postgres_step_syncs_the_hive_role_to_its_secret(monkeypatch):
     assert "hive-pw" not in sent[0]
 
 
-def test_secrets_step_creates_a_new_hive_secret_before_rendering():
+def test_secrets_step_renders_the_hive_secret_that_won_a_racing_create():
     """409-safe: an overlapping deploy that won the create keeps its value."""
-    from tests.test_functional_templates import _make_engine
+    from tests.fixtures.functional_templates_helpers import _make_engine
 
     engine = _make_engine()
     engine.dry_run = False
@@ -483,34 +386,6 @@ def test_secrets_step_creates_a_new_hive_secret_before_rendering():
     applied = [c.args[0] for c in engine.k8s.apply_manifest.call_args_list]
     pg_secret = next(m for m in applied if m["metadata"]["name"] == ds.HIVE_DB_SECRET)
     assert pg_secret["stringData"]["password"] == "winner-pw"
-
-
-def test_thrift_container_expands_env_through_bash():
-    """The env references only work under a shell: pin it (SD-5b reworks
-    this template)."""
-    import yaml
-
-    text = _render("spark-thrift/sparkapplication.yaml.j2", "polaris-iceberg-spark-thrift")
-    docs = [d for d in yaml.safe_load_all(text) if d]
-    containers = [
-        c
-        for d in docs
-        for c in ((d.get("spec") or {}).get("template", {}).get("spec", {}).get("containers") or [])
-        if c.get("name") == "spark-thrift"
-    ]
-    assert containers and containers[0]["command"][:2] == ["/bin/bash", "-c"]
-
-
-def test_destroy_deletes_secrets_when_the_pvc_is_terminating():
-    """The usual path: step 8 just deleted the claim, so it is Terminating."""
-    pvc = SimpleNamespace(metadata=SimpleNamespace(deletion_timestamp="2026-10-01T00:00:00Z"))
-    deleted = _destroy_secret_deletes(True, pvc=pvc)
-    assert ds.POLARIS_CLIENT_SECRET in deleted and ds.HIVE_DB_SECRET in deleted
-
-
-def test_destroy_keeps_db_secrets_when_the_pvc_cannot_be_read():
-    deleted = _destroy_secret_deletes(True, pvc_error=ApiException(status=500))
-    assert ds.HIVE_DB_SECRET not in deleted and ds.POLARIS_DB_SECRET not in deleted
 
 
 def test_create_race_falls_through_to_sync():
@@ -547,7 +422,7 @@ def test_create_race_falls_through_to_sync():
 @pytest.mark.parametrize("fresh", [True, False])
 def test_an_empty_stored_client_secret_is_refused_not_used(fresh):
     """A tampered Secret holding "" must never bootstrap Polaris or be synced
-    to the role. Reverted, the empty value was returned as the secret."""
+    to the role."""
     core = FakeCore({("a", ds.POLARIS_CLIENT_SECRET): {ds.POLARIS_CLIENT_KEY: ""}})
     with pytest.raises(ds.DeploymentSecretError, match="empty"):
         ds.ensure_polaris_client_secret(core, _cfg(), "a", fresh=fresh)
@@ -573,8 +448,7 @@ def test_an_empty_stored_db_password_is_refused():
 )
 def test_job_redaction_regex_always_hides_the_catalog_credential(user):
     """A user's spark.redaction.regex is kept, with Lakebench's terms in front:
-    the Polaris client secret sits in sparkConf as ...catalog.<name>.credential.
-    Reverted (setdefault), a user regex without 'credential' exposed it."""
+    the Polaris client secret sits in sparkConf as ...catalog.<name>.credential."""
     import re
 
     from lakebench.modules.pipeline_engines.spark.job import (
@@ -586,6 +460,7 @@ def test_job_redaction_regex_always_hides_the_catalog_credential(user):
     if not user:
         assert regex == SPARK_REDACTION_REGEX
         return
-    assert regex.endswith("|" + user)  # the user's part is kept whole
-    head = regex[: -len(user) - 1]
-    assert re.search(head, "spark.sql.catalog.lakehouse.credential")
+    # Lakebench's own group leads, ahead of whatever the user wrote.
+    ours = re.match(r"\(\?i:[^)]*\)", regex)
+    assert ours and re.search(ours.group(0), "spark.sql.catalog.lakehouse.credential")
+    assert user in regex

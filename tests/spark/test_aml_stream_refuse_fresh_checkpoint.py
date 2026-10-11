@@ -20,32 +20,24 @@ def spark(spark_session, iceberg_catalog, tmp_path_factory):
     return spark_session
 
 
-def test_refuse_fresh_checkpoint_over_populated_aml_silver(spark, tmp_path):
-    """Populated silver.transactions + fresh checkpoint -> SilverAbort."""
+@pytest.mark.parametrize("as_list", [True, False], ids=["table-list", "single-str"])
+def test_refuse_fresh_checkpoint_over_populated_aml_silver(spark, tmp_path, as_list):
+    """A populated table, named in a list or as one str, plus a fresh
+    checkpoint -> SilverAbort."""
     from common import SilverAbort, refuse_fresh_checkpoint_over_data
 
     spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.silver")
-    tbl_t = "ice.silver.transactions_aml"
-    tbl_e = "ice.silver.edges_aml"
-    # Populate one of the two tables (edges empty is fine; any populated
-    # table on the list must trigger refusal).
+    suffix = "list" if as_list else "str"
+    tbl_t = f"ice.silver.transactions_aml_{suffix}"
+    tbl_e = f"ice.silver.edges_aml_{suffix}"
+    # Populate one of the tables (edges empty is fine; any populated table
+    # on the list must trigger refusal).
     spark.createDataFrame([(1,), (2,)], "n bigint").writeTo(tbl_t).create()
     spark.sql(f"CREATE TABLE {tbl_e} (n BIGINT) USING iceberg")
 
     ckpt = str(tmp_path / "aml-fresh-ckpt")  # never used
     with pytest.raises(SilverAbort):
-        refuse_fresh_checkpoint_over_data(spark, ckpt, [tbl_t, tbl_e])
-
-
-def test_refuse_accepts_single_str_arg(spark, tmp_path):
-    """Backwards compatibility: str signature still works."""
-    from common import SilverAbort, refuse_fresh_checkpoint_over_data
-
-    spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.silver")
-    tbl = "ice.silver.single_arg"
-    spark.createDataFrame([(1,)], "n bigint").writeTo(tbl).create()
-    with pytest.raises(SilverAbort):
-        refuse_fresh_checkpoint_over_data(spark, str(tmp_path / "ckpt-never-used"), tbl)
+        refuse_fresh_checkpoint_over_data(spark, ckpt, [tbl_t, tbl_e] if as_list else tbl_t)
 
 
 def test_refuse_no_op_when_all_tables_empty(spark, tmp_path):

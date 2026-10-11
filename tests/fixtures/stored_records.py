@@ -1,7 +1,7 @@
-"""The stored-record regression harness (DESIGN-v1.7 ch03 ER-1).
+"""The stored-record regression harness.
 
 ``tests/fixtures/records/run-<id>/metrics.json`` holds the 24 pinned stored
-records of ch03 section 0.2, each taken through ``tests/fixtures/scrub.py``
+records, each taken through ``tests/fixtures/scrub.py``
 (``MANIFEST.json`` names the source, its sha256 and the rewritten paths).
 ``tests/expected/`` holds the reviewed expected values read from those
 records. Tests for EVD-1 to EVD-13 load records and expectations from here
@@ -41,13 +41,9 @@ def resolve(run_id: str) -> str:
     return matches[0]
 
 
-def record_path(run_id: str) -> Path:
-    return RECORDS_DIR / f"run-{resolve(run_id)}" / "metrics.json"
-
-
 @cache
 def _raw(run_id: str) -> str:
-    return record_path(run_id).read_text()
+    return (RECORDS_DIR / f"run-{resolve(run_id)}" / "metrics.json").read_text()
 
 
 def load_record(run_id: str) -> dict[str, Any]:
@@ -72,7 +68,3 @@ def _expected(name: str) -> dict[str, Any]:
 def expected(name: str) -> dict[str, Any]:
     """A copy of ``tests/expected/<name>.json``."""
     return copy.deepcopy(_expected(name))
-
-
-def manifest() -> dict[str, Any]:
-    return json.loads((RECORDS_DIR / "MANIFEST.json").read_text())

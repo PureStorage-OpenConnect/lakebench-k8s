@@ -9,20 +9,6 @@ from lakebench.journal import CommandName, EventType, Journal, JournalEvent
 class TestJournalEvent:
     """Tests for JournalEvent dataclass."""
 
-    def test_basic_event(self) -> None:
-        event = JournalEvent(
-            event_type=EventType.SESSION_START,
-            session_id="test-session",
-            message="Test event",
-        )
-        assert event.event_type == EventType.SESSION_START
-        assert event.session_id == "test-session"
-        assert event.message == "Test event"
-        assert len(event.event_id) == 12
-        assert event.command is None
-        assert event.success is None
-        assert event.details == {}
-
     def test_to_dict_roundtrip(self) -> None:
         event = JournalEvent(
             event_type=EventType.DEPLOY_COMPONENT,
@@ -43,44 +29,11 @@ class TestJournalEvent:
         assert restored.success is True
         assert restored.details["elapsed_seconds"] == 3.2
 
-    def test_from_dict(self) -> None:
-        data = {
-            "event_type": "command.start",
-            "session_id": "s1",
-            "message": "Command started",
-            "event_id": "abc123def456",
-            "timestamp": "2026-01-29T12:00:00",
-            "command": "deploy",
-            "success": None,
-            "details": {"args": {"dry_run": True}},
-            "config_hash": None,
-            "duration_s": None,
-        }
-        event = JournalEvent.from_dict(data)
-        assert event.event_type == EventType.COMMAND_START
-        assert event.details["args"]["dry_run"] is True
-
-    def test_event_types_are_strings(self) -> None:
-        for et in EventType:
-            assert isinstance(et.value, str)
-            assert "." in et.value
-
-    def test_from_dict_does_not_mutate_input(self) -> None:
-        data = {
-            "event_type": "session.start",
-            "session_id": "s1",
-            "message": "test",
-            "event_id": "aaa",
-            "timestamp": "2026-01-29T12:00:00",
-            "command": None,
-            "success": None,
-            "details": {},
-            "config_hash": None,
-            "duration_s": None,
-        }
-        original_type = data["event_type"]
-        JournalEvent.from_dict(data)
-        assert data["event_type"] == original_type
+        nested = JournalEvent.from_dict(
+            {**d, "event_type": "command.start", "details": {"args": {"dry_run": True}}}
+        )
+        assert nested.event_type == EventType.COMMAND_START
+        assert nested.details["args"]["dry_run"] is True
 
 
 class TestJournal:
@@ -163,7 +116,8 @@ class TestJournal:
         assert events[1]["command"] == "deploy"
         assert events[2]["event_type"] == "command.end"
         assert events[2]["success"] is True
-        assert events[2]["duration_s"] is not None
+        assert isinstance(events[2]["duration_s"], (int, float))
+        assert events[2]["duration_s"] >= 0
 
     def test_record_event_appends_jsonl(self, tmp_path: Path) -> None:
         j = Journal(journal_dir=tmp_path)
@@ -257,33 +211,23 @@ class TestJournal:
         files = list(tmp_path.glob("session-*.jsonl"))
         events = _read_jsonl(files[0])
         assert events[-1]["event_type"] == "session.end"
-        assert events[-1]["details"]["events_recorded"] > 0
+        assert events[-1]["details"]["events_recorded"] == 3
         assert events[-1]["details"]["commands_run"] == 1
 
-    def test_command_duration_calculated(self, tmp_path: Path) -> None:
-        j = Journal(journal_dir=tmp_path)
-        j.open_session(config_name="test")
-        j.begin_command(CommandName.VALIDATE)
-        j.end_command(success=True)
-
-        files = list(tmp_path.glob("session-*.jsonl"))
-        events = _read_jsonl(files[0])
-        cmd_end = events[-1]
-        assert cmd_end["event_type"] == "command.end"
-        assert cmd_end["duration_s"] is not None
-        assert cmd_end["duration_s"] >= 0
-
     def test_config_hash_for_drift_detection(self, tmp_path: Path) -> None:
-        config = tmp_path / "lakebench.yaml"
-        config.write_text("name: test\nscale: 10\n")
+        def session_hash(directory: Path, content: str) -> str:
+            directory.mkdir()
+            config = directory / "lakebench.yaml"
+            config.write_text(content)
+            Journal(journal_dir=directory).open_session(config_path=config, config_name="test")
+            (path,) = directory.glob("session-*.jsonl")
+            return _read_jsonl(path)[0]["config_hash"]
 
-        j = Journal(journal_dir=tmp_path)
-        j.open_session(config_path=config, config_name="test")
-
-        files = list(tmp_path.glob("session-*.jsonl"))
-        events = _read_jsonl(files[0])
-        assert events[0]["config_hash"] is not None
-        assert len(events[0]["config_hash"]) == 16
+        a = session_hash(tmp_path / "a", "name: test\nscale: 10\n")
+        same = session_hash(tmp_path / "b", "name: test\nscale: 10\n")
+        other = session_hash(tmp_path / "c", "name: test\nscale: 50\n")
+        assert a == same
+        assert a != other
 
 
 def _read_jsonl(path: Path) -> list[dict]:

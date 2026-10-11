@@ -251,7 +251,7 @@ def _query_json_rows(engine: str, raw: str) -> tuple[list[str] | None, list[list
     import io
 
     if engine == "duckdb":
-        from lakebench.benchmark.fingerprint import last_json_line
+        from lakebench.benchmark.result import last_json_line
 
         payload = last_json_line((raw or "").strip()) or {}
         return None, [[str(d)] for d in payload.get("data") or []], "python-repr"
@@ -648,6 +648,8 @@ def _save_benchmark_record(
     if pb is not None:
         pb.query_benchmark = bench
         pb.benchmark_rounds = []
+        # The parent's benchmark seconds, which its wall clock holds.
+        parent_query_s = sum(s.elapsed_seconds for s in pb.stages if s.stage_type == "query")
         pb.stages = [s for s in pb.stages if s.stage_type != "query"]
         pb.stages.append(
             StageMetrics(
@@ -656,7 +658,6 @@ def _save_benchmark_record(
                 engine=result.engine or "trino",
                 elapsed_seconds=result.total_seconds,
                 success=True,
-                input_size_gb=record.gold_size_gb,
                 queries_executed=len(result.queries),
                 queries_per_hour=result.qph,
             )
@@ -674,10 +675,12 @@ def _save_benchmark_record(
         pb.maintenance_paired_queries = 0
         pb.pre_compaction_benchmark = None
         if pb.pipeline_mode != "sustained":
-            # Batch elapsed is the stage-time sum, which held the parent's
-            # query stage. Continuous elapsed is the stream window's wall
-            # clock (the stages overlap) and does not include the benchmark.
-            pb.total_elapsed_seconds = sum(s.elapsed_seconds for s in pb.stages)
+            # Batch elapsed is the run's wall clock, which held the parent's
+            # benchmark: this benchmark's seconds replace it. Continuous
+            # elapsed is the stream window's and does not include it.
+            pb.total_elapsed_seconds = max(
+                0.0, pb.total_elapsed_seconds - parent_query_s + result.total_seconds
+            )
     # The stored experiment block is never rebuilt; bring its benchmark half
     # (results, iterations, mode) in line with the benchmark it now holds.
     refresh_benchmark(record)
@@ -917,8 +920,8 @@ def benchmark(
     # outside the known-upstream allowlist, any zero-row query not
     # declared allow_empty, and the empty-set / all-failed case all fail
     # the run. Also refuse when composite mode's throughput half
-    # produced qph=0 (the LB-044 shape: power passes, throughput is
-    # empty, composite headline is 0.0 but exit was previously 0).
+    # produced qph=0 (power passes, throughput is empty, composite
+    # headline is 0.0 but exit was previously 0).
     from lakebench.cli._run import _benchmark_gate_problems
 
     total_queries = len(primary_result.queries)

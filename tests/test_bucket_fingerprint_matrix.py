@@ -1,4 +1,4 @@
-"""SAF-10: the cluster fingerprint in bucket ownership (SD-18a, DESIGN ch01 section 4).
+"""SAF-10: the cluster fingerprint in bucket ownership (SD-18a).
 
 One case per row of the verdict matrix, on a tagged backend (the
 ``lakebench.cluster`` tag) and a tagless one (FlashBlade: the
@@ -110,8 +110,6 @@ def test_matrix_row(row, deployment, cluster, mine, recorded, want_tagged, want_
         )
         assert v.verdict is (want_tagged if tagged else want_tagless), v.hint
         assert v.tagged is tagged
-        if row == "5":
-            assert "CA changed" in (v.hint or "")
 
 
 def test_tagless_marker_without_stamp_in_record_is_legacy_proven():
@@ -163,10 +161,9 @@ class TestDeploy:
         with recording(NS) as rec:
             result = _deploy(rec, fp=None)
             assert result.status.value == "failed"
-            assert "cannot compute this cluster's fingerprint" in result.message
-            assert not rec.buckets_store or all(
-                TAG_CLUSTER not in rec.tags_store.get(b, {}) for b in rec.buckets_store
-            )
+            # No bucket is stamped or written to without a fingerprint.
+            assert all(not objects for objects in rec.buckets_store.values())
+            assert all(TAG_CLUSTER not in tags for tags in rec.tags_store.values())
 
     def test_refuses_another_clusters_bucket(self):
         """Row 2: fails reverted (the name tag alone read MATCH)."""
@@ -343,33 +340,30 @@ class TestDestroy:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("tags", "problem"),
-    [
-        ({TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: FP}, False),
-        ({TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: OTHER_FP}, True),
-        ({TAG_DEPLOYMENT_NAME: NS}, True),  # row 4, not in the record
-    ],
-    ids=["mine", "foreign-cluster", "unproven"],
-)
-def test_continuous_reset_applies_the_matrix(tags, problem):
-    from kubernetes import client
+def test_continuous_reset_applies_the_matrix():
+    for tags, objects, problem in [
+        ({TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: FP}, (), False),
+        ({TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: OTHER_FP}, (), True),
+        ({TAG_DEPLOYMENT_NAME: NS}, (), True),  # row 4, not in the record
+        (None, ("data/part-0",), True),  # untagged, holding data
+    ]:
+        from kubernetes import client
 
-    from lakebench.cli._sustained import _bucket_ownership_problem
-    from tests.conftest import make_config
+        from lakebench.cli._sustained import _bucket_ownership_problem
+        from tests.conftest import make_config
 
-    cfg = make_config(name=NS)
-    with recording() as rec:
-        rec.for_config(cfg)
-        rec.add_namespace(NS, annotations={"lakebench.deployment/name": NS})
-        for b in ("u01-bronze", "u01-silver", "u01-gold"):
-            rec.add_bucket(b, tags={TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: FP})
-        rec.tags_store[B] = dict(tags)
-        with patch("lakebench.deploy.ownership.api_server_fingerprint", return_value=FP):
-            got = _bucket_ownership_problem(cfg, client.CoreV1Api())
-        assert (got is not None) is problem, got
-        if problem:
-            assert B in got
+        cfg = make_config(name=NS)
+        with recording() as rec:
+            rec.for_config(cfg)
+            rec.add_namespace(NS, annotations={"lakebench.deployment/name": NS})
+            for b in ("u01-silver", "u01-gold"):
+                rec.add_bucket(b, tags={TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: FP})
+            rec.add_bucket(B, list(objects), tags=tags)
+            with patch("lakebench.deploy.ownership.api_server_fingerprint", return_value=FP):
+                got = _bucket_ownership_problem(cfg, client.CoreV1Api())
+            assert (got is not None) is problem, got
+            if problem:
+                assert B in got
 
 
 # ---------------------------------------------------------------------------

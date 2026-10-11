@@ -20,29 +20,12 @@ from lakebench.cli._run_args import (
     RunArgs,
     RunContext,
     run_args_problems,
-    validate_run_args,
 )
-from lakebench.exit_codes import ExitCode, UsageError
+from lakebench.exit_codes import ExitCode
+from tests.fixtures import run_args_helpers as _run_args_helpers
+from tests.fixtures.run_args_helpers import CONFIG as CONFIG
 
-CONFIG = """\
-name: runargs
-recipe: hive-iceberg-spark-trino
-platform:
-  kubernetes:
-    namespace: runargs
-  storage:
-    s3:
-      endpoint: http://10.0.1.50:80
-      access_key: x
-      secret_key: y
-architecture:
-  pipeline:
-    mode: batch
-workload:
-  schema: customer360
-  datagen:
-    scale: 1
-"""
+no_cluster = _run_args_helpers.no_cluster  # the SAF-6 fixture
 
 #: One argument list per rule, in RUN_RULES order, and the text it prints.
 CASES = [
@@ -82,92 +65,12 @@ CASES = [
 SUPPORT_CASES = [(["--local", "--continuous"], "batch mode only")]
 
 
-def test_every_rule_has_a_case():
-    """One case per rule, in table order, each refused by its own rule."""
-    assert len(CASES) == len(RUN_RULES)
-    for (argv, message), rule in zip(CASES, RUN_RULES, strict=True):
-        args = _args_of(argv)
-        ctx = RunContext(
-            mode="continuous" if args.continuous else "batch",
-            cycles=2 if "--cycles" in argv else 1,
-            schema="financial" if "--financial" in argv else "customer360",
-            investigators="the run is batch" if "--investigators" in argv else None,
-        )
-        assert rule.broken(args, ctx), argv
-        assert message in rule.text(args), (argv, rule.next)
-
-
-def _args_of(argv: list[str]) -> RunArgs:
-    flags = {
-        "--continuous": "continuous",
-        "--deploy-only": "deploy_only",
-        "--generate-only": "generate_only",
-        "--local": "local",
-        "--force-rebuild": "force_rebuild",
-        "--force-reset": "force_reset",
-        "--regenerate": "regenerate",
-        "--generate": "include_datagen",
-        "--skip-generate": "skip_generate",
-        "--skip-deploy": "skip_infra",
-        "--allow-stale-bronze": "allow_stale_bronze",
-    }
-    kw: dict = {}
-    it = iter(argv)
-    for a in it:
-        if a in flags:
-            kw[flags[a]] = True
-        elif a == "--stage":
-            kw["stage"] = next(it)
-        elif a in ("--duration", "--timeout", "--repeat"):
-            kw[a[2:]] = int(next(it))
-    return RunArgs(**kw)
-
-
-def test_the_cli_reference_lists_exactly_the_rules():
-    """docs/cli-reference.md's "Refused arguments" list is the table."""
-    from pathlib import Path
-
-    doc = (Path(__file__).resolve().parents[1] / "docs" / "cli-reference.md").read_text()
-    block = doc.split("**Refused arguments.**", 1)[1].split("\n\n", 2)[1]
-    listed = [line[2:].rstrip(";.") for line in block.splitlines() if line.startswith("- ")]
-    assert listed == [r.doc for r in RUN_RULES]
-
-
-@pytest.fixture
-def no_cluster(monkeypatch):
-    """Every way ``run`` reaches a cluster, S3 or a child process records
-    the call and raises."""
-    import subprocess
-
-    import boto3
-    import kubernetes.client
-    import kubernetes.config
-
-    from lakebench.k8s.client import K8sClient
-
-    fired: list[str] = []
-
-    def stop(name):
-        def call(*a, **k):
-            fired.append(name)
-            raise AssertionError(f"cluster call: {name}")
-
-        return call
-
-    monkeypatch.setattr(kubernetes.config, "load_kube_config", stop("load_kube_config"))
-    monkeypatch.setattr(kubernetes.config, "load_incluster_config", stop("load_incluster_config"))
-    monkeypatch.setattr(kubernetes.client.ApiClient, "__init__", stop("ApiClient"))
-    monkeypatch.setattr(K8sClient, "__init__", stop("K8sClient"))
-    monkeypatch.setattr(subprocess, "run", stop("subprocess.run"))
-    monkeypatch.setattr(subprocess, "Popen", stop("subprocess.Popen"))
-    monkeypatch.setattr(boto3, "client", stop("boto3.client"))
-    return fired
-
-
 @pytest.mark.parametrize(
-    "argv, message", CASES + SUPPORT_CASES, ids=[" ".join(c[0]) for c in CASES + SUPPORT_CASES]
+    ("argv", "message"),
+    CASES + SUPPORT_CASES,
+    ids=lambda v: " ".join(v) if isinstance(v, list) else "",
 )
-def test_run_validation_zero_cluster_calls(tmp_path, monkeypatch, no_cluster, argv, message):
+def test_run_validation_zero_cluster_calls(argv, message, tmp_path, monkeypatch, no_cluster):
     monkeypatch.chdir(tmp_path)
     cfg = tmp_path / "runargs.yaml"
     text = CONFIG
@@ -189,79 +92,6 @@ def test_run_validation_zero_cluster_calls(tmp_path, monkeypatch, no_cluster, ar
         assert message in result.output, result.output
     assert no_cluster == []
     assert not list(tmp_path.glob("lakebench-output/runs/*/metrics.json"))
-
-
-def _cfg(mode="batch"):
-    from types import SimpleNamespace
-
-    return SimpleNamespace(architecture=SimpleNamespace(pipeline=SimpleNamespace(mode=mode)))
-
-
-def test_valid_arguments_resolve_the_mode():
-    assert validate_run_args(RunArgs(), _cfg()).mode == "batch"
-    assert validate_run_args(RunArgs(continuous=True), _cfg()).mode == "continuous"
-    assert validate_run_args(RunArgs(sustained=True), _cfg()).mode == "continuous"
-    assert validate_run_args(RunArgs(), _cfg("continuous")).mode == "continuous"
-    assert validate_run_args(RunArgs(), _cfg("sustained")).mode == "continuous"
-    # Allowed combinations stay allowed.
-    for ok in (
-        RunArgs(stage="silver-build"),
-        RunArgs(include_datagen=True, regenerate=True),
-        RunArgs(generate_only=True, regenerate=True),
-        RunArgs(continuous=True, force_reset=True, duration=60),
-        RunArgs(force_rebuild=True, timeout=1),
-        RunArgs(local=True, stage="gold-finalize"),
-    ):
-        assert run_args_problems(ok, _cfg()) == [], ok
-    # --generate-only honours --regenerate whatever the config's mode.
-    regen = RunArgs(generate_only=True, regenerate=True)
-    assert run_args_problems(regen, _cfg("continuous")) == []
-
-
-def test_several_refusals_name_the_first_and_count_the_rest():
-    with pytest.raises(UsageError) as info:
-        validate_run_args(RunArgs(stage="bogus", force_reset=True, timeout=0), _cfg())
-    assert str(info.value) == "Unknown stage: bogus (2 more refused argument(s))"
-    assert info.value.code == ExitCode.USAGE and info.value.path == "run.args"
-
-
-def test_reproduce_refuses_a_bad_timeout_before_it_destroys(tmp_path, monkeypatch, no_cluster):
-    """reproduce destroys, deploys and generates before it calls run; a
-    timeout run would refuse is refused first, with nothing destroyed."""
-    import lakebench.cli._destroy as destroy_mod
-    from lakebench.cli._reproduce import _run_pipeline
-
-    monkeypatch.chdir(tmp_path)
-    cfg = tmp_path / "runargs.yaml"
-    cfg.write_text(CONFIG)
-    called: list[str] = []
-    monkeypatch.setattr(destroy_mod, "destroy", lambda **k: called.append("destroy"))
-    with pytest.raises(UsageError, match="--timeout must be at least 1 s"):
-        _run_pipeline(cfg, 0, keep=True)
-    assert called == [] and no_cluster == []
-
-
-def test_reproduce_refuses_batch_investigator_sessions_before_it_deploys(
-    tmp_path, monkeypatch, no_cluster
-):
-    """A batch AML config with investigator sessions loads, and run would
-    refuse it only after reproduce had deployed and generated: reproduce
-    checks run's rules first."""
-    import lakebench.cli._deploy as deploy_mod
-    from lakebench.cli._reproduce import _run_pipeline
-
-    monkeypatch.chdir(tmp_path)
-    cfg = tmp_path / "runargs.yaml"
-    cfg.write_text(
-        CONFIG.replace("schema: customer360", "schema: financial").replace(
-            "  pipeline:\n", "  benchmark:\n    investigator_sessions: 8\n  pipeline:\n"
-        )
-    )
-    called: list[str] = []
-    monkeypatch.setattr(deploy_mod, "_deploy_impl", lambda *a, **k: called.append("deploy"))
-    with pytest.raises(UsageError, match="investigator_sessions runs only on an AML continuous"):
-        _run_pipeline(cfg, None, keep=True)
-    assert called == [] and no_cluster == []
 
 
 @pytest.mark.parametrize(
@@ -287,22 +117,6 @@ def test_allow_stale_bronze_only_where_a_generate_reads_it(kw, mode, cycles, ref
     ctx = RunContext(mode=mode, cycles=cycles)
     assert rule.broken(RunArgs(allow_stale_bronze=True, **kw), ctx) is refused
     assert not rule.broken(RunArgs(**kw), ctx)
-
-
-@pytest.mark.parametrize(
-    ("kw", "cycles", "refused"),
-    [
-        ({}, 2, False),  # a multi-cycle run takes --regenerate alone
-        ({"skip_generate": True}, 2, True),  # reuses the corpus: nothing to clear
-        ({"deploy_only": True}, 2, True),
-        ({"local": True}, 2, True),
-        ({}, 1, True),  # a single-cycle run generates only with --generate
-        ({"include_datagen": True}, 1, False),
-    ],
-)
-def test_regenerate_on_a_multi_cycle_run(kw, cycles, refused):
-    problems = run_args_problems(RunArgs(regenerate=True, **kw), _cycles_cfg(cycles))
-    assert bool(problems) is refused, [p.doc for p in problems]
 
 
 def _cycles_cfg(cycles: int, schema: str = "customer360"):

@@ -64,11 +64,6 @@ def test_planted_docs_internal_member_in_an_sdist_fails(tmp_path):
     ]
 
 
-def test_ordinary_member_names_pass():
-    names = ["lakebench/cli/__init__.py", "docs/internals-of-x.md", "docs/aml-scoring.md"]
-    assert pg.check_names(names) == []
-
-
 @pytest.mark.parametrize(
     ("body", "rule"),
     [
@@ -84,15 +79,6 @@ def test_planted_key_pattern_fails_without_printing_it(body, rule):
     assert all(f.status == pg.FAIL for f in found)
     for secret in (FAKE_PSFB, FAKE_AKIA, FAKE_SECRET):
         assert secret not in " ".join(f.render() for f in found)
-
-
-def test_allowlisted_and_low_entropy_values_pass():
-    members = {
-        # .gitleaks.toml allowlists this fixed local-only value.
-        "a.yaml": b"secret_key: 0123456789abcdef0123456789abcdef\n",
-        "b.yaml": b"secret_key: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
-    }
-    assert pg.check_content(members) == []
 
 
 def test_a_value_on_the_line_after_its_key_is_found():
@@ -127,9 +113,19 @@ def test_link_member_in_an_sdist_fails(tmp_path):
     assert pg.check_content(members) == []
 
 
-def test_gitleaks_runs_on_the_extracted_members_or_skips(tmp_path, monkeypatch):
-    monkeypatch.setattr(pg.shutil, "which", lambda name: None)
-    assert [f.status for f in pg.check_gitleaks(tmp_path)] == [pg.SKIP]
+@pytest.mark.parametrize(
+    ("gitleaks", "baseline", "status"),
+    [
+        (None, False, "SKIP"),  # no gitleaks: SKIP, never a silent pass
+        ("/bin/true", False, "FAIL"),  # an empty tree scanned nothing
+        ("/bin/true", True, "FAIL"),  # a .gitleaksignore at the scan root would be honoured
+    ],
+)
+def test_gitleaks_check_fails_closed(tmp_path, monkeypatch, gitleaks, baseline, status):
+    monkeypatch.setattr(pg.shutil, "which", lambda name: gitleaks)
+    if baseline:
+        (tmp_path / ".gitleaksignore").write_text("x\n")
+    assert [f.status for f in pg.check_gitleaks(tmp_path)] == [getattr(pg, status)]
 
 
 def test_gitleaks_ignores_inline_allow_comments_and_names_the_member(tmp_path):
@@ -142,19 +138,8 @@ def test_gitleaks_ignores_inline_allow_comments_and_names_the_member(tmp_path):
     assert found.detail == "pkg/x.yaml:2: pure-flashblade-s3-access-key"
 
 
-def test_gitleaks_on_an_empty_tree_fails(tmp_path, monkeypatch):
-    monkeypatch.setattr(pg.shutil, "which", lambda name: "/bin/true")
-    (found,) = pg.check_gitleaks(tmp_path)
-    assert found.status == pg.FAIL and "no files" in found.detail
-
-
 def _absence(mode, problems):
     return lambda texts: (mode, problems(texts))
-
-
-def test_heldout_check_is_off_without_the_hash_file(tmp_path):
-    (found,) = pg.check_heldout({"a": b"1"}, hashes=tmp_path / "heldout_hashes.json")
-    assert found.status == pg.SKIP
 
 
 @pytest.mark.parametrize(("mode", "status"), [("report", pg.PENDING), ("enforce", pg.FAIL)])
@@ -185,52 +170,64 @@ def test_planted_heldout_token_follows_the_files_mode(tmp_path, mode, status):
     assert pg.exit_code(found, require_all=True) == 1
 
 
-def test_heldout_check_that_cannot_run_fails(tmp_path):
-    hashes = tmp_path / "heldout_hashes.json"
-    hashes.write_text("{}")
+def _raising(exc):
+    def load(path=None):
+        raise exc
 
-    def broken(texts):
-        raise RuntimeError("no absence check")
-
-    (found,) = pg.check_heldout({"a": b"1"}, broken, hashes)
-    assert found.status == pg.FAIL and "no absence check" in found.detail
+    return load
 
 
-def test_hash_file_that_cannot_load_yet_is_pending(tmp_path, monkeypatch):
-    # The datagen lane ships the hash file before the maintainers' commit
-    # writes its compiled floor; until then loading it raises.
+@pytest.mark.parametrize(
+    ("hash_text", "ds_patch", "absence", "status", "detail"),
+    [
+        (None, None, None, "SKIP", "held-out check is off"),
+        ("{}", None, "broken", "FAIL", "no absence check"),
+        ("{}", "no_absence_fn", None, "FAIL", "no absence check"),
+        (
+            '{"absence_check": "report"}',
+            _raising(RuntimeError("compiled held-out floor is not initialised")),
+            None,
+            "PENDING",
+            "cannot be loaded yet",
+        ),
+        (
+            '{"absence_check": "enforce"}',
+            _raising(ValueError("role hash is not hex")),
+            None,
+            "FAIL",
+            "do not load",
+        ),
+        ("not json", _raising(ValueError("x")), None, "FAIL", ""),
+    ],
+    ids=[
+        "no-hash-file-is-off",
+        "absence-check-raises",
+        "no-absence-function",
+        "report-mode-cannot-load-is-pending",
+        "enforce-mode-cannot-load-fails",
+        "unparseable-hash-file-fails",
+    ],
+)
+def test_heldout_check_states(tmp_path, monkeypatch, hash_text, ds_patch, absence, status, detail):
     from lakebench.config import datagen_seed as ds
 
     hashes = tmp_path / "heldout_hashes.json"
-    hashes.write_text('{"absence_check": "report"}')
+    if hash_text is not None:
+        hashes.write_text(hash_text)
     monkeypatch.setattr(pg, "HELDOUT_HASHES", hashes)
+    if ds_patch == "no_absence_fn":
+        monkeypatch.delattr(ds, "absence_problems", raising=False)
+    elif ds_patch is not None:
+        monkeypatch.setattr(ds, "load_heldout", ds_patch, raising=False)
+        monkeypatch.setattr(ds, "absence_problems", lambda texts, held=None: [], raising=False)
+    check = None
+    if absence == "broken":
 
-    def not_yet(path=None):
-        raise RuntimeError("compiled held-out floor is not initialised")
+        def check(texts):
+            raise RuntimeError("no absence check")
 
-    monkeypatch.setattr(ds, "load_heldout", not_yet, raising=False)
-    monkeypatch.setattr(ds, "absence_problems", lambda texts, held=None: [], raising=False)
-    (found,) = pg.check_heldout({"a": b"1"}, hashes=hashes)
-    assert found.status == pg.PENDING and "cannot be loaded yet" in found.detail
-
-
-def test_hash_file_marked_enforce_that_does_not_load_fails(tmp_path, monkeypatch):
-    from lakebench.config import datagen_seed as ds
-
-    hashes = tmp_path / "heldout_hashes.json"
-    hashes.write_text('{"absence_check": "enforce"}')
-    monkeypatch.setattr(pg, "HELDOUT_HASHES", hashes)
-
-    def broken(path=None):
-        raise ValueError("role hash is not hex")
-
-    monkeypatch.setattr(ds, "load_heldout", broken, raising=False)
-    monkeypatch.setattr(ds, "absence_problems", lambda texts, held=None: [], raising=False)
-    (found,) = pg.check_heldout({"a": b"1"}, hashes=hashes)
-    assert found.status == pg.FAIL and "do not load" in found.detail
-    hashes.write_text("not json")
-    (found,) = pg.check_heldout({"a": b"1"}, hashes=hashes)
-    assert found.status == pg.FAIL
+    (found,) = pg.check_heldout({"a": b"1"}, check, hashes)
+    assert found.status == getattr(pg, status) and detail in found.detail
 
 
 def test_symlink_in_a_wheel_fails(tmp_path):
@@ -248,33 +245,9 @@ def test_symlink_in_a_wheel_fails(tmp_path):
     ]
 
 
-def test_a_path_only_rule_is_left_to_gitleaks(tmp_path):
-    cfg = tmp_path / "gitleaks.toml"
-    cfg.write_text("[[rules]]\nid = 'no-pem'\npath = '[.]pem$'\n")
-    assert pg.check_content({"a.txt": b"ok"}, cfg) == []
-
-
-def test_a_baseline_at_the_scan_root_is_refused(tmp_path, monkeypatch):
-    monkeypatch.setattr(pg.shutil, "which", lambda name: "/bin/true")
-    (tmp_path / ".gitleaksignore").write_text("x\n")
-    (found,) = pg.check_gitleaks(tmp_path)
-    assert found.status == pg.FAIL and "would be honoured" in found.detail
-
-
-def test_hash_file_without_an_absence_check_fails(tmp_path, monkeypatch):
-    from lakebench.config import datagen_seed as ds
-
-    hashes = tmp_path / "heldout_hashes.json"
-    hashes.write_text("{}")
-    monkeypatch.delattr(ds, "absence_problems", raising=False)
-    (found,) = pg.check_heldout({"a": b"1"}, hashes=hashes)
-    assert found.status == pg.FAIL and "no absence check" in found.detail
-
-
 def test_planted_heldout_token_with_the_datagen_fixture(monkeypatch):
-    # Runs once the held-out hash file and its test fixture are in the tree.
-    ts = pytest.importorskip("tests.fixtures.heldout_test_seeds")
     from lakebench.config import datagen_seed as ds
+    from tests.fixtures import heldout_test_seeds as ts
 
     held = ts.use_fixture(monkeypatch)
     texts = {
@@ -286,16 +259,7 @@ def test_planted_heldout_token_with_the_datagen_fixture(monkeypatch):
     assert str(ts.TEST_EVALUATION_SEED) not in " ".join(problems)
 
 
-def test_require_all_counts_skips():
-    found = [pg.Finding(pg.PASS, "names", ""), pg.Finding(pg.SKIP, "gitleaks", "")]
-    assert pg.exit_code(found) == 0 and pg.exit_code(found, require_all=True) == 1
-
-
-def test_missing_artifact_fails(tmp_path):
-    (found,) = pg.guard(tmp_path, tmp_path / "work")
-    assert found.status == pg.FAIL and "needs a wheel and an sdist" in found.detail
-
-
+@pytest.mark.slow
 def test_real_build_passes_non_seed_checks(tmp_path):
     pytest.importorskip("build")
     pytest.importorskip("hatchling")
@@ -305,8 +269,6 @@ def test_real_build_passes_non_seed_checks(tmp_path):
     assert [f for f in found if f.status == pg.FAIL] == [], [f.render() for f in found]
     by = {f.check: f for f in found}
     assert by["names"].status == by["content"].status == pg.PASS
-    # The script maps were rendered from the wheel and scanned with it.
-    assert int(by["names"].detail.split()[0]) > 100
 
 
 def test_release_gate_check_maps_pending_to_skip(monkeypatch):

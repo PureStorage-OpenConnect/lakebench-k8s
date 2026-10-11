@@ -3,8 +3,6 @@ history features, and subject-only monthly labels with exclusions."""
 
 from __future__ import annotations
 
-import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,19 +17,8 @@ CFG = {"lead_in_days": 14, "burn_in_months": 1, "history_days": 60}
 
 
 @pytest.fixture(scope="module")
-def spark():
-    from pyspark.sql import SparkSession
-
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    s = (
-        SparkSession.builder.master("local[1]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "4")
-        .config("spark.sql.session.timeZone", "UTC")
-        .getOrCreate()
-    )
-    yield s
-    s.stop()
+def spark(spark_session):
+    return spark_session
 
 
 def t(m, d, h=12):

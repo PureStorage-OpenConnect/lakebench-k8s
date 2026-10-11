@@ -102,7 +102,7 @@ def generate(rows, customers, start, days, seed=7, ticket_space=90_000):
                     "channel": ch,
                     "device_type": None if offline else rng.choice(DEVICES),
                     "browser": None if offline else rng.choice(BROWSERS),
-                    "ip_address": "10.0.0.1",
+                    "ip_address": "10.0.1.50",
                     "city_raw": "Austin",
                     "state_raw": "TX",
                     "zip_code": "73301",

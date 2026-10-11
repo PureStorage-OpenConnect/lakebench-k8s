@@ -93,7 +93,7 @@ class LocalDeployer:
                 runs on one host do not collide.
             s3_port: Host port for the Garage S3 API.
             region: S3 region. Garage validates the sigv4 scope, so this must
-                match what Spark signs with (LB-052).
+                match what Spark signs with.
             buckets: Medallion buckets to create.
             cli: Container CLI. Auto-detected when empty.
         """

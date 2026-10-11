@@ -122,7 +122,10 @@ fn finish_gives_up_after_the_last_wait() {
         },
         |s| waits.push(s),
     );
-    assert!(r.is_err());
+    assert!(
+        r.unwrap_err().contains("boom"),
+        "the cause is not swallowed"
+    );
     assert_eq!(calls.load(Ordering::SeqCst), FINISH_RETRY_WAITS_S.len() + 1);
     assert_eq!(waits, FINISH_RETRY_WAITS_S.to_vec());
 }

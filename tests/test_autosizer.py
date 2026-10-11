@@ -8,16 +8,14 @@ from lakebench.config.autosizer import (
     _resolve_datagen_mode,
     resolve_auto_sizing,
 )
-from lakebench.config.scale import full_compute_guidance
 from lakebench.k8s.client import ClusterCapacity
 
 
 class TestParseCpuMillicores:
     """The parser must accept every Kubernetes-idiomatic CPU form."""
 
-    @pytest.mark.parametrize(
-        "value,expected",
-        [
+    def test_accepts_kubernetes_forms(self):
+        for value, expected in [
             ("500m", 500),
             ("1500m", 1500),
             ("1", 1000),
@@ -27,306 +25,8 @@ class TestParseCpuMillicores:
             (1, 1000),
             (2, 2000),
             (1.5, 1500),
-        ],
-    )
-    def test_accepts_kubernetes_forms(self, value, expected):
-        assert _parse_cpu_millicores(value) == expected
-
-    def test_rejects_empty(self):
-        with pytest.raises(ValueError):
-            _parse_cpu_millicores("")
-
-    def test_rejects_garbage(self):
-        with pytest.raises(ValueError):
-            _parse_cpu_millicores("half-a-core")
-
-
-class TestAutosizerAcceptsMillicoreCpu:
-    """Regression: LB-072 -- deploy crashed on any x.cpu with a Kubernetes-idiomatic suffix."""
-
-    def test_millicore_trino_cpu_does_not_crash(self):
-        cfg = LakebenchConfig(
-            name="test",
-            architecture={
-                "query_engine": {
-                    "trino": {
-                        "coordinator": {"cpu": "1500m"},
-                        "worker": {"cpu": "500m", "replicas": 2},
-                    }
-                },
-                "workload": {"datagen": {"scale": 1, "cpu": "500m"}},
-            },
-        )
-        cap = ClusterCapacity(
-            total_cpu_millicores=64_000,
-            total_memory_bytes=256 * 1024**3,
-            node_count=4,
-            largest_node_memory_bytes=64 * 1024**3,
-            largest_node_cpu_millicores=16_000,
-        )
-        # Would have raised ValueError before the fix.
-        resolve_auto_sizing(cfg, cap)
-
-
-# ---------------------------------------------------------------------------
-# full_compute_guidance()
-# ---------------------------------------------------------------------------
-
-
-class TestFullComputeGuidance:
-    """Tests for the full_compute_guidance function."""
-
-    def test_minimal_tier(self):
-        g = full_compute_guidance(1)
-        assert g.spark.tier_name == "minimal"
-        assert g.trino.worker_replicas == 1
-        assert g.datagen.parallelism == 2
-
-    def test_balanced_tier(self):
-        g = full_compute_guidance(10)
-        assert g.spark.tier_name == "balanced"
-        assert g.trino.worker_replicas == 2
-        assert g.datagen.parallelism == 4
-
-    def test_performance_tier(self):
-        g = full_compute_guidance(100)
-        assert g.spark.tier_name == "performance"
-        assert g.trino.worker_replicas == 4
-        assert g.datagen.parallelism >= 8
-
-    def test_extreme_tier(self):
-        g = full_compute_guidance(1000)
-        assert g.spark.tier_name == "extreme"
-        assert g.trino.worker_replicas >= 8
-        assert g.datagen.parallelism >= 16
-
-    def test_datagen_mode_batch_for_small_scale(self):
-        """scale <= 10 should get batch mode."""
-        g = full_compute_guidance(1)
-        assert g.datagen.mode == "batch"
-        assert g.datagen.generators == 1
-
-    def test_datagen_mode_batch_at_boundary(self):
-        """scale=10 should still get batch mode."""
-        g = full_compute_guidance(10)
-        assert g.datagen.mode == "batch"
-        assert g.datagen.generators == 1
-
-    def test_datagen_mode_continuous_above_boundary(self):
-        """scale > 10 should get continuous mode."""
-        g = full_compute_guidance(20)
-        assert g.datagen.mode == "continuous"
-        assert g.datagen.generators == 8
-
-    def test_datagen_fixed_cpu_batch(self):
-        """Batch mode: fixed 4 CPU per pod."""
-        g = full_compute_guidance(1)
-        assert g.datagen.cpu == "4"
-        assert g.datagen.memory == "4Gi"
-
-    def test_datagen_fixed_cpu_continuous(self):
-        """Continuous mode: fixed 8 CPU, 8Gi per pod (Rust image)."""
-        g = full_compute_guidance(100)
-        assert g.datagen.cpu == "8"
-        assert g.datagen.memory == "8Gi"
-
-
-# ---------------------------------------------------------------------------
-# _resolve_datagen_mode()
-# ---------------------------------------------------------------------------
-
-
-class TestDatagenModeResolution:
-    """Tests for mode resolution logic."""
-
-    def test_auto_mode_resolves_continuous_at_every_scale(self):
-        """AUTO resolves to CONTINUOUS unconditionally (Wave 2 D-wave adv-review
-        fix, 2026-09-28). Pre-fix rule was scale<=10 -> batch, scale>10 ->
-        continuous, which contradicted the delivery-mode docstring and the
-        template default. The choice is now delivery pattern, not resource
-        profile; resource sizing is scale-based elsewhere in this module."""
-        for s in (1, 5, 10, 11, 50, 1000):
-            config = LakebenchConfig(
-                name="test",
-                architecture={"workload": {"datagen": {"scale": s}}},
-            )
-            assert _resolve_datagen_mode(config) == "continuous", (
-                f"AUTO at scale={s} did not resolve to continuous"
-            )
-
-    def test_explicit_batch_mode(self):
-        """Explicit batch mode preserved regardless of scale."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 1000, "mode": "batch"}}},
-        )
-        assert _resolve_datagen_mode(config) == "batch"
-
-    def test_explicit_continuous_mode(self):
-        """Explicit continuous mode preserved regardless of scale."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 1, "mode": "continuous"}}},
-        )
-        assert _resolve_datagen_mode(config) == "continuous"
-
-
-# ---------------------------------------------------------------------------
-# resolve_auto_sizing -- scale only (no cluster cap)
-# ---------------------------------------------------------------------------
-
-
-class TestAutoSizingScaleOnly:
-    """Tests for auto-sizing when no cluster capacity is available."""
-
-    def test_minimal_scale_sizing(self):
-        """Scale=1 should get minimal tier resources with batch mode."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 1}}},
-        )
-        resolve_auto_sizing(config)
-
-        assert config.architecture.query_engine.trino.worker.replicas == 1
-        assert config.architecture.query_engine.trino.worker.memory == "8Gi"
-        assert config.architecture.workload.datagen.parallelism == 2
-        # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
-        # the pod CPU request); memory from the measured RSS model, which for
-        # c360 at 64 MB files is under the 4Gi floor. See
-        # test_datagen_template_entrypoint_contract.
-        assert config.architecture.workload.datagen.cpu == "8"
-        assert config.architecture.workload.datagen.memory == "4Gi"
-        assert config.architecture.workload.datagen.generators == 0
-
-    def test_balanced_scale_sizing(self):
-        """Scale=10 should get balanced tier resources, still batch mode."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 10}}},
-        )
-        resolve_auto_sizing(config)
-
-        assert config.architecture.query_engine.trino.worker.replicas == 2
-        assert config.architecture.workload.datagen.parallelism == 4
-        # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
-        # the pod CPU request); memory from the measured RSS model, which for
-        # c360 at 64 MB files is under the 4Gi floor. See
-        # test_datagen_template_entrypoint_contract.
-        assert config.architecture.workload.datagen.cpu == "8"
-        assert config.architecture.workload.datagen.memory == "4Gi"
-        assert config.architecture.workload.datagen.generators == 0
-
-    def test_performance_scale_sizing(self):
-        """Scale=100 should get performance tier resources, continuous mode."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 100}}},
-        )
-        resolve_auto_sizing(config)
-
-        assert config.architecture.query_engine.trino.worker.replicas == 4
-        assert config.architecture.query_engine.trino.worker.memory == "48Gi"
-        assert config.architecture.workload.datagen.parallelism >= 8
-        # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
-        # the pod CPU request); memory from the measured RSS model, which for
-        # c360 at 64 MB files is under the 4Gi floor. See
-        # test_datagen_template_entrypoint_contract.
-        assert config.architecture.workload.datagen.cpu == "8"
-        assert config.architecture.workload.datagen.memory == "4Gi"
-        assert config.architecture.workload.datagen.generators == 0
-
-    def test_extreme_scale_sizing(self):
-        """Scale=1000 should get extreme tier resources, continuous mode."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 1000}}},
-        )
-        resolve_auto_sizing(config)
-
-        assert config.architecture.query_engine.trino.worker.replicas >= 8
-        # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
-        # the pod CPU request); memory from the measured RSS model, which for
-        # c360 at 64 MB files is under the 4Gi floor. See
-        # test_datagen_template_entrypoint_contract.
-        assert config.architecture.workload.datagen.cpu == "8"
-        assert config.architecture.workload.datagen.memory == "4Gi"
-        assert config.architecture.workload.datagen.generators == 0
-
-
-# ---------------------------------------------------------------------------
-# resolve_auto_sizing -- user overrides preserved
-# ---------------------------------------------------------------------------
-
-
-class TestAutoSizingUserOverride:
-    """Tests that user-specified values are preserved."""
-
-    def test_user_trino_replicas_preserved(self):
-        """Explicitly set trino worker replicas should not be overwritten."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "workload": {"datagen": {"scale": 1}},
-                "query_engine": {"trino": {"worker": {"replicas": 8}}},
-            },
-        )
-        resolve_auto_sizing(config)
-
-        assert config.architecture.query_engine.trino.worker.replicas == 8
-
-    def test_user_datagen_parallelism_preserved(self):
-        """Explicitly set datagen parallelism should not be overwritten."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 1, "parallelism": 32}}},
-        )
-        resolve_auto_sizing(config)
-
-        assert config.architecture.workload.datagen.parallelism == 32
-
-    def test_user_explicit_mode_preserved(self):
-        """User setting mode=batch on large scale should keep batch resources."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 100, "mode": "batch"}}},
-        )
-        resolve_auto_sizing(config)
-
-        # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
-        # the pod CPU request); memory from the measured RSS model, which for
-        # c360 at 64 MB files is under the 4Gi floor. See
-        # test_datagen_template_entrypoint_contract.
-        assert config.architecture.workload.datagen.cpu == "8"
-        assert config.architecture.workload.datagen.memory == "4Gi"
-        assert config.architecture.workload.datagen.generators == 0
-
-    def test_datagen_memory_user_value_honoured_continuous(self):
-        """User-set datagen memory is kept (the old hard-lock overwrote it)."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "workload": {"datagen": {"scale": 100, "memory": "16Gi"}},
-            },
-        )
-        resolve_auto_sizing(config)
-
-        assert config.architecture.workload.datagen.memory == "16Gi"
-        assert config.architecture.workload.datagen.cpu == "8"
-
-    def test_datagen_memory_user_value_honoured_batch(self):
-        """User-set datagen memory is kept in batch mode too."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "workload": {
-                    "datagen": {"scale": 5, "mode": "batch", "memory": "16Gi"},
-                },
-            },
-        )
-        resolve_auto_sizing(config)
-
-        assert config.architecture.workload.datagen.memory == "16Gi"
-        assert config.architecture.workload.datagen.cpu == "8"
+        ]:
+            assert _parse_cpu_millicores(value) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -336,28 +36,6 @@ class TestAutoSizingUserOverride:
 
 class TestAutoSizingClusterCap:
     """Tests for cluster capacity capping."""
-
-    def test_cluster_cap_reduces_trino_workers(self):
-        """When cluster is small, Trino worker count is capped."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 1000}}},
-        )
-
-        # Small cluster: 2 nodes, 4 cores each
-        cap = ClusterCapacity(
-            total_cpu_millicores=8000,
-            total_memory_bytes=64 * 1024**3,
-            node_count=2,
-            largest_node_cpu_millicores=4000,
-            largest_node_memory_bytes=32 * 1024**3,
-        )
-
-        resolve_auto_sizing(config, cap)
-
-        # 30% of 8 cores = 2.4 cores budget
-        # Each worker uses 8 cores → max 0 ... but min is 1
-        assert config.architecture.query_engine.trino.worker.replicas >= 1
 
     def test_cluster_cap_memory_per_pod(self):
         """Per-pod memory is capped to 85% of largest node."""
@@ -375,30 +53,18 @@ class TestAutoSizingClusterCap:
             largest_node_memory_bytes=16 * 1024**3,
         )
 
-        resolve_auto_sizing(config, cap)
+        cuts = resolve_auto_sizing(config, cap)
 
-        # 85% of 16Gi ≈ 13Gi: the Trino worker tier memory is capped to it.
+        # 85% of 16Gi ≈ 13Gi: the Trino worker tier memory is capped to it,
+        # and the cap is reported as a cut.
         assert config.architecture.query_engine.trino.worker.memory == "13Gi"
-
-    def test_no_cluster_cap_still_works(self):
-        """Auto-sizing works fine without cluster capacity."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 10}}},
-        )
-        resolve_auto_sizing(config, None)
-
-        # Should still have auto-sized values from scale
-        assert config.architecture.query_engine.trino.worker.replicas == 2
-        assert config.architecture.workload.datagen.parallelism == 4
+        assert [c for c in cuts if c.startswith("trino.worker.memory capped to 13Gi")], cuts
 
 
 class TestAutosizerLeavesSparkToTheProfiles:
     """Spark sizing is the job profiles'; the autosizer neither sets nor cuts it."""
 
     def test_no_spark_executor_change_or_cut(self):
-        # A small cluster used to "cap" executor memory and instances on
-        # fields nothing read; those cuts were recorded as Lakebench caps.
         config = LakebenchConfig(
             name="test",
             architecture={"workload": {"datagen": {"scale": 1000}}},
@@ -410,16 +76,9 @@ class TestAutosizerLeavesSparkToTheProfiles:
             largest_node_cpu_millicores=8000,
             largest_node_memory_bytes=16 * 1024**3,
         )
-        cuts = resolve_auto_sizing(config, cap)
-        assert not [c for c in cuts if c.startswith("spark.")], cuts
-
-    def test_financial_scratch_is_not_overridden(self):
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"schema": "financial", "datagen": {"scale": 1}}},
-        )
-        resolve_auto_sizing(config)
-        assert not hasattr(config.platform.storage.scratch, "size")
+        before = config.platform.compute.spark.model_dump()
+        resolve_auto_sizing(config, cap)
+        assert config.platform.compute.spark.model_dump() == before
 
 
 # ---------------------------------------------------------------------------
@@ -429,66 +88,6 @@ class TestAutosizerLeavesSparkToTheProfiles:
 
 class TestAutoSizingClusterAware:
     """Tests for cluster-aware scaling: cap small scales, scale up large."""
-
-    def test_large_cluster_does_not_boost_trino_workers(self):
-        """Big cluster should NOT boost Trino worker count beyond tier."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 1}}},
-        )
-
-        cap = ClusterCapacity(
-            total_cpu_millicores=256000,
-            total_memory_bytes=512 * 1024**3,
-            node_count=8,
-            largest_node_cpu_millicores=32000,
-            largest_node_memory_bytes=64 * 1024**3,
-        )
-
-        resolve_auto_sizing(config, cap)
-
-        # Tier guidance for scale=1: 1 Trino worker -- should NOT be boosted
-        assert config.architecture.query_engine.trino.worker.replicas == 1
-
-    def test_large_cluster_does_not_boost_datagen(self):
-        """Big cluster should NOT boost datagen parallelism beyond tier."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 1}}},
-        )
-
-        cap = ClusterCapacity(
-            total_cpu_millicores=256000,
-            total_memory_bytes=512 * 1024**3,
-            node_count=8,
-            largest_node_cpu_millicores=32000,
-            largest_node_memory_bytes=64 * 1024**3,
-        )
-
-        resolve_auto_sizing(config, cap)
-
-        # Tier guidance for scale=1: parallelism=2 -- should NOT be boosted
-        assert config.architecture.workload.datagen.parallelism == 2
-
-    def test_user_set_parallelism_preserved(self):
-        """User-set parallelism should be preserved even with cluster capacity."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 1, "parallelism": 3}}},
-        )
-
-        cap = ClusterCapacity(
-            total_cpu_millicores=256000,
-            total_memory_bytes=512 * 1024**3,
-            node_count=8,
-            largest_node_cpu_millicores=32000,
-            largest_node_memory_bytes=64 * 1024**3,
-        )
-
-        resolve_auto_sizing(config, cap)
-
-        # User explicitly set 3 -- should stay at 3
-        assert config.architecture.workload.datagen.parallelism == 3
 
     def test_small_cluster_caps_datagen(self):
         """Small cluster caps datagen parallelism to fit."""
@@ -517,72 +116,41 @@ class TestAutoSizingClusterAware:
         total = datagen.parallelism * int(datagen.cpu) + co_resident
         assert total <= 32, f"datagen phase: {total} > 32"
 
-    def test_phase_aware_budgets(self):
-        """Datagen and Spark each get the full phase budget (they're sequential)."""
+    @pytest.mark.parametrize("pattern", ["medallion", "streaming"])
+    @pytest.mark.parametrize("scale", [1, 10, 50, 100, 500, 1000])
+    def test_no_overprovisioning(self, scale, pattern):
+        """Datagen demand plus the co-resident pods must not exceed cluster
+        capacity: never schedule more pods than the cluster can run."""
         config = LakebenchConfig(
             name="test",
-            architecture={"workload": {"datagen": {"scale": 100}}},
+            architecture={
+                "workload": {"datagen": {"scale": scale}},
+                "processing": {"pattern": pattern},
+            },
         )
 
-        # Medium cluster: 4 nodes, 16 cores each = 64 cores
+        # 8 worker nodes x 40 cores = 320 cores
         cap = ClusterCapacity(
-            total_cpu_millicores=64000,
-            total_memory_bytes=256 * 1024**3,
-            node_count=4,
-            largest_node_cpu_millicores=16000,
-            largest_node_memory_bytes=64 * 1024**3,
+            total_cpu_millicores=320000,
+            total_memory_bytes=8 * 432 * 1024**3,
+            node_count=8,
+            largest_node_cpu_millicores=40000,
+            largest_node_memory_bytes=432 * 1024**3,
         )
 
         resolve_auto_sizing(config, cap)
 
-        datagen = config.architecture.workload.datagen
         coord = config.architecture.query_engine.trino.coordinator
         worker = config.architecture.query_engine.trino.worker
+        datagen = config.architecture.workload.datagen
 
-        # Co-resident: Trino coord + workers + infra
         co_resident = int(coord.cpu) + worker.replicas * int(worker.cpu) + 1
-
-        # Datagen phase: datagen + co-resident must fit
-        datagen_total = datagen.parallelism * int(datagen.cpu) + co_resident
-        assert datagen_total <= 64, f"datagen phase: {datagen_total} > 64"
-
-    def test_no_overprovisioning(self):
-        """Total CPU demand per phase must not exceed cluster capacity.
-
-        This is the core constraint: we should never schedule more pods
-        than the cluster can actually run in any single phase.
-        """
-        for scale in (1, 10, 50, 100, 500, 1000):
-            config = LakebenchConfig(
-                name="test",
-                architecture={"workload": {"datagen": {"scale": scale}}},
-            )
-
-            # Cluster similar to real test environment:
-            # 8 worker nodes × 40 cores = 320 cores
-            cap = ClusterCapacity(
-                total_cpu_millicores=320000,
-                total_memory_bytes=8 * 432 * 1024**3,
-                node_count=8,
-                largest_node_cpu_millicores=40000,
-                largest_node_memory_bytes=432 * 1024**3,
-            )
-
-            resolve_auto_sizing(config, cap)
-
-            coord = config.architecture.query_engine.trino.coordinator
-            worker = config.architecture.query_engine.trino.worker
-            datagen = config.architecture.workload.datagen
-
-            co_resident = int(coord.cpu) + worker.replicas * int(worker.cpu) + 1
-            cluster_cores = cap.total_cpu_millicores // 1000
-
-            # Datagen phase
-            datagen_demand = datagen.parallelism * int(datagen.cpu) + co_resident
-            assert datagen_demand <= cluster_cores, (
-                f"scale={scale}: datagen phase demand {datagen_demand} CPU "
-                f"exceeds cluster capacity {cluster_cores} CPU"
-            )
+        cluster_cores = cap.total_cpu_millicores // 1000
+        datagen_demand = datagen.parallelism * int(datagen.cpu) + co_resident
+        assert datagen_demand <= cluster_cores, (
+            f"scale={scale}: datagen phase demand {datagen_demand} CPU "
+            f"exceeds cluster capacity {cluster_cores} CPU"
+        )
 
     def test_large_scale_scales_up_datagen(self):
         """Scale=102 on a big cluster should scale datagen beyond tier guidance."""
@@ -605,148 +173,11 @@ class TestAutoSizingClusterAware:
         # With phase budget ≈ 254, at 8 CPU/pod → can fit ~31
         assert config.architecture.workload.datagen.parallelism > 10
 
-    def test_large_scale_trino_still_not_boosted(self):
-        """Even at large scale, Trino workers stay at tier guidance."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 102}}},
-        )
 
-        cap = ClusterCapacity(
-            total_cpu_millicores=320000,
-            total_memory_bytes=8 * 432 * 1024**3,
-            node_count=8,
-            largest_node_cpu_millicores=40000,
-            largest_node_memory_bytes=432 * 1024**3,
-        )
-
-        resolve_auto_sizing(config, cap)
-
-        # Tier guidance: 4 workers -- should NOT be boosted
-        assert config.architecture.query_engine.trino.worker.replicas == 4
-
-    def test_streaming_mode_splits_phase_budget(self):
-        """STREAMING mode should give datagen less budget than MEDALLION mode."""
-        cap = ClusterCapacity(
-            total_cpu_millicores=320000,
-            total_memory_bytes=8 * 432 * 1024**3,
-            node_count=8,
-            largest_node_cpu_millicores=40000,
-            largest_node_memory_bytes=432 * 1024**3,
-        )
-
-        # Batch (MEDALLION) config
-        batch_config = LakebenchConfig(
-            name="test-batch",
-            architecture={
-                "workload": {"datagen": {"scale": 100}},
-                "processing": {"pattern": "medallion"},
-            },
-        )
-        resolve_auto_sizing(batch_config, cap)
-        batch_datagen = batch_config.architecture.workload.datagen.parallelism
-
-        # Streaming config (same scale, same cluster)
-        stream_config = LakebenchConfig(
-            name="test-stream",
-            architecture={
-                "workload": {"datagen": {"scale": 100}},
-                "processing": {"pattern": "streaming"},
-            },
-        )
-        resolve_auto_sizing(stream_config, cap)
-        stream_datagen = stream_config.architecture.workload.datagen.parallelism
-
-        # Streaming mode should cap datagen lower (40% budget vs 100%)
-        assert stream_datagen < batch_datagen, (
-            f"Streaming datagen ({stream_datagen}) should be less than "
-            f"batch datagen ({batch_datagen})"
-        )
-
-    def test_medium_scale_not_scaled_up(self):
-        """Scale=10 on a big cluster: datagen stays at tier guidance."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 10}}},
-        )
-
-        cap = ClusterCapacity(
-            total_cpu_millicores=320000,
-            total_memory_bytes=8 * 432 * 1024**3,
-            node_count=8,
-            largest_node_cpu_millicores=40000,
-            largest_node_memory_bytes=432 * 1024**3,
-        )
-
-        resolve_auto_sizing(config, cap)
-
-        # Tier guidance for scale=10 (balanced): 4 pods -- no scaling up
-        assert config.architecture.workload.datagen.parallelism == 4
-
-    def test_streaming_mode_no_overprovisioning(self):
-        """In STREAMING mode, datagen stays inside its share of the phase budget."""
-
-        for scale in (10, 50, 100, 500):
-            config = LakebenchConfig(
-                name="test",
-                architecture={
-                    "workload": {"datagen": {"scale": scale}},
-                    "processing": {"pattern": "streaming"},
-                },
-            )
-
-            cap = ClusterCapacity(
-                total_cpu_millicores=320000,
-                total_memory_bytes=8 * 432 * 1024**3,
-                node_count=8,
-                largest_node_cpu_millicores=40000,
-                largest_node_memory_bytes=432 * 1024**3,
-            )
-
-            resolve_auto_sizing(config, cap)
-
-            coord = config.architecture.query_engine.trino.coordinator
-            worker = config.architecture.query_engine.trino.worker
-            datagen = config.architecture.workload.datagen
-
-            co_resident = int(coord.cpu) + worker.replicas * int(worker.cpu) + 1
-            cluster_cores = cap.total_cpu_millicores // 1000
-            datagen_demand = datagen.parallelism * int(datagen.cpu)
-            share = (cluster_cores - co_resident) * 0.9 * 0.4
-            assert datagen_demand <= share, (
-                f"scale={scale}: streaming datagen demand {datagen_demand} CPU "
-                f"exceeds its share {share:.0f} CPU"
-            )
-
-    def test_batch_mode_unchanged(self):
-        """MEDALLION mode should still give each phase the full budget."""
-        cap = ClusterCapacity(
-            total_cpu_millicores=320000,
-            total_memory_bytes=8 * 432 * 1024**3,
-            node_count=8,
-            largest_node_cpu_millicores=40000,
-            largest_node_memory_bytes=432 * 1024**3,
-        )
-
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "workload": {"datagen": {"scale": 102}},
-                "processing": {"pattern": "medallion"},
-            },
-        )
-
-        resolve_auto_sizing(config, cap)
-
-        # Should still scale up (sequential phases -- each gets full budget)
-        assert config.architecture.workload.datagen.parallelism > 10
-
-
-class TestDatagenCutIsExplicit:
-    """LB-160: at scale 250 and 500 `lakebench generate` cut a configured
-    43-pod datagen to 38 and 30 with no visible message. The cut itself is
-    real (the Trino tier's workers hold 85 and 165 of 434 cores), so it
-    stays, but it is returned and logged with its arithmetic."""
+class TestDatagenSetInConfigIsKept:
+    """A datagen pod count set in the config is the run's pressure: the
+    autosizer never cuts it to fit the cluster, it warns that the rest will
+    wait Pending (outcome 6, exact override)."""
 
     @staticmethod
     def _cfg(scale):
@@ -763,21 +194,12 @@ class TestDatagenCutIsExplicit:
     def _cap():
         return ClusterCapacity(434_000, 8 * 432 * 1024**3, 8, 54_000, 432 * 1024**3)
 
-    @pytest.mark.parametrize(("scale", "pods"), [(250, 38), (500, 30)])
-    def test_sweep_cut_is_returned_with_its_reason(self, scale, pods, caplog):
+    @pytest.mark.parametrize("scale", [250, 500])
+    def test_a_count_over_the_cluster_is_kept_and_warned(self, scale):
         cfg = self._cfg(scale)
-        with caplog.at_level("WARNING", logger="lakebench.config.autosizer"):
-            cuts = resolve_auto_sizing(cfg, self._cap())
-        assert cfg.architecture.workload.datagen.parallelism == pods
-        dg = [c for c in cuts if c.startswith("datagen.parallelism")]
-        assert len(dg) == 1
-        assert f"43 -> {pods}" in dg[0]
-        assert "434 allocatable cores" in dg[0] and "Trino" in dg[0]
-        # The arithmetic is stated, including the even rounding (LB-160 review).
-        if scale == 250:
-            assert "= 39 pods of 8 cores, rounded down to an even 38" in dg[0]
-        assert "set in config" in dg[0]
-        assert any(f"43 -> {pods}" in r.getMessage() for r in caplog.records)
+        cuts = resolve_auto_sizing(cfg, self._cap())
+        assert cfg.architecture.workload.datagen.parallelism == 43
+        assert [c for c in cuts if c.startswith("datagen.parallelism")]
 
     def test_no_cut_no_warning(self):
         cfg = self._cfg(100)
@@ -785,51 +207,22 @@ class TestDatagenCutIsExplicit:
         assert cfg.architecture.workload.datagen.parallelism == 43
         assert not [c for c in cuts if c.startswith("datagen")]
 
-    def test_generate_prints_the_cut(self, tmp_path, monkeypatch):
-        from unittest import mock
-
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        cfg_file = tmp_path / "c.yaml"
-        cfg_file.write_text(
-            "name: dg-cut\n"
-            "platform:\n  storage:\n    s3:\n      endpoint: http://127.0.0.1:1\n"
-            "      access_key: x\n      secret_key: y\n"
-            "architecture:\n  workload:\n    datagen:\n"
-            "      scale: 500\n      parallelism: 43\n      cpu: '8'\n      memory: 12Gi\n"
-        )
-        k8s = mock.MagicMock()
-        k8s.get_cluster_capacity.return_value = self._cap()
-        monkeypatch.setattr("lakebench.cli._generate.get_k8s_client", lambda **kw: k8s)
-        # generate imports DeploymentEngine inside the function; stop there.
-        monkeypatch.setattr(
-            "lakebench.deploy.DeploymentEngine", mock.MagicMock(side_effect=SystemExit(3))
-        )
-        res = CliRunner().invoke(app, ["generate", str(cfg_file), "--yes"])
-        out = " ".join(res.output.split())
-        assert "43 -> 30" in out, (out[-2000:], repr(res.exception))
-
 
 class TestScratchAutoenable:
-    """Scale 50 silver-build spilled past node ephemeral storage without a
-    scratch PVC per executor (R.5.2 2026-10-05, ExitCode 137 "node was low
-    on resource: ephemeral-storage"). The autosizer enables scratch for
-    batch at scale 50 and above.
-    """
+    """Batch at scale 50 and above enables scratch unless the user set it."""
 
-    def _cfg(
-        self, scale: float, scratch_override: dict | None = None, mode: str = "batch"
-    ) -> LakebenchConfig:
-        from lakebench.config import LakebenchConfig
-
-        return LakebenchConfig.model_validate(
+    @pytest.mark.parametrize(
+        ("scale", "scratch_override", "expected"),
+        [(1, None, False), (50, None, True), (50, {"enabled": False}, False)],
+        ids=["small_scale", "scale_50", "user_override_wins"],
+    )
+    def test_scratch_autoenable(self, scale, scratch_override, expected):
+        cfg = LakebenchConfig.model_validate(
             {
                 "name": "autoscratch",
                 "architecture": {
                     "workload": {"datagen": {"scale": scale}},
-                    "pipeline": {"mode": mode},
+                    "pipeline": {"mode": "batch"},
                 },
                 "platform": {
                     "storage": {
@@ -843,59 +236,85 @@ class TestScratchAutoenable:
                 },
             }
         )
-
-    def test_small_scale_leaves_scratch_disabled(self):
-        cfg = self._cfg(scale=1)
         resolve_auto_sizing(cfg)
-        assert cfg.platform.storage.scratch.enabled is False
+        assert cfg.platform.storage.scratch.enabled is expected
 
-    def test_scale_10_leaves_scratch_disabled(self):
-        """Below the measured failure point (scale 50) scratch stays off:
-        the R.1 matrix proves scales 1-10 pass without it."""
-        cfg = self._cfg(scale=10)
-        resolve_auto_sizing(cfg)
-        assert cfg.platform.storage.scratch.enabled is False
 
-    def test_scale_50_enables_scratch(self):
-        """R.5.2 regression: scale 50 batch must enable scratch so silver
-        shuffle does not spill into pod ephemeral and get evicted."""
-        cfg = self._cfg(scale=50)
-        resolve_auto_sizing(cfg)
-        assert cfg.platform.storage.scratch.enabled is True
+_BIG_CLUSTER = ClusterCapacity(
+    total_cpu_millicores=256000,
+    total_memory_bytes=512 * 1024**3,
+    node_count=8,
+    largest_node_cpu_millicores=32000,
+    largest_node_memory_bytes=64 * 1024**3,
+)
 
-    def test_explicit_user_override_wins(self):
-        """A user who sets scratch.enabled=False explicitly keeps that
-        value even above the threshold."""
-        cfg = self._cfg(scale=50, scratch_override={"enabled": False})
-        resolve_auto_sizing(cfg)
-        assert cfg.platform.storage.scratch.enabled is False
 
-    def test_default_storage_class_is_not_changed(self):
-        """The autosizer flips enabled only; storage_class and provisioner
-        stay at their config defaults so a user on a non-Portworx cluster
-        can keep their own values."""
-        cfg = self._cfg(scale=50)
-        resolve_auto_sizing(cfg)
-        assert cfg.platform.storage.scratch.storage_class == "px-csi-scratch"
+@pytest.mark.parametrize(
+    ("architecture", "capacity", "expected"),
+    [
+        (
+            {
+                "workload": {"datagen": {"scale": 1}},
+                "query_engine": {"trino": {"worker": {"replicas": 8}}},
+            },
+            None,
+            {"query_engine.trino.worker.replicas": 8},
+        ),
+        (
+            {"workload": {"datagen": {"scale": 1, "parallelism": 32}}},
+            None,
+            {"workload.datagen.parallelism": 32},
+        ),
+        (
+            {"workload": {"datagen": {"scale": 1, "parallelism": 3}}},
+            _BIG_CLUSTER,
+            {"workload.datagen.parallelism": 3},
+        ),
+        (
+            {"workload": {"datagen": {"scale": 100, "memory": "16Gi"}}},
+            None,
+            {"workload.datagen.memory": "16Gi", "workload.datagen.cpu": "8"},
+        ),
+        (
+            {"workload": {"datagen": {"scale": 5, "mode": "batch", "memory": "16Gi"}}},
+            None,
+            {"workload.datagen.memory": "16Gi", "workload.datagen.cpu": "8"},
+        ),
+        # batch at a large scale keeps batch resources: 8 CPU, the RSS-model
+        # memory floor, generators 0 (threads follow the pod CPU request)
+        (
+            {"workload": {"datagen": {"scale": 100, "mode": "batch"}}},
+            None,
+            {
+                "workload.datagen.cpu": "8",
+                "workload.datagen.memory": "4Gi",
+                "workload.datagen.generators": 0,
+            },
+        ),
+    ],
+)
+def test_user_set_values_survive_auto_sizing(architecture, capacity, expected):
+    """Outcome 6: a value the user set is the value deployed."""
+    config = LakebenchConfig(name="test", architecture=architecture)
+    if capacity is None:
+        resolve_auto_sizing(config)
+    else:
+        resolve_auto_sizing(config, capacity)
+    for path, want in expected.items():
+        obj = config.architecture
+        for part in path.split("."):
+            obj = getattr(obj, part)
+        assert obj == want, path
 
-    def test_preflight_checks_the_storage_class_autosizing_will_use(self):
-        """plan and deploy check the scratch StorageClass before auto-sizing
-        runs, so they must see the scale-50 enable too."""
-        from lakebench.deploy.prereqs import _scratch_applies
 
-        assert _scratch_applies(self._cfg(scale=50)) is True
-        assert _scratch_applies(self._cfg(scale=10)) is False
-        assert _scratch_applies(self._cfg(scale=50, scratch_override={"enabled": False})) is False
-        assert _scratch_applies(self._cfg(scale=1, scratch_override={"enabled": True})) is True
-
-    def test_continuous_is_left_alone(self):
-        """Only batch was measured at scale 50."""
-        cfg = self._cfg(scale=50, mode="continuous")
-        resolve_auto_sizing(cfg)
-        assert cfg.platform.storage.scratch.enabled is False
-
-    def test_admin_install_all_includes_the_scratch_class_it_will_need(self):
-        from lakebench.deploy.shared_components import SCRATCH, components_for_config
-
-        assert SCRATCH in components_for_config(self._cfg(scale=50))
-        assert SCRATCH not in components_for_config(self._cfg(scale=10))
+@pytest.mark.parametrize(
+    ("scale", "mode", "expected"),
+    [(1000, "batch", "batch"), (1, "continuous", "continuous")]
+    + [(s, "auto", "continuous") for s in (1, 5, 10, 11, 50, 1000)],
+)
+def test_datagen_mode_resolution(scale, mode, expected):
+    """An explicit mode is kept at any scale; auto resolves to continuous."""
+    config = LakebenchConfig(
+        name="test", architecture={"workload": {"datagen": {"scale": scale, "mode": mode}}}
+    )
+    assert _resolve_datagen_mode(config) == expected

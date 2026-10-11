@@ -1,142 +1,108 @@
-# Component Reference: Apache Polaris
+# Polaris
 
-## Overview
+Reference: configure the Apache Polaris REST catalog: config keys, version limits, sizing and deploy behaviour.
 
-Apache Polaris is an alternative catalog to Hive Metastore. It provides a
-REST-based Iceberg catalog with OAuth2 authentication. In Lakebench, Polaris
-replaces Hive Metastore as the metadata service -- Spark jobs and Trino both
-connect to Polaris instead of the Hive Thrift protocol.
+## What it does
 
-When `architecture.catalog.type` is set to `polaris`, Lakebench deploys
-Polaris automatically during `lakebench deploy` and tears it down during
-`lakebench destroy`. The user workflow is identical to Hive -- all commands,
-table names, and benchmark queries work the same way.
+[Apache Polaris](https://github.com/apache/polaris) is an Iceberg REST catalog with OAuth2 authentication and fine-grained access control. It is the alternative to Hive Metastore.
 
-## Architecture
+- `lakebench init` writes the Polaris recipe `polaris-iceberg-spark-trino` by default.
+- In an existing config, set `recipe: polaris-iceberg-spark-trino`. Setting only `architecture.catalog.type: polaris` under a `hive-*` recipe is refused at load.
+- `lakebench deploy` deploys Polaris and `lakebench destroy` removes it. No Hive Metastore is deployed.
+- Commands, stages, table names and benchmark queries are the same as with Hive. Spark registers tables through the Polaris REST API instead of the Hive Thrift protocol. Trino queries through the same REST endpoint.
+- Polaris serves only catalog metadata. It processes no query data.
+- Recipes: `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none` ([Recipes](recipes.md)).
 
-Lakebench deploys Polaris as three Kubernetes resources:
+## Version and image
 
-- **Deployment** -- `lakebench-polaris` (1 replica). Runs the Polaris REST
-  server on port 8181 (API) and port 8182 (health/metrics).
-- **Service** -- `lakebench-polaris` (ClusterIP). Exposes the REST API at
-  `lakebench-polaris.<namespace>.svc.cluster.local:8181`.
-- **Bootstrap Job** -- `lakebench-polaris-bootstrap`. Creates the catalog
-  realm, root principal, catalog, and namespaces (default, bronze, silver,
-  gold). Runs once after the Polaris server is healthy.
+`images.polaris` and `images.polaris_admin_tool` set the images (defaults: [version matrix](compatibility-matrix.md#component-version-matrix)). Keep both tags on the same release.
 
-Polaris stores its metadata in the deployment's PostgreSQL instance, in a
-`polaris` database that the deployer creates.
+| Component | Minimum | Default | Why the minimum |
+|---|---|---|---|
+| Apache Polaris | 1.3.0-incubating | 1.6.0 | 1.1.0 and 1.2.0 attempt STS even when told not to. |
+| Trino | 454 | 483 | 454 added `iceberg.rest-catalog.oauth2.scope`. |
 
-### Health checks
+- **Polaris 1.3.0.** In 1.1.0 and 1.2.0, `TaskFileIOSupplier` tries STS credential subscoping even when told not to ([apache/polaris#379](https://github.com/apache/polaris/issues/379)). Server-side S3 operations then fail on non-AWS storage. 1.3.0 and later contain the fix ([PR #400](https://github.com/apache/polaris/pull/400)).
+- **Tag suffix:** only 1.3.0 carries `-incubating` (`apache/polaris:1.3.0` does not exist). 1.4.0 and later have no suffix.
+- **Trino 454** added `oauth2.scope` ([PR #22961](https://github.com/trinodb/trino/pull/22961)). Without it, Trino sends `scope=catalog`, which Polaris rejects as `invalid_scope`. The default, 483, also has the native S3 file system that current Trino releases need.
+- **STS skip:** the bootstrap creates the catalog with `stsUnavailable: true` and `pathStyleAccess: true`, because FlashBlade and most on-premises stores have no STS. This is the only supported way to skip STS on non-AWS S3.
+- Do not add a server-wide credential-subscoping override. It drops the endpoint and path-style settings, and server-side S3FileIO falls back to `s3.amazonaws.com`.
 
-- **Readiness**: HTTP GET on `/q/health/ready` (port 8182)
-- **Liveness**: HTTP GET on `/q/health/live` (port 8182)
+## Configuration keys
 
-The deployer additionally waits for the REST API to respond on port 8181
-before running the bootstrap job.
-
-### Bootstrap behavior
-
-The bootstrap job is a two-stage process:
-
-1. **Init container** -- runs `polaris-admin-tool bootstrap` to create the
-   realm and root principal.
-2. **Main container** -- obtains an OAuth2 token and creates the catalog and
-   namespaces via the REST API.
-
-The bootstrap is not idempotent -- re-running it on an existing realm fails.
-Lakebench handles this by deleting stale bootstrap jobs before creating new
-ones, and by treating "already bootstrapped" errors as success. If you need
-to redeploy Polaris, run `lakebench destroy` first.
-
-## YAML Configuration
-
-Polaris settings live under `architecture.catalog` in the config file.
-The image is set under `images`.
+Defaults from `PolarisConfig` and `PolarisResourcesConfig` in `config/schema.py`.
 
 ```yaml
-images:
-  polaris: "apache/polaris:1.6.0"                        # Polaris server image
-  polaris_admin_tool: "apache/polaris-admin-tool:1.6.0"  # Bootstrap init container
-
+recipe: polaris-iceberg-spark-trino
 architecture:
   catalog:
-    type: polaris
+    type: polaris            # optional: the recipe sets it
     polaris:
       # client_secret: optional; deploy generates one per deployment
-      port: 8181                      # REST API port
+      port: 8181
       resources:
-        cpu: "1"                      # CPU request and limit
-        memory: "2Gi"                 # Memory request and limit
+        cpu: "1"
+        memory: "2Gi"
 ```
 
-### Field reference
-
-| Field | Default | Description |
+| Key | Default | Effect |
 |---|---|---|
-| `catalog.type` | `hive` | Set to `polaris` to deploy Polaris instead of Hive Metastore. |
-| `polaris.client_secret` | `""` | OAuth2 client secret for the `lakebench` root principal. Optional. Empty: `deploy` generates one per deployment, once, and stores it in the Secret `lakebench-polaris-client` in the namespace; `run`, `benchmark`, Trino and Spark Thrift read it from there. Set before the first deploy: it is used as is and stored in that Secret. A Polaris already bootstrapped keeps its secret: `deploy` refuses a config value that differs from the stored one, and stops when neither the config nor the Secret holds it. The Polaris DB password is per deployment too (Secret `lakebench-polaris-db`), and each deploy sets the `polaris` role to it. |
-| `images.polaris` | `apache/polaris:1.6.0` | Polaris server image. 1.4.0+ (including this default) has no `-incubating` suffix; only 1.3.0 specifically needs the suffix -- `apache/polaris:1.3.0` (without it) does not exist. |
+| `architecture.catalog.type` | `hive` | `polaris` deploys Polaris instead of Hive Metastore. |
+| `polaris.client_secret` | `""` | OAuth2 client secret for the `lakebench` root principal. See [Client secret](#client-secret). |
 | `polaris.port` | `8181` | REST API port. Rarely needs changing. |
-| `polaris.resources.cpu` | `"1"` | CPU request and limit for the Polaris pod. |
-| `polaris.resources.memory` | `"2Gi"` | Memory request and limit for the Polaris pod. |
+| `polaris.resources.cpu` | `"1"` | CPU request and limit. Raise to `"2"` at scale 100+ if table commits or metadata reads slow down. |
+| `polaris.resources.memory` | `"2Gi"` | Memory request and limit (JVM heap). Raise to `"4Gi"` if Polaris OOMs during concurrent table commits. |
+| `images.polaris`, `images.polaris_admin_tool` | [matrix](compatibility-matrix.md#component-version-matrix) | Server and bootstrap init-container images. |
 
-### What the overrides do
+### Client secret
 
-| Override | Effect | When to change |
+- Empty: `deploy` generates one per deployment, once, and stores it in the Secret `lakebench-polaris-client` in the namespace. `run`, `benchmark`, Trino and Spark Thrift read it from there.
+- Set before the first deploy (for example `"${LAKEBENCH_POLARIS_CLIENT_SECRET}"`): it is used as is and stored in that Secret.
+- A bootstrapped Polaris keeps its secret. `deploy` refuses a config value that differs from the stored one. It stops when neither the config nor the Secret holds it.
+- The Polaris DB password is per deployment too (Secret `lakebench-polaris-db`). Each deploy sets the `polaris` role to it.
+
+## Sizing
+
+The defaults (1 CPU, 2Gi) handle pipelines up to ~1 TB. Needs grow with concurrent catalog operations (table commits from many Spark executors), not data volume.
+
+| Scale factor | CPU | Memory |
 |---|---|---|
-| `polaris.resources.cpu` | Controls how much CPU Polaris gets for handling catalog requests. | Increase to `"2"` at scale 100+ if catalog operations (table commits, metadata reads) become slow. |
-| `polaris.resources.memory` | JVM heap for the Polaris server. | Increase to `"4Gi"` if Polaris OOMs during concurrent table commits from multiple Spark executors. |
-| `images.polaris`, `images.polaris_admin_tool` | Pin the Polaris server and admin-tool images. | Default is `1.6.0`. Only change if you need a different Polaris release; minimum supported is `1.3.0-incubating`. Keep both tags on the same release. |
+| 1-50 | 1 | 2Gi |
+| 51 and above | 2 | 4Gi |
 
-## Version Constraints
+## Deploy and destroy
 
-- **Minimum Polaris version**: 1.3.0-incubating. Versions 1.1.0 and 1.2.0
-  have a credential vending bug (apache/polaris#379) that makes the server
-  attempt STS even when told not to, causing S3 failures on non-AWS storage.
-  Lakebench defaults to 1.6.0, well past this floor.
-- **STS skip**: lakebench creates the catalog with `stsUnavailable: true`
-  and `pathStyleAccess: true` in the bootstrap payload. This is the only
-  supported way to skip STS on FlashBlade or other non-AWS S3. Do not add
-  any server-wide credential-subscoping override to Polaris; it drops the
-  endpoint and path-style settings, and server-side S3FileIO falls back to
-  `s3.amazonaws.com`.
-- **Minimum Trino version**: 454 (for `oauth2.scope` support). Default is 483.
-- **Image tag suffix**: only the 1.3.0 release carries `-incubating`.
-  Polaris graduated from the Apache incubator at 1.4.0, so 1.4.0 and later
-  (including the 1.6.0 default) have no suffix -- there is no
-  `1.6.0-incubating` tag. Omitting the suffix on the 1.3.0 tag specifically
-  causes an image pull failure.
+`lakebench deploy` creates:
 
-## Sizing Guidance
+- **Deployment** `lakebench-polaris` (1 replica): REST server on port 8181 (API) and 8182 (health and metrics). Readiness probe `/q/health/ready`, liveness `/q/health/live`, both on 8182.
+- **Service** `lakebench-polaris` (ClusterIP): `lakebench-polaris.<namespace>.svc.cluster.local:8181`.
+- **Bootstrap Job** `lakebench-polaris-bootstrap`: runs once after the server is healthy and the REST API answers on 8181.
+  1. Init container: `polaris-admin-tool bootstrap` creates the realm and root principal.
+  2. Main container: gets an OAuth2 token. It creates the principal roles, the catalog, and namespaces `default`, `bronze`, `silver`, `gold` via the REST API.
+- Metadata goes into a `polaris` database the deployer creates on the deployment's PostgreSQL.
 
-Polaris is lightweight. The defaults (1 CPU, 2Gi) handle medallion pipeline
-workloads up to ~1 TB. Polaris does not process query data -- it only serves
-catalog metadata. Resource needs grow with concurrent catalog operations
-(table commits from multiple Spark executors), not with data volume.
+The engines are set up to match:
 
-| Scale factor | Recommended CPU | Recommended memory |
-|---|---|---|
-| 1--50 | 1 | 2Gi |
-| 51--500 | 2 | 4Gi |
-| 500+ | 2 | 4Gi |
+| Engine | Catalog settings |
+|---|---|
+| Spark | Iceberg REST catalog (`catalog-impl=org.apache.iceberg.rest.RESTCatalog`), OAuth2 client credentials, static S3 access keys. |
+| Trino | `iceberg.catalog.type=rest`, `oauth2.scope=PRINCIPAL_ROLE:ALL`, native S3 file system (`fs.native-s3.enabled=true`). Init containers wait for Polaris instead of the Hive Metastore. |
 
-## Recipes
+The bootstrap is not idempotent: re-running it on an existing realm fails. Lakebench deletes stale bootstrap jobs before creating new ones and treats "already bootstrapped" errors as success. To redeploy Polaris, run `lakebench destroy` first.
 
-Polaris is used by these recipes:
+`lakebench destroy`:
 
-- `polaris-iceberg-spark-trino`
-- `polaris-iceberg-spark-thrift`
-- `polaris-iceberg-spark-duckdb`
-- `polaris-iceberg-spark-none`
+- Deletes the bootstrap Job and the Polaris Deployment, Service and ConfigMap.
+- Does not drop the `polaris` database on its own. It lives on the PostgreSQL PVC, which destroy deletes.
+- With `platform.kubernetes.create_namespace: false`, leaves the namespace. It still unregisters the tables from the catalog first.
 
-See the [Recipes Guide](recipes.md) for all combinations.
+## Troubleshooting
 
-## See Also
+- [Polaris bootstrap Job fails or times out](troubleshooting.md#polaris-bootstrap-job-fails-or-times-out)
+- [Polaris credential vending fails](troubleshooting.md#polaris-credential-vending-fails)
+- [Polaris 1.3.0 image fails with ImagePullBackOff](troubleshooting.md#polaris-130-image-fails-with-imagepullbackoff)
+- [Trino queries fail with Polaris: "scope not valid"](troubleshooting.md#trino-queries-fail-with-polaris-scope-not-valid)
 
-- [Hive Metastore](component-hive.md) -- the alternative catalog
-- [Polaris Quickstart](quickstart-polaris.md) -- step-by-step setup guide
-- [Trino](component-trino.md) -- query engine that connects to Polaris
-- [Recipes](recipes.md) -- all supported component combinations
-- [Configuration](configuration.md) -- full YAML schema reference
-- [Troubleshooting](troubleshooting.md) -- common deployment issues
+## See also
+
+[Getting started](getting-started.md), [Choosing a catalog](recipes.md#choosing-a-catalog), [Hive Metastore](component-hive.md), [Trino](component-trino.md), [Configuration](configuration.md).

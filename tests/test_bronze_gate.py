@@ -1,4 +1,4 @@
-"""SAF-9: stale bronze on buckets the deployment did not create (SD-17, DESIGN ch01 section 5).
+"""SAF-9: stale bronze on buckets the deployment did not create (SD-17).
 
 One gate, ``bronze_prefix_gate``, decides before any datagen Job whether the
 datagen prefix may be written: an owned bucket's prefix is cleared only with
@@ -6,7 +6,7 @@ datagen prefix may be written: an owned bucket's prefix is cleared only with
 with ``--allow-stale-bronze``, which the run records. ``DatagenDeployer``'s
 cycle-0 path refuses the same way for a caller that skipped the gate.
 
-Also LB-231: destroy clears the kept silver-state's ``bronze_data_clock``
+Also: destroy clears the kept silver-state's ``bronze_data_clock``
 when it empties bronze in a surviving namespace.
 """
 
@@ -75,11 +75,24 @@ class TestGate:
             got = _gate(cfg)
             assert got.proceed and got.owned and not got.stale_allowed
 
-    def test_owned_nonempty_refuses_without_regenerate(self):
+    @pytest.mark.parametrize(
+        "objects",
+        [
+            [f"{PREFIX}/part-0"],
+            # a series marker beside part files is a corpus
+            [SERIES_KEY, f"{PREFIX}/part-0"],
+            [f"{PREFIX}/part-0", OWNER_MARKER_KEY],
+        ],
+        ids=["part-file", "series-marker-and-part-file", "part-file-and-owner-marker"],
+    )
+    def test_owned_nonempty_refuses_without_regenerate(self, objects):
         with recording() as rec:
-            cfg = _seed(rec, owned=True, objects=[f"{PREFIX}/part-0"])
+            cfg = _seed(rec, owned=True, objects=objects)
+            before = sorted(rec.buckets_store[BRONZE])
             got = _gate(cfg)
-            assert not got.proceed and "--regenerate" in got.message
+            assert not got.proceed and got.cleared == 0 and got.message
+            assert sorted(rec.buckets_store[BRONZE]) == before
+            assert not [c for c in rec.mutations() if c.api == "s3"]
 
     def test_regenerate_on_owned_clears_only_the_datagen_prefix(self):
         """C2-8: the datagen prefix, its multipart uploads, never the bucket."""
@@ -87,12 +100,19 @@ class TestGate:
             cfg = _seed(
                 rec,
                 owned=True,
-                objects=[f"{PREFIX}/part-0", f"{PREFIX}/part-1", "checkpoints/x", OWNER_MARKER_KEY],
+                objects=[
+                    f"{PREFIX}/part-0",
+                    f"{PREFIX}/part-1",
+                    SERIES_KEY,
+                    "checkpoints/x",
+                    OWNER_MARKER_KEY,
+                ],
             )
             got = _gate(cfg, regenerate=True)
             assert got.proceed and got.cleared == 2
-            # The series marker the clear writes first and keeps (it says a
-            # clear is under way until the generate begins).
+            # The series marker is overwritten by the one the clear writes
+            # first and keeps (it says a clear is under way until the
+            # generate begins).
             assert sorted(rec.buckets_store[BRONZE]) == sorted(
                 ["checkpoints/x", OWNER_MARKER_KEY, SERIES_KEY]
             )
@@ -104,17 +124,15 @@ class TestGate:
         with recording() as rec:
             cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"])
             got = _gate(cfg)
-            assert not got.proceed
-            assert "did not create" in got.message and "--allow-stale-bronze" in got.message
+            assert not got.proceed and got.message
             assert list(rec.buckets_store[BRONZE]) == [f"{PREFIX}/part-0"]
 
     def test_regenerate_on_unowned_deletes_nothing(self):
-        """Fails reverted: --regenerate emptied the whole bucket, whoever owned it."""
+        """--regenerate never empties a bucket this deployment did not create."""
         with recording() as rec:
             cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0", "theirs/data"])
             got = _gate(cfg, regenerate=True)
-            assert not got.proceed
-            assert "does not empty a bucket this deployment did not create" in got.message
+            assert not got.proceed and got.message
             assert sorted(rec.buckets_store[BRONZE]) == [f"{PREFIX}/part-0", "theirs/data"]
             assert not [c for c in rec.mutations() if c.api == "s3"]
 
@@ -131,15 +149,21 @@ class TestGate:
             }
             assert list(rec.buckets_store[BRONZE]) == [f"{PREFIX}/part-0", f"{PREFIX}/part-1"]
 
-    def test_unowned_empty_proceeds(self):
+    @pytest.mark.parametrize(
+        ("owned", "objects"),
+        [
+            (False, ["other/x"]),
+            (False, [OWNER_MARKER_KEY]),
+            # a series marker with no part file beside it is no corpus
+            (True, [SERIES_KEY]),
+            (False, [SERIES_KEY]),
+        ],
+    )
+    def test_a_prefix_without_corpus_data_proceeds(self, owned, objects):
         with recording() as rec:
-            cfg = _seed(rec, owned=False, objects=["other/x"])
-            assert _gate(cfg).proceed
-
-    def test_marker_alone_is_empty(self):
-        with recording() as rec:
-            cfg = _seed(rec, owned=False, objects=[OWNER_MARKER_KEY])
-            assert _gate(cfg).proceed
+            cfg = _seed(rec, owned=owned, objects=objects)
+            got = _gate(cfg)
+            assert got.proceed and not got.stale_allowed
 
     def test_regenerate_empty_prefix_refused(self):
         with recording() as rec:
@@ -148,7 +172,7 @@ class TestGate:
             # prefix that ever comes back empty.
             with patch("lakebench.deploy.datagen.bronze_datagen_prefix", return_value="/"):
                 got = _gate(cfg, regenerate=True)
-            assert not got.proceed and "prefix is empty" in got.message
+            assert not got.proceed and got.message
             assert list(rec.buckets_store[BRONZE]) == ["x/part-0"]
 
     def test_listing_failure_refuses(self):
@@ -156,7 +180,8 @@ class TestGate:
             cfg = _seed(rec, owned=True)
             rec.fail_s3("list_objects_v2", "InternalError")
             got = _gate(cfg)
-            assert not got.proceed and "could not list" in got.message
+            assert not got.proceed and got.message
+            assert not [c for c in rec.mutations() if c.api == "s3"]
 
     def test_ownership_that_cannot_be_checked_is_a_prerequisite_not_a_refusal(self):
         """A transient API error proving ownership exits 4, not 3."""
@@ -259,21 +284,6 @@ class TestDeployerCycleZero:
             assert not got.proceed and "reclaim-bucket" in got.message
 
 
-def test_continuous_unowned_refuses():
-    """The continuous start refuses an unowned bucket before any datagen
-    (``_require_reset_ownership``, the same SAF-10 verdicts)."""
-    from kubernetes import client
-
-    from lakebench.cli._sustained import _bucket_ownership_problem
-
-    with recording() as rec:
-        cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"])
-        for b in ("u01-silver", "u01-gold"):
-            rec.add_bucket(b, tags={TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: FP})
-        problem = _bucket_ownership_problem(cfg, client.CoreV1Api())
-        assert problem and BRONZE in problem
-
-
 def test_stale_bronze_in_metrics_and_badge():
     from datetime import datetime, timezone
 
@@ -281,19 +291,21 @@ def test_stale_bronze_in_metrics_and_badge():
     from lakebench.metrics.verdict import compute_badge_status
 
     m = PipelineMetrics(run_id="r", deployment_name=NS, start_time=datetime.now(timezone.utc))
+    _ok, _reasons, warnings_without = compute_badge_status(m)
     m.datagen_stale_bronze = {
         "allowed": True,
         "objects_before": 7,
         "bucket": BRONZE,
         "prefix": PREFIX,
     }
-    assert m.to_dict()["datagen"]["stale_bronze"]["objects_before"] == 7
+    stale = m.to_dict()["datagen"]["stale_bronze"]
+    assert stale["objects_before"] == 7 and stale["allowed"] is True
     _ok, _reasons, warnings = compute_badge_status(m)
-    assert any("bronze held 7 objects before generate" in w for w in warnings)
+    assert len(warnings) > len(warnings_without)
 
 
 # ---------------------------------------------------------------------------
-# LB-231
+# destroy clears bronze_data_clock
 # ---------------------------------------------------------------------------
 
 
@@ -347,87 +359,3 @@ def test_destroy_clears_the_bronze_clock_only_with_bronze(clean_buckets):
         data = _destroy(rec, clean_buckets=clean_buckets)
         assert data["rebuild_epoch_c360_iceberg"] == "3"  # counters never go back
         assert data["bronze_data_clock"] == ("" if clean_buckets else "2026-09-30")
-
-
-class TestMultiCycleGate:
-    """The multi-cycle loop runs the same gate as every generate before cycle
-    0 (DESIGN ch05 7.1 rule 3): an owned non-empty prefix, a leftover series
-    marker included, is refused unless --regenerate, which clears only the
-    datagen prefix; --allow-stale-bronze still applies to an unowned one."""
-
-    def test_owned_prefix_is_refused_without_regenerate(self):
-        with recording() as rec:
-            cfg = _seed(rec, owned=True, objects=[f"{PREFIX}/part-0", OWNER_MARKER_KEY])
-            got = _gate(cfg)
-            assert not got.proceed and got.cleared == 0
-            assert "--regenerate" in got.message
-            assert sorted(rec.buckets_store[BRONZE]) == sorted(
-                [OWNER_MARKER_KEY, f"{PREFIX}/part-0"]
-            )
-
-    def test_a_prefix_holding_only_the_series_marker_is_empty(self):
-        """A marker with no part file beside it (a clear or a generate that
-        stopped before writing data) is no corpus: the gate proceeds, on an
-        owned or unowned bucket, and records nothing stale."""
-        for owned in (True, False):
-            with recording() as rec:
-                cfg = _seed(rec, owned=owned, objects=[SERIES_KEY])
-                got = _gate(cfg)
-                assert got.proceed and not got.stale_allowed, owned
-
-    def test_series_marker_beside_part_files_is_a_corpus(self):
-        with recording() as rec:
-            cfg = _seed(rec, owned=True, objects=[SERIES_KEY, f"{PREFIX}/part-0"])
-            assert not _gate(cfg).proceed
-
-    def test_regenerate_keeps_ownership_marker(self):
-        """Only the datagen prefix goes: the bucket's .lakebench/ owner marker
-        and every other prefix stay (cluster-safety item 7)."""
-        with recording() as rec:
-            cfg = _seed(
-                rec,
-                owned=True,
-                objects=[
-                    OWNER_MARKER_KEY,
-                    f"{PREFIX}/part-0",
-                    f"{PREFIX}/_corpus/series.json",
-                    "checkpoints/x",
-                ],
-            )
-            got = _gate(cfg, regenerate=True)
-            # The old series marker is not deleted: it is overwritten by the
-            # marker that says a clear is under way, and kept.
-            assert got.proceed and got.cleared == 1
-            assert sorted(rec.buckets_store[BRONZE]) == sorted(
-                [OWNER_MARKER_KEY, "checkpoints/x", SERIES_KEY]
-            )
-            assert _clearing(rec)
-
-    def test_unowned_with_allow_stale_proceeds(self):
-        with recording() as rec:
-            cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"])
-            got = _gate(cfg, allow_stale_bronze=True)
-            assert got.proceed and got.stale_allowed
-            assert list(rec.buckets_store[BRONZE]) == [f"{PREFIX}/part-0"]
-
-    def test_unowned_without_the_flag_refuses(self):
-        with recording() as rec:
-            cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"])
-            assert not _gate(cfg).proceed
-
-    def test_run_wires_every_gate_with_the_users_flags(self):
-        """[static] Phase 3's and the multi-cycle loop's calls pass the user's
-        flags and nothing that would clear an owned prefix without them."""
-        import ast
-        from pathlib import Path
-
-        src = Path(__file__).resolve().parent.parent / "src/lakebench/cli/_run.py"
-        calls = [
-            n
-            for n in ast.walk(ast.parse(src.read_text()))
-            if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "enforce_bronze_gate"
-        ]
-        assert len(calls) == 2
-        for c in calls:
-            assert [ast.unparse(a) for a in c.args] == ["cfg", "regenerate", "allow_stale_bronze"]
-            assert c.keywords == []

@@ -4,7 +4,7 @@
 holds the lease; the low-level helpers read it without importing the
 deploy layer: ``lakebench.k8s._pinned`` (new session and timeouts for
 kubectl, helm and oc) and ``lakebench.k8s.client.K8sClient`` (request
-timeouts). DESIGN ch01 3.6 and 3.7.
+timeouts).
 """
 
 from __future__ import annotations

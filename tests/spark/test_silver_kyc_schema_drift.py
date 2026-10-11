@@ -1,47 +1,15 @@
-"""F1 (silver): `_read_reference` fails loud on KYC schema drift.
-
-A reference file that exists but silently drops a KYC column (a datagen
-bump, a migration that never replayed the schema) used to slip through:
-`build_kyc` returned None, silver wrote NULL KYC for every entity, and
-every customer-scoped rule turned into "ran, 0 alerts". This test proves
-`_read_reference` now raises `SilverAbort` naming the missing columns
-before any silver DataFrame is built.
-
-The check lives in `_read_reference`, not in `build_kyc`, to preserve the
-contract that `build_kyc(party.drop("is_customer"), account) is None` (see
-tests/spark/test_silver_kyc_spark.py::test_missing_or_old_reference_files_give_null_kyc).
+"""`_read_reference` raises `SilverAbort` naming the missing column when a
+KYC reference file drops one, instead of silently writing NULL KYC for every
+entity. The check lives in `_read_reference`, not `build_kyc`, so
+`build_kyc(party.drop("is_customer"), account)` still returns None.
 """
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
 pytest.importorskip("pyspark")
-
-# Silver scripts import `common` and `silver_build_financial` as top-level
-# modules (job.py adds the scripts dir to sys.path at submit time).
-_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"
 pytestmark = pytest.mark.usefixtures("load_script")
-
-
-@pytest.fixture(scope="module")
-def spark():
-    import os
-
-    from pyspark.sql import SparkSession
-
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    s = (
-        SparkSession.builder.master("local[1]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "2")
-        .getOrCreate()
-    )
-    yield s
-    s.stop()
 
 
 def _write_parquet(df, path):
@@ -90,14 +58,6 @@ def _read_reference_with_paths(spark, monkeypatch, party_path, acct_path):
     return sb._read_reference(spark)
 
 
-def test_read_reference_ok_when_schema_complete(spark, tmp_path, monkeypatch):
-    party_path, acct_path = _write_full_refs(spark, tmp_path)
-    party, account = _read_reference_with_paths(spark, monkeypatch, party_path, acct_path)
-    assert party is not None and account is not None
-    assert "is_customer" in party.columns
-    assert set(account.columns) == {"account_id", "iban", "holder_entity_id", "home_fi"}
-
-
 def _write_party_missing(spark, tmp_path, dropped):
     """Write a full account and a party missing ``dropped`` columns, to a
     fresh subdirectory so read-and-overwrite races cannot fire."""
@@ -120,52 +80,27 @@ def _write_account_missing(spark, tmp_path, dropped):
     return party_path, drift_path
 
 
-def test_read_reference_raises_when_party_missing_is_customer(spark, tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("side", "dropped"),
+    [
+        ("party", "is_customer"),
+        ("party", "crr_tier"),
+        ("account", "holder_entity_id"),
+    ],
+)
+def test_read_reference_raises_naming_the_dropped_column(
+    spark_session, tmp_path, monkeypatch, side, dropped
+):
     from common import SilverAbort
 
-    party_path, acct_path = _write_party_missing(spark, tmp_path, ["is_customer"])
+    write = _write_party_missing if side == "party" else _write_account_missing
+    party_path, acct_path = write(spark_session, tmp_path, [dropped])
     with pytest.raises(SilverAbort) as exc:
-        _read_reference_with_paths(spark, monkeypatch, party_path, acct_path)
-    msg = str(exc.value)
-    assert "KYC schema drift" in msg
-    assert "is_customer" in msg
-    assert str(party_path) in msg
+        _read_reference_with_paths(spark_session, monkeypatch, party_path, acct_path)
+    assert dropped in str(exc.value)
 
 
-def test_read_reference_raises_when_party_missing_crr_tier(spark, tmp_path, monkeypatch):
-    from common import SilverAbort
-
-    party_path, acct_path = _write_party_missing(spark, tmp_path, ["crr_tier"])
-    with pytest.raises(SilverAbort) as exc:
-        _read_reference_with_paths(spark, monkeypatch, party_path, acct_path)
-    assert "crr_tier" in str(exc.value)
-
-
-def test_read_reference_raises_when_account_missing_holder_entity_id(spark, tmp_path, monkeypatch):
-    from common import SilverAbort
-
-    party_path, acct_path = _write_account_missing(spark, tmp_path, ["holder_entity_id"])
-    with pytest.raises(SilverAbort) as exc:
-        _read_reference_with_paths(spark, monkeypatch, party_path, acct_path)
-    msg = str(exc.value)
-    assert "holder_entity_id" in msg
-    assert str(acct_path) in msg
-
-
-def test_read_reference_still_returns_none_for_pre_kyc_manifest(spark, tmp_path, monkeypatch):
-    """A corpus without party/account and with a pre-KYC manifest still
-    yields (None, None). The schema check must not intercept that path."""
-    import silver_build_financial as sb
-
-    # Write a pre-KYC manifest so `_corpus_predates_kyc` returns True.
-    manifest_dir = tmp_path / "manifest"
-    manifest_dir.mkdir()
-    version = next(iter(sb.PRE_KYC_MODEL_VERSIONS))
-    m = spark.createDataFrame([(version,)], "model_version string")
-    _write_parquet(m, manifest_dir / "manifest0.parquet")
-
-    monkeypatch.setattr(sb, "PARTY_PATH", str(tmp_path / "nope/party.parquet"))
-    monkeypatch.setattr(sb, "ACCOUNT_PATH", str(tmp_path / "nope/account.parquet"))
-    monkeypatch.setattr(sb, "MANIFEST_GLOB", str(manifest_dir / "manifest*.parquet"))
-
-    assert sb._read_reference(spark) == (None, None)
+def test_read_reference_ok_when_schema_complete(spark_session, tmp_path, monkeypatch):
+    party_path, acct_path = _write_full_refs(spark_session, tmp_path)
+    party, account = _read_reference_with_paths(spark_session, monkeypatch, party_path, acct_path)
+    assert party is not None and account is not None

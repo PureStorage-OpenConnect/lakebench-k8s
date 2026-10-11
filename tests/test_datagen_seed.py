@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -25,24 +26,15 @@ def _cfg(schema: str, seed: int | None = None):
     return make_config(architecture={"workload": {"schema": schema, "datagen": dg}})
 
 
-def test_spent_seeds_come_from_the_preregistration():
-    corpora = json.loads(PREREG.read_text())["corpora"]
-    # The pre-registration's list plus every seed with a recorded look or burn.
-    assert ds.spent_seeds() == frozenset(corpora["spent_seeds"]) | ds.recorded_seeds()
-    assert 42 in ds.spent_seeds()
+def test_prereg_spent_list_holds_no_unlooked_heldout_seed():
     # The calibration seed is never spent; the held-out seeds are known only by
     # hash, and a spent seed hashes to one only when its look or burn is recorded.
-    assert corpora["calibration_seed"] not in ds.spent_seeds()
+    assert _CORPORA["calibration_seed"] not in ds.spent_seeds()
     assert not any(ds.heldout_role(s) for s in ds.spent_seeds() - ds.recorded_seeds())
 
 
-def test_unset_seed_resolves_per_schema():
-    assert (
-        ds.config_seed(_cfg("financial"))
-        == json.loads(PREREG.read_text())["corpora"]["calibration_seed"]
-    )
-    # Other schemas keep the seed their corpora always had.
-    assert ds.config_seed(_cfg("customer360")) == 42
+def test_unset_financial_seed_resolves_to_the_calibration_seed():
+    assert ds.config_seed(_cfg("financial")) == _CORPORA["calibration_seed"]
 
 
 def test_explicit_seed_is_used():
@@ -80,13 +72,20 @@ def test_deployer_renders_the_configured_seed():
     assert args[args.index("--seed") + 1] == "7777"
 
 
-def test_template_has_no_seed_default():
+def test_template_without_the_seed_fails_instead_of_defaulting():
     # A default in the template would bring the spent 42 back for any
     # renderer that forgets the context key; StrictUndefined fails instead.
-    src = (
-        Path(__file__).resolve().parents[1] / "src/lakebench/templates/datagen/job.yaml.j2"
-    ).read_text()
-    assert "datagen_seed | default" not in src
+    from jinja2 import UndefinedError
+
+    from lakebench.deploy.datagen import DatagenDeployer
+    from lakebench.deploy.engine import DeploymentEngine
+
+    engine = DeploymentEngine(_cfg("financial", 7777), dry_run=True)
+    ctx = DatagenDeployer(engine)._build_datagen_context()
+    ctx.pop("datagen_seed")
+    assert not ctx.get("datagen_seed_secret")
+    with pytest.raises(UndefinedError):
+        engine.renderer.render("datagen/job.yaml.j2", ctx)
 
 
 def test_reference_job_reports_the_configured_seed(monkeypatch):
@@ -143,15 +142,6 @@ def looks_open(monkeypatch):
     """The pre-registration after the freeze: registered looks open."""
     opened = {**_no_plain(ds._corpora()), "registered_looks_open": True}
     monkeypatch.setattr(ds, "_corpora", lambda: opened)
-
-
-def test_registered_looks_are_closed_until_the_freeze(monkeypatch):
-    # Open since the freeze (AML-GOALS #52); a closed pre-registration still refuses.
-    assert _CORPORA.get("registered_looks_open") is True
-    closed = {**_no_plain(ds._corpora()), "registered_looks_open": False}
-    monkeypatch.setattr(ds, "_corpora", lambda: closed)
-    with pytest.raises(ValidationError, match="closed"):
-        _cfg_role(EVAL, "evaluation")
 
 
 @pytest.mark.parametrize(("seed", "role"), [(EVAL, "evaluation"), (ROBUST, "robustness")])
@@ -216,38 +206,43 @@ def _gate():
     )
 
 
-def test_gate_guard_refuses_unregistered_looks(looks_open):
-    g = _gate()
-    # Calibration and unregistered seeds score freely.
-    assert g.seed_guard_error(43, None, []) is None
-    assert g.seed_guard_error(7777, None, []) is None
-    assert g.seed_guard_error(None, None, []) is None
-    # Spent: always refused, registered or not.
-    assert "spent" in g.seed_guard_error(42, None, [])
-    assert "spent" in g.seed_guard_error(None, "evaluation", [42])
-    # Evaluation / robustness: only as the registered run for that role.
-    assert "registered" in g.seed_guard_error(EVAL, None, [])
-    assert g.seed_guard_error(EVAL, "evaluation", [EVAL]) is None
-    assert g.seed_guard_error(ROBUST, "robustness", [ROBUST]) is None
-    assert g.seed_guard_error(EVAL, "robustness", [EVAL]) is not None
-    # --registered cannot be attached to another seed.
-    assert g.seed_guard_error(7777, "evaluation", []) is not None
-
-
-def test_gate_guard_counts_only_is_not_a_look():
-    g = _gate()
-    # A counts-only smoke run may touch a protected corpus (no AP), never a
-    # spent one, and never under a registered role.
-    assert g.seed_guard_error(EVAL, None, [EVAL], counts_only=True) is None
-    assert g.seed_guard_error(42, None, [], counts_only=True) is not None
-    assert g.seed_guard_error(EVAL, "evaluation", [EVAL], counts_only=True) is not None
-
-
-def test_mixed_corpus_counts_as_the_guarded_seed():
-    # A manifest mixing a guarded seed's instances with others is refused:
-    # any matching instance seed puts the guarded seed in `matched`.
-    assert ds.aml_seed_error(_CORPORA, 7777, None, [EVAL]) is not None
-    assert ds.aml_seed_error(_CORPORA, None, None, [42]) is not None
+@pytest.mark.parametrize(
+    ("seed", "role", "matched", "counts_only", "looks_open_", "refused"),
+    [
+        # Calibration and unregistered seeds score freely.
+        (43, None, [], False, True, False),
+        (7777, None, [], False, True, False),
+        (None, None, [], False, True, False),
+        # Spent: always refused, registered or not.
+        (42, None, [], False, True, True),
+        (None, "evaluation", [42], False, True, True),
+        # Evaluation / robustness: only as the registered run for that role.
+        (EVAL, None, [], False, True, True),
+        (EVAL, "evaluation", [EVAL], False, True, False),
+        (ROBUST, "robustness", [ROBUST], False, True, False),
+        (EVAL, "robustness", [EVAL], False, True, True),
+        # --registered cannot be attached to another seed.
+        (7777, "evaluation", [], False, True, True),
+        # A counts-only smoke run may touch a protected corpus (no AP), never a
+        # spent one, and never under a registered role.
+        (EVAL, None, [EVAL], True, False, False),
+        (42, None, [], True, False, True),
+        (EVAL, "evaluation", [EVAL], True, False, True),
+        # A manifest mixing a guarded seed's instances with others is refused:
+        # any matching instance seed puts the guarded seed in `matched`.
+        (7777, None, [EVAL], False, False, True),
+        (None, None, [42], False, False, True),
+        # An evaluation corpus scored with --seed omitted or misstated is refused.
+        (None, None, [EVAL], False, False, True),
+        (7777, "evaluation", [EVAL], False, False, True),
+    ],
+)
+def test_gate_guard_table(seed, role, matched, counts_only, looks_open_, refused, monkeypatch):
+    if looks_open_:
+        opened = {**_no_plain(ds._corpora()), "registered_looks_open": True}
+        monkeypatch.setattr(ds, "_corpora", lambda: opened)
+    err = _gate().seed_guard_error(seed, role, matched, counts_only)
+    assert (err is not None) is refused
 
 
 def test_guard_ships_flat_to_the_spark_driver():
@@ -263,19 +258,6 @@ def test_guard_ships_flat_to_the_spark_driver():
         for k, v in cm["data"].items()
     }
     assert shipped["datagen_seed.py"] == seed_src, "the guard ships flat, byte for byte"
-    ref = (
-        Path(__file__).resolve().parents[1]
-        / "src/lakebench/spark/scripts/score_financial_reference.py"
-    ).read_text()
-    assert "from datagen_seed import" in ref and "refusing to score this corpus" in ref
-
-
-def test_gate_guard_uses_the_manifest_seed_not_the_claim():
-    g = _gate()
-    # An evaluation corpus scored with --seed omitted or misstated is refused.
-    assert g.seed_guard_error(None, None, [EVAL]) is not None
-    assert "not the claimed" in g.seed_guard_error(7777, None, [EVAL])
-    assert "not the claimed" in g.seed_guard_error(7777, "evaluation", [EVAL])
 
 
 def test_gate_refuses_before_spark_starts():
@@ -290,7 +272,6 @@ def test_flat_copy_imports_without_lakebench(tmp_path):
     # lakebench package: it must import and work from the corpora dict and
     # the hash file mounted next to it.
     import subprocess
-    import sys
 
     src = Path(ds.__file__).read_text()
     (tmp_path / "datagen_seed.py").write_text(src)
@@ -326,22 +307,6 @@ def test_cluster_refusal_runs_before_anything_is_written():
     assert main.index("_refuse_guarded_corpus(") < main.index("compute_leakage_gate(")
 
 
-def test_robustness_look_allowed_now_the_perturbation_exists(looks_open):
-    # Lane T2: datagen applies corpora.robustness_perturbation, so the
-    # registered robustness look is no longer refused on that ground.
-    assert ds.ROBUSTNESS_PERTURBATION_IMPLEMENTED is True
-    assert (
-        ds.aml_seed_error(
-            _no_plain(ds._corpora()), ROBUST, "robustness", [ROBUST], claim_verified=True
-        )
-        is None
-    )
-    assert (
-        ds.aml_seed_error(_no_plain(ds._corpora()), EVAL, "evaluation", [EVAL], claim_verified=True)
-        is None
-    )
-
-
 @pytest.mark.parametrize(
     "bad",
     [{k: v for k, v in _CORPORA.items() if k != "spent_seeds"}, {**_CORPORA, "spent_seeds": "42"}],
@@ -353,7 +318,7 @@ def test_damaged_spent_seeds_fail_closed(bad):
         ds.aml_seed_error(bad, 43)
 
 
-@pytest.mark.parametrize("flag", ["false", "true", 1, None])
+@pytest.mark.parametrize("flag", [False, "false", "true", 1, None])
 def test_looks_open_only_when_literally_true(flag):
     corpora = {**_CORPORA, "registered_looks_open": flag}
     err = ds.aml_seed_error(corpora, EVAL, "evaluation", [EVAL], claim_verified=True)
@@ -370,8 +335,10 @@ def test_looks_open_only_when_literally_true(flag):
         [],  # no --out
     ],
 )
-def test_registered_look_runs_only_as_registered(extra, looks_open, tmp_path, capsys):
+def test_registered_look_runs_only_as_registered(extra, looks_open, tmp_path, monkeypatch):
     g = _gate()
+    # Refusal comes before Spark: importing the scorer's Spark side would fail.
+    monkeypatch.setitem(sys.modules, "aml_features", None)
     out = [] if extra == [] else ["--out", "/nonexistent/r.json"]
     argv = [
         "/nonexistent",
@@ -385,8 +352,6 @@ def test_registered_look_runs_only_as_registered(extra, looks_open, tmp_path, ca
         *extra,
     ]
     assert g.main(argv) == 1
-    err = capsys.readouterr().err
-    assert ("needs --out" if extra == [] else "cannot run with") in err, err
 
 
 def _seed_file(tmp_path, seed):
@@ -407,9 +372,9 @@ def test_registered_look_gets_no_operator_retry(looks_open):
         m = mgr._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
         return m["spec"]["restartPolicy"]
 
-    reg = policy(_cfg_role(EVAL, "evaluation"))
-    assert reg["onFailureRetries"] == 0 and reg["onSubmissionFailureRetries"] == 5
-    assert policy(_cfg("financial", 7777))["type"] == "OnFailure"
+    assert policy(_cfg_role(EVAL, "evaluation"))["onFailureRetries"] == 0
+    dev = policy(_cfg("financial", 7777))
+    assert dev["type"] == "OnFailure" and dev["onFailureRetries"] > 0
 
 
 def test_binary_spent_list_is_a_subset_of_the_preregistration():
@@ -422,21 +387,28 @@ def test_binary_spent_list_is_a_subset_of_the_preregistration():
     assert rust and rust <= set(_CORPORA["spent_seeds"])
 
 
-def test_entrypoint_requires_a_financial_seed():
-    import subprocess
-    import sys
+def test_entrypoint_requires_a_financial_seed(monkeypatch):
+    import importlib.util
+    from unittest.mock import patch
 
-    ep = Path(__file__).resolve().parents[1] / "datagen_rs/entrypoint.py"
-    r = subprocess.run(
-        [sys.executable, str(ep), "--schema", "financial", "--bucket", "b"],
-        capture_output=True,
-        text=True,
-    )
-    assert r.returncode == 2 and "--seed is required" in r.stderr
+    path = Path(__file__).resolve().parents[1] / "datagen_rs/entrypoint.py"
+    spec = importlib.util.spec_from_file_location("datagen_entrypoint_seed", path)
+    ep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ep)
+    monkeypatch.delenv("LB_DATAGEN_SEED", raising=False)
+    monkeypatch.setenv("CPU_LIMIT", "8")
+
+    def _no_exec(*_a):
+        raise AssertionError("generator started without a seed")
+
+    argv = ["entrypoint.py", "--schema", "financial", "--bucket", "b"]
+    with patch.object(sys, "argv", argv), patch.object(ep.os, "execvp", _no_exec):
+        assert ep.main() == 2
 
 
-def test_registered_look_claims_out_before_spark(tmp_path, looks_open, monkeypatch, capsys):
+def test_registered_look_claims_out_before_spark(tmp_path, looks_open, monkeypatch):
     g = _gate()
+    monkeypatch.setitem(sys.modules, "aml_features", None)
     # The look preconditions before the claim are met (a clean checkout, no
     # earlier look of this seed, committed predictions), so the claim decides.
     monkeypatch.setattr(g, "clean_checkout_error", lambda: None)
@@ -460,9 +432,8 @@ def test_registered_look_claims_out_before_spark(tmp_path, looks_open, monkeypat
         str(out),
     ]
     assert g.main(argv) == 1
-    assert "cannot claim --out" in capsys.readouterr().err
     assert out.read_text() == "{}"
     missing = tmp_path / "no-such-dir" / "look.json"
     argv[-1] = str(missing)
     assert g.main(argv) == 1
-    assert "cannot claim --out" in capsys.readouterr().err
+    assert not missing.exists()

@@ -422,7 +422,7 @@ def _generate_loaded(
     except Exception as e:
         logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         cluster_cap = None
-    # Cuts to fit the cluster are shown with their reason, never silent (LB-160).
+    # Cuts to fit the cluster are shown with their reason, never silent.
     for cut in resolve_auto_sizing(cfg, cluster_cap) or []:
         print_warning(f"Auto-sizing: {cut}")
 
@@ -439,7 +439,7 @@ def _generate_loaded(
     # image pull; ceiling 86400 s (24 h) to keep a typo from parking a
     # runaway wait forever. If `approx_bronze_gb` isn't populated the
     # formula cannot estimate wall time -- fall back to a fixed 7200 s
-    # default (matching the pre-LB-111 hard-coded value) rather than
+    # default (matching the older hard-coded value) rather than
     # let it clamp to the 900 s floor and declare a 75-minute job
     # failed after 15 minutes.
     if timeout <= 0:

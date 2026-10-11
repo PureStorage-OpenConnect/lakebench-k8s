@@ -23,7 +23,7 @@ Environment variables (set by job.py):
     BRONZE_BUCKET        - bucket name (for checkpoint path)
     LB_ICEBERG_CATALOG   - Spark catalog: spark_catalog for Delta + Hive
     CHECKPOINT_LOCATION  - s3a://bronze-bucket/checkpoints/bronze-ingest/
-    TRIGGER_INTERVAL     - e.g., "30 seconds"
+    TRIGGER_INTERVAL     - e.g., "0 seconds" (back to back)
 """
 
 from __future__ import annotations
@@ -31,12 +31,16 @@ from __future__ import annotations
 import time
 
 from common import (
+    LANDED_COLUMN,
     _s3_table_path,
+    arrival_time,
     await_stream,
     delta_idempotent_options,
     delta_table_version,
     env,
+    landing_batch,
     log,
+    log_landing,
     pipeline_table,
     refuse_fresh_checkpoint_over_data,
     replay_possible,
@@ -80,7 +84,7 @@ def write_bronze_batch(batch_df, batch_id, table_name, bronze_bucket, location=N
     spark = batch_df.sparkSession
     check_replay = replay_possible(spark)
     batch_start = time.time()
-    count = batch_df.count()
+    batch_df, count, landed_lo, landed_hi = landing_batch(batch_df)
     if count == 0:
         log(f"Batch {batch_id}: empty, skipping")
         return 0
@@ -111,13 +115,14 @@ def write_bronze_batch(batch_df, batch_id, table_name, bronze_bucket, location=N
     log(f"Batch {batch_id}: writing {count:,} rows to {table_name}")
     batch_time = time.time() - batch_start
     log(f"Batch {batch_id}: committed in {batch_time:.1f}s")
+    log_landing(batch_id, landed_lo, landed_hi)
     return count
 
 
 def main() -> None:
     bronze_uri = env("LB_BRONZE_URI", "s3a://lb-bronze/")
     checkpoint_location = env("CHECKPOINT_LOCATION")
-    trigger_interval = env("TRIGGER_INTERVAL", "30 seconds")
+    trigger_interval = env("TRIGGER_INTERVAL", "0 seconds")
     max_files_per_trigger = env("MAX_FILES_PER_TRIGGER", "50")
 
     landing_zone = bronze_uri + "customer/interactions/"
@@ -133,6 +138,8 @@ def main() -> None:
     log(f"Target table: {table_name} at {table_location}")
     log(f"Checkpoint:   {checkpoint_location}")
     log(f"Trigger:      {trigger_interval}")
+
+    arrived = arrival_time(spark, bronze_uri, checkpoint_location)
 
     # Wait for Parquet files in the landing zone, then infer schema. Datagen
     # writes self-describing Parquet; in continuous mode it starts
@@ -156,11 +163,13 @@ def main() -> None:
         waited += _LANDING_WAIT_INTERVAL
 
     refuse_fresh_checkpoint_over_data(spark, checkpoint_location, table_name)
-    stream = (
-        spark.readStream.schema(inferred_schema)
-        .option("maxFilesPerTrigger", max_files_per_trigger)
-        .parquet(landing_zone)
-    )
+    reader = spark.readStream.schema(inferred_schema)
+    # 0: no per-trigger limit, so each micro-batch takes every landed file.
+    if int(max_files_per_trigger) > 0:
+        reader = reader.option("maxFilesPerTrigger", max_files_per_trigger)
+    # Each file's landing time, for the landing-to-bronze lag; dropped
+    # before the write.
+    stream = reader.parquet(landing_zone).withColumn(LANDED_COLUMN, arrived)
     query = (
         stream.writeStream.foreachBatch(
             lambda df, bid: write_bronze_batch(df, bid, table_name, bronze_uri, table_location)

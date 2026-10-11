@@ -27,12 +27,6 @@ def result(tmp_path_factory, spark_subprocess, spark_jars):
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-def test_ten_batches_written(result):
-    assert result["errors"] == [], result
-    assert result["batches"] == 10
-    assert len(result["returns"]) == 10
-
-
 def test_returns_non_zero_and_match_table_delta(result):
     """Every non-empty batch's return value equals the growth of this
     writer's own rows. With interleaved commits a before/after-version

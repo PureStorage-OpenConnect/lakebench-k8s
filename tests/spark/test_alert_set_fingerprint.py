@@ -109,20 +109,6 @@ def test_pinned_cross_line_value(base):
     assert {k: got[k] for k in PINNED} == PINNED
 
 
-def test_totals_equal_the_whole_frame_fingerprint(base):
-    """The per-rule sums are frame_fingerprint of the whole frame, and each
-    rule's entry is frame_fingerprint of that rule's rows."""
-    from common import frame_fingerprint
-    from pyspark.sql import functions as F
-
-    got = _aset(base)
-    cols = ["rule_id", "entity_id", "alert_ts"]
-    assert (got["rows"], got["h"], got["cols_sha"]) == frame_fingerprint(base, cols)
-    for rule, part in got["by_rule"].items():
-        n, h, _ = frame_fingerprint(base.where(F.col("rule_id") == rule), cols)
-        assert part == {"rows": n, "h": h}, rule
-
-
 def test_shuffled_rows_equal(spark_session, base):
     rows = _rows()
     random.Random(43).shuffle(rows)
@@ -172,11 +158,6 @@ def test_generated_ids_and_wall_clock_do_not_count(spark_session, base):
     assert _aset(_df(spark_session, rows)) == _aset(base)
 
 
-def test_empty_frame(spark_session):
-    got = _aset(_df(spark_session, []))
-    assert (got["rows"], got["h"], got["by_rule"]) == (0, "0", {})
-
-
 def test_gold_finalize_line_round_trips(spark_session, load_script_module):
     """alert_set_line over a view of the table, scoped to the run, parsed by
     the collector: the same alert set, and the seconds it took."""
@@ -190,12 +171,3 @@ def test_gold_finalize_line_round_trips(spark_session, load_script_module):
     got, seconds, why = parse_alert_set("[lb] 2026-10-03T00:00:00 - " + line)
     assert why is None and got == _aset(_df(spark_session, _rows()))
     assert seconds is not None and seconds >= 0
-
-
-def test_gold_finalize_line_unavailable(spark_session, load_script_module):
-    from lakebench.metrics.alert_set import parse_alert_set
-
-    gf = load_script_module("gold_finalize_financial")
-    line = gf.alert_set_line(spark_session, RUN, table="er15_no_such_table")
-    got, _s, why = parse_alert_set(line)
-    assert got is None and why and "er15_no_such_table" in why

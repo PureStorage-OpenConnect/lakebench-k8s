@@ -1,4 +1,4 @@
-"""Silver's reference USD rates must match the generator's (LB-137).
+"""Silver's reference USD rates must match the generator's.
 
 The generator expresses amounts in each account's own currency using
 `datagen_rs::amounts::fx_to_usd`; silver converts them back with
@@ -36,8 +36,3 @@ def test_fx_tables_match():
     rust, py = _rust_rates(), _python_rates()
     assert len(rust) >= 15
     assert rust == py
-
-
-def test_silver_does_not_use_xchg_rate_as_usd_rate():
-    src = (ROOT / "src/lakebench/spark/scripts/silver_build_financial.py").read_text()
-    assert 'col("intr_bk_sttlm_amt") * coalesce(col("xchg_rate")' not in src

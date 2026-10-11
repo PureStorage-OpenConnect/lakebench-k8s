@@ -429,13 +429,13 @@ class ImagesConfig(ConfigModel):
     # Python layer bytes. Rust source unchanged from 25f1aa8, so corpus
     # bytes at a fixed seed are unchanged; MODEL_VERSION stays
     # datagen-v2-rs-0.3. Datagen_rs freeze wiring carried forward from
-    # 25f1aa8: LB-191 dirty-ratio semantics, screening rates in prereg
+    # 25f1aa8: dirty-ratio semantics, screening rates in prereg
     # 3.6.1, calibration-replicate seed refusal in perturbation_for_seed,
     # multi-writer guard on --mode reference, S3Sink::put_multipart retry,
     # --delivery-mode {batch|continuous} MpuWriter switch with continuous
     # as the Rust binary default, and the #52 registered_looks_open freeze
     # wiring.
-    # 30603b1 re-fits the datagen peak-RSS memory model (LB-199): the autosizer
+    # 30603b1 re-fits the datagen peak-RSS memory model: the autosizer
     # under-sized financial node-0 at scale 100, OOMKilling it at the 17Gi
     # default. Only datagen_rs/entrypoint.py (thread cap) and config/autosizer.py
     # (pod memory request) change; the Rust generator is unchanged, so the corpus
@@ -446,14 +446,13 @@ class ImagesConfig(ConfigModel):
     # the FUNCTIONAL default; it is DISQUALIFIED from generating any D8 / A6 /
     # registered-look / calibration corpus -- those runs pass an explicit frozen
     # digest via --generator-image (aml-protocol.md), never this default.
-    # e14d0fd (LB-204): mimalloc allocator, typology payloads pruned to each
+    # e14d0fd: mimalloc allocator, typology payloads pruned to each
     # pod's own files, world columns recomputed on demand, fixed 64 MB files,
-    # re-fit memory model with a 16Gi pod cap, LB-196 delivery-mode forwarding.
+    # re-fit memory model with a 16Gi pod cap, delivery-mode forwarding.
     # AML pod peak at scale 100 fell from 18.18 to 5.70 GiB. Output-neutral,
     # PROVEN on the pushed image: seed-43 --mode all byte-compare against the
     # frozen generator (rebuilt from 9382420 source) -- 73/73 objects at 128 MB,
-    # 141/141 at 64 MB, 141/141 with 4 pods, 141/141 thread-throttled; cargo pin
-    # cycles.rs::financial_output_is_pinned_to_the_frozen_generator. MODEL_VERSION
+    # 141/141 at 64 MB, 141/141 with 4 pods, 141/141 thread-throttled. MODEL_VERSION
     # stays datagen-v2-rs-0.3, same freeze. Functional default, disqualified from
     # registered-look corpora as below.
     # 034f998: same Rust source as e14d0fd; entrypoint.py thread-cap model gains
@@ -465,7 +464,7 @@ class ImagesConfig(ConfigModel):
     # 034f998 and e14d0fd were deleted with the repository wipe of 2026-09-30.
     # Prior tags (deleted from docker.io between 2026-09-29 22:30 and 23:29;
     # rebuild from source to reproduce):
-    #   30603b1 (sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16) LB-199 memory refit
+    #   30603b1 (sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16) memory refit
     #   9382420 (sha256:2faad1cc0252a165a56361a06f159a62ba7c4387c83adfb7c46fe260af23b8f2) live-metrics Pushgateway push
     #   b6f2905 (sha256:312f9ecfa301b09f696cd04f9b6d44052656041fc293d9d76f0adddd01fbd4f6)
     #   25f1aa8 (sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7)
@@ -473,26 +472,37 @@ class ImagesConfig(ConfigModel):
     #   7c24641 (sha256:c5a6bc80...)
     # 1.6.0: the v1.6 release image, rebuilt from the same datagen_rs source as
     # 034f998 (datagen_rs unchanged 034f998..release; base images digest-pinned,
-    # cargo --locked) after the docker.io repository was wiped (LB-209). Release
+    # cargo --locked) after the docker.io repository was wiped. Release
     # tags are the exception to the commit-tag rule above.
     # Pushed digest (1.6.0): sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
-    # 2a36ae21: the v1.7 release image, built from integrate
-    # 2a36ae2162d0672c8a46173bc70da448cac497ae with LB_BUILD_COMMIT set and
-    # pushed 2026-10-05. Carries forward the five-case byte-compare equality
-    # against 1.6.0 that a592385 produced on 2026-10-03 (same datagen_rs
-    # source on the F0/F1/F2/C0/C2 public-seed cases). It is the v1.7 look
-    # image (docs/internal/aml-protocol.md), so the "disqualified from
-    # registered looks" note above applies to older tags only. The default
+    # 2a36ae21: the v1.7 release image and v1.7 look image
+    # (sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04);
+    # deleted from docker.io with the repository on 2026-10-06.
+    # 3f4729b6 (sha256:7fbb35f1a94f5aea11a135e93cadbb969a97a37d04c9ce2d227fd7db266083cb):
+    # adds continuous delivery (--deliver-until); batch output is
+    # byte-identical to 4274bb67 on the nine A/B cases. Never released.
+    # 3cb67f92: the 1.7.1 image, tagged by the git tree of datagen_rs/ it was
+    # built from (`git rev-parse <commit>:datagen_rs` starts with it; pushed
+    # 2026-10-07). Builds the AML world once per pod instead of every
+    # continuous epoch and checks for a stop before an epoch's manifest;
+    # its output is byte-identical to 3f4729b6 (AML continuous and batch
+    # locally, an AML scale-10 batch corpus on the cluster from an earlier
+    # push of this tag built from the same context). The default
     # names the tag and the digest; the runtime pulls the digest, so a
     # re-push of the tag cannot move it.
+    # 5d7ce61a (datagen_rs tree 5d7ce61aa0c4, pushed 2026-10-09):
+    # datagen-v2-rs-0.4. Surnames are synthetic at every scale and the surname
+    # and company-head pools grow in proportion to the population, so
+    # screening namesakes per watchlist entry stay flat across scale. Every
+    # AML corpus differs from 3cb67f92's, scale 1 included; the Customer 360
+    # generator is unchanged.
     datagen: str = (
-        "docker.io/sillidata/lb-datagen:2a36ae21"
-        "@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04"
+        "docker.io/sillidata/lb-datagen:5d7ce61a"
+        "@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc"
     )
     """Data generator image, pinned by tag and digest (the digest is what is pulled).
-    Output is byte-identical to the v1.6 AML generator freeze (`datagen-v2-rs-0.3`) on
-    the five byte-compare cases; this build adds the held-out seed check, strict
-    argument parsing and per-node corpus markers.
+    In continuous mode it generates until the run window ends: AML as successive
+    24-month periods of the same bank, Customer360 as successive time slices.
     """
     spark: str = "apache/spark:4.1.1-python3"
     """Spark runtime image. Unset: the image of the config's recipe (or of the recipe its
@@ -516,7 +526,13 @@ class ImagesConfig(ConfigModel):
     """Python image the DuckDB query engine pod runs in; DuckDB itself is pinned by
     `architecture.query_engine.duckdb.version`.
     """
-    jmx_exporter: str = "bitnami/jmx-exporter:latest"
+    # Bitnami publishes only `latest` for this image now (versioned tags
+    # moved to bitnamilegacy), so the default names it by digest: a re-push of
+    # `latest` cannot change what a deployment runs (checked 2026-10-09).
+    jmx_exporter: str = (
+        "bitnami/jmx-exporter:latest"
+        "@sha256:873527b34b55ca7b8f0b5f7efdf18c93e4337d06709da674ba7284fd3f6316de"
+    )
     """JMX exporter image for the metrics sidecars, used when observability is enabled."""
 
     pull_policy: ImagePullPolicy = ImagePullPolicy.ALWAYS
@@ -617,7 +633,7 @@ class S3Config(ConfigModel):
     buckets: S3BucketsConfig = Field(default_factory=S3BucketsConfig)
     """Bronze, silver and gold bucket names."""
     create_buckets: bool = True
-    """Create buckets if they do not exist. `reproduce` refuses `false`."""
+    """Create buckets if they do not exist."""
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "secret_ref": (
@@ -646,7 +662,7 @@ class ScratchStorageConfig(ConfigModel):
         ),
         # Nothing sized a PVC from it: each executor's scratch volume is the
         # job profile's scratch_size (modules/pipeline_engines/spark/job.py).
-        "size": "per-job scratch comes from the job profiles (silver-build 300Gi).",
+        "size": "per-job scratch comes from the job profiles (silver-build: 60 GiB x scale / executors, 50-300Gi).",
     }
     _removed_defaults: ClassVar[dict[str, Any]] = {"size": "100Gi"}
 
@@ -829,6 +845,26 @@ class SparkComputeConfig(ConfigModel):
         default=None,
         ge=1,
         description="Override gold-refresh executor count (1--28). Null = auto from scale.",
+    )
+    # Streaming executor size overrides (None = the profile's, grown to 8 or 16
+    # cores when the offered load needs more cores than the executor cap).
+    bronze_ingest_executor_cores: int | None = Field(
+        default=None,
+        ge=1,
+        le=16,
+        description="Override bronze-ingest cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_ingest_executors` is set.",
+    )
+    silver_stream_executor_cores: int | None = Field(
+        default=None,
+        ge=1,
+        le=16,
+        description="Override silver-stream cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_stream_executors` is set.",
+    )
+    gold_refresh_executor_cores: int | None = Field(
+        default=None,
+        ge=1,
+        le=16,
+        description="Override gold-refresh cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically.",
     )
 
     # Driver resource overrides (None = use profile defaults).
@@ -1089,9 +1125,9 @@ class PolarisResourcesConfig(ConfigModel):
     """Polaris resource configuration."""
 
     cpu: str = "1"
-    """Polaris CPU request/limit."""
+    """Catalog server CPU request/limit."""
     memory: str = "2Gi"
-    """Polaris memory."""
+    """Catalog server memory."""
 
 
 class PolarisConfig(ConfigModel):
@@ -1148,7 +1184,7 @@ class CatalogConfig(ConfigModel):
     """Catalog service configuration."""
 
     type: CatalogType = CatalogType.HIVE
-    """Catalog service: `hive`, `polaris`, or `none`."""
+    """Catalog service: `hive` or `polaris`. `unity` and `none` have no supported recipe and are refused."""
     hive: HiveConfig = Field(default_factory=HiveConfig)
     """Hive Metastore settings, used when `type` is `hive`."""
     polaris: PolarisConfig = Field(default_factory=PolarisConfig)
@@ -1318,7 +1354,8 @@ class DuckDBConfig(ConfigModel):
     cores: int = Field(default=2, ge=1)
     """DuckDB CPU cores."""
     memory: str = "4g"
-    """DuckDB memory."""
+    """DuckDB pod memory. Auto-sized to `16g` on the financial schema when unset (less on a
+    node with under 24 GiB allocatable)."""
     catalog_name: str = "lakehouse"
     """Iceberg catalog name for DuckDB."""
     # Pinned, not floating. Both install sites used a bare `pip install duckdb`,
@@ -1389,19 +1426,30 @@ class SustainedConfig(ConfigModel):
     checkpoint path prefix in S3, and throughput tuning knobs.
     """
 
-    bronze_trigger_interval: str = "30 seconds"
-    """Bronze streaming trigger interval."""
-    silver_trigger_interval: str = "60 seconds"
-    """Silver streaming trigger interval."""
-    gold_refresh_interval: str = "5 minutes"
-    """Gold refresh trigger interval."""
+    bronze_trigger_interval: str = "0 seconds"
+    """Bronze streaming trigger interval. "0 seconds" (the default) starts the
+    next micro-batch as soon as the last one finishes and new files exist; a
+    positive interval holds bronze to that cadence, labelled beside freshness.
+    With a trickle (`max_files_per_trigger`, `--skip-generate`), "0 seconds"
+    becomes 30 seconds, the trickle's cadence, and the run says so. A whole
+    number and seconds, minutes or hours; anything else is refused at load."""
+    silver_trigger_interval: str = "0 seconds"
+    """Silver streaming trigger interval. "0 seconds" (the default) starts the
+    next micro-batch as soon as the last one finishes and bronze has
+    committed more; a positive interval is labelled beside freshness. A whole
+    number and seconds, minutes or hours."""
+    gold_refresh_interval: str = "0 seconds"
+    """Gold refresh trigger interval. "0 seconds" (the default) starts the
+    next refresh as soon as the last one finishes (Customer360: as soon as
+    silver commits); a positive interval holds gold to that cadence, labelled
+    beside freshness."""
     run_duration: int = Field(
         default=1800,
         ge=60,
         description=(
-            "Measurement window in seconds. The schema accepts 60 and up; a continuous run "
-            "refuses less than 3 x `gold_refresh_interval` (900 s at defaults). Use 900 s or "
-            "more, UAT included."
+            "Measurement window in seconds. The schema accepts 60 and up; with gold on an "
+            "interval a continuous run refuses less than 3 x `gold_refresh_interval`. Use 900 s "
+            "or more, UAT included."
         ),
     )
     checkpoint_base: str = "checkpoints"
@@ -1413,12 +1461,11 @@ class SustainedConfig(ConfigModel):
         default=None,
         ge=1,
         description=(
-            "Max Parquet files bronze reads per trigger; with `bronze_trigger_interval` it sets "
-            "the offered load. Unset: derived per run so data keeps arriving for about 1.2 x "
-            "`run_duration`, capped at 50 (a Lakebench-imposed cap; 50 files per 30 s is about "
-            "107 MB/s, so an auto-capped ingest rate measures the cap, not the infrastructure). "
-            "An explicit value that would offer the corpus before the window ends is refused at "
-            "run start."
+            "Max Parquet files bronze reads per trigger, a Lakebench cap on intake. Unset: no "
+            "limit when the run starts its own datagen, which generates for the whole window. "
+            "With --skip-generate (a finite corpus) unset is derived per run so data keeps "
+            "arriving for about 1.2 x `run_duration`, capped at 50, and an explicit value that "
+            "would offer the corpus before the window ends is refused at run start."
         ),
     )
     bronze_target_file_size_mb: int = Field(
@@ -1435,11 +1482,11 @@ class SustainedConfig(ConfigModel):
         default=None,
         ge=10,
         description=(
-            "Seconds silver-stream waits for the bronze table to appear before "
-            "it stops the run. Unset (auto): run_duration / 4, floored at 10 s, "
-            "so a short run cannot spend its whole window on the wait. The old "
-            "fixed 1800 was longer than a default run_duration, so the check for "
-            "a stalled bronze-ingest never fired."
+            "Customer360 only: seconds silver-stream waits for the bronze table to "
+            "appear before it stops the run. Unset (auto): the run's window "
+            "(`--duration` or run_duration) / 4, floored at 600 s. "
+            "The wait runs before the window opens: datagen starts once the "
+            "streams run, and bronze creates its table with its first batch."
         ),
     )
     gold_target_file_size_mb: int = Field(
@@ -1462,8 +1509,8 @@ class SustainedConfig(ConfigModel):
             "1800 s window), so a default run maintains inside its window. An explicit value too "
             "long for the first round to run inside the window is refused at run start unless "
             "`--skip-maintenance` is given. While streams are live Delta `VACUUM` keeps Delta's "
-            "7-day default retention, so continuous Delta has no effective table maintenance in "
-            "v1.6. Range: 300--7200."
+            "7-day default retention, so a continuous Delta run shorter than 7 days removes no "
+            "files. Range: 300--7200."
         ),
     )
     retention_threshold: str = Field(
@@ -1480,6 +1527,22 @@ class SustainedConfig(ConfigModel):
             "uses less than 24 h 10 min, on any engine."
         ),
     )
+
+    @field_validator("bronze_trigger_interval", "silver_trigger_interval", "gold_refresh_interval")
+    @classmethod
+    def _validate_interval(cls, v: str) -> str:
+        # A bare "0" passed straight to Spark for one workload and read as a
+        # 10 s fallback for the other.
+        import re as _re
+
+        if not isinstance(v, str) or not _re.fullmatch(
+            r"\s*\d+\s+(second|minute|hour)s?\s*", v, flags=_re.IGNORECASE
+        ):
+            raise ValueError(
+                f"trigger interval {v!r} is not a whole number and a unit (seconds, minutes "
+                "or hours), for example '0 seconds' (back to back) or '5 minutes'"
+            )
+        return v.strip()
 
     @field_validator("retention_threshold")
     @classmethod
@@ -1525,9 +1588,8 @@ class SustainedConfig(ConfigModel):
         ge=300,
         le=3600,
         description=(
-            "Seconds between in-stream benchmark rounds. Clamped to `gold_refresh_interval` at "
-            "runtime -- intervals shorter than the gold cycle cause Q9 contention. Range: "
-            "300--3600."
+            "Seconds between in-stream benchmark rounds, 300--3600. With gold on a longer "
+            "interval, raised to that interval so rounds do not overlap gold rewrites."
         ),
     )
     benchmark_warmup: int = Field(
@@ -1535,9 +1597,8 @@ class SustainedConfig(ConfigModel):
         ge=300,
         le=1800,
         description=(
-            "Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` "
-            "at runtime -- rounds before the first gold refresh produce inflated QpH. Range: "
-            "300--1800."
+            "Seconds before the first in-stream benchmark round, 300--1800. With gold on a "
+            "longer interval, raised to that interval so gold refreshes once first."
         ),
     )
 
@@ -1589,16 +1650,17 @@ class SustainedConfig(ConfigModel):
         return 2 * self.effective_retention_interval(run_duration)
 
     def effective_silver_bronze_wait_seconds(self, run_duration: int | None = None) -> int:
-        """silver_bronze_wait_seconds, or auto: run_duration // 4 floored at 10.
+        """silver_bronze_wait_seconds, or auto: run_duration // 4 floored at 600.
 
-        A3 (silver-plan): caps the wait for the bronze table so a stream
-        cannot burn its whole window on the wait. The floor keeps the value
-        positive even for a minimum-length run.
+        A3 (silver-plan): caps the wait for the bronze table so a stalled
+        bronze-ingest stops the run. The floor covers datagen's start (it
+        starts once the streams run) and bronze's first batch, all before
+        the window opens.
         """
         if self.silver_bronze_wait_seconds is not None:
             return self.silver_bronze_wait_seconds
         window = self.run_duration if run_duration is None else run_duration
-        return max(10, int(window) // 4)
+        return max(600, int(window) // 4)
 
 
 class ProcessingConfig(ConfigModel):
@@ -1614,6 +1676,9 @@ class ProcessingConfig(ConfigModel):
     jobs over arriving data). `sustained` is accepted as a deprecated alias. The
     `--continuous` CLI flag overrides this.
     """
+    # The mode the config file set, when `run --continuous` replaced it on the
+    # run's copy (cli/_run.py); the run record names the command line.
+    _configured_mode: PipelineMode | None = PrivateAttr(default=None)
     cycles: int = Field(
         default=1,
         ge=1,
@@ -1807,15 +1872,19 @@ class DatagenConfig(ConfigModel):
     option.
     """
     parallelism: int = Field(default=4, ge=1)
-    """Number of parallel datagen pods. A value you set is used as given, except that it is
-    capped to fit the cluster and financial above scale 100 is raised to at least 8 pods;
-    unset, the auto-sizer derives it from the scale. The schema fallback without auto-sizing
-    is 4.
+    """Number of parallel datagen pods. A value you set is used exactly, with a warning when
+    the cluster cannot fit it (batch pods queue; a continuous run, whose pods all run beside
+    the streams, is refused at preflight) or it is under 8 for financial above scale 100.
+    Unset: in batch the auto-sizer derives it from the scale, caps it to fit the cluster and
+    raises financial above scale 100 to at least 8 pods; in continuous, with `cpu` also unset,
+    it is the pods (of up to 8 cores) that offer the scale's load, still raised to the
+    financial floor and capped to fit the cluster (a cap lowers the offered load). The schema
+    fallback without auto-sizing is 4.
     """
     # Datagen output file size, fixed at 64mb for every workload and mode
     # (owner decision 2026-09-29). c360 rows are drawn per file and truncated
     # by file size, so one size keeps row content identical across delivery
-    # modes (DESIGN.md) and keeps corpus identity stable. The field stays so
+    # modes and keeps corpus identity stable. The field stays so
     # existing configs that set 64mb still load; any other value is refused.
     file_size: Literal["64mb"] = "64mb"
     """Fixed at `64mb` for every workload and mode; any other value is refused. One size keeps
@@ -1826,8 +1895,9 @@ class DatagenConfig(ConfigModel):
     only; the `financial` (AML) generator ignores it.
     """
     cpu: str = "2"
-    """CPU per datagen pod. A value you set is used as given; unset, the auto-sizer sets 8 in
-    both modes.
+    """CPU per datagen pod. A value you set is used as given. Unset: 8 in batch, and 8 in
+    continuous when `parallelism` is set; in continuous with both unset, the cores that offer
+    the scale's load (in 100m steps, at least 200m), split over the pods.
     """
     memory: str = "4Gi"
     """Memory per datagen pod. A value you set is used as given; unset, the auto-sizer derives
@@ -1836,8 +1906,8 @@ class DatagenConfig(ConfigModel):
     """
     # Generator threads per pod; 0 = auto (follow the pod CPU).
     generators: int = Field(default=0, ge=0, le=1024)
-    """Generator threads per pod. 0 = auto: the entrypoint sizes threads from the pod's CPU
-    request.
+    """Generator threads per pod. 0 = auto: one thread per started core of the pod's CPU
+    (Lakebench sets `CPU_LIMIT`), held to the CPU by its quota.
     """
     timestamp_start: str | None = Field(
         default=None,
@@ -1876,7 +1946,7 @@ class DatagenConfig(ConfigModel):
             return "64mb"
         raise ValueError(
             f"datagen.file_size is fixed at 64mb; got {v!r}. Remove the key or set 64mb. "
-            "(Configs and reproduce packages from before v1.6 that used another size "
+            "(Configs from before v1.6 that used another size "
             "cannot be regenerated with this version.)"
         )
 
@@ -2052,16 +2122,17 @@ class WorkloadConfig(ConfigModel):
     customer360: Customer360Config = Field(default_factory=Customer360Config)
     """Customer 360 workload parameters."""
 
-    # Snapshot-retention policy. Set retention_workload=True on Financial
-    # recipes whose workload set includes historical replay (W8) or
-    # time-travel reproduction (W10): the pre-benchmark maintenance step
-    # then preserves snapshots covering retention_months + headroom, rather
-    # than expiring everything with the default "0s" threshold. See
-    # REQ-R-03/REQ-R-05 in the FinServ-Crime spec.
+    # Snapshot-retention policy for batch runs: with retention_workload=True
+    # the pre-benchmark maintenance step keeps snapshots covering
+    # retention_months + headroom, rather than expiring everything with the
+    # default "0s" threshold. No Lakebench command reads those older
+    # snapshots; continuous time travel is bounded by
+    # sustained.retention_threshold instead. Both fields are part of the AML
+    # workload parameters (parameters_id).
     retention_workload: bool = False
-    """AML: keep the snapshots time-travel reproduction needs. Pre-benchmark
-    maintenance then retains `retention_months` plus headroom instead of expiring
-    every snapshot.
+    """AML batch: keep snapshot history through pre-benchmark maintenance, which
+    then retains `retention_months` plus headroom instead of expiring every
+    snapshot.
     """
     retention_months: int = Field(default=60, ge=1, le=120)
     """AML: months of snapshots kept when `retention_workload` is true (1--120)."""
@@ -2070,7 +2141,7 @@ class WorkloadConfig(ConfigModel):
     # Default sits above the scale-10 vertex count (1.1M entities) so W1 runs
     # out of the box at scale 10; raise it for larger scales that have the
     # executor budget. Whether W1 completes in acceptable wall-clock above
-    # the cap is a measured question (LB-120), not a config guarantee, so the
+    # the cap is a measured question, not a config guarantee, so the
     # ceiling stays generous rather than unbounded. Consumed by
     # gold_finalize_financial via LB_FINANCIAL_W1_MAX_VERTICES.
     w1_max_vertices: int = Field(default=8_000_000, ge=1, le=200_000_000)
@@ -2191,8 +2262,8 @@ _SUPPORTED_COMBINATIONS = [
 ]
 
 
-# What each workload can run on (DESIGN.md 6.5, layers 2 and 3). The
-# architecture tuple list above says nothing about workloads; this does. A
+# What each workload can run on (support layers 2 and 3, config/support.py).
+# The architecture tuple list above says nothing about workloads; this does. A
 # workload x format or workload x mode pair not listed here is refused at load.
 # The AML stage scripts and DDL write Iceberg tables (USING iceberg), so AML on
 # Delta used to pass validation and then run Iceberg code on a Delta
@@ -2364,6 +2435,10 @@ class TableNamesConfig(ConfigModel):
         default="silver.silver_batch_versions",
         description="Silver sealed-batch marker sidecar (Financial): one row per (stream_id, batch_id) written last so downstream consumers hide mid-batch crashes",
     )
+    silver_counterparty_pairs: str = Field(
+        default="silver.counterparty_pairs",
+        description="Silver distinct (originator, beneficiary) pairs (Financial, continuous only): one row per pair, so the stream counts a batch's new counterparties without re-reading the history",
+    )
     gold_alerts: str = Field(
         default="gold.alerts",
         description="Gold alerts table (Financial): namespace.table",
@@ -2415,6 +2490,7 @@ class TableNamesConfig(ConfigModel):
             "LB_FINANCIAL_SILVER_EDGES": self.silver_counterparty_edges,
             "LB_FINANCIAL_SILVER_PROFILES": self.silver_entity_profiles,
             "LB_FINANCIAL_SILVER_BATCH_VERSIONS": self.silver_batch_versions,
+            "LB_FINANCIAL_SILVER_PAIRS": self.silver_counterparty_pairs,
             "LB_FINANCIAL_GOLD_ALERTS": self.gold_alerts,
             "LB_FINANCIAL_GOLD_RISK_SCORES": self.gold_risk_scores,
             "LB_FINANCIAL_GOLD_CLUSTERS": self.gold_entity_clusters,
@@ -2426,13 +2502,19 @@ class TableNamesConfig(ConfigModel):
         }
 
     def workload_tables(
-        self, schema: str, *, layers: tuple[str, ...] = ("bronze", "silver", "gold")
+        self,
+        schema: str,
+        *,
+        layers: tuple[str, ...] = ("bronze", "silver", "gold"),
+        continuous: bool = True,
     ) -> list[str]:
         """Every table the pipeline writes for ``schema``, bronze first.
 
         Customer 360 writes one table per layer. Financial writes several per
         layer; maintenance, compaction and destroy that only looked at
-        ``silver``/``gold`` missed all but two of them.
+        ``silver``/``gold`` missed all but two of them. ``continuous=False``
+        leaves out the tables only the continuous pipeline writes
+        (``silver_counterparty_pairs``), which a batch run never creates.
         """
         if schema != "financial":
             by_layer = {"bronze": [self.bronze], "silver": [self.silver], "gold": [self.gold]}
@@ -2447,6 +2529,7 @@ class TableNamesConfig(ConfigModel):
                     self.silver_counterparty_edges,
                     self.silver_entity_profiles,
                     self.silver_batch_versions,
+                    *([self.silver_counterparty_pairs] if continuous else []),
                 ],
                 "gold": [
                     self.gold_alerts,
@@ -2473,7 +2556,7 @@ class MaintenanceSettleConfig(ConfigModel):
 
     On FlashBlade at c360 scale 10 the compacted tables read QpH 546 two
     minutes after maintenance, 569 at +15 min and 841 at +35 min, against 828
-    before it (LB-150). A post round taken straight away measured the object
+    before it. A post round taken straight away measured the object
     store working off the delete and rewrite burst. The wait probes one
     storage-bound query until it is stable; see ``lakebench.benchmark.settle``.
     Batch mode only: continuous-mode maintenance runs during the stream and
@@ -2484,7 +2567,7 @@ class MaintenanceSettleConfig(ConfigModel):
         default=True,
         description=(
             "Batch mode: probe until storage settles between maintenance and the post-maintenance "
-            "round. See [benchmarking.md](benchmarking.md)."
+            "round. See [Storage settle wait](benchmarking/maintenance.md#storage-settle-wait)."
         ),
     )
     # Recovery took about 35 minutes in the one measured case; 45 minutes
@@ -2563,7 +2646,7 @@ class BenchmarkConfig(ConfigModel):
     # One sample per query cannot tell a change from noise: same-run rounds
     # on the live cluster differed 3-11% in QpH and a post-maintenance round
     # read 10-80% slower per query with nothing to compare that against
-    # (LB-150). Three samples give a median and a measured spread.
+    # Three samples give a median and a measured spread.
     iterations: int = Field(
         default=3,
         ge=1,
@@ -2919,8 +3002,7 @@ S3_BUCKET_MAX = 63
 # The metastore pod volume is the tightest: 40 + len(namespace) <= 63, so a
 # Hive recipe accepts a namespace of at most 23 characters. Past that the
 # metastore pod is rejected, no pod is ever created, the hive-operator logs
-# "metastore listener has no adress", and deploy times out after 600 s
-# (LB-153).
+# "metastore listener has no adress", and deploy times out after 600 s.
 _S3_CRED_CLASS = "lakebench-s3-credentials-{ns}"
 _S3_CA_CLASS = "lakebench-s3-ca-cert-{ns}"
 _DERIVED_NAMES: tuple[tuple[str, str, str], ...] = (
@@ -3412,7 +3494,7 @@ class LakebenchConfig(ConfigModel):
         Destroy deletes the deployment's namespace. If that namespace were
         the shared observability namespace or the cluster-lock namespace,
         tearing down one deployment would remove what every other deployment
-        uses (DESIGN.md invariant 6).
+        uses: destroying deployment A must never affect deployment B.
         """
         ns = self.get_namespace()
         if ns in RESERVED_NAMESPACES:
@@ -3461,7 +3543,7 @@ class LakebenchConfig(ConfigModel):
         See ``derived_name_violations`` for the objects and limits checked.
         Without this, a namespace a few characters too long deploys up to
         the Hive metastore and then hangs until the readiness timeout
-        (LB-153). Teardown and diagnostic commands load with
+        Teardown and diagnostic commands load with
         ``allow_long_names`` in the validation context (see ``load_config``)
         so a deployment that failed this way can still be torn down.
         """

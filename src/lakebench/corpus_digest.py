@@ -9,13 +9,13 @@ One definition each, so the writers and readers of a corpus never disagree:
   the bronze listing digest, sha256 over the sorted ``(key, size, etag)``
   triples of every object in the scope (the ``--repeat`` series guard and
   the recorded ``bronze_listing_sha256`` are this one value);
-* ``corpus_series_sha256(markers)``: ch05 section 3.1's multi-cycle form of
+* ``corpus_series_sha256(markers)``: the multi-cycle form of
   the generator's ``corpus_args_sha256``, sha256 over the canonical JSON
   array of the per-cycle hashes in cycle order, or None when the per-node
   markers do not describe one complete corpus;
 * ``read_corpus_markers(client, bucket, prefix) -> MarkerSet``: the one
-  parser of the generator's per-node markers and of ``series.json`` (ch05
-  sections 3.1 and 7.1), from one listing of the scope. The run record
+  parser of the generator's per-node markers and of ``series.json``,
+  from one listing of the scope. The run record
   persists ``MarkerSet.to_dict()``; the ``--skip-generate`` marker read and
   the object-completeness check wrap ``MarkerSet.markers``.
 
@@ -36,7 +36,7 @@ from typing import Any
 #: markers and the series marker.
 MARKER_DIR = "_corpus"
 
-#: ``c{cycle:03}-node-{node:04}.json`` (ch05 section 3.1).
+#: ``c{cycle:03}-node-{node:04}.json``.
 MARKER_NAME = re.compile(r"^c(\d{3})-node-(\d{4})\.json$")
 
 SERIES_NAME = "series.json"
@@ -45,7 +45,7 @@ SERIES_NAME = "series.json"
 #: ``c360_key`` and ``pacs_key``).
 LATER_CYCLE_PART = re.compile(r"^part-c\d{3}-")
 
-#: Marker file format this reader understands (ch05 section 3.1).
+#: Marker file format this reader understands.
 MARKER_FORMAT = 1
 
 #: More markers than this is not a datagen corpus; reading stops.
@@ -160,7 +160,7 @@ def listing_digest(client: Any, bucket: str, prefix: str) -> str | None:
 
 
 def corpus_series_sha256(markers: Mapping[int, Sequence[Mapping[str, Any]]]) -> str | None:
-    """ch05 section 3.1: sha256 hex of ``["h0","h1",...]``, the per-cycle
+    """The sha256 hex of ``["h0","h1",...]``, the per-cycle
     ``corpus_args_sha256`` values in cycle order (for one cycle, the hash of
     ``["h0"]``, never ``h0`` itself).
 
@@ -230,7 +230,7 @@ class MarkerSet:
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """The persisted form (ch03 section 0.1): per cycle the nodes found
+        """The persisted form: per cycle the nodes found
         and the distinct values of the fields identity reads. Marker bodies
         (``corpus_args``, ``seed_ref``) are never persisted."""
         cycles = []
@@ -381,7 +381,7 @@ def _read_into(out: MarkerSet, client: Any, bucket: str, prefix: str) -> None:
 
 
 #: series.json ``generation`` keys that must equal the markers' resolved
-#: ``corpus_args`` when both carry them (ch05 sections 3.1 and 7.1), per
+#: ``corpus_args`` when both carry them, per
 #: schema. Customer 360 pods are never given ``--scale`` (the template
 #: passes it to financial only), so their resolved scale is the generator's
 #: default while series.json records the config's; their size is

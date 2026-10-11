@@ -154,22 +154,19 @@ def test_unreadable_held_out_record_fails_closed(mod, monkeypatch):
     assert len(_about(problems, "s1-a")) == 1 and "protected" in _about(problems, "s1-a")[0]
 
 
-@pytest.mark.parametrize(
-    "drop, why",
-    [
+def test_record_without_the_keys_is_refused_by_name(mod):
+    for drop, why in [
         ("nonplanted_alerts_by_rule", "nonplanted_alerts_by_rule lacks W5 or W6"),
         ("customer_count", "customer_count is missing or not positive"),
         (
             "evidence_capped_alerts_by_rule",
             "evidence_capped_alerts_by_rule is missing or malformed",
         ),
-    ],
-)
-def test_record_without_the_keys_is_refused_by_name(mod, drop, why):
-    rec = _record("old", 1.0, 40, 20, 10_000)
-    del rec["financial_scoring"][drop]
-    _doc, problems = mod.build([rec])
-    assert _about(problems, "old") == [f"run old: financial_scoring.{why}"]
+    ]:
+        rec = _record("old", 1.0, 40, 20, 10_000)
+        del rec["financial_scoring"][drop]
+        _doc, problems = mod.build([rec])
+        assert _about(problems, "old") == [f"run old: financial_scoring.{why}"]
 
 
 def test_record_counting_other_rules_only_is_refused(mod):
@@ -181,14 +178,14 @@ def test_record_counting_other_rules_only_is_refused(mod):
     ]
 
 
-@pytest.mark.parametrize("bad", [None, 55.9, -3, True, "40"])
-def test_a_non_count_is_refused(mod, bad):
-    rec = _record("odd", 1.0, 40, 20, 10_000)
-    rec["financial_scoring"]["nonplanted_alerts_by_rule"][W5] = bad
-    _doc, problems = mod.build([rec])
-    assert _about(problems, "odd") == [
-        "run odd: financial_scoring.nonplanted_alerts_by_rule holds a non-count for W5 or W6"
-    ]
+def test_a_non_count_is_refused(mod):
+    for bad in [None, 55.9, -3, True, "40"]:
+        rec = _record("odd", 1.0, 40, 20, 10_000)
+        rec["financial_scoring"]["nonplanted_alerts_by_rule"][W5] = bad
+        _doc, problems = mod.build([rec])
+        assert _about(problems, "odd") == [
+            "run odd: financial_scoring.nonplanted_alerts_by_rule holds a non-count for W5 or W6"
+        ]
 
 
 def test_a_rule_that_did_not_run_is_refused_not_read_as_zero(mod):
@@ -200,22 +197,19 @@ def test_a_rule_that_did_not_run_is_refused_not_read_as_zero(mod):
     ]
 
 
-@pytest.mark.parametrize(
-    "change, why",
-    [
+def test_a_corpus_without_observed_identity_is_refused(mod):
+    for change, why in [
         ({"observed": False}, "no observed generator digest"),
         ({"digest": None}, "no observed generator digest"),
         ({"scale": 10.0}, "the observed datagen scale differs"),
         ({"seed": 44}, "the observed datagen seed is missing or differs"),
         ({"seed": None}, "the observed datagen seed is missing or differs"),
-    ],
-)
-def test_a_corpus_without_observed_identity_is_refused(mod, change, why):
-    rec = _record("old-data", 1.0, 40, 20, 10_000)
-    rec["experiment"]["corpus"]["datagen"].update(change)
-    _doc, problems = mod.build([rec])
-    got = _about(problems, "old-data")
-    assert len(got) == 1 and why in got[0]
+    ]:
+        rec = _record("old-data", 1.0, 40, 20, 10_000)
+        rec["experiment"]["corpus"]["datagen"].update(change)
+        _doc, problems = mod.build([rec])
+        got = _about(problems, "old-data")
+        assert len(got) == 1 and why in got[0]
 
 
 def test_record_without_a_scale_is_refused(mod):
@@ -275,23 +269,20 @@ def test_another_scale_is_refused(mod):
     assert problems == ["run s100: scale 100 is not one the figure uses (1 or 10)"]
 
 
-@pytest.mark.parametrize(
-    "path, value",
-    [
+def test_malformed_shapes_are_refused_not_crashed(mod):
+    for path, value in [
         (("financial_scoring", "evidence_capped_alerts_by_rule"), ["W5_sanctions_match"]),
         (("financial_scoring",), []),
         (("experiment",), "x"),
         (("financial_scoring", "rules"), {"W5": "ran"}),
-    ],
-)
-def test_malformed_shapes_are_refused_not_crashed(mod, path, value):
-    rec = _record("shape", 1.0, 40, 20, 10_000)
-    node = rec
-    for key in path[:-1]:
-        node = node[key]
-    node[path[-1]] = value
-    _doc, problems = mod.build([rec])
-    assert len(_about(problems, "shape")) == 1
+    ]:
+        rec = _record("shape", 1.0, 40, 20, 10_000)
+        node = rec
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+        _doc, problems = mod.build([rec])
+        assert len(_about(problems, "shape")) == 1
 
 
 def test_a_calibration_seed_of_43_needs_only_seed_43s_two_runs(mod, monkeypatch):

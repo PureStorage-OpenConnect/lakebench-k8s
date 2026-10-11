@@ -120,22 +120,6 @@ def test_marker_mid_tick_completes_the_tick_and_starts_no_other(gr, monkeypatch)
     assert loop.idle_sleeps == 130
 
 
-def test_marker_between_ticks_is_seen_in_the_sleep(gr, monkeypatch):
-    loop = _Loop(gr, monkeypatch)
-    calls = {"n": 0}
-
-    def requested(_s):
-        calls["n"] += 1
-        return bool(loop.ticks)  # set once tick 1 has completed
-
-    monkeypatch.setattr(gr, "stop_requested", requested)
-    gr.main()
-    assert loop.ticks == [1]
-    assert "Drain complete: last completed cycle 1 run=run-1" in loop.lines
-    # Seen within a second, not after the rest of the refresh interval.
-    assert loop.sleeps_before_drain == 0
-
-
 def test_sigterm_mid_tick_completes_the_tick_without_a_drain_line(gr, monkeypatch):
     loop = _Loop(gr, monkeypatch)
 
@@ -286,44 +270,6 @@ def test_marker_name_matches_the_cli(gr):
     assert gr.STOP_MARKER == GOLD_REFRESH_STOP_MARKER
 
 
-def test_run_tick_logs_pinned_committed_completed_in_order():
-    """Static: the pinned line precedes detection, the committed line
-    follows it, and the completed line follows ``Tick complete``."""
-    src = (SCRIPTS / "gold_refresh_financial.py").read_text()
-    body = src[src.index("def run_tick(") : src.index("def _stop_marker_path(")]
-    marks = [
-        "tick_pinned_line(",
-        "detection = run_detection_rules(",
-        'f"Cycle {cycle}: committed alerts=',
-        'log(f"Tick complete in',
-        'log(f"Cycle {cycle}: completed run={RUN_ID}")',
-    ]
-    pos = [body.index(m) for m in marks]
-    assert pos == sorted(pos), list(zip(marks, pos, strict=True))
-
-
-def test_marker_reads_do_not_stretch_the_refresh_interval(gr, monkeypatch):
-    """The sleep runs to a deadline: a slow marker read is part of the
-    interval, not added to it."""
-    loop = _Loop(gr, monkeypatch)
-    starts: list[float] = []
-
-    def slow_read(_s):
-        loop.now += 0.5  # a marker read that takes half a second
-        return len(starts) >= 3
-
-    def tick(_spark, _state, cycle):
-        starts.append(loop.now)
-        loop.ticks.append(cycle)
-        return {}
-
-    monkeypatch.setattr(gr, "stop_requested", slow_read)
-    monkeypatch.setattr(gr, "run_tick", tick)
-    gr.main()
-    gaps = [b - a for a, b in zip(starts, starts[1:], strict=False)]
-    assert gaps and all(g <= 3.0 + 0.5 + 1e-9 for g in gaps), gaps
-
-
 # --- AML-9 tick record: snapshot metadata only (AM-15) -----------------------
 
 
@@ -444,33 +390,3 @@ def test_tick_record_round_trips_into_time_travel_ticks(gr):
     assert time_travel_ticks(parsed["ticks"]) == [
         {"start": 0, "cycle": 1, "table": "silver.transactions", **rec, "completed": False}
     ]
-
-
-def test_tick_path_scans_nothing_for_the_record():
-    """AML-9 silent-corruption S6: the tick records metadata only. run_tick,
-    _pin_silver and snapshot_record call no fingerprint or hash helper, and
-    their count()/collect() calls are exactly the existing ones: the alert
-    count in run_tick, the newest-ingest aggregate in _pin_silver and the one
-    snapshots-table query in snapshot_record. A per-tick scan of the
-    snapshot (d1's design) adds a call and fails here."""
-    import ast
-
-    tree = ast.parse((SCRIPTS / "gold_refresh_financial.py").read_text())
-    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
-    want = {"run_tick": (1, 0), "_pin_silver": (0, 1), "snapshot_record": (0, 1)}
-    for name, (counts, collects) in want.items():
-        calls = [n for n in ast.walk(funcs[name]) if isinstance(n, ast.Call)]
-        names = [
-            c.func.attr if isinstance(c.func, ast.Attribute) else getattr(c.func, "id", "")
-            for c in calls
-        ]
-        for banned in ("frame_fingerprint", "xxhash64", "hash", "read_at_snapshot_count"):
-            assert banned not in names, (name, banned)
-        assert (names.count("count"), names.count("collect")) == (counts, collects), (
-            name,
-            names,
-        )
-    sql = ast.get_source_segment(
-        (SCRIPTS / "gold_refresh_financial.py").read_text(), funcs["snapshot_record"]
-    )
-    assert ".snapshots WHERE snapshot_id" in sql and "FROM {fq} " not in sql

@@ -1,4 +1,4 @@
-"""Delta + Hive continuous table naming (lb16-cs), run in a fresh JVM.
+"""Delta + Hive continuous table naming, run in a fresh JVM.
 
 Not collected by pytest (no ``test_`` prefix). ``test_c360_delta_continuous_spark``
 runs it as a subprocess because the Delta jars must be on the driver
@@ -6,9 +6,7 @@ classpath at JVM launch.
 
 The environment is the one job.py gives a hive-delta recipe: CATALOG_NAME is
 the Trino catalog ("lakehouse"), which names no Spark catalog, and
-LB_ICEBERG_CATALOG is spark_catalog. Before the fix the continuous reset
-named bronze ``lakehouse.default.bronze_raw`` and failed with
-REQUIRES_SINGLE_PART_NAMESPACE before any stream ran.
+LB_ICEBERG_CATALOG is spark_catalog.
 
 Usage: python c360_delta_continuous_scenarios.py <jars> <work_dir>  (jars: comma-separated)
 Prints one JSON object on the last stdout line.
@@ -20,7 +18,7 @@ import json
 import os
 import sys
 
-from c360_stream_scenarios import bronze_df, run_stream, session, stage_files  # noqa: E402
+from c360_stream_scenarios import bronze_df, run_stream, session, stage_files
 
 
 def _files_under(path):
@@ -112,6 +110,19 @@ def main():
     src = stage_files(spark, work, "bronze-third", 1, 10, start=200)
     run_stream(spark, src, f"{work}/ckpt-bronze-third", write)
     out["bronze_rows_after_orphan_reset"] = spark.table(name).count()
+
+    # A batch silver build that committed at silver's managed path but never
+    # registered (the table has no stream columns): the reset clears it, so
+    # the stream's create does not meet a schema it cannot adopt.
+    silver_fq = f"spark_catalog.{os.environ['LB_SILVER_TABLE']}"
+    orphan = f"{buckets['silver']}/warehouse/{os.environ['LB_SILVER_TABLE'].split('.')[-1]}"
+    bronze_df(spark, 4).write.format("delta").mode("overwrite").save(f"file://{orphan}")
+    out["silver_orphan_unregistered"] = os.path.isdir(f"{orphan}/_delta_log") and not (
+        table_exists(spark, silver_fq)
+    )
+    bronze_verify.main()
+    spark = session(jars, work)
+    out["silver_orphan_files_after_reset"] = _files_under(orphan)
     spark.stop()
     print(json.dumps(out, default=str))
 

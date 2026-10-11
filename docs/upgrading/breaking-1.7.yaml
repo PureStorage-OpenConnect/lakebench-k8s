@@ -4,8 +4,8 @@
 # UPGRADING-1.7.md; `text` is its bullet under 1.7.0 "Breaking changes" in
 # CHANGELOG.md; `source` is `path:symbol` of the code it describes. `kind` is one of
 # removed-key, refused-command, alias, exit-code, identity, version-bump,
-# default-change. tests/test_breaking_changes.py checks both directions;
-# `python3.11 scripts/upgrading.py missing` prints a skeleton for each gap.
+# default-change. `python3.11 scripts/upgrading.py missing` prints a skeleton
+# for each code change the list lacks.
 
 - id: config-fields-nothing-read-are-removed
   title: Config fields nothing read are removed
@@ -138,7 +138,7 @@
   text: '`lakebench compare` exits 2 with any arguments: comparing runs is left to the reader, and each
     report states the corpus, components, result fingerprints and caps needed to judge a comparison.'
   fix: Run each configuration with `lakebench run`, then read the two reports side by side (`lakebench
-    report CONFIG`); see Comparing Runs in docs/benchmarking.md.
+    report CONFIG`); see docs/benchmarking/comparing.md.
 - id: init-refuses-credential-values
   title: init refuses credential values
   kind: refused-command
@@ -200,7 +200,7 @@
   title: Safety refusals exit 3
   kind: exit-code
   subject:
-  - reproduce.existing_namespace
+  - deploy.existing_namespace
   - destroy.redeployed
   - deploy.identity_foreign
   - run.bronze_nonempty
@@ -236,15 +236,6 @@
   source: src/lakebench/exit_codes.py:PATHS
   text: '`destroy` exits 6 (was 4) when its steps finished but the namespace is still terminating.'
   fix: Treat 6 as "safe to re-run"; check `kubectl get ns` before redeploying the name.
-- id: reproduce-drift-exits-14
-  title: reproduce drift exits 14
-  kind: exit-code
-  subject:
-  - reproduce.drift
-  - reproduce.commit_drift
-  source: src/lakebench/exit_codes.py:PATHS
-  text: '`reproduce` exits 14 (was 2) for metric drift or commit drift without `--allow-commit-drift`.'
-  fix: Treat 14 as "requirement unmet".
 - id: a-datagen-timeout-exits-1
   title: A datagen timeout exits 1
   kind: exit-code
@@ -261,14 +252,14 @@
     records carry workload version `c360-2.dev1` and do not compare with `c360-1`.
   fix: Re-run a Customer 360 baseline under 1.7 before comparing; `spark.lb.gold.strategy=incremental`
     is refused.
-- id: aml-records-are-workload-version-aml-2
-  title: AML records are workload version aml-2
+- id: aml-records-are-workload-version-aml-3
+  title: AML records are workload version aml-3
   kind: identity
-  subject: workload financial aml-2
+  subject: workload financial aml-3
   source: src/lakebench/metrics/experiment.py:WORKLOAD_VERSIONS
-  text: AML alert evidence is capped at 1,000 ids per W4 alert and flagged; records carry workload version
-    `aml-2` and do not compare with `aml-1`.
-  fix: Re-run an AML baseline under 1.7 before comparing; read the bounded-recall labels in the score.
+  text: 1.7.0 capped W4 alert evidence (`aml-2`); 1.7.1 changes the W3 and W17 hub rule (`aml-3`, rule
+    version 1.1.0). Records at `aml-3` do not compare with `aml-1` or `aml-2`.
+  fix: Re-run an AML baseline under 1.7.1 before comparing; read the bounded-recall labels in the score.
 - id: system-and-access-path-are-not-execution-conditions
   title: System and access path are not execution conditions
   kind: identity
@@ -292,7 +283,7 @@
   subject: scripts/perf_gate.py
   source: scripts/perf_gate.py
   text: '`scripts/perf_gate.py`, its pinned configs (`benchmarks/perf/`) and the baseline store are gone.'
-  fix: Read `lakebench report` for each run side by side; `lakebench reproduce` re-runs a record.
+  fix: Read `lakebench report` for each run side by side.
 - id: deploy-generates-the-polaris-client-secret
   title: Deploy generates the Polaris client secret
   kind: default-change
@@ -342,14 +333,6 @@
   text: '`run` exits 2 before any cluster call on a flag its mode does not use (the list is under `run`
     in docs/cli-reference.md).'
   fix: Drop the flag the mode does not use.
-- id: reproduce-never-destroys-before-its-run
-  title: reproduce never destroys before its run
-  kind: default-change
-  subject: reproduce destroy
-  source: src/lakebench/cli/_reproduce.py:_record
-  text: '`reproduce` refuses (exit 3) an existing namespace or bucket instead of destroying it, and destroys
-    only what it created.'
-  fix: Run `lakebench destroy CONFIG` first to reuse a deployment's name.
 - id: init-writes-a-first-day-config
   title: init writes a first-day config
   kind: default-change
@@ -523,13 +506,13 @@
     and a deployment made from it must be redeployed before run.
   fix: 'Pin `images.spark: apache/spark:4.0.2-python3` to keep 4.0.2. A config that writes `delta.version:
     4.0.0` keeps Spark 4.0.2.'
-- id: the-default-datagen-image-is-the-v17-look-image
-  title: The default datagen image is the v1.7 look image
+- id: the-default-datagen-image-is-lb-datagen5d7ce61a
+  title: The default datagen image is lb-datagen:5d7ce61a
   kind: version-bump
-  subject: images.datagen docker.io/sillidata/lb-datagen:2a36ae21@sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04
+  subject: images.datagen docker.io/sillidata/lb-datagen:5d7ce61a@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc
   source: src/lakebench/config/schema.py:ImagesConfig
-  text: 'The default datagen image is `lb-datagen:2a36ae21`, pinned by digest: the v1.7 look image. A config that does not set `images.datagen` generates with it where v1.6 used `lb-datagen:1.6.0`; its output on the five byte-compare cases is byte-identical to 1.6.0, and the lineage table maps it to the 1.6.0 root.'
-  fix: 'Nothing for most configs. A config that pins `images.datagen: docker.io/sillidata/lb-datagen:1.6.0` keeps the 1.6 image, which writes no corpus markers and refuses a registered corpus; remove the pin to take the 1.7 image.'
+  text: 'The default datagen image is `lb-datagen:5d7ce61a`, pinned by digest (1.7.0: `2a36ae21`; v1.6: `1.6.0`; neither is in the registry). It has no lineage row, so its corpora get a corpus id of their own.'
+  fix: Remove any `images.datagen` pin to an older tag.
 - id: a-run-passes-only-when-its-record-shows-it
   title: A run passes only when its record shows it
   kind: default-change
@@ -618,13 +601,28 @@
   kind: default-change
   subject: protected AML corpus
   source: src/lakebench/aml/look_guard.py:refuse_if_protected
-  text: '`run`, `benchmark`, `query`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.'
+  text: '`run`, `benchmark`, `query` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.'
   fix: 'Use the calibration seed or another unregistered seed. A registered look runs only through `scripts/aml_gate.py --registered`, and its corpus is generated only by `lakebench generate --registered-corpus`.'
-- id: financial-reproduce-reruns-the-alerts-rule-on-what-gold-read
-  title: financial reproduce reruns the alert's rule on what gold read
-  kind: exit-code
-  subject:
-  - financial.reproduce.snapshot_gone
-  source: src/lakebench/exit_codes.py:PATHS
-  text: '`financial reproduce` reproduces the alert from the snapshots its run''s gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 2 when this host has no record of the run, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 after every reproduction it waited for (it could not reproduce), and 0 after a submit with `--no-wait`, which now refuses first when the record cannot drive a reproduction.'
-  fix: 'Reproduce alerts of 1.7 AML batch runs; `--run RUN_ID` picks a run other than the deployment''s latest.'
+- id: continuous-stages-run-back-to-back-by-default
+  title: Continuous stages run back to back by default
+  kind: default-change
+  subject: continuous trigger intervals 0 seconds
+  source: src/lakebench/config/schema.py:SustainedConfig
+  text: The three continuous trigger intervals default to `0 seconds` (were 30 s, 60 s and 5 minutes);
+    freshness runs from file landing.
+  fix: Set the intervals to keep 1.7.0 timing; do not compare continuous freshness with 1.7.0 records.
+- id: a-bare-0-trigger-interval-is-refused
+  title: A bare "0" trigger interval is refused
+  kind: default-change
+  subject: continuous trigger interval units
+  source: src/lakebench/config/schema.py:SustainedConfig
+  text: A trigger interval must be a whole number and a unit; a bare `"0"` is refused at load.
+  fix: Write `"0 seconds"`.
+- id: a-set-datagenparallelism-is-used-exactly
+  title: A set datagen.parallelism is used exactly
+  kind: default-change
+  subject: datagen.parallelism set in config
+  source: src/lakebench/config/autosizer.py:_apply_datagen_pod_floor
+  text: A configured `datagen.parallelism` is no longer cut to fit the cluster or raised to the AML 8-pod
+    floor; the autosizer warns, and a continuous run that cannot place it is refused at preflight.
+  fix: Unset it to let the autosizer size it, or set a count the cluster can run.

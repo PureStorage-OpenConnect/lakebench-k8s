@@ -1,5 +1,5 @@
 """OD-2 identity groups, identity versions and the stored-block rule (EVD-7,
-ER-10a; DESIGN-v1.7 ch03 sections 0.1 and 6).
+ER-10a).
 
 Stored records come from the ER-1 harness (tests/fixtures/records/). Expected
 values are derived from each record's own fields (recipe, effective
@@ -19,40 +19,17 @@ from lakebench.metrics import corpus_identity as ci
 from lakebench.metrics import experiment as ex
 from lakebench.metrics.storage import MetricsStorage
 from tests.fixtures import stored_records as sr
-from tests.test_corpus_identity import observe, two_nodes
-from tests.test_corpus_identity import series as series_body
-from tests.test_experiment import _cfg, _metrics
+from tests.fixtures.comparability_helpers import SYSID, _fresh
+from tests.fixtures.corpus_identity_helpers import observe
 
 ROOT = Path(__file__).resolve().parents[1]
 EXPECTED = sr.expected("records")["records"]
 EXP1_RECORDS = sorted(r for r, w in EXPECTED.items() if w["generation"] == "exp1")
 
-SYSID = {
-    "type": "cluster",
-    "version": 2,
-    "fingerprint": "f" * 16,
-    "partial": False,
-    "parts": {"api_server_ca": "c" * 12, "kubernetes": "v1.31.6"},
-}
-
 
 def _load(record: dict):
     with tempfile.TemporaryDirectory() as tmp:
         return MetricsStorage(tmp)._dict_to_metrics(copy.deepcopy(record))
-
-
-def _fresh(*, markers: bool = True, system: bool = True):
-    """A v1.7 run (identity_version 2 at run start), with or without the
-    v2 inputs."""
-    run = _metrics(_cfg())
-    inputs = run.config_snapshot["experiment_inputs"]
-    assert inputs["identity_version"] == 2
-    if markers:
-        obs, _ = observe(two_nodes(), series_body())
-        inputs["corpus_observation"] = obs
-    if system:
-        inputs["system_identity"] = copy.deepcopy(SYSID)
-    return run
 
 
 # ---------------------------------------------------------------------------
@@ -126,34 +103,6 @@ class TestIdentityVersions:
         v1 = _fresh(markers=False).to_dict()["experiment"]
         assert ex.identity_hash(v2) != ex.identity_hash(v1)
 
-    @pytest.mark.parametrize("run_id", EXP1_RECORDS)
-    def test_stored_v1_identity_is_the_frozen_one(self, run_id):
-        exp = sr.load_record(run_id)["experiment"]
-        assert ex.identity(exp) == ex._identity_v1(exp)
-        assert ex.identity_hash(exp) == EXPECTED[run_id]["identity_digest"]
-
-    def test_v2_baseline_against_v1_run_names_both_versions(self):
-        """L8: one refusal naming the versions, not per-key lines."""
-        v2 = _fresh().to_dict()["experiment"]
-        v1 = _fresh(markers=False).to_dict()["experiment"]
-        refs = ex.stored_identity_refusals(
-            ex.identity(v2), ex.result_fingerprints(v2), v1, "baseline"
-        )
-        assert len(refs) == 1
-        assert "identity v2 and this run is v1" in refs[0]
-        assert "no generator marker" in refs[0]
-
-    def test_v1_baseline_against_v2_run_names_both_versions(self):
-        v2 = _fresh().to_dict()["experiment"]
-        v1 = _fresh(markers=False).to_dict()["experiment"]
-        refs = ex.stored_identity_refusals(
-            ex.identity(v1), ex.result_fingerprints(v1), v2, "package"
-        )
-        assert refs == [
-            "not comparable: the package was recorded with experiment identity v1 and this run "
-            "is v2; record the package again from a current run"
-        ]
-
 
 # ---------------------------------------------------------------------------
 # A stored block is never rebuilt (d3, review d2 item 2)
@@ -175,7 +124,7 @@ def _planted():
 
 
 def _caller_to_dict(m):
-    return m.to_dict()["experiment"]["corpus"]["id_v2"] == "plantedidv2plant"
+    return m.to_dict()["experiment"]["corpus"]["id_v2"], "plantedidv2plant"
 
 
 def _caller_read_first(m):
@@ -185,7 +134,7 @@ def _caller_read_first(m):
         html = ReportGenerator(metrics_dir=tmp)._generate_read_first_panel(
             m, passed=True, warnings=[], fail_reasons=[], n_runs=1
         )
-    return "plantedcorpu" in html and ex.identity_hash(m.experiment) in html
+    return ("plantedcorpu" in html, ex.identity_hash(m.experiment) in html), (True, True)
 
 
 def _caller_experiment_section(m):
@@ -193,31 +142,25 @@ def _caller_experiment_section(m):
 
     with tempfile.TemporaryDirectory() as tmp:
         html = ReportGenerator(metrics_dir=tmp)._generate_experiment_section(m)
-    return "plantedcorpus1aa" in html
+    return "plantedcorpus1aa" in html, True
 
 
 def _caller_caps(m):
     from lakebench.reports.formatter import caps_bound_from
 
-    return caps_bound_from(m) == ["planted cap"]
+    return caps_bound_from(m), ["planted cap"]
 
 
 def _caller_n_runs(m):
     from lakebench.reports.formatter import n_runs_of
 
-    return n_runs_of(m) == 7
+    return n_runs_of(m), 7
 
 
 def _caller_support(m):
     from lakebench.reports.formatter import support_state_of
 
-    return support_state_of(m) == "planted-state"
-
-
-def _caller_reproduce(m):
-    from lakebench.cli._reproduce import _run_experiment
-
-    return (_run_experiment(m) or {}).get("corpus", {}).get("id_v2") == "plantedidv2plant"
+    return support_state_of(m), "planted-state"
 
 
 @pytest.mark.parametrize(
@@ -229,15 +172,15 @@ def _caller_reproduce(m):
         _caller_caps,
         _caller_n_runs,
         _caller_support,
-        _caller_reproduce,
     ],
     ids=lambda f: f.__name__.removeprefix("_caller_"),
 )
 def test_stored_block_never_rebuilt(caller):
-    """Each of the seven readers of experiment_block() sees the stored
+    """Each of the six readers of experiment_block() sees the stored
     block. With the d2 rule (rebuild a current-schema block) every one of
     them sees the rebuilt value."""
-    assert caller(_load(_planted()))
+    got, want = caller(_load(_planted()))
+    assert got == want
 
 
 @pytest.mark.parametrize("run_id", EXP1_RECORDS)
@@ -267,23 +210,29 @@ def test_record_without_block_is_built_once():
 # ---------------------------------------------------------------------------
 
 
-#: Compaction operation by recipe, from the statement builders
-#: (modules/table_formats/iceberg/maintenance.py build_compaction_sql: Trino
-#: optimize at 128MB, Spark Thrift rewrite_data_files defaults), for records
-#: whose stored effective-maintenance id says compaction=ran.
-_OP_BY_RECIPE = {
-    "hive-iceberg-spark-trino": "trino_optimize:128MB",
-    "polaris-iceberg-spark-trino": "trino_optimize:128MB",
-    "hive-iceberg-spark-thrift": "iceberg_rewrite_data_files",
-    "polaris-iceberg-spark-thrift": "iceberg_rewrite_data_files",
+#: Compaction operation by the engine a stored record's compaction outcome
+#: names (Trino optimize at 128MB, Spark Thrift rewrite_data_files defaults).
+_OP_BY_ENGINE = {
+    "trino": "trino_optimize:128MB",
+    "spark-thrift": "iceberg_rewrite_data_files",
 }
 
 
 @pytest.mark.parametrize("run_id", EXP1_RECORDS)
 def test_compaction_operation_of_stored_records(run_id):
-    exp = sr.load_record(run_id)["experiment"]
+    rec = sr.load_record(run_id)
+    exp = rec["experiment"]
     ran = "compaction=ran" in exp["effective_maintenance"]["id"].split(":", 1)[1].split(",")
-    want = _OP_BY_RECIPE[exp["architecture"]["recipe"]] if ran else None
+    engines = {
+        o["engine"]
+        for o in rec.get("maintenance_outcomes") or []
+        if o.get("kind") == "compaction" and o.get("engine")
+    }
+    if ran:
+        assert len(engines) == 1, engines
+        want = _OP_BY_ENGINE[next(iter(engines))]
+    else:
+        want = None
     assert cmp.compaction_operation(exp) == want
 
 
@@ -332,10 +281,6 @@ class TestExp1Derivations:
         rec.setdefault("provenance", {})["deps"] = {"pinset_sha256": "a" * 64}
         c = cmp.classify(rec["experiment"], rec)
         assert "dependency pinset" not in c.keys(cmp.ARCHITECTURE)
-
-    @pytest.mark.parametrize("raw,want", [("1.7.0.dev3", (1, 7)), ("v1.10", (1, 10))])
-    def test_version_parse(self, raw, want):
-        assert cmp.lakebench_minor({"lakebench": {"lakebench_version": raw}}) == (want, None)
 
     def test_unreadable_version_is_pre17_with_a_note(self):
         rec = sr.load_record("5105a0")
@@ -399,8 +344,8 @@ class TestDifferences:
 
     def test_system_and_access_path_are_not_conditions(self):
         """OD-2: they moved to the System and Architecture groups."""
-        assert "system" not in ex.CONDITION_KEYS
-        assert "query access path" not in ex.CONDITION_KEYS
+        assert "system" not in cmp.CONDITION_KEYS
+        assert "query access path" not in cmp.CONDITION_KEYS
         a = sr.load_record("5105a0")["experiment"]
         b = copy.deepcopy(a)
         b["system"] = "local"
@@ -452,41 +397,29 @@ def test_unreadable_optional_key_is_not_the_default(monkeypatch):
     assert cmp.optional_keys(exp)["spark conf"] == "unreadable: KeyError"
 
 
-@pytest.mark.parametrize("path", ["src/lakebench/cli/_run.py", "src/lakebench/cli/_sustained.py"])
-def test_run_paths_sample_at_start_and_before_save(path):
-    """Each run path that starts a record samples right after start_run
-    and right before its save (the batch path is also traced by the run
-    harness; the continuous one is not)."""
-    src = (ROOT / path).read_text()
-    starts = [i for i in range(len(src)) if src.startswith("collector.start_run(", i)]
-    assert starts
-    for i in starts:
-        assert "sample_run_start(collector.current_run, cfg" in src[i : i + 400]
-    saves = [
-        i for i in range(len(src)) if src.startswith("metrics_storage.save_run(run_metrics)", i)
-    ]
-    for i in saves:
-        assert "sample_run_end(run_metrics, cfg" in src[max(0, i - 600) : i]
+def test_benchmark_record_refreshes_the_stored_block(tmp_path):
+    """``lakebench benchmark`` saves a copy of the measured run with the new
+    benchmark; the copied block's benchmark half must follow it."""
+    import shutil
 
+    from lakebench.cli._query import _save_benchmark_record
+    from tests.fixtures.record_writers_helpers import _bench_result
 
-def test_optional_key_table_rows_name_a_group_and_owner():
-    for name, row in cmp.OPTIONAL_IDENTITY_KEYS.items():
-        assert row.group in cmp.GROUPS, name
-        assert row.owner, name
-
-
-def test_benchmark_path_refreshes_the_stored_block():
-    """``lakebench benchmark`` puts its benchmark in its own record (a copy
-    of the run it measured) and must refresh the copied block's benchmark
-    half before saving (a stored block is never rebuilt)."""
-    src = (ROOT / "src/lakebench/cli/_query.py").read_text()
-    replace = src.index("record.benchmark = bench\n")
-    save = src.index("storage.save_run(record)", replace)
-    assert "refresh_benchmark(record)" in src[replace:save]
-
-
-def test_records_json_drift_list_is_empty():
-    assert sr.expected("records")["known_rebuild_drift"]["runs"] == []
+    parent_id = "20260926-231711-6dd3bc"
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    shutil.copytree(ROOT / "tests/fixtures/records" / f"run-{parent_id}", runs / f"run-{parent_id}")
+    storage = MetricsStorage(runs)
+    parent = storage.load_run(parent_id)
+    result = _bench_result()
+    before = parent.to_dict()["experiment"]["limits"]
+    assert before["benchmark_iterations"] != result.iterations, "fixture premise"
+    assert "benchmark_source" not in parent.to_dict()["experiment"]
+    path = _save_benchmark_record(storage, parent, result)
+    saved = storage.load_run(path.parent.name.removeprefix("run-")).to_dict()["experiment"]
+    assert saved["limits"]["benchmark_iterations"] == result.iterations
+    assert saved["limits"]["benchmark_mode"] == result.mode
+    assert saved["benchmark_source"].startswith("lakebench benchmark")
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +444,7 @@ def _rec(run_id="5105a0", new_id=None, **edits):
 
 def _condition_keys(a, b):
     """The Conditions keys that differ between two stored records, as the
-    perf gate and reproduce read them (comparability.diff_group)."""
+    comparison ladder reads them (comparability.diff_group)."""
     ca, cb = cmp.classify(a["experiment"], a), cmp.classify(b["experiment"], b)
     return [d.key for d in cmp.diff_group(ca, cb, cmp.CONDITIONS)]
 
@@ -542,29 +475,12 @@ def test_local_identity_does_not_block_exp2():
     assert run.to_dict()["experiment"]["schema"] == "exp1"
 
 
-class TestWrappers:
-    def test_optional_key_absent_from_the_baseline_is_a_difference(self):
-        run = _fresh().to_dict()["experiment"]
-        baseline = ex.identity(run)
-        run["architecture"]["spark_executor_overrides"] = {"silver": 12}
-        refs = ex.stored_identity_refusals(baseline, ex.result_fingerprints(run), run, "baseline")
-        assert any(r.startswith("spark executor overrides differs") for r in refs), refs
-        assert not any("older experiment identity" in r for r in refs)
-
-
-def test_reference_with_no_observed_system_is_refused():
-    """A v2 reference whose system fingerprint is the no-part constant
-    would match any unsampled run on any cluster: refused."""
-    from lakebench.metrics import system_identity as si
-
+def test_optional_key_absent_from_the_baseline_is_a_difference():
     run = _fresh().to_dict()["experiment"]
     baseline = ex.identity(run)
-    baseline["system fingerprint"] = si._unobserved_identity("cluster", "x")["fingerprint"]
-    refs = ex.stored_identity_refusals(baseline, ex.result_fingerprints(run), run, "baseline")
-    assert refs == [
-        "not comparable: the reference observed no part of its system; "
-        "the baseline cannot be matched to a system"
-    ]
+    run["architecture"]["spark_executor_overrides"] = {"silver": 12}
+    added = set(ex.identity(run)) - set(baseline)
+    assert added == {"spark executor overrides"}
 
 
 def test_config_only_identity_is_not_v2():

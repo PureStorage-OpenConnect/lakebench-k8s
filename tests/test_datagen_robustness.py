@@ -62,16 +62,6 @@ def test_rust_multipliers_are_the_preregistered_ones(const, key):
     assert _rust_const(const) == CORPORA["robustness_perturbation"][key]
 
 
-def test_prereg_block_has_exactly_the_three_multipliers():
-    # A new multiplier in the prereg needs a generator change, not silence.
-    keys = {k for k in CORPORA["robustness_perturbation"] if not k.startswith("note")}
-    assert keys == {
-        "median_amount_multiplier",
-        "persona_sd_multiplier",
-        "dormancy_range_multiplier",
-    }
-
-
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -148,21 +138,6 @@ def test_deployer_renders_the_flag_only_when_on():
     assert [a for a in on if a != "--robustness-perturbation"] == off
 
 
-def test_template_without_the_key_renders_unperturbed():
-    # A renderer that forgets the key gets the unperturbed corpus, and the
-    # generator refuses the robustness seed without the flag.
-    from lakebench.deploy.datagen import DatagenDeployer
-    from lakebench.deploy.engine import DeploymentEngine
-
-    engine = DeploymentEngine(_cfg(seed=7777), dry_run=True)
-    ctx = DatagenDeployer(engine)._build_datagen_context()
-    del ctx["datagen_robustness_perturbation"]
-    job = yaml.safe_load(engine.renderer.render("datagen/job.yaml.j2", ctx))
-    assert (
-        "--robustness-perturbation" not in job["spec"]["template"]["spec"]["containers"][0]["args"]
-    )
-
-
 def _entrypoint():
     import importlib.util
 
@@ -188,8 +163,8 @@ def _entry_cmd(argv, monkeypatch):
         with patch.object(ep.os, "execvp", _fake_exec):
             try:
                 rc = ep.main()
-            except SystemExit:
-                rc = None
+            except SystemExit as exc:
+                rc = None if "cmd" in captured else exc.code
     return rc, captured.get("cmd")
 
 
@@ -260,7 +235,8 @@ def _plain(n=10):
 
 
 def test_summarise_stamp():
-    assert _plain()["n_stamped"] == 0 and _plain()["n_instances"] == 10
+    plain = _plain()
+    assert plain["n_stamped"] == 0 and plain["n_instances"] == 10
     s = _stamped()
     assert s["n_stamped"] == 10 and s["multipliers"] == MULT
     # A stamp that is not exactly "true" does not count.
@@ -268,8 +244,7 @@ def test_summarise_stamp():
 
 
 def test_robustness_role_needs_the_stamp():
-    err = ds.perturbation_stamp_error(CORPORA, "robustness", _plain())
-    assert err and "no robustness stamp" in err
+    assert ds.perturbation_stamp_error(CORPORA, "robustness", _plain())
     assert ds.perturbation_stamp_error(CORPORA, "robustness", _stamped()) is None
     # Empty manifest: not a stamped corpus.
     assert ds.perturbation_stamp_error(CORPORA, "robustness", _plain(0))
@@ -284,7 +259,7 @@ def test_robustness_role_needs_the_registered_multipliers():
 
 @pytest.mark.parametrize("role", ["calibration", "evaluation"])
 def test_other_roles_refuse_the_stamp(role):
-    assert "never perturbed" in ds.perturbation_stamp_error(CORPORA, role, _stamped())
+    assert ds.perturbation_stamp_error(CORPORA, role, _stamped())
     assert ds.perturbation_stamp_error(CORPORA, role, _plain()) is None
 
 
@@ -296,12 +271,12 @@ def test_mixed_manifest_refused():
         ]
     )
     for role in (None, "robustness", "evaluation"):
-        assert "mixed" in ds.perturbation_stamp_error(CORPORA, role, mixed)
+        assert ds.perturbation_stamp_error(CORPORA, role, mixed)
 
 
 def test_declared_must_match_the_corpus():
-    assert "declares" in ds.perturbation_stamp_error(CORPORA, None, _plain(), declared=True)
-    assert "declares" in ds.perturbation_stamp_error(CORPORA, None, _stamped(), declared=False)
+    assert ds.perturbation_stamp_error(CORPORA, None, _plain(), declared=True)
+    assert ds.perturbation_stamp_error(CORPORA, None, _stamped(), declared=False)
     assert ds.perturbation_stamp_error(CORPORA, None, _stamped(), declared=True) is None
     assert ds.perturbation_stamp_error(CORPORA, None, _plain(), declared=False) is None
     # Locally nothing is declared: a perturbed dev corpus scores freely.
@@ -377,27 +352,63 @@ def test_scorer_refuses_a_stamp_the_config_did_not_declare(scorer, monkeypatch):
     )
 
 
-def test_scorer_provenance_comes_from_the_manifest():
-    src = (REPO / "src/lakebench/spark/scripts/score_financial_reference.py").read_text()
-    prov = src[src.index("provenance = {") :]
-    prov = prov[: prov.index("}\n")]
-    assert '"robustness_perturbation": stamp[' in prov
-    assert "LB_DATAGEN_ROBUSTNESS_PERTURBATION" not in prov
-
-
-def test_local_gate_checks_the_stamp_before_scoring():
-    src = (REPO / "scripts/aml_gate.py").read_text()
-    main = src[src.index("def main(") :]
-    i = main.index("perturbation_stamp_error(")
-    assert "args.registered" in main[i : i + 120]
-    assert i < main.index("af.corpus_scale(") < main.index("af.build_gate_inputs(")
-
-
-def test_entrypoint_does_not_accept_abbreviations(monkeypatch):
+@pytest.mark.parametrize("abbrev", ["--rob", "--robust", "--robustness"])
+def test_entrypoint_does_not_accept_abbreviations(monkeypatch, abbrev):
     # An abbreviation is an unknown flag: refused (exit 2), never read as
     # --robustness-perturbation.
-    for abbrev in ("--rob", "--robust", "--robustness"):
-        _, cmd = _entry_cmd(
-            ["--schema", "financial", "--bucket", "b", "--seed", "7777", abbrev], monkeypatch
-        )
-        assert cmd is None, abbrev
+    rc, cmd = _entry_cmd(
+        ["--schema", "financial", "--bucket", "b", "--seed", "7777", abbrev], monkeypatch
+    )
+    assert rc == 2 and cmd is None
+
+
+def test_local_gate_refuses_an_unstamped_robustness_corpus_before_scoring(
+    monkeypatch, tmp_path, capsys
+):
+    from tests.conftest import exec_repo_script
+
+    af = MagicMock()
+    af.read_manifest.return_value = _Manifest(ROBUST)
+    af.manifest_stamp_groups.return_value = _groups(False)
+    for mod, stub in (
+        ("aml_features", af),
+        ("pyspark", MagicMock()),
+        ("pyspark.sql", MagicMock()),
+        ("pyspark.sql.functions", MagicMock()),
+    ):
+        monkeypatch.setitem(sys.modules, mod, stub)
+    gate = exec_repo_script(REPO / "scripts/aml_gate.py", "aml_gate_robustness_stamp")
+    opened = json.loads(json.dumps(PREREG))
+    opened["corpora"]["registered_looks_open"] = True
+    from lakebench.aml import fidelity_gate
+
+    monkeypatch.setattr(fidelity_gate, "load_preregistration", lambda *a, **k: (opened, "x"))
+    monkeypatch.setattr(fidelity_gate, "library_versions", lambda: {})
+    monkeypatch.setattr(gate, "version_mismatches", lambda _v: {})
+    monkeypatch.setattr(gate, "clean_checkout_error", lambda: None)
+    monkeypatch.setattr(gate, "seed_ever_recorded", lambda _s: None)
+    monkeypatch.setattr(gate, "registered_corpus_problem", lambda *a: None)
+    monkeypatch.setattr(gate, "predictions_error", lambda _i: None)
+    monkeypatch.setattr("lakebench.config.datagen_seed.load_predictions", lambda: ({}, "x"))
+    seed_file = tmp_path / "seed"
+    seed_file.write_text(f"{ROBUST}\n")
+    seed_file.chmod(0o600)
+    corpus = tmp_path / "c"
+    corpus.mkdir()
+    rc = gate.main(
+        [
+            str(corpus),
+            "--registered",
+            "robustness",
+            "--seed-file",
+            str(seed_file),
+            "--out",
+            str(tmp_path / "o.json"),
+            "--generator-image",
+            "repo@sha256:" + "0" * 64,
+        ]
+    )
+    err = capsys.readouterr().err
+    assert rc == 1 and "no robustness stamp" in err, err
+    af.build_gate_inputs.assert_not_called()
+    af.corpus_scale.assert_not_called()

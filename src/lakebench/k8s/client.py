@@ -332,7 +332,7 @@ class K8sClient:
         """``_request_timeout`` for a call made while the cluster lease is held.
 
         A deferred signal (``cluster_lock``) waits for the leased work to end,
-        so no request inside the lease may hang (DESIGN ch01 3.6).
+        so no request inside the lease may hang.
         """
         from lakebench.k8s.lease_state import request_timeout_kw
 
@@ -484,7 +484,7 @@ class K8sClient:
             name: Namespace name
             uid: When set, the delete carries a UID precondition so the API
                 server refuses it if the name now belongs to a different
-                namespace (LB-157).
+                namespace.
 
         Returns:
             True if this call started the deletion, False if the namespace
@@ -753,21 +753,34 @@ class K8sClient:
         return True
 
     def _apply_service(self, manifest: dict[str, Any], namespace: str) -> bool:
-        """Apply a Service manifest."""
+        """Apply a Service manifest.
+
+        An operator can create a Service of the same name between the read
+        and the create (the Stackable Hive operator creates
+        ``<cluster>-metastore``); that create's 409 is answered by replacing
+        the Service that now exists, as if the read had found it.
+        """
         name = manifest["metadata"]["name"]
         manifest["metadata"]["namespace"] = namespace
-        try:
-            existing = self._core_v1.read_namespaced_service(name, namespace)
+        for _ in range(2):
+            try:
+                existing = self._core_v1.read_namespaced_service(name, namespace)
+            except ApiException as e:
+                if e.status != 404:
+                    raise
+                try:
+                    self._core_v1.create_namespaced_service(namespace, manifest)
+                    return True
+                except ApiException as e2:
+                    if e2.status != 409:
+                        raise
+                    continue
             # Preserve clusterIP for updates
             if "spec" in manifest and "clusterIP" not in manifest["spec"]:
                 manifest["spec"]["clusterIP"] = existing.spec.cluster_ip
             self._core_v1.replace_namespaced_service(name, namespace, manifest)
-        except ApiException as e:
-            if e.status == 404:
-                self._core_v1.create_namespaced_service(namespace, manifest)
-            else:
-                raise
-        return True
+            return True
+        raise K8sResourceError(f"Service {name} was created and deleted under apply")
 
     def _apply_deployment(self, manifest: dict[str, Any], namespace: str) -> bool:
         """Apply a Deployment manifest."""

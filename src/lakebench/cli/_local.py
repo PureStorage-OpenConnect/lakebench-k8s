@@ -425,12 +425,11 @@ def benchmark_local(
     deployment: LocalDeployment,
     workdir: Path | None = None,
     timeout: int = 300,
-) -> tuple[list[tuple[str, bool, float, int, dict | None]], float]:
+) -> tuple[list[tuple[str, bool, float, int]], float]:
     """Run the query benchmark locally with DuckDB.
 
     Returns (per-query results, queries per hour). Each result is
-    (name, success, elapsed_seconds, rows_returned, result fingerprint or
-    None). QpH uses the same
+    (name, success, elapsed_seconds, rows_returned). QpH uses the same
     definition as the cluster path -- successful queries / total seconds *
     3600 -- so a local number is comparable in kind, though obviously not in
     magnitude.
@@ -468,10 +467,9 @@ def benchmark_local(
     silver_table = "silver.customer_interactions_enriched"
     gold_table = "gold.customer_executive_dashboard"
 
-    # (name, success, elapsed, rows, result fingerprint or None)
-    results: list[tuple[str, bool, float, int, dict | None]] = []
+    # (name, success, elapsed, rows)
+    results: list[tuple[str, bool, float, int]] = []
     durations: list[float] = []
-    sent: dict[str, str] = {}
     for query in BENCHMARK_QUERIES:
         # Queries are templates: substitute the table names first, then let the
         # executor rewrite them to iceberg_scan paths. Skipping the format step
@@ -481,10 +479,9 @@ def benchmark_local(
             silver_table=silver_table,
             gold_table=gold_table,
         )
-        sent[query.name] = executor.adapt_query(sql)
-        outcome = executor.execute_query(sent[query.name], timeout=timeout)
+        outcome = executor.execute_query(executor.adapt_query(sql), timeout=timeout)
         results.append(
-            (query.name, outcome.success, outcome.duration_seconds, outcome.rows_returned, None)
+            (query.name, outcome.success, outcome.duration_seconds, outcome.rows_returned)
         )
         if outcome.success:
             durations.append(outcome.duration_seconds)
@@ -492,35 +489,10 @@ def benchmark_local(
         else:
             print_error(f"{query.name}: {outcome.error}")
 
-    results = _fingerprint_local(executor, results, sent, timeout)
-
     qph = 0.0
     if durations:
         qph = 3600.0 / (sum(durations) / len(durations))
     return results, qph
-
-
-def _fingerprint_local(executor, results, sent: dict[str, str], timeout: int) -> list[tuple]:
-    """Each successful query once more, untimed, for its result fingerprint
-    (benchmark.fingerprint); the timed loop is over by now."""
-    from lakebench.benchmark.fingerprint import unusable
-    from lakebench.benchmark.queries import BENCHMARK_QUERIES
-
-    approx = {q.name: q.fingerprint_columns() for q in BENCHMARK_QUERIES}
-    out = []
-    for name, ok, elapsed, rows, _ in results:
-        fp = None
-        if ok and hasattr(executor, "fingerprint_query"):
-            try:
-                fp = executor.fingerprint_query(
-                    sent[name], timeout=timeout, approx_columns=approx.get(name)
-                ).fingerprint
-            except Exception as e:  # noqa: BLE001 -- recorded, never fatal
-                fp = unusable("error", f"fingerprint run failed: {e}", "duckdb")
-            if not isinstance(fp, dict):
-                fp = unusable("error", "fingerprint run returned nothing", "duckdb")
-        out.append((name, ok, elapsed, rows, fp))
-    return out
 
 
 def print_local_benchmark(results: list[tuple], qph: float) -> None:

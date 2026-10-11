@@ -825,7 +825,7 @@ def _heldout_role(seed: int) -> str | None:
 def corpus_role(seed, prereg: dict) -> str:
     """calibration / evaluation / robustness by the registered seeds, or
     unknown. Tuning happens on calibration only; a report that says
-    evaluation or robustness before the freeze is a burned seed. The
+    evaluation or robustness outside its registered look is a burned seed. The
     calibration seeds are plaintext in the pre-registration; the evaluation
     and robustness seeds are known only as salted hashes in
     heldout_hashes.json, so they are matched by hash (an unreadable hash file

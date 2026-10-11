@@ -85,6 +85,15 @@ READERS: dict[str, str] = {
     "platform.compute.spark.gold_refresh_executors": (
         "lakebench.modules.pipeline_engines.spark.job:executor_override"
     ),
+    "platform.compute.spark.bronze_ingest_executor_cores": (
+        "lakebench.modules.pipeline_engines.spark.job:_executor_cores_override"
+    ),
+    "platform.compute.spark.silver_stream_executor_cores": (
+        "lakebench.modules.pipeline_engines.spark.job:_executor_cores_override"
+    ),
+    "platform.compute.spark.gold_refresh_executor_cores": (
+        "lakebench.modules.pipeline_engines.spark.job:_executor_cores_override"
+    ),
     "platform.compute.spark.driver_memory": (
         "lakebench.modules.pipeline_engines.spark.job:effective_driver"
     ),
@@ -236,7 +245,7 @@ READERS: dict[str, str] = {
     "architecture.pipeline.sustained.benchmark_warmup": "lakebench.cli._sustained:_run_sustained",
     "architecture.workload.schema_type": "lakebench.deploy.datagen:bronze_datagen_prefix",
     "architecture.workload.datagen.scale": (
-        "lakebench.modules.pipeline_engines.spark.job:_streaming_concurrent_budget"
+        "lakebench.modules.pipeline_engines.spark.job:_scale_and_schema"
     ),
     "architecture.workload.datagen.target_size": (
         "lakebench.config.schema:DatagenConfig.resolve_scale_from_target_size"
@@ -359,7 +368,10 @@ READERS: dict[str, str] = {
     "architecture.tables.silver_batch_versions": (
         "lakebench.config.schema:TableNamesConfig.financial_env"
     ),
-    "architecture.tables.gold_alerts": "lakebench.cli._financial:replay",
+    "architecture.tables.silver_counterparty_pairs": (
+        "lakebench.config.schema:TableNamesConfig.financial_env"
+    ),
+    "architecture.tables.gold_alerts": "lakebench.config.schema:TableNamesConfig.financial_env",
     "architecture.tables.gold_risk_scores": "lakebench.benchmark.executor:get_executor",
     "architecture.tables.gold_entity_clusters": "lakebench.benchmark.executor:get_executor",
     "architecture.tables.gold_daily_dashboards": "lakebench.benchmark.executor:get_executor",

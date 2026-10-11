@@ -26,7 +26,8 @@ def test_continuous_dimensions_in_a_fresh_jvm(spark_subprocess, spark_jars):
 def _check_dims(spark) -> None:
     import silver_build_financial as sb
     import silver_stream_financial as ss
-    from test_silver_kyc_spark import _bronze, _refs, _txns
+
+    from tests.fixtures.silver_kyc_helpers import _bronze, _refs, _txns
 
     ss.CATALOG = "lh"
     ss.SILVER_ENTITIES = "silver.ents"

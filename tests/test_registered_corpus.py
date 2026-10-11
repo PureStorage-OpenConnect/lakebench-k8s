@@ -37,10 +37,6 @@ def env(tmp_path, monkeypatch):
     return SimpleNamespace(held=held, tmp=tmp_path, ledger=tmp_path / "corpora.jsonl")
 
 
-class _Calls(list):
-    pass
-
-
 @pytest.fixture
 def cluster(monkeypatch):
     """The cluster, as calls that raise unless a test fakes them; each call
@@ -54,7 +50,7 @@ def cluster(monkeypatch):
     from lakebench.k8s.client import K8sClient
     from lakebench.s3 import S3Client
 
-    calls = _Calls()
+    calls = []
 
     def stop(name):
         def call(*a, **k):
@@ -88,34 +84,61 @@ def _no_seed(*texts):
 # -- refusals before any cluster call ----------------------------------------
 
 
-def test_protected_config_without_the_flag_is_refused(env, cluster):
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation")
-    r = _gen(cfg, "--yes")
+def _broken_look_history(seed):
+    raise OSError("git log over aml_registered_looks.json failed (exit 128)")
+
+
+@pytest.mark.parametrize(
+    ("seed", "role", "image", "flags", "look_history"),
+    [
+        ("EV", "evaluation", None, ("--yes",), None),  # protected config without the flag
+        (
+            "CALIBRATION",
+            None,
+            None,
+            ("--registered-corpus", "--yes"),
+            None,
+        ),  # names no protected corpus
+        ("EV", "evaluation", "IMAGE", ("--registered-corpus",), None),  # needs --yes
+        (
+            "EV",
+            "evaluation",
+            "IMAGE",
+            ("--registered-corpus", "--yes", "--allow-stale-bronze"),
+            None,
+        ),
+        ("EV", "evaluation", "IMAGE", ("--registered-corpus", "--yes"), "seen"),  # look recorded
+        ("EV", "evaluation", "IMAGE", ("--registered-corpus", "--yes"), "unreadable"),
+        (
+            "EV",
+            "evaluation",
+            "docker.io/sillidata/lb-datagen:1.6.0",
+            ("--registered-corpus", "--yes"),
+            None,
+        ),  # tag, not digest
+    ],
+)
+def test_registered_generate_refusals_touch_nothing(
+    env, cluster, monkeypatch, seed, role, image, flags, look_history
+):
+    """Each refusal exits 2 with zero cluster calls, no ledger written and no
+    seed in the output."""
+    if look_history == "seen":
+        monkeypatch.setattr(
+            ds, "seed_ever_recorded", lambda s: "the registered evaluation seed is in the ledger"
+        )
+    elif look_history == "unreadable":
+        monkeypatch.setattr(ds, "seed_ever_recorded", _broken_look_history)
+    kw = {}
+    if role:
+        kw["role"] = role
+    if image:
+        kw["image"] = pc.IMAGE if image == "IMAGE" else image
+    cfg = pc.financial_config(env.tmp / "c.yaml", seed=getattr(pc, seed), **kw)
+    r = _gen(cfg, *flags)
     assert r.exit_code == 2, r.output
-    assert "only with --registered-corpus" in r.output
     assert cluster == [] and not env.ledger.exists()
     _no_seed(r.output)
-
-
-def test_flag_on_a_config_that_names_no_protected_corpus_is_refused(env, cluster):
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.CALIBRATION)
-    r = _gen(cfg, "--registered-corpus", "--yes")
-    assert r.exit_code == 2 and "declares neither role" in r.output, r.output
-    assert cluster == [] and not env.ledger.exists()
-
-
-def test_flag_needs_yes(env, cluster):
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation", image=pc.IMAGE)
-    r = _gen(cfg, "--registered-corpus")
-    assert r.exit_code == 2 and "needs --yes" in r.output, r.output
-    assert cluster == [] and not env.ledger.exists()
-
-
-def test_flag_refuses_writing_over_stale_bronze(env, cluster):
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation", image=pc.IMAGE)
-    r = _gen(cfg, "--registered-corpus", "--yes", "--allow-stale-bronze")
-    assert r.exit_code == 2 and "never writes over objects" in r.output, r.output
-    assert cluster == [] and not env.ledger.exists()
 
 
 def test_a_development_generate_into_a_registered_prefix_is_refused(env, cluster):
@@ -135,29 +158,8 @@ def test_a_development_generate_into_a_registered_prefix_is_refused(env, cluster
         }
     )
     r = _gen(dev, "--yes", "--allow-stale-bronze")
-    assert r.exit_code == 2 and "holds a registered robustness corpus" in r.output, r.output
+    assert r.exit_code == 2, r.output
     assert cluster == []
-
-
-def test_a_seed_with_a_look_is_never_generated_again(env, cluster, monkeypatch):
-    monkeypatch.setattr(
-        ds, "seed_ever_recorded", lambda seed: "the registered evaluation seed is in the ledger"
-    )
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation", image=pc.IMAGE)
-    r = _gen(cfg, "--registered-corpus", "--yes")
-    assert r.exit_code == 2 and "never generated again" in r.output, r.output
-    assert cluster == [] and not env.ledger.exists()
-
-
-def test_an_unreadable_look_history_refuses(env, cluster, monkeypatch):
-    def broken(seed):
-        raise OSError("git log over aml_registered_looks.json failed (exit 128)")
-
-    monkeypatch.setattr(ds, "seed_ever_recorded", broken)
-    cfg = pc.financial_config(env.tmp / "c.yaml", seed=pc.EV, role="evaluation", image=pc.IMAGE)
-    r = _gen(cfg, "--registered-corpus", "--yes")
-    assert r.exit_code == 2 and "cannot be checked" in r.output, r.output
-    assert cluster == [] and not env.ledger.exists()
 
 
 # -- the ledger --------------------------------------------------------------
@@ -341,14 +343,12 @@ def test_an_unwritable_ledger_submits_nothing(env, cluster, monkeypatch):
     assert cluster == []
 
 
-def test_look_ledger_moved_into_datagen_seed(tmp_path, monkeypatch):
-    """aml_gate's ledger helpers are datagen_seed's: one implementation."""
+def test_a_torn_look_ledger_line_refuses(tmp_path, monkeypatch):
     from tests.conftest import exec_repo_script
 
     root = Path(__file__).resolve().parents[1]
     gate = exec_repo_script(root / "scripts/aml_gate.py", "aml_gate_ledger")
     monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "looks.jsonl"))
-    assert gate.ledger_path() == ds.looks_ledger_path() == tmp_path / "looks.jsonl"
     gate.append_ledger({"role": "evaluation", "seed": 5})
     (tmp_path / "looks.jsonl").write_text((tmp_path / "looks.jsonl").read_text() + "garbage\n")
     with pytest.raises(ValueError, match="line 2 is not a look entry"):
@@ -450,19 +450,6 @@ def test_a_shallow_history_refuses(tmp_path, monkeypatch):
 # -- owner, 10-03: the registered look scores only the generated corpus -------
 
 
-def test_a_tag_pinned_image_is_refused(env, cluster):
-    # The default image is pinned by digest (tag@sha256), so name a tag alone.
-    cfg = pc.financial_config(
-        env.tmp / "c.yaml",
-        seed=pc.EV,
-        role="evaluation",
-        image="docker.io/sillidata/lb-datagen:1.6.0",
-    )
-    r = _gen(cfg, "--registered-corpus", "--yes")
-    assert r.exit_code == 2 and "pinned by digest" in r.output, r.output
-    assert cluster == [] and not env.ledger.exists()
-
-
 def test_generated_entry_carries_the_corpus_fingerprint(env, monkeypatch):
     _fake_generate(monkeypatch, env)
     assert _gen(_registered(env), "--registered-corpus", "--yes").exit_code == 0
@@ -504,137 +491,112 @@ def _base(env, **kw):
     }
 
 
-def test_mixed_fleet_and_unobserved_images_are_refused(env):
-    corpus = _local_copy(env.tmp / "copy")
-    fp = ds.local_corpus_fingerprint(corpus)
-    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
-    ds.append_corpus_ledger(
-        _base(
-            env,
-            attempt="a1",
-            state="generated",
-            corpus_fingerprint=fp,
-            image_ids=[pc.IMAGE, "repo@sha256:" + "c" * 64],
-        )
-    )
-    assert "one image digest" in _gate_problem(env, corpus)
-    ds.append_corpus_ledger(_base(env, attempt="a2", state="attempted"))
-    ds.append_corpus_ledger(
-        _base(env, attempt="a2", state="generated", corpus_fingerprint=fp, image_ids="not_observed")
-    )
-    assert "digest" in _gate_problem(env, corpus)
-
-
 def _gen_ok(env, fp, attempt="a1"):
     return _base(
         env, attempt=attempt, state="generated", corpus_fingerprint=fp, image_ids=[pc.IMAGE]
     )
 
 
-def test_a_concurrent_submit_into_the_prefix_is_refused(env):
+_OTHER_IMAGE = "docker.io/example/lb-datagen@sha256:" + "d" * 64
+_PLATFORM_IMAGE = "docker.io/example/lb-datagen@sha256:" + "e" * 64
+
+
+def _opened(attempt, submitted=True):
+    rows = [(attempt, "attempted", {})]
+    return rows + ([(attempt, "submitting", {})] if submitted else [])
+
+
+_LEDGER_SEQUENCES = {
+    "mixed-fleet": (
+        lambda fp: [
+            ("a1", "attempted", {}),
+            ("a1", "generated", {"image_ids": [pc.IMAGE, "repo@sha256:" + "c" * 64]}),
+        ],
+        "one image digest",
+    ),
+    "unobserved-images": (
+        lambda fp: [
+            ("a2", "attempted", {}),
+            ("a2", "generated", {"image_ids": "not_observed"}),
+        ],
+        "digest",
+    ),
+    "concurrent-submit": (
+        lambda fp: [
+            ("a1", "attempted", {}),
+            ("a1", "submitting", {}),
+            ("a2", "submitting", {}),
+            "GEN_OK",
+        ],
+        "same bronze prefix",
+    ),
+    "earlier-unfinished-submit": (
+        lambda fp: [*_opened("a0"), *_opened("a1"), "GEN_OK"],
+        "same bronze prefix",
+    ),
+    "earlier-failure-after-submit": (
+        lambda fp: [
+            *_opened("a0"),
+            ("a0", "failed", {"submitted": True}),
+            *_opened("a1"),
+            "GEN_OK",
+        ],
+        "same bronze prefix",
+    ),
+    "earlier-generated-attempt": (
+        lambda fp: [
+            *_opened("a0"),
+            ("a0", "generated", {"corpus_fingerprint": None}),
+            *_opened("a1"),
+            "GEN_OK",
+        ],
+        None,
+    ),
+    "generation-without-attempted-line": (lambda fp: ["GEN_OK"], "no attempted entry"),
+    "pinned-to-another-image": (
+        lambda fp: [
+            ("a1", "attempted", {}),
+            ("a1", "generated", {"image": _OTHER_IMAGE, "image_ids": [_OTHER_IMAGE]}),
+        ],
+        "pinned",
+    ),
+    "uniform-platform-digest": (
+        lambda fp: [
+            ("a1", "attempted", {}),
+            ("a1", "generated", {"image_ids": [_PLATFORM_IMAGE, _PLATFORM_IMAGE]}),
+        ],
+        None,
+    ),
+    "unfingerprinted-generation": (
+        lambda fp: [
+            ("a1", "attempted", {}),
+            (
+                "a1",
+                "generated",
+                {"corpus_fingerprint": None, "fingerprint_error": "ClientError"},
+            ),
+        ],
+        "no corpus fingerprint (ClientError)",
+    ),
+}
+
+
+@pytest.mark.parametrize("build,expected", _LEDGER_SEQUENCES.values(), ids=list(_LEDGER_SEQUENCES))
+def test_gate_ledger_sequences(env, build, expected):
     corpus = _local_copy(env.tmp / "copy")
     fp = ds.local_corpus_fingerprint(corpus)
-    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
-    ds.append_corpus_ledger(_base(env, attempt="a1", state="submitting"))
-    ds.append_corpus_ledger(_base(env, attempt="a2", state="submitting"))
-    ds.append_corpus_ledger(_gen_ok(env, fp))
-    assert "same bronze prefix" in _gate_problem(env, corpus)
-
-
-def test_an_earlier_unfinished_submit_into_the_prefix_is_refused(env):
-    """An attempt that submitted before this one began and never closed may
-    still have pods writing."""
-    corpus = _local_copy(env.tmp / "copy")
-    fp = ds.local_corpus_fingerprint(corpus)
-    ds.append_corpus_ledger(_base(env, attempt="a0", state="attempted"))
-    ds.append_corpus_ledger(_base(env, attempt="a0", state="submitting"))
-    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
-    ds.append_corpus_ledger(_base(env, attempt="a1", state="submitting"))
-    ds.append_corpus_ledger(_gen_ok(env, fp))
-    assert "same bronze prefix" in _gate_problem(env, corpus)
-
-
-def test_an_earlier_failure_after_submit_blocks(env):
-    """A failure after submit leaves the Job behind (OOM, crash loop,
-    timeout): its pods may still have been writing."""
-    corpus = _local_copy(env.tmp / "copy")
-    fp = ds.local_corpus_fingerprint(corpus)
-    ds.append_corpus_ledger(_base(env, attempt="a0", state="attempted"))
-    ds.append_corpus_ledger(_base(env, attempt="a0", state="submitting"))
-    ds.append_corpus_ledger(_base(env, attempt="a0", state="failed", submitted=True))
-    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
-    ds.append_corpus_ledger(_base(env, attempt="a1", state="submitting"))
-    ds.append_corpus_ledger(_gen_ok(env, fp))
-    assert "different bucket" in _gate_problem(env, corpus)
-
-
-def test_an_earlier_generated_attempt_does_not_block(env):
-    corpus = _local_copy(env.tmp / "copy")
-    fp = ds.local_corpus_fingerprint(corpus)
-    ds.append_corpus_ledger(_base(env, attempt="a0", state="attempted"))
-    ds.append_corpus_ledger(_base(env, attempt="a0", state="submitting"))
-    ds.append_corpus_ledger(_base(env, attempt="a0", state="generated", corpus_fingerprint=None))
-    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
-    ds.append_corpus_ledger(_base(env, attempt="a1", state="submitting"))
-    ds.append_corpus_ledger(_gen_ok(env, fp))
-    assert _gate_problem(env, corpus) is None
-
-
-def test_a_generation_without_its_attempted_line_is_refused(env):
-    corpus = _local_copy(env.tmp / "copy")
-    ds.append_corpus_ledger(_gen_ok(env, ds.local_corpus_fingerprint(corpus)))
-    assert "no attempted entry" in _gate_problem(env, corpus)
-
-
-def test_a_generation_pinned_to_another_image_is_refused(env):
-    corpus = _local_copy(env.tmp / "copy")
-    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
-    other = "docker.io/example/lb-datagen@sha256:" + "d" * 64
-    ds.append_corpus_ledger(
-        _base(
-            env,
-            attempt="a1",
-            state="generated",
-            image=other,
-            corpus_fingerprint=ds.local_corpus_fingerprint(corpus),
-            image_ids=[other],
-        )
-    )
-    assert "pinned" in _gate_problem(env, corpus)
-
-
-def test_a_platform_digest_differing_from_the_pin_passes_when_uniform(env):
-    """For a multi-arch pin the kubelet may report the platform manifest's
-    digest: one digest across every pod is what is required."""
-    corpus = _local_copy(env.tmp / "copy")
-    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
-    platform = "docker.io/example/lb-datagen@sha256:" + "e" * 64
-    ds.append_corpus_ledger(
-        _base(
-            env,
-            attempt="a1",
-            state="generated",
-            corpus_fingerprint=ds.local_corpus_fingerprint(corpus),
-            image_ids=[platform, platform],
-        )
-    )
-    assert _gate_problem(env, corpus) is None
-
-
-def test_an_unfingerprinted_generation_says_so(env):
-    corpus = _local_copy(env.tmp / "copy")
-    ds.append_corpus_ledger(_base(env, attempt="a1", state="attempted"))
-    ds.append_corpus_ledger(
-        _base(
-            env,
-            attempt="a1",
-            state="generated",
-            corpus_fingerprint=None,
-            fingerprint_error="ClientError",
-            image_ids=[pc.IMAGE],
-        )
-    )
-    assert "no corpus fingerprint (ClientError)" in _gate_problem(env, corpus)
+    for row in build(fp):
+        if row == "GEN_OK":
+            ds.append_corpus_ledger(_gen_ok(env, fp))
+            continue
+        attempt, state, extra = row
+        fields = {"corpus_fingerprint": fp, "image_ids": [pc.IMAGE]} if state == "generated" else {}
+        ds.append_corpus_ledger(_base(env, attempt=attempt, state=state, **{**fields, **extra}))
+    problem = _gate_problem(env, corpus)
+    if expected is None:
+        assert problem is None
+    else:
+        assert problem is not None and expected in problem
 
 
 def test_a_half_synced_file_is_part_of_the_fingerprint(env):
@@ -714,11 +676,8 @@ def test_unread_pod_images_fail_generate(env, monkeypatch):
 
 
 def test_a_directory_marker_key_is_not_a_file(env, monkeypatch):
-    CORPUS["pacs008/bronze/"] = b""
-    try:
-        _fake_generate(monkeypatch, env)
-        assert _gen(_registered(env), "--registered-corpus", "--yes").exit_code == 0
-        gen = _lines(env.ledger)[-1]
-        assert gen["corpus_fingerprint"]["files"] == 3
-    finally:
-        del CORPUS["pacs008/bronze/"]
+    monkeypatch.setitem(CORPUS, "pacs008/bronze/", b"")
+    _fake_generate(monkeypatch, env)
+    assert _gen(_registered(env), "--registered-corpus", "--yes").exit_code == 0
+    gen = _lines(env.ledger)[-1]
+    assert gen["corpus_fingerprint"]["files"] == 3

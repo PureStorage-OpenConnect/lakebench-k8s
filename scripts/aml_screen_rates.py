@@ -2,9 +2,10 @@
 """W5/W6 screening: non-planted alerts per customer, by scale.
 
 The screening rules W5 (sanctions) and W6 (PEP counterparty) match names
-from fixed pools against a watchlist that grows with the population, so
-their non-planted alerts per customer grow with scale. This script measures
-that from stored run records only (never a bucket or a cluster) and writes
+against a watchlist that grows with the population; the generator grows its
+name pools with the population too, so their non-planted alerts per customer
+should stay flat across scale. This script measures that from stored run
+records only (never a bucket or a cluster) and writes
 the published figure ``docs/benchmarks/data/aml_screening_rates.json``.
 
 For each AML batch record given it reads

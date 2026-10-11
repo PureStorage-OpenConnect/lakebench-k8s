@@ -1,7 +1,7 @@
 """One source of metric metadata: unit, direction, band, modes, workloads
 and Lakebench caps a metric depends on.
 
-Readers: ``lakebench reproduce`` (``reproduce_class``), the HTML
+Readers: the HTML
 report's "higher is better" hints (``direction_hint``), and the collector's
 ``score_descriptions``. Still outside it: the QpH query-set check and
 its "capped" rendering. A score emitted
@@ -9,8 +9,8 @@ with no entry fails ``tests/test_metric_registry.py``.
 
 ``band`` decides who uses a metric:
 
-- ``performance``: a rate or a time; feeds deltas and reproduce tolerance.
-- ``correctness``: exact in reproduce (``scale_ratio``, best at 1.0).
+- ``performance``: a rate or a time; feeds deltas.
+- ``correctness``: exact (``scale_ratio``, best at 1.0).
 - ``guard``: a range the run must sit in (``ingest_ratio``).
 - ``diagnostic``, ``config_bound``, ``label`` and ``result``: shown, never
   directional. ``config_bound`` follows a configured value (a continuous
@@ -34,8 +34,7 @@ seconds are the window length; continuous core-hours scale with it): they
 have one entry per mode, and ``lookup`` takes the run's mode. ``lookup``
 refuses ``mode=None`` for a key whose unit, direction or band differs by
 mode (``ModeRequired``), and answers it with every mode's caps when only the
-caps differ; reproduce, which reads numbers without a
-mode, uses ``reproduce_class``.
+caps differ.
 
 History of band and direction changes to published metrics (to be named in
 UPGRADING-1.7.md):
@@ -53,8 +52,7 @@ UPGRADING-1.7.md):
   ``storage_reclaimed_mb``, and in a continuous run ``total_core_hours`` and
   ``total_elapsed_seconds``. ``compaction_ratio`` is higher (was lower) and
   diagnostic; ``ingest_ratio`` is a guard, best inside [0.95, 1.05] (was
-  higher). The reproduce classification of every metric it
-  extracts is unchanged.
+  higher).
 """
 
 from __future__ import annotations
@@ -77,6 +75,8 @@ UNITS = frozenset(
         "ms",
         "rows/s",
         "rows",
+        # Pace: seconds per million rows.
+        "s/M rows",
         "GB/s",
         "GB",
         "MB",
@@ -153,8 +153,8 @@ class MetricMeta:
     #: ``ml_loop`` metrics are assessed only between equal loop groups.
     group: Literal["pipeline", "ml_loop"] = "pipeline"
     #: ``scores``: emitted under ``pipeline_benchmark.scores`` (and listed in
-    #: ``score_descriptions``); ``derived``: computed by reproduce or the perf
-    #: gate from elsewhere in the record; ``ml_loop``: in the record's
+    #: ``score_descriptions``); ``derived``: computed from elsewhere in the
+    #: record; ``ml_loop``: in the record's
     #: ``ml_loop`` block.
     source: Literal["scores", "derived", "ml_loop"] = "scores"
     #: A median over in-stream rounds: when the rounds executed different
@@ -178,7 +178,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _BATCH,
         _ALL_WL,
         _PIPELINE_CAPS,
-        description="Total CPU core-hours of requested compute (executor_count x cores x elapsed / 3600). Uses per-job profile cores from K8s manifest, not the global executor.cores config value",
+        description="Core-hours of requested Spark executor compute: executor_count x cores x stage seconds / 3600, summed over the bronze, silver and gold jobs. Requested, not used; drivers, datagen, the query engine and maintenance are not counted",
     ),
     MetricMeta(
         "total_core_hours",
@@ -188,7 +188,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         _STREAM_CAPS,
-        description="Total CPU core-hours of requested compute (executor_count x cores x elapsed / 3600). Uses per-job profile cores from K8s manifest, not the global executor.cores config value",
+        description="Core-hours of requested Spark executor compute for the streams: executor_count x cores x window seconds / 3600. Follows the configured window, so not a performance figure; drivers, datagen, the query engine and maintenance are not counted",
     ),
     MetricMeta(
         "compute_efficiency_gb_per_core_hour",
@@ -198,7 +198,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _BATCH,
         _ALL_WL,
         _PIPELINE_CAPS,
-        description="GB processed per core-hour of requested compute (higher is better)",
+        description="total_data_processed_gb per total_core_hours (GiB per requested executor core-hour; higher is better)",
     ),
     MetricMeta(
         "compute_efficiency_gb_per_core_hour",
@@ -208,7 +208,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         _INTAKE_CAPS,
-        description="GB processed per core-hour of requested compute (higher is better)",
+        description="total_data_processed_gb per total_core_hours (GiB per requested executor core-hour; higher is better)",
     ),
     MetricMeta(
         "total_data_processed_gb",
@@ -218,7 +218,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _BOTH,
         _ALL_WL,
         (),
-        description="Sum of input data across all pipeline stages in GB",
+        description="Sum of the stages' input bytes in GiB. Batch: what each job reported reading (bronze the raw files, silver the bronze input, gold silver's current snapshot); a stage that reported none adds nothing. Continuous: bronze and silver window rows x datagen's raw bytes per row; gold's re-reads of silver are not counted. Never a bucket listing",
     ),
     MetricMeta(
         "pipeline_throughput_gb_per_second",
@@ -228,7 +228,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _BATCH,
         _ALL_WL,
         _PIPELINE_CAPS,
-        description="Total data / wall-clock time in GB/s (higher is better)",
+        description="total_data_processed_gb / time_to_value_seconds, in GiB/s (higher is better)",
     ),
     MetricMeta(
         "pipeline_throughput_gb_per_second",
@@ -238,7 +238,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         _INTAKE_CAPS,
-        description="Total data / wall-clock time in GB/s (higher is better)",
+        description="total_data_processed_gb / window seconds, in GiB/s (higher is better)",
     ),
     MetricMeta(
         "total_elapsed_seconds",
@@ -248,7 +248,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _BATCH,
         _ALL_WL,
         _PIPELINE_CAPS,
-        description="Wall-clock seconds from pipeline start to final stage completion",
+        description="The run's wall clock, start to end: datagen, the stages and the gaps between them, maintenance and the benchmark. time_to_value_seconds is the pipeline's own time",
     ),
     MetricMeta(
         "total_elapsed_seconds",
@@ -258,7 +258,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         (),
-        description="Wall-clock seconds from pipeline start to final stage completion",
+        description="The run's wall clock, start to end: datagen, the stages and the gaps between them, maintenance and the benchmark. time_to_value_seconds is the pipeline's own time",
     ),
     MetricMeta(
         "composite_qph",
@@ -279,7 +279,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _ALL_WL,
         _AML_CAPS,
         blended_by_rounds=True,
-        description="Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
+        description="Queries per Hour -- median of the in-stream rounds with a QpH, or the single post-stream benchmark (higher is better). AML: over the rounds that ran the fixed full query set only (composite_qph_basis.composite_set); the smaller set's rounds are in composite_qph_by_set",
     ),
     MetricMeta(
         "composite_qph_rounds",
@@ -289,7 +289,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         (),
-        description="Continuous. In-stream benchmark rounds whose median is composite_qph (rounds with a QpH); 0 means composite_qph is the single post-stream benchmark. Runs with different counts are not like-for-like",
+        description="Continuous. In-stream benchmark rounds whose median is composite_qph (rounds with a QpH; AML: those that ran the fixed full set); 0 means composite_qph is the single post-stream benchmark. Runs with different counts are not like-for-like",
     ),
     MetricMeta(
         "composite_qph_basis",
@@ -299,7 +299,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         (),
-        description="Continuous. Whether composite_qph blends in-stream rounds that executed different query sets (blended), and the rounds per executed query set id (sets); 'not_recorded' for rounds that did not record their executed set",
+        description="Continuous. Whether composite_qph blends in-stream rounds that executed different query sets (blended), the rounds per executed query set id (sets), and the one set it is over when the rounds ran the AML fixed full set beside a smaller one (composite_set); 'not_recorded' for rounds that did not record their executed set",
     ),
     MetricMeta(
         "composite_qph_by_set",
@@ -319,7 +319,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         (*_STREAM_CAPS, *_AML_CAPS),
-        description="Primary freshness score. Worst-case gold table staleness during the streaming window in seconds (lower is better)",
+        description="Primary freshness score. The largest gold freshness sampled at a refresh inside the window, in seconds (lower is better). Sampled when a refresh completes, the freshest point of its cycle: readers see data up to one refresh interval older (limits.trigger_bound)",
     ),
     MetricMeta(
         "sustained_throughput_rps",
@@ -380,7 +380,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _ALL_WL,
         (),
         guard_range=(0.95, 1.05),
-        description="Bronze rows ingested by the window's end / rows the trickle had released to bronze by then (released_rows: max_files_per_trigger files per bronze trigger since bronze's first write, at the corpus's mean rows per file, capped at the corpus). 1.0 = bronze kept up with what arrived. Falls back to corpus_ingest_ratio when released_rows is unknown",
+        description="An estimate: bronze rows ingested by the window's end / released_rows, itself a mean-rate estimate (the trickle: max_files_per_trigger files per bronze trigger since bronze's first write, at the corpus's mean rows per file, capped at the corpus; the run's continuous datagen: the rows it had written one bronze trigger before the window's end, at its mean rate). 1.0 = bronze kept up with what arrived; a little above 1 is the estimate's error, not extra rows. Falls back to corpus_ingest_ratio when released_rows is unknown",
     ),
     MetricMeta(
         "corpus_ingest_ratio",
@@ -400,7 +400,47 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         (),
-        description="Rows the trickle had made available to bronze by the window's end (ingest_ratio's denominator); null when the corpus file count or window is unknown",
+        description="Rows available to bronze by the window's end (ingest_ratio's denominator): with the trickle, the files it had released; with the run's continuous datagen, the rows datagen had written one bronze trigger before the window's end, at its mean rate. Null when unknown",
+    ),
+    MetricMeta(
+        "backlog_rows",
+        "rows",
+        "none",
+        "diagnostic",
+        _CONT,
+        _ALL_WL,
+        (),
+        description="Rows the run's continuous datagen wrote by the window's end that bronze had not taken. datagen_ahead is true when bronze is under 0.95 of released_rows; then, with intake_limit bronze_capacity, the paces are the pipeline's capacity",
+    ),
+    MetricMeta(
+        "datagen_ahead",
+        "bool",
+        "none",
+        "label",
+        _CONT,
+        _ALL_WL,
+        (),
+        description="True when the run's continuous datagen left a backlog at the window's end (bronze under 0.95 of released_rows); False when bronze took about every row datagen wrote, so the paces are datagen's rate, not the pipeline's capacity",
+    ),
+    MetricMeta(
+        "pace_seconds_per_million_rows",
+        "s/M rows",
+        "lower",
+        "performance",
+        _CONT,
+        _ALL_WL,
+        _INTAKE_CAPS,
+        description="End-to-end pace: window seconds per million rows silver took in inside the window, a batch straddling the window's start or end counted by the share of its run time inside it; lower is better. A capacity only when datagen_ahead is true and intake_limit is bronze_capacity; gold's lag behind silver is data_freshness_seconds",
+    ),
+    MetricMeta(
+        "bronze_pace_seconds_per_million_rows",
+        "s/M rows",
+        "lower",
+        "performance",
+        _CONT,
+        _ALL_WL,
+        _INTAKE_CAPS,
+        description="Bronze pace: window seconds per million rows bronze ingested inside the window, lower is better. A capacity only when datagen_ahead is true and intake_limit is bronze_capacity",
     ),
     MetricMeta(
         "stage_latency_profile",
@@ -451,7 +491,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         (),
-        description="Share of the window bronze spent inside micro-batches (batches x mean batch time / window)",
+        description="Share of the window bronze spent inside micro-batches (batches x median batch time / window, at most 1)",
     ),
     MetricMeta(
         "time_to_detect_seconds",
@@ -531,7 +571,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         (),
-        description="Rows taken in across all streaming stages inside the measurement window (gold re-reads of silver included)",
+        description="Rows taken in across all streaming stages inside the measurement window, summed: gold re-reads all of silver each cycle, so this counts silver rows many times and is not distinct rows. The distinct volume is bronze's and silver's window rows",
     ),
     MetricMeta(
         "total_s3_objects",
@@ -551,7 +591,8 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _CONT,
         _ALL_WL,
         (),
-        description="Diagnostic, not freshness. Median age of the newest event date in gold at benchmark query time (query time minus MAX(interaction_date), day resolution). It tracks where the corpus's event timestamps sit, not how stale gold is; data_freshness_seconds is the freshness score. Replaces query_time_freshness_seconds, which carried this figure under a freshness name",
+        source="derived",
+        description="Diagnostic, not freshness, and not in the scorecard (pipeline_benchmark.diagnostics). Median age of the newest event date in gold at benchmark query time (query time minus MAX(interaction_date), day resolution). It tracks where the corpus's event timestamps sit, not how stale gold is; data_freshness_seconds is the freshness score. Replaces query_time_freshness_seconds, which carried this figure under a freshness name",
     ),
     MetricMeta(
         "in_stream_composite_qph",
@@ -562,7 +603,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _ALL_WL,
         _AML_CAPS,
         blended_by_rounds=True,
-        description="Median QpH from in-stream benchmark rounds",
+        description="Median QpH from in-stream benchmark rounds with a QpH (AML: the fixed full query set's rounds)",
     ),
     MetricMeta(
         "benchmark_rounds_count",
@@ -696,7 +737,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         _BOTH,
         _ALL_WL,
         (),
-        description="Maintenance time as percentage of total pipeline time",
+        description="Maintenance seconds as a percentage of pipeline plus maintenance time (batch: time_to_value_seconds + maintenance; continuous: the run's wall clock)",
     ),
     MetricMeta(
         "pre_compaction_file_count",
@@ -879,39 +920,6 @@ _ENTRIES: tuple[MetricMeta, ...] = (
         source="derived",
         description="Physical over logical table bytes at run end (storage_multiple.total.multiple): a condition of the maintenance policy, not a system score",
     ),
-    MetricMeta(
-        "datagen_cpu_hr_per_tb",
-        "cpu-h/TB",
-        "lower",
-        "performance",
-        _BOTH,
-        _ALL_WL,
-        (),
-        source="derived",
-        description="Datagen CPU-hours per TB written (fleet aggregate)",
-    ),
-    MetricMeta(
-        "datagen_aggregate_mbps",
-        "MB/s",
-        "higher",
-        "performance",
-        _BOTH,
-        _ALL_WL,
-        (),
-        source="derived",
-        description="Datagen fleet write throughput in MB/s",
-    ),
-    MetricMeta(
-        "datagen_mbps_per_pod",
-        "MB/s",
-        "higher",
-        "performance",
-        _BOTH,
-        _ALL_WL,
-        (),
-        source="derived",
-        description="Datagen write throughput per pod in MB/s",
-    ),
 )
 
 #: Renamed keys a stored record may carry, to the key they became.
@@ -1027,7 +1035,7 @@ _BY_ID = _by_id(_ENTRIES)
 def _merged(entries: tuple[MetricMeta, ...]) -> MetricMeta:
     """The first (batch) entry of a mode-split key with every entry's modes,
     caps and ``blended_by_rounds``: ``lookup(key, None)`` when the entries agree on unit,
-    direction and band, and ``reproduce_class`` always."""
+    direction and band, and ``capped_by`` without a mode always."""
     first = entries[0]
     if len(entries) == 1:
         return first
@@ -1159,8 +1167,8 @@ def descriptions() -> dict[str, str]:
 
 
 def _mode_free(key: str) -> MetricMeta | None:
-    """The batch entry with every mode's caps (``_merged``); reproduce
-    reads stored numbers without a mode."""
+    """The batch entry with every mode's caps (``_merged``), for a reader
+    of stored numbers without a mode."""
     key = ALIASES.get(key, key)
     if key in _BY_ID:
         return _merged(_BY_ID[key])
@@ -1168,24 +1176,6 @@ def _mode_free(key: str) -> MetricMeta | None:
         if pattern.match(key):
             return replace(_merged(metas), id=key)
     return None
-
-
-def reproduce_class(key: str) -> tuple[str, str]:
-    """``(band, direction)`` in the vocabulary reproduce
-    uses: band ``correctness`` (the registry's correctness and guard bands)
-    or ``performance`` (every other band); direction ``higher`` or
-    ``lower`` for a directional metric, else ``exact`` (either way of
-    drift counts). Mode-free, as those callers are. A key the registry does
-    not know keeps the rule those callers had: a ``*_seconds`` key is lower
-    is better, anything else exact."""
-    meta = _mode_free(key)
-    if meta is None:
-        if key.endswith("_seconds"):
-            return ("performance", "lower")
-        return ("performance", "exact")
-    if meta.band in ("correctness", "guard"):
-        return ("correctness", "exact")
-    return ("performance", meta.direction if meta.directional else "exact")
 
 
 def _check(entries: Iterable[MetricMeta]) -> None:

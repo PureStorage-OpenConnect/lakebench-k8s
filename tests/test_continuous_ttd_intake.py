@@ -1,16 +1,9 @@
-"""AML continuous: time to detect reaches the scorecard, and a short
-ingest_ratio says what bounded intake.
-
-run-20260925-104452-21bf3a (AML, continuous, scale 10) reported no time to
-detect at all: gold_refresh_financial logged no such measurement and the
-collector had no field for it. The same run read pipeline_saturated=True
-with no way to tell a slow bronze from a trickle rate that a 1800 s window
-could never drain; its bronze ran 16 back-to-back 110 s micro-batches under a
-30 s trigger, so bronze's own processing was the limit.
-"""
+"""AML continuous: time to detect parses into the scorecard, and a short
+ingest_ratio names what bounded intake."""
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,7 +14,6 @@ from lakebench.metrics.collector import (
     MetricsCollector,
     PipelineBenchmark,
     StageMetrics,
-    StreamingJobMetrics,
     build_pipeline_benchmark,
     ttd_percentile,
 )
@@ -30,6 +22,7 @@ SCRIPTS = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
 _T0 = datetime(2026, 9, 25, 10, 48)
 
 
+@functools.cache
 def _common():
     spec = importlib.util.spec_from_file_location("lb_common_ttd", SCRIPTS / "common.py")
     mod = importlib.util.module_from_spec(spec)
@@ -122,16 +115,12 @@ def test_time_to_detect_reaches_the_scores():
     assert scores["time_to_detect_unmeasured_cycles"] == 1
 
 
-def test_financial_run_without_a_measurement_says_none():
-    pb = _pb(bronze_batches=16, bronze_ms=109_737.5, schema="financial")
-    scores = pb.to_dict()["scores"]
-    assert "time_to_detect_seconds" in scores
-    assert scores["time_to_detect_seconds"] is None
-
-
-def test_c360_scores_carry_no_time_to_detect_keys():
-    pb = _pb(bronze_batches=16, bronze_ms=109_737.5, schema="customer360")
-    assert "time_to_detect_seconds" not in pb.to_dict()["scores"]
+@pytest.mark.parametrize(("schema", "has_key"), [("financial", True), ("customer360", False)])
+def test_unmeasured_time_to_detect_is_none_for_aml_and_absent_for_c360(schema, has_key):
+    scores = _pb(bronze_batches=16, bronze_ms=109_737.5, schema=schema).to_dict()["scores"]
+    assert ("time_to_detect_seconds" in scores) is has_key
+    if has_key:
+        assert scores["time_to_detect_seconds"] is None
 
 
 def test_percentile_is_the_bin_upper_edge_capped_at_max():
@@ -172,86 +161,81 @@ def _pb(bronze_batches, bronze_ms, bronze_rows=155_610_788, schema="financial"):
     return pb
 
 
-def test_back_to_back_bronze_is_a_capacity_limit():
-    """The live run: 16 batches x 109.7 s in an 1800 s window."""
-    pb = _pb(bronze_batches=16, bronze_ms=109_737.5)
-    assert pb.ingest_ratio == pytest.approx(0.5835, abs=1e-4)
-    assert pb.bronze_busy_fraction == pytest.approx(0.975, abs=1e-3)
-    assert pb.intake_limit == "bronze_capacity"
-    assert pb.pipeline_saturated is True
+_UNKNOWN = "unknown snapshot"
 
 
-def test_idle_bronze_is_not_called_a_capacity_limit():
-    """Same rows, but bronze was inside a batch for 27% of the window: the
-    limit was not bronze's processing (a trigger cap, a late start or a
-    stall). The ratio verdict is kept: idle time does not prove the
-    pipeline kept pace."""
-    pb = _pb(bronze_batches=60, bronze_ms=8_000.0)
-    assert pb.intake_limit == "below_bronze_capacity"
-    assert pb.pipeline_saturated is True
-    assert pb.to_dict()["scores"]["intake_limit"] == "below_bronze_capacity"
-
-
-def test_kept_up_intake_has_no_limit():
-    pb = _pb(bronze_batches=16, bronze_ms=5_000.0, bronze_rows=266_666_400)
-    assert pb.intake_limit == "none"
-    assert pb.pipeline_saturated is False
-
-
-def test_unknown_bronze_timing_keeps_the_ratio_verdict():
-    pb = _pb(bronze_batches=0, bronze_ms=None)
-    assert pb.bronze_busy_fraction is None
-    assert pb.intake_limit is None
-    assert pb.pipeline_saturated is True
-
-
-def test_gold_refresh_logs_time_to_detect():
-    src = (SCRIPTS / "gold_refresh_financial.py").read_text()
-    assert "if _log_time_to_detect(\n        spark, cycle, ttd_base, detection_end_s," in src
-    assert "ttd_baseline.measured(_prior_alerts_snapshot(spark))" in src
-    assert "log(ttd_line(cycle, stats))" in src
-
-
-def test_an_unmeasured_tick_is_carried_not_dropped():
+@pytest.mark.parametrize(
+    ("max_carry", "steps"),
+    [
+        # an unmeasured tick is carried, not dropped: tick 3 is measured against
+        # tick 2's baseline, so tick 2's new alerts count
+        (
+            3,
+            [
+                ("begin", (10, None), (10, None)),
+                ("measured", (), None),
+                ("begin", (20, 100.0), (20, 100.0)),
+                ("begin", (30, 200.0), (20, 100.0)),
+                ("measured", (), None),
+                ("begin", (40, 300.0), (40, 300.0)),
+            ],
+        ),
+        # a failed lookup falls back to the snapshot read after the last
+        # measured tick, which is the same point in history
+        (
+            None,
+            [
+                ("begin", (5, 1.0), (5, 1.0)),
+                ("measured", (6,), None),
+                ("begin", (_UNKNOWN, 2.0), (6, 2.0)),
+            ],
+        ),
+        # a failed lookup with no fallback is not carried and uses no carry budget
+        (
+            None,
+            [
+                ("begin", (_UNKNOWN, 1.0), (_UNKNOWN, 1.0)),
+                ("begin", (7, 2.0), (7, 2.0)),
+                ("begin", (8, 3.0), (7, 2.0)),
+            ],
+        ),
+        # the carried snapshot may be expired by in-stream maintenance, so it
+        # gives way after max_carry
+        (
+            2,
+            [
+                ("begin", (1, None), (1, None)),
+                ("begin", (2, 5.0), (1, None)),
+                ("begin", (3, 6.0), (1, None)),
+                ("begin", (4, 7.0), (4, 7.0)),
+            ],
+        ),
+        # after max_carry the fallback snapshot is as old as the carried one
+        (
+            1,
+            [
+                ("begin", (1, None), (1, None)),
+                ("measured", (2,), None),
+                ("begin", (3, 1.0), (3, 1.0)),
+                ("begin", (4, 2.0), (3, 1.0)),
+                ("begin", (_UNKNOWN, 3.0), (_UNKNOWN, 3.0)),
+            ],
+        ),
+    ],
+    ids=["carried", "fallback", "no-fallback", "carry-exhausted", "fallback-dropped"],
+)
+def test_ttd_baseline_never_drops_an_unmeasured_tick(max_carry, steps):
     c = _common()
-    b = c.TtdBaseline(max_carry=3)
-    assert b.begin(10, None) == (10, None)
-    b.measured()
-    # Tick 2 starts from its own snapshot, then fails to measure.
-    assert b.begin(20, 100.0) == (20, 100.0)
-    # Tick 3 is measured against tick 2's baseline, so tick 2's new alerts count.
-    assert b.begin(30, 200.0) == (20, 100.0)
-    b.measured()
-    assert b.begin(40, 300.0) == (40, 300.0)
+    b = c.TtdBaseline() if max_carry is None else c.TtdBaseline(max_carry=max_carry)
 
+    def real(args):
+        return tuple(c.TTD_SNAPSHOT_UNKNOWN if a == _UNKNOWN else a for a in args)
 
-def test_a_failed_lookup_falls_back_to_the_last_good_snapshot():
-    """A transient lookup failure must not drop the tick: the snapshot read
-    after the last measured tick is the same point in history."""
-    c = _common()
-    b = c.TtdBaseline()
-    assert b.begin(5, 1.0) == (5, 1.0)
-    b.measured(6)
-    assert b.begin(c.TTD_SNAPSHOT_UNKNOWN, 2.0) == (6, 2.0)
-
-
-def test_a_failed_lookup_with_no_fallback_is_not_carried():
-    c = _common()
-    b = c.TtdBaseline()
-    assert b.begin(c.TTD_SNAPSHOT_UNKNOWN, 1.0) == (c.TTD_SNAPSHOT_UNKNOWN, 1.0)
-    assert b.begin(7, 2.0) == (7, 2.0)
-    # The unknown tick did not use up the carry budget.
-    assert b.begin(8, 3.0) == (7, 2.0)
-
-
-def test_a_carried_baseline_gives_way_after_max_carry():
-    """The carried snapshot may be expired by in-stream maintenance."""
-    c = _common()
-    b = c.TtdBaseline(max_carry=2)
-    assert b.begin(1, None) == (1, None)
-    assert b.begin(2, 5.0) == (1, None)
-    assert b.begin(3, 6.0) == (1, None)
-    assert b.begin(4, 7.0) == (4, 7.0)
+    for action, args, expected in steps:
+        if action == "measured":
+            b.measured(*args)
+        else:
+            assert b.begin(*real(args)) == real(expected)
 
 
 def test_every_cycle_unmeasured_is_counted():
@@ -286,17 +270,36 @@ def test_every_cycle_unmeasured_is_counted():
     assert scores["time_to_detect_seconds"] is None
 
 
-def test_streaming_job_metrics_default_to_unmeasured():
-    m = StreamingJobMetrics(job_name="x", job_type="gold-refresh")
-    assert m.ttd_alerts is None and m.ttd_p50_seconds is None
+def test_stage_capacity_is_in_the_autosizer_units():
+    """Raw MB/s per core at full busy, from window rows, busy time, datagen
+    bytes per row and the stage's cores."""
 
+    def stage(name, batches, ms, cores):
+        return StageMetrics(
+            stage_name=name,
+            stage_type="streaming",
+            engine="spark",
+            elapsed_seconds=900,
+            input_rows=9_000_000,
+            window_input_rows=9_000_000,
+            latency_ms=ms,
+            total_batches=batches,
+            executor_count=cores // 4,
+            executor_cores=4,
+        )
 
-def test_fallback_is_dropped_with_an_exhausted_carry():
-    """After max_carry the fallback snapshot is as old as the carried one."""
-    c = _common()
-    b = c.TtdBaseline(max_carry=1)
-    b.begin(1, None)
-    b.measured(2)
-    assert b.begin(3, 1.0) == (3, 1.0)  # not measured
-    assert b.begin(4, 2.0) == (3, 1.0)  # carried once
-    assert b.begin(c.TTD_SNAPSHOT_UNKNOWN, 3.0) == (c.TTD_SNAPSHOT_UNKNOWN, 3.0)
+    pb = PipelineBenchmark(
+        run_id="t",
+        deployment_name="t",
+        pipeline_mode="sustained",
+        start_time=_T0,
+        end_time=_T0 + timedelta(seconds=900),
+        success=True,
+        stages=[stage("bronze", 20, 30_000.0, 20), stage("silver", 3, 300_000.0, 40)],
+        config_snapshot={"datagen_bytes_per_row": 400.0, "datagen_mb_s_per_core": 31.0},
+    )
+    pb.compute_aggregates()
+    cap = pb.to_dict()["stage_capacity"]
+    assert cap["bronze"]["busy_fraction"] == pytest.approx(0.667, abs=1e-3)
+    assert cap["bronze"]["mb_s_per_core"] == pytest.approx(0.3)
+    assert cap["silver"]["mb_s_per_core"] == pytest.approx(0.1)

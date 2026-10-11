@@ -1,4 +1,4 @@
-"""LB-229: a run record names a corpus seed in plaintext only when it is a
+"""A run record names a corpus seed in plaintext only when it is a
 public development seed (42, the AML calibration seed); any other seed is
 its salted reference, a held-out seed also by its role, and a seed that
 cannot be checked is withheld. TEST VALUES ONLY: the held-out record is the
@@ -7,7 +7,6 @@ test fixture (tests/fixtures/heldout_test.json)."""
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 import pytest
 
@@ -74,7 +73,7 @@ def test_unreadable_held_out_record_withholds(monkeypatch):
 
 def test_experiment_inputs_never_record_a_held_out_seed(tmp_path, held):
     from lakebench.config import LoadPurpose, load_config
-    from lakebench.metrics.experiment import experiment_inputs
+    from lakebench.metrics.experiment import _short_hash, experiment_inputs
 
     path = pc.financial_config(tmp_path / "c.yaml", seed=pc.EV, role="evaluation")
     cfg = load_config(path, purpose=LoadPurpose.INSPECT, print_notes=False)
@@ -82,9 +81,14 @@ def test_experiment_inputs_never_record_a_held_out_seed(tmp_path, held):
     _no_seed(json.dumps(inputs, default=str), pc.EV)
     corpus = inputs["corpus"]
     assert corpus["seed"]["role"] == "evaluation"
-    # The corpus id still hashes the seed: a record of this corpus keeps the id
-    # it had before the seed was hidden.
-    assert corpus["id"]
+    # The corpus id still hashes the plaintext seed and the declared
+    # overrides (both null here) that the record then drops.
+    plain = {k: v for k, v in corpus.items() if k != "id"} | {
+        "seed": pc.EV,
+        "unique_customers": None,
+        "date_range_days": None,
+    }
+    assert corpus["id"] == _short_hash(plain)
     record = {"experiment": {"workload": {"name": "financial"}, "corpus": corpus}}
     assert lg.protected_record_reason(record) == "corpus_role evaluation"
     del corpus["corpus_role"]
@@ -148,9 +152,15 @@ def test_an_old_sidecar_seed_is_recorded_by_the_rule(held):
     _no_seed(json.dumps(out), pc.EV)
 
 
-def test_report_shows_the_recorded_form_not_the_seed(held):
-    assert sr.seed_label(pc.EV).startswith("evaluation seed (ref ")
-    _no_seed(sr.seed_label(pc.EV), pc.EV)
-    # A record written before the rule kept the plaintext: the page does not.
-    legacy = SimpleNamespace(seed=pc.RB)
-    _no_seed(sr.seed_label(legacy.seed), pc.RB)
+@pytest.mark.parametrize(
+    ("seed", "prefix"),
+    [(pc.EV, "evaluation seed (ref "), (pc.RB, None)],
+    ids=["evaluation", "robustness"],
+)
+def test_a_raw_held_out_seed_reaches_the_report_as_its_form(held, seed, prefix):
+    """A record written before the rule kept the plaintext seed; the report
+    label for it must not."""
+    label = sr.seed_label(seed)
+    _no_seed(label, seed)
+    if prefix:
+        assert label.startswith(prefix)

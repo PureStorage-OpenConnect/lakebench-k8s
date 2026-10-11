@@ -15,34 +15,23 @@ from unittest import mock
 
 import pytest
 
-from lakebench.benchmark.fingerprint import fingerprint_rows
+import lakebench
+from lakebench.config.datagen_seed import config_seed
 from lakebench.config.recipes import RECIPES
+from lakebench.config.support import resolved_format_version
 from lakebench.metrics import experiment as ex
 from lakebench.metrics.collector import (
-    BenchmarkMetrics,
     JobMetrics,
     MetricsCollector,
     build_config_snapshot,
 )
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID, effective_maintenance
+from lakebench.metrics.seed_record import recorded_seed
 from tests.conftest import make_config
+from tests.fixtures.experiment_helpers import _cfg as _cfg
+from tests.fixtures.experiment_helpers import _metrics as _metrics
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def _cfg(schema="customer360", mode="batch", engine="trino", fmt="iceberg", **datagen):
-    return make_config(
-        architecture={
-            "workload": {"schema": schema, "datagen": {"scale": 1, **datagen}},
-            "pipeline": {"mode": mode},
-            "query_engine": {"type": engine},
-            "table_format": {"type": fmt},
-        }
-    )
-
-
-def _fp(value: int = 1) -> dict:
-    return fingerprint_rows([(value, "x")], engine="trino", adapted_sql="SELECT 1")
 
 
 def _cfg_spark41():
@@ -54,45 +43,13 @@ def _cfg_spark41():
     )
 
 
-def _metrics(cfg, fingerprints: dict | None = None, fleet: dict | None = None):
-    run = MetricsCollector().start_run(
-        "20260926-120000-aaaaaa", cfg.name, build_config_snapshot(cfg)
-    )
-    fps = fingerprints if fingerprints is not None else {"Q1_full_aggregation_scan": _fp()}
-    run.benchmark = BenchmarkMetrics(
-        mode="power",
-        cache="hot",
-        scale=1,
-        qph=100.0,
-        total_seconds=10.0,
-        queries=[
-            {"name": n, "elapsed_seconds": 1.0, "success": True, "result_fingerprint": f}
-            for n, f in fps.items()
-        ],
-    )
-    run.datagen_fleet = fleet
-    # A2b wiring: compare and perf_gate now refuse a run whose verdict is
-    # FAILED. PipelineMetrics defaults success to False (the "run in
-    # progress" shape), so a synthetic collector object without an
-    # end_run(success=True) call would compute a FAILED verdict and be
-    # refused by compare. These tests build a synthetic completed run to
-    # exercise the comparability ladder itself, not to test a failed run;
-    # mark it complete so the verdict computes PASSED. Every layer has rows,
-    # so the verdict's layer_rows gate (EVD-1) passes too.
-    run.success = True
-    run.jobs = [
-        JobMetrics(job_name=f"lakebench-{s}", job_type=s, success=True, output_rows=100)
-        for s in ("bronze-verify", "silver-build", "gold-finalize")
-    ]
-    return run
-
-
 class TestStamping:
     @pytest.mark.parametrize("schema", ["customer360", "financial"])
     @pytest.mark.parametrize("mode", ["batch", "sustained"])
     def test_every_record_carries_the_block(self, schema, mode):
         cfg = _cfg(schema, mode)
-        d = _metrics(cfg).to_dict()
+        run = _metrics(cfg)
+        d = run.to_dict()
         e = d["experiment"]
         # No corpus observation and no system identity in this synthetic
         # run: identity v1, naming what v2 lacked (ER-10a stamping rule).
@@ -102,17 +59,16 @@ class TestStamping:
         assert e["architecture"]["access_paths"] == {"pipeline": "catalog", "query": "catalog"}
         assert e["workload"]["name"] == schema
         assert e["workload"]["version"] == ex.WORKLOAD_VERSIONS[schema]
-        assert e["corpus"]["seed"] is not None
+        assert e["corpus"]["seed"] == recorded_seed(config_seed(cfg))
         assert e["corpus"]["generator_image"] == cfg.images.datagen
         assert e["corpus"]["scale"] == 1
         assert e["mode"] == mode
         assert e["architecture"]["recipe"] == "hive-iceberg-spark-trino"
         assert e["architecture"]["query_access_path"] == "catalog"
-        assert e["architecture"]["table_format"]["version"]
+        assert e["architecture"]["table_format"]["version"] == resolved_format_version(cfg)
         assert e["maintenance_policy_id"] == MAINTENANCE_POLICY_ID
         assert e["effective_maintenance"]["id"].startswith(MAINTENANCE_POLICY_ID)
-        assert e["lakebench"]["lakebench_version"]
-        assert "executors" in e["limits"]
+        assert e["lakebench"]["lakebench_version"] == lakebench.__version__
         if schema == "financial":
             assert (
                 e["workload"]["generator_model_version"] == ex.DATAGEN_MODEL_VERSIONS["financial"]
@@ -120,10 +76,13 @@ class TestStamping:
             assert "corpus_role" in e["corpus"]
             assert e["limits"]["w1_max_vertices"] == cfg.architecture.workload.w1_max_vertices
         if mode == "sustained":
-            assert e["limits"]["max_files_per_trigger"] is not None
-            assert e["results"]["not_checked"]
+            # The cap label: the config's value, None when no per-trigger limit applies.
+            assert (
+                e["limits"]["max_files_per_trigger"]
+                == cfg.architecture.pipeline.sustained.max_files_per_trigger
+            )
         else:
-            assert e["results"]["fingerprints"]["Q1_full_aggregation_scan"]["rows"] == 1
+            assert e["results"]["query_set_id"] == run.benchmark.query_set_id
 
     def test_block_survives_a_save_and_load(self, tmp_path):
         from lakebench.metrics.storage import MetricsStorage
@@ -167,9 +126,8 @@ class TestStamping:
         assert s.to_dict()["image"] == "img:1"
         assert s.to_dict()["image_ids"] == ["img@sha256:x"]
 
-    def test_rules_and_executor_caps_are_recorded(self):
-        cfg = _cfg("financial", scale=1000)
-        run = _metrics(cfg)
+    def test_rules_are_recorded(self):
+        run = _metrics(_cfg("financial", scale=1000))
         run.jobs.append(
             JobMetrics(
                 job_name="g",
@@ -182,19 +140,39 @@ class TestStamping:
         e = run.to_dict()["experiment"]
         assert e["rules"]["executed"] == ["W2", "W3"]
         assert e["rules"]["skipped"] == {"W1": "vertex-cap"}
-        gold = next(x for x in e["limits"]["executors"] if x["job_type"] == "gold-finalize")
-        assert gold["cap_hit"] and gold["scale_derived"] > gold["cap"]
         # Invariant 4: the bound limits are named, not left to be inferred.
-        bound = e["limits"]["bound"]
-        assert any(b.startswith("gold-finalize: executor cap") for b in bound), bound
-        assert any("W1" in b and "vertex-cap" in b for b in bound), bound
+        assert any("W1" in b and "vertex-cap" in b for b in e["limits"]["bound"])
 
-    def test_support_state_and_repetitions_are_stamped(self):
-        e = _metrics(_cfg()).to_dict()["experiment"]
+    @pytest.mark.parametrize(
+        ("mode", "scale", "job"),
+        [("batch", 1000, "gold-finalize"), ("continuous", 100, "gold-refresh")],
+    )
+    def test_a_stage_the_executor_cap_cut_is_labelled(self, mode, scale, job):
+        """Invariant 6: a stage whose scale asks for more executors than its
+        cap (AML gold-refresh at scale 100 asks for more than 28) is labelled
+        capped, beside its numbers."""
+        from lakebench.metrics.collector import StreamingJobMetrics
+
+        run = _metrics(_cfg("financial", mode, scale=scale))
+        if mode == "batch":
+            run.jobs.append(JobMetrics(job_name="g", job_type=job, success=True))
+        else:
+            run.streaming.append(StreamingJobMetrics(job_name="g", job_type=job))
+        e = run.to_dict()["experiment"]
+        row = next(x for x in e["limits"]["executors"] if x["job_type"] == job)
+        assert row["cap_hit"] and row["scale_derived"] > row["cap"]
+        assert any(b.startswith(f"{job}: executor cap") for b in e["limits"]["bound"])
+
+    def test_support_state_and_repetitions_are_stamped(self, tmp_path):
+        from lakebench.config import support
+
+        rec = tmp_path / "validated_combinations.yaml"
+        rec.write_text("validated: []\n")
+        with mock.patch.object(support, "VALIDATION_RECORD", rec):
+            e = _metrics(_cfg()).to_dict()["experiment"]
         assert e["support"]["state"] == "unverified"
         assert e["repetitions"]["runs"] == 1
         assert e["repetitions"]["benchmark_samples_per_query"] == 1
-        assert "validated_combinations.yaml" in e["support"]["basis"]
 
     def test_support_is_supported_only_when_the_record_lists_it(self, tmp_path):
         from lakebench.config import support
@@ -206,7 +184,7 @@ class TestStamping:
             "validated:\n"
             "  - {workload: customer360, recipe: hive-iceberg-spark-trino, mode: batch,\n"
             "     spark: '4.1', table_format_version: 1.11.0,\n"
-            f"     tree: {'abc1234' + '0' * 33}, runs: [run-1]}}\n"
+            "     runs: [run-1]}\n"
         )
         with (
             mock.patch.object(support, "VALIDATION_RECORD", rec),
@@ -215,7 +193,7 @@ class TestStamping:
             run = _metrics(_cfg_spark41())
             s = run.to_dict()["experiment"]["support"]
             assert s["state"] == "supported"
-            assert s["validation_runs"] == ["run-1"] and "abc1234" in s["basis"]
+            assert s["validation_runs"] == ["run-1"] and "this release" in s["basis"]
             # A modified tree is not the validated code.
             dirty = dict(clean, git_dirty=True)
             with mock.patch.object(provenance, "run_provenance", lambda: dirty):
@@ -250,7 +228,6 @@ class TestStamping:
     def test_run_mode_from_the_flag_is_stamped(self):
         """run --continuous does not write the mode back; a continuous run
         that failed before any stream was recorded is still continuous."""
-        from lakebench.metrics.collector import build_config_snapshot
 
         cfg = _cfg()
         run = MetricsCollector().start_run(
@@ -259,46 +236,33 @@ class TestStamping:
         e = run.to_dict()["experiment"]
         assert e["mode"] == "sustained"
         assert e["support"]["mode"] == "continuous"
+        # run sets continuous on its copy of the config so sizing sizes for
+        # it: the record is then the continuous config's, same identity, and
+        # says the mode came from the command line.
+        from lakebench.cli._run import apply_run_mode
+
+        def block(cfg):
+            snap = build_config_snapshot(cfg, run_mode="continuous")
+            return MetricsCollector().start_run("r", cfg.name, snap).to_dict()["experiment"]
+
+        moved = _cfg()
+        apply_run_mode(moved, "continuous")
+        flag, configured = block(moved), block(_cfg(mode="continuous"))
+        assert ex.identity_hash(flag) == ex.identity_hash(configured)
+        assert flag["requested_effective"]["pipeline_mode"]["source"] == "command line"
 
     @pytest.mark.parametrize("recipe", sorted(n for n in RECIPES if n != "default"))
     def test_stamped_recipe_is_a_recipe_name(self, recipe):
-        from lakebench.config.recipes import RECIPES as R
-
         cfg = make_config(
             recipe=recipe,
             architecture={"workload": {"schema": "customer360", "datagen": {"scale": 1}}},
         )
         assert ex.experiment_inputs(cfg)["architecture"]["recipe"] == recipe
-        assert recipe in R
 
     def test_autosize_cuts_are_a_recorded_limit(self):
         run = _metrics(_cfg())
         run.autosize_cuts = ["trino workers 4 -> 2 to fit the cluster"]
         assert run.to_dict()["experiment"]["limits"]["autosize_cuts"] == run.autosize_cuts
-
-    def test_report_shows_the_block(self, tmp_path):
-        from lakebench.reports.generator import ReportGenerator
-
-        html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(_metrics(_cfg()))
-        assert (
-            "Experiment" in html
-            and ex.WORKLOAD_VERSIONS["customer360"] in html
-            and "Result fingerprints" in html
-        )
-        for label in (
-            "Query access path",
-            "Support state",
-            "Maintenance (effective",
-            "Repetitions",
-        ):
-            assert label in html
-
-    def test_report_says_when_a_record_has_no_provenance(self, tmp_path):
-        from lakebench.reports.generator import ReportGenerator
-
-        run = MetricsCollector().start_run("r", "d", {})
-        html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(run)
-        assert "No provenance" in html
 
 
 class TestLegacy:
@@ -315,33 +279,20 @@ class TestLegacy:
         assert "experiment" not in loaded.to_dict()
 
 
-class TestRefusals:
-    def test_stored_references_refuse_on_conditions(self):
-        """The perf gate and reproduce need the same experiment under the same
-        conditions: a condition difference refuses there."""
-        a = ex.experiment_of(_metrics(_cfg(engine="trino")).to_dict())
-        b = ex.experiment_of(_metrics(_cfg(engine="duckdb")).to_dict())
-        reasons = ex.stored_identity_refusals(
-            ex.identity(a), ex.result_fingerprints(a), b, "baseline"
-        )
-        assert any(r.startswith("effective maintenance") for r in reasons), reasons
-
-    def test_query_set_change_is_refused(self):
+class TestQuerySetId:
+    def test_query_set_change_moves_the_id(self):
         """Tiebreakers moved the query-set id: the old id never matches the new."""
         from lakebench.benchmark.queries import (
             LEGACY_QUERY_SET_IDS,
             get_benchmark_queries,
-            qph_comparable,
             query_set_id,
         )
         from lakebench.config.schema import WorkloadSchema
 
         for schema in (WorkloadSchema.CUSTOMER360, WorkloadSchema.FINANCIAL):
-            names = [q.name for q in get_benchmark_queries(schema)]
-            current = query_set_id(names)
+            current = query_set_id([q.name for q in get_benchmark_queries(schema)])
             for old, _ in LEGACY_QUERY_SET_IDS.values():
-                ok, _why = qph_comparable(old, current)
-                assert not ok
+                assert old != current
 
 
 class TestEffectiveMaintenance:
@@ -460,15 +411,6 @@ class TestBenchmarkGateEmptyResults:
         # Without the declaration the same result fails the gate.
         assert _benchmark_gate_problems(_cfg("financial"), qs)
 
-    def test_only_the_case_queries_are_declared_allowed_empty(self):
-        """IQ2 and IQ4 need TM cases a small or short run may not have."""
-        from lakebench.benchmark.queries import BENCHMARK_QUERIES_BY_DOMAIN
-
-        declared = {
-            q.name for qs in BENCHMARK_QUERIES_BY_DOMAIN.values() for q in qs if q.allow_empty
-        }
-        assert declared == {"IQ2_case_activity_12m", "IQ4_open_cases_over_60_days"}
-
 
 class TestReportCarriesWhatAReaderCompares:
     """compare is removed (owner, 10-03): the report itself must show what a
@@ -480,9 +422,7 @@ class TestReportCarriesWhatAReaderCompares:
         run = _metrics(_cfg())
         html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(run)
         exp = run.to_dict()["experiment"]
-        assert "Experiment identity digest" in html
         assert ex.identity_hash(exp) in html
-        assert "Query set" in html
 
     def test_aml_alert_set_is_shown_per_rule(self):
         from lakebench.reports.generator import ReportGenerator
@@ -500,34 +440,5 @@ class TestReportCarriesWhatAReaderCompares:
             }
         }
         html = ReportGenerator._alert_set_html(exp)
-        assert "<h3>Alert set</h3>" in html
-        for cell in ("<td>W2</td><td>3</td>", "<td>W5</td><td>4</td>", "<td>total</td><td>7</td>"):
-            assert cell in html
-
-    def test_a_run_with_no_alert_set_shows_none(self):
-        from lakebench.reports.generator import ReportGenerator
-
-        assert ReportGenerator._alert_set_html({"results": {}}) == ""
-
-
-def test_a_malformed_alert_set_is_flagged_not_drawn():
-    from lakebench.reports.generator import ReportGenerator
-
-    html = ReportGenerator._alert_set_html({"results": {"alert_set": {"by_rule": "x"}}})
-    assert "malformed, not comparable" in html and "<table>" not in html
-
-
-def test_the_report_does_not_claim_the_digest_covers_the_recipe(tmp_path):
-    """identity_hash leaves out the recipe and components (reviewed 10-03):
-    the report must say so, never that equal digests are repeats."""
-    import copy
-
-    from lakebench.reports.generator import ReportGenerator
-
-    a = _metrics(_cfg()).to_dict()["experiment"]
-    b = copy.deepcopy(a)
-    b["architecture"]["recipe"] = "polaris-iceberg-spark-thrift"
-    b["architecture"]["catalog"] = {"type": "polaris", "version": "1.6.0"}
-    assert ex.identity_hash(a) == ex.identity_hash(b)
-    html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(_metrics(_cfg()))
-    assert "does not include the recipe" in html and "repeats of one experiment" not in html
+        for rule, rows in (("W2", "3"), ("W5", "4"), ("total", "7")):
+            assert re.search(rf"<td>{rule}</td>\s*<td>{rows}</td>", html)

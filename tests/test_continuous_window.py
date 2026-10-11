@@ -1,4 +1,4 @@
-"""Continuous-mode credibility (mission invariant 3, DESIGN 5).
+"""Continuous-mode credibility (mission invariant 3).
 
 The 2026-09-27 discovery run (20260926-215221-65567b, integrate f8b29eb)
 exited 0 on a degenerate window: silver-stream and gold-refresh failed to
@@ -25,9 +25,10 @@ from lakebench.metrics.collector import (
 )
 from lakebench.metrics.continuous_window import (
     arrival_seconds,
+    balance,
     classify_submission_failure,
+    freshness_summary,
     parse_events,
-    settle_state,
     window_gate_problems,
     window_stats,
 )
@@ -52,12 +53,22 @@ def bronze_log(batches: list[tuple[float, int]]) -> str:
     return "\n".join(out) + "\n"
 
 
-def silver_log(batches: list[tuple[float, int, int]]) -> str:
+def silver_log(batches: list[tuple[float, int, int]], seconds: float = 8.0) -> str:
     out = []
     for i, (t, rows_in, rows_out) in enumerate(batches):
         out.append(_line(t, f"Batch {i}: transforming {rows_in:,} rows"))
         out.append(_line(t + 2, f"Batch {i}: {rows_out:,} rows after transforms (filtered ~2%)"))
-        out.append(_line(t + 8, f"Batch {i}: committed to ice.silver.t in 8.0s"))
+        out.append(_line(t + seconds, f"Batch {i}: committed to ice.silver.t in {seconds:.1f}s"))
+    return "\n".join(out) + "\n"
+
+
+def back_to_back_silver(durations: list[float]) -> str:
+    """Silver batches that each start as the previous one commits."""
+    out, t = [], 0.0
+    for i, d in enumerate(durations):
+        out.append(_line(t, f"Batch {i}: transforming 52,000 rows"))
+        out.append(_line(t + d, f"Batch {i}: committed to ice.silver.t in {d:.1f}s"))
+        t += d
     return "\n".join(out) + "\n"
 
 
@@ -124,7 +135,7 @@ def test_idle_gold_cycles_do_not_count_as_continuous():
 def test_unreadable_log_fails_the_gate():
     stats = _stats(HEALTHY)
     stats["gold-refresh"] = None
-    assert any("no gold-refresh driver log" in p for p in window_gate_problems(stats))
+    assert any("no gold-refresh batch lines" in p for p in window_gate_problems(stats))
 
 
 def test_gold_freshness_must_be_measured_inside_the_window():
@@ -402,57 +413,6 @@ def test_benchmark_runner_failure_fails_before_any_stream(monkeypatch, tmp_path,
     jm.deploy_scripts_configmap.assert_not_called()
 
 
-# ---------------------------------------------------- result check (deviation)
-
-
-def test_settled_needs_every_row_through_silver_and_a_gold_read_after():
-    ev = {job: parse_events(log, job) for job, log in HEALTHY.items()}
-    bronze_rows = 20 * 26_000
-    ok, why = settle_state(ev, bronze_rows + 1)
-    assert not ok and "bronze has" in why
-    ok, why = settle_state(ev, bronze_rows)
-    assert not ok and "no gold refresh has read silver" in why  # last gold read at 401 s
-    short = silver_log([(t, 52_000, 51_000) for t in range(10, 540, 60)])
-    ok, why = settle_state(
-        {**ev, "silver-stream": parse_events(short, "silver-stream")}, bronze_rows
-    )
-    assert not ok and "silver has committed" in why
-    ev["gold-refresh"] = parse_events(gold_log([(599, 510_000, 40, False)]), "gold-refresh")
-    ok, why = settle_state(ev, bronze_rows)
-    assert ok, why
-
-
-def test_continuous_results_are_established_only_by_a_result_check():
-    from lakebench.metrics.experiment import _continuous_results
-
-    run = MagicMock(continuous=None)
-    assert "no end-of-run result check" in _continuous_results(run)["not_checked"]
-    run.continuous = {"result_check": {"not_checked": "the corpus did not settle: x"}}
-    assert "did not settle" in _continuous_results(run)["not_checked"]
-    run.continuous = {"result_check": {"query_set_id": "qs8-x", "fingerprints": {"Q1": {"a": 1}}}}
-    res = _continuous_results(run)
-    assert res["fingerprints"] == {"Q1": {"a": 1}} and "not_checked" not in res
-
-
-def test_stored_reference_refuses_a_continuous_run_without_checked_results():
-    from lakebench.metrics.experiment import identity, stored_identity_refusals
-    from tests.conftest import stub_experiment
-
-    ref = stub_experiment(["Q1"], mode="sustained")
-    run = stub_experiment(["Q1"], mode="sustained")
-    assert (
-        stored_identity_refusals(
-            identity(ref), {"Q1": ref["results"]["fingerprints"]["Q1"]}, run, "baseline"
-        )
-        == []
-    )
-    run["results"] = {"fingerprints": {}, "not_checked": "continuous: the corpus did not settle"}
-    reasons = stored_identity_refusals(
-        identity(ref), ref["results"]["fingerprints"], run, "baseline"
-    )
-    assert any("comparability not established" in r for r in reasons)
-
-
 # ------------------------------------------------ end to end (mocked cluster)
 
 
@@ -519,13 +479,16 @@ def _drive(
         name.removeprefix("lakebench-"), clock.now_utc_naive()
     )
     monkeypatch.setattr("lakebench.spark.SparkJobMonitor", lambda *a, **kw: mon)
-    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", lambda c: MagicMock())
+    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", lambda c, **kw: MagicMock())
     dg = MagicMock()
     from lakebench.deploy import DeploymentStatus
 
     dg.deploy.return_value = MagicMock(status=DeploymentStatus.SUCCESS)
     monkeypatch.setattr("lakebench.deploy.DatagenDeployer", lambda e, **kw: dg)
     monkeypatch.setattr("lakebench.deploy.datagen.stop_previous_datagen", lambda c: None)
+    monkeypatch.setattr("lakebench.deploy.datagen.end_continuous_datagen", lambda c: True)
+    # The window opens at datagen's first file in bronze.
+    monkeypatch.setattr(_sustained, "_wait_for_bronze_data", lambda *a, **kw: True)
     monkeypatch.setattr(_sustained, "_require_reset_ownership", lambda c: None)
     monkeypatch.setattr(_sustained, "_stop_leftover_streams", lambda *a: None)
     monkeypatch.setattr(_sustained, "_reset_continuous_state", lambda c, clear_raw: None)
@@ -632,7 +595,6 @@ def test_healthy_run_passes_with_window_scores(monkeypatch, tmp_path):
     assert code is None, saved.continuous.get("gate_problems")
     assert saved.success is True
     assert saved.continuous["gate_problems"] == []
-    assert saved.continuous["result_check"] == {"not_checked": "no benchmark (--skip-benchmark)"}
     gold = next(s for s in saved.streaming if s.job_type == "gold-refresh")
     assert gold.window_new_data_cycles == 3 and gold.freshness_seconds == 25
 
@@ -704,15 +666,6 @@ def test_stage_rate_is_windowed_after_compute_derived():
     assert st.throughput_rows_per_second == pytest.approx(1000.0)
 
 
-def test_drained_rps_is_gated_when_arrival_lasted_the_window():
-    from lakebench.metrics.continuous_window import drained_rps_excluded
-
-    assert drained_rps_excluded(True, 0.95) is None
-    assert "short arrival" in drained_rps_excluded(True, 0.5)
-    assert "lower bound" in drained_rps_excluded(True, None)  # pre-window record
-    assert drained_rps_excluded(False, 0.1) is None
-
-
 def test_a_stream_restarted_inside_the_window_fails():
     from lakebench.cli._sustained import end_of_window_problems
     from lakebench.spark.job import JobState, JobStatus
@@ -730,17 +683,11 @@ def test_a_window_too_short_for_two_gold_refreshes_is_refused():
     from lakebench.cli._sustained import short_window_problem
     from tests.conftest import make_config
 
-    cfg = make_config()  # gold_refresh_interval 5 minutes
-    assert "at least 900s" in short_window_problem(cfg, 600)
+    cfg = make_config(
+        architecture={"pipeline": {"continuous": {"gold_refresh_interval": "5 minutes"}}}
+    )
+    assert short_window_problem(cfg, 600) is not None
     assert short_window_problem(cfg, 900) is None
-
-
-def test_aml_continuous_results_are_not_established(monkeypatch, tmp_path):
-    # Settling is not attempted for AML: detection and TM passes are timed.
-    from lakebench.cli import _sustained
-
-    src = __import__("inspect").getsource(_sustained._run_sustained)
-    assert "not a function of the corpus alone" in src
 
 
 def test_an_error_after_the_window_fails_the_run_and_stops_streams(monkeypatch, tmp_path):
@@ -812,46 +759,18 @@ def _settling_logs(job, end):
     )
 
 
-def _runner(fail=()):
-    from lakebench.benchmark.fingerprint import fingerprint_rows
-
-    queries = []
-    for name in ("Q1_a", "Q9_b"):
-        ok = name not in fail
-        q = MagicMock(success=ok, result_fingerprint=fingerprint_rows([(name, 1)]) if ok else None)
-        q.query.name = name
-        q.to_dict.return_value = {"name": name, "success": ok, "rows_returned": 1 if ok else 0}
-        queries.append(q)
-    r = MagicMock()
-    r.run_power.return_value = MagicMock(queries=queries)
-    return r
-
-
-def test_settled_run_records_fingerprinted_results(monkeypatch, tmp_path):
-    code, saved = _drive(
-        monkeypatch, tmp_path, _settling_logs, runner=_runner(), dg_rows=12 * 10_000
-    )
-    assert code is None, saved.continuous
-    assert saved.continuous["settle"]["settled"] is True
-    fps = saved.continuous["result_check"]["fingerprints"]
-    assert set(fps) == {"Q1_a", "Q9_b"}
-    results = saved.experiment_block()["results"]
-    assert results["fingerprints"] == fps and "not_checked" not in results
-
-
-def test_a_failed_result_check_query_fails_the_run(monkeypatch, tmp_path):
-    code, saved = _drive(
-        monkeypatch, tmp_path, _settling_logs, runner=_runner(fail=("Q1_a",)), dg_rows=120_000
-    )
+def test_a_c360_run_with_no_in_stream_round_fails(monkeypatch, tmp_path):
+    """A 120 s window is shorter than benchmark_warmup + benchmark_interval,
+    so no round runs and no query answer is checked (invariant 2): the run
+    fails and says why, whatever the window gate found."""
+    runner = MagicMock()
+    code, saved = _drive(monkeypatch, tmp_path, _settling_logs, runner=runner)
+    runner.run_power.assert_not_called()
+    assert saved.benchmark_rounds == []
     assert code == 1 and saved.success is False
-
-
-def test_an_unsettled_corpus_leaves_results_not_established(monkeypatch, tmp_path):
-    monkeypatch.setattr("lakebench.cli._sustained.SETTLE_MAX_SECONDS", 1)
-    code, saved = _drive(monkeypatch, tmp_path, _settling_logs, runner=_runner(), dg_rows=10**9)
-    assert code is None
-    assert "settle limit" in saved.continuous["result_check"]["not_checked"]
-    assert "not_checked" in saved.experiment_block()["results"]
+    # The only reason: the window itself passed.
+    assert len(saved.failure_reasons) == 1
+    assert "no in-stream benchmark round ran" in saved.failure_reasons[0]
 
 
 def test_a_rerun_with_the_same_pod_name_is_caught_by_submission_time():
@@ -915,19 +834,28 @@ def test_a_refused_trickle_starts_nothing(monkeypatch, tmp_path, capsys):
     op = MagicMock()
     monkeypatch.setattr("lakebench.spark.SparkOperatorManager", lambda **kw: op)
     with pytest.raises(typer.Exit) as exc:
+        # A finite corpus (--skip-generate) is the one a trickle reads.
         _sustained._run_sustained(
-            _cont_cfg(1, max_files_per_trigger=50), tmp_path / "c.yaml", 60, True, 900
+            _cont_cfg(1, max_files_per_trigger=50),
+            tmp_path / "c.yaml",
+            60,
+            True,
+            900,
+            skip_generate=True,
         )
     assert exc.value.exit_code == 2  # usage: the window and trickle do not fit
     op.check_status.assert_not_called()
     assert "max_files_per_trigger" in "".join(capsys.readouterr())
 
 
-def test_the_run_uses_the_resolved_trickle(monkeypatch, tmp_path):
+def test_the_runs_own_datagen_sets_no_trickle(monkeypatch, tmp_path):
+    """Datagen generates for the whole window, so bronze reads with no
+    per-trigger limit, and the record says so."""
     code, saved = _drive(monkeypatch, tmp_path, _settling_logs)
     trickle = saved.continuous["trickle"]
-    assert trickle["source"] == "auto" and trickle["value"] >= 1
-    assert saved.config_snapshot["sustained"]["max_files_per_trigger"] == trickle["value"]
+    assert trickle["source"] == "none" and trickle["value"] is None
+    assert saved.config_snapshot["sustained"]["max_files_per_trigger"] is None
+    assert saved.config_snapshot["datagen_continuous"] is True
 
 
 # ------------------------------------- ingest_ratio against what was released
@@ -988,6 +916,60 @@ def test_without_a_file_count_the_corpus_ratio_stands():
     pb = _trickle_pb(1_220_000, 0.0, datagen_rows=1_500_000, files=0)
     assert pb.released_rows is None
     assert pb.ingest_ratio == pytest.approx(pb.corpus_ingest_ratio)
+
+
+def _datagen_pb(bronze_rows, datagen_rows, datagen_elapsed_s):
+    """The run's own continuous datagen: no trickle, a 900 s window, 30 s
+    bronze trigger (the shape of a scale-1 matrix run, 2026-10-07)."""
+    t0 = datetime(2026, 10, 7, tzinfo=timezone.utc)
+    pb = PipelineBenchmark(
+        run_id="t",
+        deployment_name="t",
+        pipeline_mode="sustained",
+        start_time=t0,
+        end_time=t0 + timedelta(seconds=900),
+        success=True,
+        stages=[
+            StageMetrics(
+                stage_name="bronze",
+                stage_type="streaming",
+                engine="spark",
+                elapsed_seconds=900,
+                input_rows=bronze_rows,
+                window_input_rows=bronze_rows,
+                pre_window_input_rows=0,
+                last_write_offset_seconds=890,
+                trickle_start_offset_seconds=5.0,
+            )
+        ],
+        config_snapshot={
+            "datagen_output_rows": datagen_rows,
+            "datagen_output_files": 1404,
+            "datagen_continuous": True,
+            "datagen_elapsed_s": datagen_elapsed_s,
+            "sustained": {"bronze_trigger_interval": "30 seconds", "max_files_per_trigger": None},
+        },
+    )
+    pb.compute_aggregates()
+    return pb
+
+
+def test_continuous_datagen_bronze_one_trigger_behind_kept_up():
+    # Datagen wrote 21.75M rows over 906.6 s; bronze's last trigger and the
+    # seconds before the pods saw the stop marker left 1.25M rows untaken.
+    # Against datagen's total that read 0.94, a saturated pipeline.
+    pb = _datagen_pb(20_494_593, 21_749_364, 906.625)
+    assert pb.released_rows == round(21_749_364 / 906.625 * 870)
+    assert pb.ingest_ratio == pytest.approx(0.982, abs=1e-3)
+    assert pb.pipeline_saturated is False
+    assert pb.datagen_ahead is False
+    assert pb.backlog_rows == 21_749_364 - 20_494_593
+
+
+def test_continuous_datagen_a_real_backlog_is_still_ahead():
+    pb = _datagen_pb(15_000_000, 21_749_364, 906.625)
+    assert pb.ingest_ratio < 0.95
+    assert pb.datagen_ahead is True
 
 
 def test_every_streams_submission_failures_are_recorded_while_another_is_waited_on():
@@ -1168,3 +1150,415 @@ def test_iceberg_run_header_is_unchanged():
         ("info", "Iceberg retention: every 600s (auto; threshold: 30m)"),
     ]
     assert "not run" in _header("iceberg", "duckdb")[0][1]
+
+
+def test_stream_marker_is_cleared_only_once_the_driver_pod_is_gone(monkeypatch):
+    """A clean stop clears the AML stream's _STARTED marker so a later batch
+    may rebuild silver; while the driver pod still exists it may write, so
+    the marker stays."""
+    from types import SimpleNamespace
+
+    import lakebench.cli._sustained as sus
+    import lakebench.deploy.datagen as dg
+
+    s3 = MagicMock()
+    monkeypatch.setattr(dg, "_s3_client_for", lambda cfg: s3)
+    monkeypatch.setattr(sus, "_STREAM_POD_GONE_WAIT_S", 0)
+    monkeypatch.setattr(sus.time, "sleep", lambda s: None)
+    cfg = MagicMock()
+    cfg.architecture.pipeline.sustained.checkpoint_base = "checkpoints"
+    cfg.platform.storage.s3.buckets.silver = "ns-silver"
+    k8s = MagicMock()
+
+    k8s.get_pod_status.return_value = SimpleNamespace(exists=True)
+    assert sus._clear_silver_stream_marker(cfg, k8s, "ns") is False
+    s3.raw_client.delete_object.assert_not_called()
+
+    k8s.get_pod_status.side_effect = RuntimeError("api down")
+    assert sus._clear_silver_stream_marker(cfg, k8s, "ns") is False
+    s3.raw_client.delete_object.assert_not_called()
+
+    k8s.get_pod_status.side_effect = None
+    k8s.get_pod_status.return_value = SimpleNamespace(exists=False)
+    assert sus._clear_silver_stream_marker(cfg, k8s, "ns") is True
+    s3.raw_client.delete_object.assert_called_once_with(
+        Bucket="ns-silver", Key="checkpoints/silver-stream/_STARTED"
+    )
+
+
+def aml_gold_back_to_back(idle_until: float, tick: float, end: float) -> str:
+    """AML gold back to back: quick cycles that find no new silver row until
+    *idle_until*, then cycles of *tick* seconds that each take in new rows."""
+    out, t, i = [], 0.0, 1
+    while t < end:
+        idle = t < idle_until
+        d = 7.0 if idle else tick
+        out.append(_line(t, f"Cycle {i}: aggregating {0 if idle else 52_000 * i:,} Silver records"))
+        cut = "None" if idle else str(1_700_000_000_000_000 + i)
+        out.append(_line(t + 1, f"Cycle {i}: earliest new event time (us) {cut}"))
+        out.append(_line(t + d, f"Cycle {i}: refreshed lakehouse.gold.alerts in {d:.1f}s"))
+        t, i = t + d, i + 1
+    return "\n".join(out) + "\n"
+
+
+# Silver back to back at a steady 30 s keeps up; one whose batches then grow
+# from 30 s to 80 s (each takes what bronze committed while the last ran) and
+# one whose silver stops halfway build a backlog, so neither is balanced.
+_SILVER_STEADY = {**HEALTHY, "silver-stream": back_to_back_silver([30.0] * 20)}
+_SILVER_SLOWS = {
+    **HEALTHY,
+    "silver-stream": back_to_back_silver([30.0] * 10 + [40.0, 50.0, 60.0, 70.0, 80.0]),
+}
+_SILVER_STOPS = {
+    **HEALTHY,
+    "silver-stream": silver_log([(t, 52_000, 51_000) for t in range(10, 300, 60)]),
+}
+# AML gold back to back whose window opened before data: its idle cycles are
+# not its cadence (live, Polaris AML s1: an 11 s cadence against 95 s ticks).
+_AML_GOLD_LATE_DATA = {
+    **_SILVER_STEADY,
+    "gold-refresh": aml_gold_back_to_back(idle_until=280, tick=95.0, end=600),
+}
+
+
+@pytest.mark.parametrize(
+    ("logs", "balanced", "stage"),
+    [
+        (HEALTHY, True, None),
+        (_SILVER_STEADY, True, None),
+        (_SILVER_SLOWS, False, "silver-stream"),
+        (_SILVER_STOPS, False, "silver-stream"),
+        (_AML_GOLD_LATE_DATA, True, None),
+    ],
+    ids=[
+        "kept-up",
+        "back-to-back-kept-up",
+        "silver-slowing",
+        "silver-stopped",
+        "aml-gold-idle-then-steady",
+    ],
+)
+def test_balance_fails_a_stage_whose_lag_climbs(logs, balanced, stage):
+    """The pass rule: a stage keeps up when its per-batch
+    lag trend rose less than one first-half batch time (or trigger interval)
+    across the window's second half; the back-to-back sawtooth and gold's
+    5-minute timer saw without a trend and still keep up."""
+    events = {job: parse_events(log, job) for job, log in logs.items()}
+    timer = None if logs is _AML_GOLD_LATE_DATA else 300.0
+    got = balance(events, W0, W1, intervals={"gold-refresh": timer})
+    assert got["measured"] and got["balanced"] is balanced
+    behind = {h["stage"] for h in got["handoffs"].values() if not h["keeps_up"]}
+    assert behind == ({stage} if stage else set())
+
+
+def test_freshness_summary_reads_only_window_cycles_that_saw_data():
+    """The published freshness p50/p95/max: cycles outside the window and
+    idle cycles (a drained corpus) are left out."""
+    cycles = [(30 + 50 * i, 1000, 10 * (i + 1), False) for i in range(10)]
+    cycles += [(560, 1000, 999, True), (700, 1000, 5000, False)]
+    events = parse_events(gold_log(cycles), "gold-refresh")
+    assert freshness_summary(events, W0, W1) == {
+        "p50_s": 50.0,
+        "p95_s": 100.0,
+        "max_s": 100.0,
+        "cycles": 10,
+    }
+
+
+@pytest.mark.parametrize(("tick_line", "busy"), [(True, 1.0), (False, 0.4)])
+def test_aml_gold_busy_share_covers_the_whole_tick(tick_line, busy):
+    """An AML gold tick runs detection, then time to detect and the TM pass;
+    'refreshed' times detection only. Back-to-back 100 s ticks with 40 s of
+    detection are busy the whole window, not 40% of it (the published busy
+    share and the balance verdict read it)."""
+    out, t, i = [], 0.0, 1
+    while t + 100 <= 600:
+        out.append(_line(t, f"Cycle {i}: aggregating {52_000 * i:,} Silver records"))
+        out.append(_line(t + 1, f"Cycle {i}: earliest new event time (us) {1_700_000_000 + i}"))
+        out.append(_line(t + 40, f"Cycle {i}: refreshed lakehouse.gold.alerts in 40.0s"))
+        if tick_line:
+            out.append(
+                _line(
+                    t + 100,
+                    f"Cycle {i}: tick timing silver_rows=1 W3=30.0s ttd=20.0s tm=40.0s total=100.0s",
+                )
+            )
+        t, i = t + 100, i + 1
+    logs = {**_SILVER_STEADY, "gold-refresh": "\n".join(out) + "\n"}
+    events = {job: parse_events(log, job) for job, log in logs.items()}
+    got = balance(events, W0, W1, intervals={"gold-refresh": None})
+    assert got["handoffs"]["silver->gold"]["busy_share"] == pytest.approx(busy, abs=0.02)
+
+
+def _gold_slows_with_tm(tm_s: float) -> str:
+    """AML gold whose ticks grow from 60 s to 150 s, each spending *tm_s*
+    in the TM pass, so its lag climbs."""
+    out, t, i = [], 0.0, 1
+    for d in [60.0] * 4 + [90.0, 120.0, 150.0, 150.0]:
+        out.append(_line(t, f"Cycle {i}: aggregating {52_000 * i:,} Silver records"))
+        out.append(_line(t + 1, f"Cycle {i}: earliest new event time (us) {1_700_000_000 + i}"))
+        out.append(
+            _line(t + d - tm_s, f"Cycle {i}: refreshed lakehouse.gold.alerts in {d - tm_s:.1f}s")
+        )
+        out.append(
+            _line(t + d, f"Cycle {i}: tick timing silver_rows=1 tm={tm_s:.1f}s total={d:.1f}s")
+        )
+        t, i = t + d, i + 1
+    return "\n".join(out) + "\n"
+
+
+@pytest.mark.parametrize(
+    ("logs", "shape", "ran", "lever"),
+    [
+        (
+            _SILVER_SLOWS,
+            {"silver-stream": {"executors": 19, "balance_need": 12}},
+            {"silver-stream": 12},
+            "cluster capacity",
+        ),
+        (
+            _SILVER_SLOWS,
+            {"silver-stream": {"executors": 28, "balance_need": 40}},
+            {"silver-stream": 28},
+            "platform.compute.spark.silver_stream_executor_cores",
+        ),
+        (
+            _SILVER_SLOWS,
+            {"silver-stream": {"executors": 6, "balance_need": 10}},
+            {"silver-stream": 6},
+            "platform.compute.spark.silver_stream_executors",
+        ),
+        (
+            {**_SILVER_STEADY, "gold-refresh": _gold_slows_with_tm(40.0)},
+            None,
+            None,
+            "workload.tm_operations.continuous_interval_seconds",
+        ),
+    ],
+    ids=["budget-cut", "need-above-cap", "plain-shortfall", "gold-tm-heavy"],
+)
+def test_balance_advice_names_the_lever_that_helps(logs, shape, ran, lever):
+    """The not-balanced line points at a lever that would help: not 'raise
+    executors' when the cluster budget cut them, the per-executor cores when
+    the count would pass the cap, the TM interval when TM takes gold's time."""
+    events = {job: parse_events(log, job) for job, log in logs.items()}
+    got = balance(events, W0, W1, shape=shape, ran=ran, intervals={"gold-refresh": None})
+    assert not got["balanced"]
+    assert got["lever"] == lever, got["bottleneck"]
+
+
+# ------------------------------------------------- metrics honesty (1.7.1)
+
+
+def _silver_batches(first_start: float, seconds: float, rows: int, until: float) -> str:
+    """Back-to-back silver batches of *seconds* each, from *first_start*."""
+    out, t, i = [], first_start, 0
+    while t < until:
+        out.append(_line(t, f"Batch {i}: transforming {rows:,} rows"))
+        out.append(_line(t + seconds, f"Batch {i}: committed to ice.silver.t in {seconds:.1f}s"))
+        t, i = t + seconds, i + 1
+    return "\n".join(out) + "\n"
+
+
+def _windowed_run(silver: str, *, bucket_gib: float = 0.0, fleet=None, rounds=(), schema=None):
+    from lakebench.metrics.collector import PipelineMetrics, build_pipeline_benchmark
+
+    m = PipelineMetrics(
+        run_id="20261008-000000-aaaaaa",
+        deployment_name="d",
+        start_time=W0,
+        end_time=W1,
+        success=True,
+        # Bucket listings: retained snapshots, the bronze table, other runs.
+        bronze_size_gb=bucket_gib,
+        silver_size_gb=bucket_gib,
+        gold_size_gb=bucket_gib,
+        config_snapshot={
+            "mode": "continuous",
+            "workload_schema": schema or "customer360",
+            "sustained": {"bronze_trigger_interval": "30 seconds"},
+        },
+    )
+    for job, log in (("bronze-ingest", HEALTHY["bronze-ingest"]), ("silver-stream", silver)):
+        sm = StreamingJobMetrics(job_name=f"lakebench-{job}", job_type=job, elapsed_seconds=600)
+        sm.apply_window(log, W0, W1)
+        m.streaming.append(sm)
+    m.benchmark_rounds = list(rounds)
+    return build_pipeline_benchmark(m, datagen_fleet=fleet)
+
+
+@pytest.mark.parametrize("shift_s", [0.0, 60.0, 120.0, 200.0])
+def test_pace_counts_a_silver_batch_on_the_window_edge_pro_rata(shift_s):
+    """Pace is window seconds per million silver rows in the window (owner,
+    2026-10-08). Whole-batch counting moved it ~25% on which side of the
+    window's end one 250 s batch committed; pro rata it does not move."""
+    pb = _windowed_run(_silver_batches(shift_s - 250, 250.0, 1_000_000, 900))
+    # 600 s of 250 s batches of 1M rows: 2.4M rows, 250 s per million.
+    assert pb.pace_seconds_per_million_rows == pytest.approx(250.0, rel=0.02)
+
+
+@pytest.mark.parametrize("bucket_gib", [0.0, 500.0])
+def test_continuous_stage_bytes_never_come_from_a_bucket_listing(bucket_gib):
+    """Bronze and silver input are their window rows at datagen's raw bytes
+    per row; extra bytes in the buckets move no total and no rate."""
+    fleet = {
+        "pods_reported": 1,
+        "total_bytes_written": 2 * 1024**3,
+        "total_rows_written": 1_000_000,
+    }
+    pb = _windowed_run(
+        silver_log([(t, 52_000, 51_000) for t in range(10, 600, 60)]),
+        bucket_gib=bucket_gib,
+        fleet=fleet,
+    )
+    bronze_rows = 20 * 26_000
+    silver_rows = 10 * 52_000
+    expect_gib = (bronze_rows + silver_rows) * 2 * 1024**3 / 1_000_000 / 1024**3
+    assert pb.total_data_processed_gb == pytest.approx(expect_gib)
+    assert pb.pipeline_throughput_gb_per_second == pytest.approx(expect_gib / 600)
+    gold = [s for s in pb.stages if s.stage_name == "gold"]
+    assert all(s.input_size_gb == 0.0 for s in gold)
+
+
+def _round(set_names: list[str], qph: float):
+    from lakebench.benchmark.queries import query_set_id
+    from lakebench.metrics.collector import BenchmarkMetrics
+
+    return BenchmarkMetrics(
+        mode="power",
+        cache="hot",
+        scale=10,
+        qph=qph,
+        total_seconds=3600 * len(set_names) / qph if qph else 0.0,
+        queries=[{"name": n, "elapsed_seconds": 1.0, "success": True} for n in set_names],
+        round_record={
+            "executed_queries": set_names,
+            "executed_query_set_id": query_set_id(set_names),
+        },
+    )
+
+
+def test_aml_continuous_composite_qph_is_the_fixed_set_median():
+    """AML continuous composite QpH is over the fixed 12-query set only
+    (owner, 2026-10-08); the 8-query rounds before the first case stay in
+    the per-set numbers, and a zero-QpH round is in neither."""
+    from lakebench.benchmark.queries import INVESTIGATOR_QUERIES, get_benchmark_queries
+    from lakebench.config.schema import WorkloadSchema
+    from lakebench.metrics.collector import aggregate_benchmark_rounds
+
+    full = [q.name for q in get_benchmark_queries(WorkloadSchema.FINANCIAL)]
+    base = [n for n in full if n not in {q.name for q in INVESTIGATOR_QUERIES}]
+    rounds = [_round(base, 900.0), _round(base, 880.0), _round(full, 600.0)]
+    rounds += [_round(full, 640.0), _round(full, 0.0), _round(full, 620.0)]
+    pb = _windowed_run(HEALTHY["silver-stream"], rounds=rounds, schema="financial")
+    scores = pb.to_dict()["scores"]
+    assert scores["composite_qph"] == 620.0
+    assert scores["composite_qph_rounds"] == 3
+    assert scores["composite_qph_basis"]["blended"] is False
+    assert aggregate_benchmark_rounds(rounds).qph == 620.0
+
+
+def _round_with(names: list[str], failed=()):
+    r = _round(names, 500.0)
+    for q in r.queries:
+        q["success"] = q["name"] not in failed
+    return r
+
+
+def test_continuous_results_carry_the_rounds_query_set_id():
+    """A continuous record's experiment results name every query its
+    in-stream rounds ran: AML the full set once a round ran the
+    investigator queries, C360 its set even when a tolerated Q9 failed in
+    one round (the QpH basis may read blended; the identity does not
+    move), and none with no round."""
+    from lakebench.benchmark.queries import (
+        INVESTIGATOR_QUERIES,
+        get_benchmark_queries,
+        query_set_id,
+    )
+    from lakebench.config.schema import WorkloadSchema
+    from lakebench.metrics.collector import aml_fixed_query_set
+    from lakebench.metrics.experiment import _continuous_results
+
+    full = [q.name for q in get_benchmark_queries(WorkloadSchema.FINANCIAL)]
+    base = [n for n in full if n not in {q.name for q in INVESTIGATOR_QUERIES}]
+    c360 = [q.name for q in get_benchmark_queries(WorkloadSchema.CUSTOMER360)]
+    q9 = next(n for n in c360 if n.startswith("Q9"))
+    run = MagicMock(benchmark_rounds=[], financial_scoring=None)
+    assert _continuous_results(run)["query_set_id"] is None
+    run.benchmark_rounds = [_round_with(base), _round_with(full)]
+    assert _continuous_results(run)["query_set_id"] == aml_fixed_query_set()
+    run.benchmark_rounds = [_round_with(c360), _round_with(c360, failed=(q9,))]
+    assert _continuous_results(run)["query_set_id"] == query_set_id(c360)
+
+
+@pytest.mark.parametrize(
+    ("schema", "rounds", "fails"),
+    [
+        ("customer360", [], True),  # no round: no answer checked
+        ("customer360", [(), ("Q9",)], False),  # Q9 contention in one round
+        ("customer360", [("Q9",), ("Q9",)], True),  # gold never answered
+        ("financial", [], False),  # AML is judged on its alerts
+    ],
+)
+def test_a_c360_run_needs_a_round_and_one_q9_answer(schema, rounds, fails):
+    from lakebench.benchmark.queries import get_benchmark_queries
+    from lakebench.cli._sustained import no_rounds_problem
+    from lakebench.config.schema import WorkloadSchema
+    from tests.conftest import make_config
+
+    names = [q.name for q in get_benchmark_queries(WorkloadSchema.CUSTOMER360)]
+    cfg = make_config(architecture={"workload": {"schema": schema}})
+    run = MagicMock(
+        benchmark_rounds=[
+            _round_with(names, failed=[n for n in names if n.split("_")[0] in f]) for f in rounds
+        ]
+    )
+    assert (no_rounds_problem(cfg, run) is not None) is fails
+
+
+@pytest.mark.parametrize("bucket_gib", [0.0, 500.0])
+def test_batch_elapsed_is_wall_clock_and_stage_bytes_ignore_buckets(bucket_gib):
+    """Batch (beside the continuous rows above, one rule): total elapsed is
+    the run's wall clock, not stage seconds summed over gaps; maintenance is
+    a share of time to value plus maintenance; GiB are what the jobs and
+    datagen's pods reported, whatever the buckets hold."""
+    from lakebench.metrics.collector import JobMetrics, PipelineMetrics, build_pipeline_benchmark
+
+    def job(kind, start_s, seconds, gib):
+        return JobMetrics(
+            job_name=f"lakebench-{kind}",
+            job_type=kind,
+            start_time=W0 + timedelta(seconds=start_s),
+            end_time=W0 + timedelta(seconds=start_s + seconds),
+            elapsed_seconds=seconds,
+            input_size_gb=gib,
+            success=True,
+        )
+
+    m = PipelineMetrics(
+        run_id="20261008-000000-bbbbbb",
+        deployment_name="d",
+        start_time=W0,
+        end_time=W0 + timedelta(seconds=1000),
+        success=True,
+        bronze_size_gb=bucket_gib,
+        silver_size_gb=bucket_gib,
+        gold_size_gb=bucket_gib,
+        config_snapshot={"workload_schema": "customer360"},
+    )
+    # Gold reported no input: unmeasured, not the silver bucket.
+    m.jobs = [job("bronze-verify", 100, 50, 10.0), job("silver-build", 200, 100, 10.0)]
+    m.jobs.append(job("gold-finalize", 400, 50, 0.0))
+    fleet = {"pods_reported": 2, "total_bytes_written": 10 * 1024**3, "total_rows_written": 9}
+    pb = build_pipeline_benchmark(
+        m, datagen_elapsed=60, datagen_output_gb=bucket_gib, datagen_fleet=fleet
+    )
+    pb.maintenance_elapsed_seconds = 350.0
+    scores = pb.to_dict()["scores"]
+    assert scores["total_elapsed_seconds"] == 1000.0
+    assert scores["time_to_value_seconds"] == 350.0
+    assert scores["maintenance_pct_of_pipeline"] == 50.0
+    assert scores["total_data_processed_gb"] == 20.0
+    datagen = next(s for s in pb.stages if s.stage_name == "datagen")
+    assert datagen.output_size_gb == pytest.approx(10.0)

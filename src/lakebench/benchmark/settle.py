@@ -1,4 +1,4 @@
-"""Wait for storage to settle after batch maintenance (LB-150).
+"""Wait for storage to settle after batch maintenance.
 
 expire_snapshots and remove_orphan_files at 0 s, then compaction, delete and
 rewrite a large share of the tables' objects in a few minutes. The object
@@ -46,7 +46,7 @@ MAX_CONSECUTIVE_PROBE_FAILURES = 3
 # result is recorded as unverified.
 UNVERIFIED_STABLE_PROBES = 3
 # Ceiling on the noise-derived tolerance. The unsettled FlashBlade rounds in
-# LB-150 were 27-34% slower than before maintenance; 20% keeps them out
+# in a live incident were 27-34% slower than before maintenance; 20% keeps them out
 # whatever the probe query's own spread.
 MAX_NOISE_TOLERANCE_PCT = 20.0
 

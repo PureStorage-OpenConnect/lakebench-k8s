@@ -22,10 +22,16 @@ class PodMetrics:
 
     pod_name: str
     component: str
-    cpu_avg_cores: float = 0.0
-    cpu_max_cores: float = 0.0
-    memory_avg_bytes: float = 0.0
-    memory_max_bytes: float = 0.0
+    # None: not collected (the query failed or returned no series for this
+    # pod), never a measured zero.
+    cpu_avg_cores: float | None = None
+    cpu_max_cores: float | None = None
+    memory_avg_bytes: float | None = None
+    memory_max_bytes: float | None = None
+
+
+class PrometheusQueryError(Exception):
+    """Prometheus answered a query with a non-200 status."""
 
 
 @dataclass
@@ -69,9 +75,11 @@ class PlatformMetrics:
     start_time: datetime
     end_time: datetime
     pods: list[PodMetrics] = field(default_factory=list)
-    s3_requests_total: int = 0
-    s3_errors_total: int = 0
-    s3_avg_latency_ms: float = 0.0
+    # No source emits S3 request metrics yet: None is "not collected", never
+    # a measured zero.
+    s3_requests_total: int | None = None
+    s3_errors_total: int | None = None
+    s3_avg_latency_ms: float | None = None
     engine: EngineMetrics = field(default_factory=EngineMetrics)
     collection_error: str | None = None
     # How the per-pod CPU and memory were queried. 2: containers only, each
@@ -94,20 +102,28 @@ class PlatformMetrics:
                 {
                     "pod_name": p.pod_name,
                     "component": p.component,
-                    "cpu_avg_cores": round(p.cpu_avg_cores, 3),
-                    "cpu_max_cores": round(p.cpu_max_cores, 3),
-                    "memory_avg_bytes": int(p.memory_avg_bytes),
-                    "memory_max_bytes": int(p.memory_max_bytes),
+                    "cpu_avg_cores": _rounded(p.cpu_avg_cores, 3),
+                    "cpu_max_cores": _rounded(p.cpu_max_cores, 3),
+                    "memory_avg_bytes": _as_int(p.memory_avg_bytes),
+                    "memory_max_bytes": _as_int(p.memory_max_bytes),
                 }
                 for p in self.pods
             ],
             "s3_requests_total": self.s3_requests_total,
             "s3_errors_total": self.s3_errors_total,
-            "s3_avg_latency_ms": round(self.s3_avg_latency_ms, 2),
+            "s3_avg_latency_ms": self.s3_avg_latency_ms,
             "engine": self.engine.to_dict() if self.engine.has_data else None,
             "collection_error": self.collection_error,
             "query_version": self.query_version,
         }
+
+
+def _rounded(value: float | None, digits: int) -> float | None:
+    return None if value is None else round(value, digits)
+
+
+def _as_int(value: float | None) -> int | None:
+    return None if value is None else int(value)
 
 
 class PlatformCollector:
@@ -143,8 +159,14 @@ class PlatformCollector:
         try:
             client = httpx.Client(timeout=30)
 
+            # A failed query names itself in collection_error and leaves its
+            # fields None, so the other family is still reported.
+            failed: list[str] = []
+
             # Collect CPU usage per pod
-            cpu_pods = self._query_range(
+            cpu_pods = self._query_family(
+                failed,
+                "CPU",
                 client,
                 "sum by (pod) (max by (pod, container) "
                 f"(rate(container_cpu_usage_seconds_total{{{self._container_selector()}}}[1m])))",
@@ -166,7 +188,9 @@ class PlatformCollector:
                     )
 
             # Collect memory usage per pod
-            mem_pods = self._query_range(
+            mem_pods = self._query_family(
+                failed,
+                "memory",
                 client,
                 "sum by (pod) (max by (pod, container) "
                 f"(container_memory_working_set_bytes{{{self._container_selector()}}}))",
@@ -192,25 +216,21 @@ class PlatformCollector:
                             )
                         )
 
-            # Collect S3 metrics (lakebench CLI-side)
-            s3_total = self._query_instant(
-                client,
-                "sum(lakebench_s3_requests_total)",
-                end_time,
-            )
-            if s3_total is not None:
-                metrics.s3_requests_total = int(s3_total)
-
-            s3_errors = self._query_instant(
-                client,
-                "sum(lakebench_s3_errors_total)",
-                end_time,
-            )
-            if s3_errors is not None:
-                metrics.s3_errors_total = int(s3_errors)
-
             # Engine-level Tier 2 metrics (best-effort)
             self._collect_engine_metrics(client, metrics, start_time, end_time)
+
+            # A pod with a series in one query but not the other (one that
+            # lived under the 1m rate window has memory but no CPU rate) has
+            # that value not collected; say how many.
+            for label, attr in (("CPU", "cpu_max_cores"), ("memory", "memory_max_bytes")):
+                missing = sum(1 for p in metrics.pods if getattr(p, attr) is None)
+                if missing and not any(f.startswith(label) for f in failed):
+                    failed.append(
+                        f"{missing} of {len(metrics.pods)} pods returned no {label} series"
+                    )
+
+            if failed:
+                metrics.collection_error = "; ".join(failed)
 
             client.close()
 
@@ -236,6 +256,15 @@ class PlatformCollector:
         """
         return f'namespace="{self.namespace}", container!="", container!="POD"'
 
+    def _query_family(self, failed: list[str], label: str, *args: Any) -> list[dict]:
+        """Run one range query; on a non-200 answer record why in *failed*."""
+        try:
+            return self._query_range(*args)
+        except PrometheusQueryError as e:
+            failed.append(f"{label} query failed: {e}")
+            logger.warning("Prometheus %s query failed: %s", label, e)
+            return []
+
     def _query_range(
         self,
         client: Any,
@@ -255,8 +284,7 @@ class PlatformCollector:
             },
         )
         if resp.status_code != 200:
-            logger.warning("Prometheus query failed: %s", resp.text[:200])
-            return []
+            raise PrometheusQueryError(f"HTTP {resp.status_code}: {resp.text[:160]}")
         data = resp.json()
         return data.get("data", {}).get("result", [])
 
@@ -284,46 +312,19 @@ class PlatformCollector:
         start_time: datetime,
         end_time: datetime,
     ) -> None:
-        """Collect Spark and Trino engine-level metrics (best-effort).
-
-        These require the Spark PrometheusServlet sink and Trino JMX
-        exporter to be enabled. If the metrics are not available,
-        fields stay None.
+        """Collect Trino engine-level metrics (best-effort) from its JMX
+        exporter. Spark engine metrics are not collected: pipeline jobs run
+        with the Spark UI off, which serves Spark's Prometheus endpoint, so
+        the Spark fields stay None. Fields stay None when a series is absent.
         """
         ns = self.namespace
 
-        # Spark GC time (total across all executors)
-        # Spark PrometheusServlet exposes metrics with the namespace prefix
-        gc = self._query_instant(
-            client,
-            f'sum(metrics_lakebench_executor_jvm_gc_time{{namespace="{ns}"}})',
-            end_time,
-        )
-        if gc is not None:
-            metrics.engine.spark_gc_seconds_total = gc
-
-        # Spark shuffle read bytes
-        shuffle_r = self._query_instant(
-            client,
-            f'sum(metrics_lakebench_executor_shuffle_read_bytes{{namespace="{ns}"}})',
-            end_time,
-        )
-        if shuffle_r is not None:
-            metrics.engine.spark_shuffle_read_bytes = shuffle_r
-
-        # Spark shuffle write bytes
-        shuffle_w = self._query_instant(
-            client,
-            f'sum(metrics_lakebench_executor_shuffle_write_bytes{{namespace="{ns}"}})',
-            end_time,
-        )
-        if shuffle_w is not None:
-            metrics.engine.spark_shuffle_write_bytes = shuffle_w
-
-        # Trino completed queries (from JMX exporter with lowercaseOutputName)
+        # Trino's query counters are lifetime totals since the coordinator
+        # started; increase() over the run window counts this run's queries.
+        window = max(60, int((end_time - start_time).total_seconds()))
         trino_completed = self._query_instant(
             client,
-            f'sum(trino_execution_querymanager_completedqueries_totalcount{{namespace="{ns}"}})',
+            f'sum(increase(trino_execution_querymanager_completedqueries_totalcount{{namespace="{ns}"}}[{window}s]))',
             end_time,
         )
         if trino_completed is not None:
@@ -332,7 +333,7 @@ class PlatformCollector:
         # Trino failed queries
         trino_failed = self._query_instant(
             client,
-            f'sum(trino_execution_querymanager_failedqueries_totalcount{{namespace="{ns}"}})',
+            f'sum(increase(trino_execution_querymanager_failedqueries_totalcount{{namespace="{ns}"}}[{window}s]))',
             end_time,
         )
         if trino_failed is not None:

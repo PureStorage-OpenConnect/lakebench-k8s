@@ -43,14 +43,14 @@ def image_tag(image: str) -> str:
     return tag
 
 
-# LB-146: the JVM heap must sit well below the container memory limit. The
+# The JVM heap must sit well below the container memory limit. The
 # process also needs metaspace, thread stacks, direct buffers, code cache and
 # GC structures outside the heap; with -Xmx equal to the limit the kernel
 # OOM-kills the container (exit 137) before the JVM ever reports a heap OOM.
 # Trino's deployment guidance is 70-85% of the memory available to the JVM.
 JVM_HEAP_FRACTION = 0.8
 
-# LB-157: how long deploy waits for a same-named namespace that an earlier
+# How long deploy waits for a same-named namespace that an earlier
 # destroy left Terminating before failing with an explicit message.
 _TERMINATING_NAMESPACE_WAIT_SECONDS = 120
 
@@ -103,13 +103,13 @@ def jvm_heap_for_limit(limit: str, fraction: float = JVM_HEAP_FRACTION) -> str:
     return f"{heap_mib}m"
 
 
-# LB-148: the Spark Thrift pod limit is the heap plus a non-heap allowance.
+# The Spark Thrift pod limit is the heap plus a non-heap allowance.
 # Spark's own rule for a JVM container is max(10% of heap, 384 MiB). The
 # 384 MiB floor is sized for executors; the Thrift JVM is a driver that also
 # loads Hive, Delta or Iceberg and the S3A client (metaspace plus code cache
 # alone run to several hundred MiB) and runs HiveServer2's handler threads,
 # so the floor here is 1 GiB. At the 4g default that gives a 5Gi pod; with
-# heap == limit (the pre-LB-148 shape) the pod sat at 4014Mi of 4Gi mid-query.
+# heap == limit (the earlier shape) the pod sat at 4014Mi of 4Gi mid-query.
 THRIFT_OVERHEAD_FACTOR = 0.10
 THRIFT_MIN_OVERHEAD_BYTES = 2**30
 
@@ -381,10 +381,10 @@ class DeploymentEngine:
             deploy_nonce: The nonce ``deploy`` recorded in the directory's
                 state before deploying; stamped on the namespace.
             require_new: Refuse, instead of adopting, a namespace or bucket
-                that already exists (``reproduce``, which may destroy only
-                what it created). The namespace is created with a plain
-                create, so a competing create between a caller's check and
-                this step is refused (409), not adopted.
+                that already exists (``deploy --require-new``, for a caller
+                that may destroy only what it created). The namespace is
+                created with a plain create, so a competing create between a
+                caller's check and this step is refused (409), not adopted.
         """
         self.deploy_nonce = deploy_nonce
         self.require_new = require_new
@@ -446,12 +446,14 @@ class DeploymentEngine:
     @staticmethod
     def _get_spark_major_minor(cfg: Any) -> str:
         """Extract Spark major.minor from image tag."""
-        tag = cfg.images.spark.split(":")[-1]
-        return ".".join(tag.split(".")[:2])
+        from lakebench.modules.pipeline_engines.spark.job import _parse_spark_major_minor
+
+        major, minor = _parse_spark_major_minor(cfg.images.spark)
+        return f"{major}.{minor}"
 
     @staticmethod
     def _trino_heap(cfg: Any, limit: str) -> str:
-        """Trino -Xmx for a pod memory limit (LB-146).
+        """Trino -Xmx for a pod memory limit.
 
         Strict only when Trino is the active query engine: an unparseable
         Trino memory on a spark-thrift or duckdb deployment must not stop
@@ -481,7 +483,7 @@ class DeploymentEngine:
 
     @staticmethod
     def _thrift_pod_memory(cfg: Any) -> str:
-        """Spark Thrift pod memory limit for the configured heap (LB-148).
+        """Spark Thrift pod memory limit for the configured heap.
 
         Strict only when Spark Thrift is the active query engine, for the
         same reason as ``_trino_heap``: destroy builds this context too.
@@ -598,7 +600,7 @@ class DeploymentEngine:
             "trino_worker_replicas": cfg.architecture.query_engine.trino.worker.replicas,
             "trino_worker_cpu": cfg.architecture.query_engine.trino.worker.cpu,
             "trino_worker_memory": cfg.architecture.query_engine.trino.worker.memory,
-            # LB-146: heap is a fraction of the pod limit, never equal to it.
+            # Heap is a fraction of the pod limit, never equal to it.
             "trino_coordinator_heap": self._trino_heap(
                 cfg, cfg.architecture.query_engine.trino.coordinator.memory
             ),
@@ -621,7 +623,7 @@ class DeploymentEngine:
             # Spark Thrift Server
             "spark_thrift_cores": cfg.architecture.query_engine.spark_thrift.cores,
             "spark_thrift_memory": cfg.architecture.query_engine.spark_thrift.memory,
-            # LB-148: pod limit = heap + overhead, never heap == limit.
+            # Pod limit = heap + overhead, never heap == limit.
             "spark_thrift_memory_k8s": self._thrift_pod_memory(cfg),
             "spark_thrift_catalog_name": cfg.architecture.query_engine.spark_thrift.catalog_name,
             "query_engine_type": cfg.architecture.query_engine.type.value,
@@ -825,7 +827,7 @@ class DeploymentEngine:
                 "resources (require_new). Nothing that existed was changed."
             ),
             elapsed_seconds=time.time() - start,
-            details={REFUSAL_DETAIL: "reproduce.existing_namespace"},
+            details={REFUSAL_DETAIL: "deploy.existing_namespace"},
         )
 
     def _namespace_already_using_name(self, namespace: str) -> str | None:
@@ -876,7 +878,7 @@ class DeploymentEngine:
         The stamp is the anchor for the "delete A does not affect B"
         invariant: destroy compares it before touching any resource, and
         a foreign stamp is a hard refuse. See
-        docs/design/namespace-isolation.md.
+        docs/internal/namespace-isolation.md.
         """
         import time
 
@@ -936,7 +938,7 @@ class DeploymentEngine:
         if not ours_from_retry and self.k8s.namespace_exists(namespace):
             phase = self.k8s.get_namespace_phase(namespace)
             if phase == "Terminating":
-                # LB-157: an earlier destroy of this name is still finishing.
+                # An earlier destroy of this name is still finishing.
                 # Creating into it fails with a confusing 403/409 from the API
                 # server, so wait a bounded time and then say what is wrong.
                 try:
@@ -1584,7 +1586,7 @@ class DeploymentEngine:
             context=self.config.platform.kubernetes.context or "",
             namespace=self.config.get_namespace(),
         )
-        # LB-159: the namespace records which buckets lakebench created, for
+        # The namespace records which buckets lakebench created, for
         # backends without tagging; destroy deletes only those. Recorded
         # before the ownership loop so a deploy that fails on a later bucket
         # still leaves a record for the ones it already created.
@@ -1815,7 +1817,7 @@ class DeploymentEngine:
                             elapsed_seconds=time.time() - start,
                         )
                 continue
-            # LB-159: keep the created-by-lakebench marker across redeploys
+            # Keep the created-by-lakebench marker across redeploys
             # (the tag set is rewritten each time) and add it on create.
             created_here = bool(results.get(name, False))
             if not created_here:

@@ -67,13 +67,11 @@ def _bronze(spark):
                 ("BANKG1",),
                 dt.datetime(2024, 3, 1),
             ),
-            # US01 as creditor, holder derived from bob, bic A_BANK
-            # (should NOT be picked -- Alice's holder_entity_id is smaller
-            # deterministically; regardless of which is smaller the fields
-            # must all come from ONE side, not mixed).
+            # US01 as creditor, holder derived from bob, bic A_BANK1. The
+            # winning row's fields must all come from ONE side, not mixed.
             (
-                bob,
                 alice,
+                bob,
                 ("GB03", "GBP"),
                 ("US01", "USD"),
                 ("BANKG2",),
@@ -108,43 +106,32 @@ def test_build_accounts_one_row_per_iban(spark):
 
 def test_build_accounts_row_fields_from_single_side(spark):
     """For the shared iban US01, the winning row's (holder_entity_id,
-    bank_bic, opened_date) must all be an actual observed triple, not a
-    per-column min blend across sides.
+    bank_bic, opened_date) must be one whole observed triple, not a
+    per-column blend across sides.
     """
-    from silver_build_financial import build_accounts
+    from pyspark.sql.functions import lit
+    from silver_build_financial import _entity_id_from, build_accounts
+
+    def holder(name, ctry, city, lei):
+        return (
+            spark.range(1)
+            .select(_entity_id_from(lit(name), lit(ctry), lit(city), lit(lei)).alias("h"))
+            .first()["h"]
+        )
+
+    alice = holder("ALICE", "US", "BOSTON", "LEIALICE")
+    bob = holder("BOB", "GB", "LONDON", "LEIBOB")
+    assert alice != bob
 
     accts = {r["iban"]: r for r in build_accounts(_bronze(spark), kyc=None).collect()}
     us01 = accts["US01"]
 
-    # The two observed (holder, bic, opened_date) triples for US01:
-    #   side A (dbtr): holder from ALICE, bic Z_BANK1, opened 2024-03-01
-    #   side B (cdtr): holder from BOB,   bic A_BANK1, opened 2024-04-01
-    # The winning row must be one of these two, not a Frankenstein mix.
-    observed_triples = {
-        # holder_entity_id we cannot know without recomputing _entity_id_from,
-        # but the (bic, opened_date) pair uniquely identifies the side.
-        ("Z_BANK1", dt.date(2024, 3, 1)),
-        ("A_BANK1", dt.date(2024, 4, 1)),
+    # Side A (dbtr): ALICE, Z_BANK1, 2024-03-01. Side B (cdtr): BOB, A_BANK1, 2024-04-01.
+    observed = {
+        (alice, "Z_BANK1", dt.date(2024, 3, 1)),
+        (bob, "A_BANK1", dt.date(2024, 4, 1)),
     }
-    assert (us01["bank_bic"], us01["opened_date"]) in observed_triples
-
-    # And -- because the row_number ordering starts with holder_entity_id
-    # ascending -- the choice is deterministic across runs. Assert a repeat.
-    accts_second = {r["iban"]: r for r in build_accounts(_bronze(spark), kyc=None).collect()}
-    assert accts_second["US01"]["holder_entity_id"] == us01["holder_entity_id"]
-    assert accts_second["US01"]["bank_bic"] == us01["bank_bic"]
-    assert accts_second["US01"]["opened_date"] == us01["opened_date"]
-
-
-def test_build_accounts_deterministic_across_calls(spark):
-    """Repeat build_accounts twice on the same bronze; result byte-identical."""
-    from silver_build_financial import build_accounts
-
-    a = sorted(build_accounts(_bronze(spark), kyc=None).collect(), key=lambda r: r["iban"])
-    b = sorted(build_accounts(_bronze(spark), kyc=None).collect(), key=lambda r: r["iban"])
-    assert [(r["iban"], r["holder_entity_id"], r["bank_bic"], r["opened_date"]) for r in a] == [
-        (r["iban"], r["holder_entity_id"], r["bank_bic"], r["opened_date"]) for r in b
-    ]
+    assert (us01["holder_entity_id"], us01["bank_bic"], us01["opened_date"]) in observed
 
 
 def test_build_accounts_prefers_non_null_bank_bic(spark):

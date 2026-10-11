@@ -9,9 +9,9 @@ Silver is the product's transform of the generator model's rows
 - batch: the real ``gold_finalize`` (``gold_finalize_delta``) ``main()``
   over the whole silver table;
 - continuous: the real ``gold_refresh`` (``gold_refresh_delta``) module,
-  loaded with its rate stream replaced by a stub that hands back the
-  ``foreachBatch`` handler, which is then called for three ticks while
-  silver grows by a third of its dates before each (as the silver stream
+  loaded with its silver stream replaced by a stub that hands back the
+  ``foreachBatch`` handler, which is then called for three ticks with the
+  rows silver gained before each (a third of its dates, as the silver stream
   appends). After every tick, gold is compared with ``gold_finalize`` over
   silver as it stands then, so each tick, not only the last, is checked;
 - changed: one silver purchase's amount changed by one cent, then
@@ -20,7 +20,7 @@ Silver is the product's transform of the generator model's rows
 Each gold table goes back to the parent as rows (``table_rows``), which
 compares them with ``c360_gold_compare``: an exact hash of gold is not
 stable, because the two averages of a DOUBLE amount can land one cent apart
-between two correct builds (LB-267).
+between two correct builds.
 
 Usage: python c360_gold_parity_scenarios.py <jars> <work_dir>
 Prints one JSON object on the last stdout line.
@@ -51,7 +51,8 @@ class _Query:
 
 
 class _RateStream:
-    """``spark.readStream`` for the refresh module: keeps the handler."""
+    """``spark.readStream`` for the refresh module (it streams silver):
+    keeps the ``foreachBatch`` handler instead of starting a query."""
 
     handler: Any = None
 
@@ -61,7 +62,10 @@ class _RateStream:
     def option(self, *_a: Any, **_k: Any) -> _RateStream:
         return self
 
-    def load(self) -> _RateStream:
+    def load(self, *_a: Any) -> _RateStream:
+        return self
+
+    def table(self, *_a: Any) -> _RateStream:
         return self
 
     @property
@@ -121,15 +125,19 @@ def stream_ticks(spark, work: str, fmt: str, parts: list, gold_table: str) -> li
     SparkSession.readStream = property(lambda self: _RateStream())  # type: ignore[assignment]
     _RateStream.handler = None
     _env(work, fmt, gold_table)
-    module = importlib.import_module(name)
+    # The refresh streams silver, so silver exists before it starts.
+    _write_silver(spark, fmt, parts[0], "overwrite")
+    importlib.import_module(name)
     tick = _RateStream.handler
-    if tick is None or getattr(tick, "__module__", None) != module.__name__:
+    if tick is None:
         raise RuntimeError(f"{name} did not hand its foreachBatch handler to the stream")
     out = []
     for i, part in enumerate(parts):
-        _write_silver(spark, fmt, part, "overwrite" if i == 0 else "append")
+        if i:
+            _write_silver(spark, fmt, part, "append")
         _env(work, fmt, gold_table)
-        tick(None, i)
+        # The micro-batch is the silver rows this commit added.
+        tick(part, i)
         stream = table_rows(spark.table(f"{CATALOGS[fmt]}.{gold_table}"))
         out.append((stream, batch_gold(spark, work, fmt, f"gold.parity_batch_{i}")))
     return out

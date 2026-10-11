@@ -10,7 +10,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rayon::prelude::*;
@@ -167,6 +167,7 @@ const FINANCIAL_FLAGS: &[&str] = &[
     "--delivery-mode",
     "--cycle",
     "--cycles",
+    "--deliver-until",
 ];
 const C360_FLAGS: &[&str] = &[
     "--schema",
@@ -188,6 +189,7 @@ const C360_FLAGS: &[&str] = &[
     "--threads",
     "--workers",
     "--delivery-mode",
+    "--deliver-until",
 ];
 /// Flags that take no value, per schema.
 const FINANCIAL_BARE: &[&str] = &[
@@ -569,7 +571,7 @@ fn main() {
         check_known_flags(&schema);
     }
     match schema.as_str() {
-        "financial" => pacs008_main(),
+        "financial" => pacs008_run(),
         "customer360" => customer360_main(),
         other => {
             eprintln!(
@@ -581,9 +583,92 @@ fn main() {
     }
 }
 
-/// pacs.008 datagen driver. Unchanged from the pre-c360 codepath -- extracted
-/// into a named function only to make room for schema dispatch in `main()`.
-fn pacs008_main() {
+/// How one AML epoch ended (see `pacs008_run`).
+enum EpochEnd {
+    /// This node finished the epoch in an earlier process (its marker is there).
+    Skipped,
+    Complete,
+    /// The deadline passed or the stop marker appeared: deliver nothing more.
+    Stopped,
+}
+
+/// AML datagen. Without --deliver-until: one corpus, as always (`pacs008_main`
+/// with epoch 0). Continuous: epoch 0 is the corpus (the bank's history),
+/// then epoch e > 0 is the same bank's next --corpus-months
+/// from 2026-01-01: the same world (customers, accounts, counterparty
+/// rings, watchlist), with new payments, new planted patterns and new
+/// screening payments from seeds salted by the epoch, new UETRs (row uids
+/// carry the epoch in bits 48..62) and an epoch suffix on every instance id.
+/// Each epoch writes its own manifest (manifest/manifest-eNNNN.parquet) and
+/// bronze files (bronze/pacs008/part-eNNNN-FFFFFF.parquet), at full speed,
+/// until the deadline or the stop marker. A restarted pod skips the epochs
+/// whose node marker is there and resumes inside the first one that is not.
+fn pacs008_run() {
+    let (cycle_n, cycles) = cycle_args();
+    let Some(until) = deliver_until_arg(cycle_n, cycles) else {
+        pacs008_main(0, false, None);
+        return;
+    };
+    let t_run = std::time::Instant::now();
+    let cont = Delivery::new(until);
+    let mut first = true;
+    for epoch in 0u64.. {
+        match pacs008_main(epoch, first, Some(&cont)) {
+            EpochEnd::Skipped => {}
+            EpochEnd::Complete => first = false,
+            EpochEnd::Stopped => break,
+        }
+    }
+    // One metrics line for the whole run: what this process wrote in every
+    // epoch over its wall time, including an epoch 0 the stop cut short.
+    // None when this process resumed after an earlier one (a restart): no
+    // line, so the fleet reads as not measured rather than undercounted.
+    let run = RUN_METRICS.lock().unwrap().take();
+    if let Some(mut m) = run {
+        m.elapsed_s = t_run.elapsed().as_secs_f64();
+        m.emit();
+    }
+}
+
+/// The AML world and watchlist, the same in every epoch of a process.
+static AML_WORLD: std::sync::OnceLock<(
+    datagen_rs::model::World,
+    datagen_rs::screening::Screening,
+)> = std::sync::OnceLock::new();
+
+/// A continuous AML run's metrics: epoch 0's record (sizing and its phase
+/// timings), with every later epoch's files, bytes and rows added.
+static RUN_METRICS: std::sync::Mutex<Option<PodMetrics>> = std::sync::Mutex::new(None);
+
+fn add_epoch_totals(files: u64, bytes: u64, rows: u64) {
+    if let Some(m) = RUN_METRICS.lock().unwrap().as_mut() {
+        m.files_written += files;
+        m.bytes_written += bytes;
+        m.rows_written += rows;
+    }
+}
+
+/// True the first time it is called in this process.
+fn first_call() -> bool {
+    static CALLED: AtomicBool = AtomicBool::new(false);
+    !CALLED.swap(true, Ordering::Relaxed)
+}
+
+/// Key of an AML node's marker for a live epoch (> 0); epoch 0's is the
+/// corpus marker (`corpus::marker_key`).
+fn epoch_marker_key(epoch: u64, node_id: i64) -> String {
+    format!(
+        "{}/e{:04}-node-{:04}.json",
+        datagen_rs::corpus::MARKER_DIR,
+        epoch,
+        node_id
+    )
+}
+
+/// pacs.008 datagen driver: one corpus, or one epoch of a paced run.
+/// `first`: the first epoch this process generates, which lists the prefix
+/// to resume after a restart.
+fn pacs008_main(epoch: u64, first: bool, cont: Option<&Delivery>) -> EpochEnd {
     // Direct-to-S3: pod holds no state. --bucket / --prefix name where the files
     // go, S3 creds and endpoint come from env (AWS_ACCESS_KEY_ID,
     // AWS_SECRET_ACCESS_KEY, S3_ENDPOINT, AWS_REGION).
@@ -601,6 +686,8 @@ fn pacs008_main() {
     // union of all cycles is the one-shot corpus. The defaults (0 of 1) are a
     // one-shot run.
     let (cycle_n, cycles) = cycle_args();
+    let until = deliver_until_arg(cycle_n, cycles);
+    let paced = until.is_some();
     let (slice_lo, slice_hi) = cycle::mass_slice(cycle_n, cycles);
     let in_slice = move |m: f64| m >= slice_lo && m < slice_hi;
     let scale: f64 = strict_f64("--scale", 1.0);
@@ -685,6 +772,10 @@ fn pacs008_main() {
     }
     let do_bronze = mode == "all" || mode == "bronze";
     let do_reference = mode == "reference" || (mode == "all" && node_id == 0);
+    if paced && mode != "all" {
+        eprintln!("--deliver-until needs --mode all (node 0 writes each epoch's manifest)");
+        std::process::exit(2);
+    }
     // Multi-writer guard (Wave 1 A3, 2026-09-28). Reference files
     // (manifest.parquet, party.parquet, account.parquet, watchlist.parquet)
     // are single-writer artefacts. A `--mode reference` pod is the whole
@@ -720,7 +811,8 @@ fn pacs008_main() {
     // affinity, not the Kubernetes CFS quota, so it oversubscribes and gets
     // throttled). 0 leaves rayon's default / RAYON_NUM_THREADS.
     let threads: usize = strict_arg("--threads", 0usize);
-    if threads > 0 {
+    // Once per process: a paced run calls this driver once per epoch.
+    if threads > 0 && first_call() {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build_global()
@@ -750,6 +842,39 @@ fn pacs008_main() {
         );
         std::process::exit(2);
     }
+    // A live epoch (> 0) is the bank's next corpus_months: from 2026-01-01
+    // plus (epoch - 1) * corpus_months. The watchlist and the world keep the
+    // history's window.
+    let (hist_start_us, hist_end_us) = (start_us, end_us);
+    let month_us = |k: i64| days_from_civil(2026 + k / 12, 1 + k % 12, 1) * US_PER_DAY;
+    let (start_us, end_us) = if epoch == 0 {
+        (start_us, end_us)
+    } else {
+        let k = (epoch as i64 - 1) * corpus_months;
+        (month_us(k), month_us(k + corpus_months))
+    };
+    let span_us = end_us - start_us;
+    // The epoch's activity seed: payments, planted patterns, amounts and
+    // screening payments. The world, counterparty rings, cadence schedule,
+    // watchlist and UETR derivation keep `seed`.
+    let aseed = if epoch == 0 {
+        seed
+    } else {
+        splitmix64((seed as u64) ^ 0xE90C_0000_0000_0001 ^ splitmix64(epoch)) as i64
+    };
+    // Row uids carry the epoch in bits 48..62, so a live epoch's UETRs never
+    // meet another epoch's (base uids are row indexes, far below 2^48).
+    let uid_salt: u64 = (epoch & 0x7FFF) << 48;
+    // A live epoch past year 9999, or past the 15 epoch bits in uid_salt
+    // (UETRs would repeat), is never generated: fail loud, not a quiet stop.
+    if epoch > 0 && (end_us as i128 > MAX_TS_US || epoch >= 0x7FFF) {
+        eprintln!(
+            "continuous delivery reached its limit at epoch {}: event time past year 9999 \
+             or past 32766 epochs; lengthen --corpus-months, shorten the window or raise --scale",
+            epoch
+        );
+        std::process::exit(2);
+    }
 
     // Validate S3 config + build the sink BEFORE the multi-minute world build,
     // so bad creds / missing endpoint surface in milliseconds. Building the
@@ -757,7 +882,7 @@ fn pacs008_main() {
     // The corpus arguments as resolved (defaults and parsed values, the
     // writer settings from the environment), for the marker and for
     // --print-resolved-args, which exits here before any S3 client.
-    let corpus_args = serde_json::json!({
+    let mut corpus_args = serde_json::json!({
         "schema": "financial",
         "seed_ref": held.seed_ref(seed),
         "cycles": cycles,
@@ -772,20 +897,83 @@ fn pacs008_main() {
         "robustness_perturbation": perturb != Perturbation::NONE,
         "bytes_per_row": bytes_per_row,
     });
+    if paced {
+        corpus_args["continuous"] = serde_json::json!(true);
+    }
     maybe_print_resolved_args(&corpus_args);
     let sink = S3Sink::from_env(&bucket, &prefix);
+    // A live epoch starts only while delivery runs: a stop that came during
+    // the previous epoch's last file must not write this epoch's manifest.
+    if epoch > 0 {
+        if let Some(reason) = cont.and_then(|d| d.stop_now(&sink)) {
+            eprintln!("continuous: node={node_id} stopped by {reason} before epoch {epoch}");
+            return EpochEnd::Stopped;
+        }
+    }
+    // Paced: an epoch this node finished in an earlier process is skipped;
+    // the first epoch of this process resumes after the files there.
+    let mut present: HashSet<String> = HashSet::new();
+    // This process resumed after files an earlier one wrote: its own
+    // totals are then not the node's.
+    let mut resumed = false;
+    if paced && first {
+        let markers: HashSet<String> = sink
+            .list_keys(datagen_rs::corpus::MARKER_DIR)
+            .into_iter()
+            .map(|(k, _)| format!("{}/{}", datagen_rs::corpus::MARKER_DIR, k))
+            .collect();
+        let done = if epoch == 0 {
+            datagen_rs::corpus::marker_key(cycle_n, node_id)
+        } else {
+            epoch_marker_key(epoch, node_id)
+        };
+        if markers.contains(&done) {
+            return EpochEnd::Skipped;
+        }
+        present = sink
+            .list_keys("bronze/pacs008")
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        let own_present = present
+            .iter()
+            .filter(|k| {
+                let fid = cycle::parse_epoch_part_key(k).map(|(_, f)| f).or_else(|| {
+                    k.strip_prefix("part-")?
+                        .strip_suffix(".parquet")?
+                        .parse::<i64>()
+                        .ok()
+                });
+                fid.is_some_and(|f| f % total_nodes == node_id)
+            })
+            .count() as u64;
+        resumed = own_present > 0;
+        continuous_identity(
+            &sink,
+            &corpus_args,
+            node_id,
+            own_present,
+            until.expect("continuous"),
+        );
+    }
 
     let t0 = std::time::Instant::now();
     // A dedicated-bronze pod (writes no reference zones) can skip the
     // reference-only world columns entirely.
     let bronze_only = do_bronze && !do_reference;
-    let mut w = build_world_p(scale, seed, corpus_months, bronze_only, &perturb);
-    // Screening track: the watchlist and its external
-    // counterparties, from their own salted streams. Attaching them adds
-    // entities above the population and changes no population column.
-    let screening = datagen_rs::screening::build(w.population, seed, start_us, end_us);
-    w.attach_external(screening.external_entities());
-    let w = w;
+    // The world and the watchlist take only the run's arguments and the
+    // history window, never the epoch: built once per process, so a live
+    // epoch starts writing at once instead of rebuilding the same bank.
+    let (w, screening) = AML_WORLD.get_or_init(|| {
+        let mut w = build_world_p(scale, seed, corpus_months, bronze_only, &perturb);
+        // Screening track: the watchlist and its external
+        // counterparties, from their own salted streams. Attaching them adds
+        // entities above the population and changes no population column.
+        let screening =
+            datagen_rs::screening::build(w.population, seed, hist_start_us, hist_end_us);
+        w.attach_external(screening.external_entities());
+        (w, screening)
+    });
     let t_world = t0.elapsed().as_secs_f64();
     let dims = &w.dims;
     let total_txns = dims.total_txns();
@@ -813,7 +1001,7 @@ fn pacs008_main() {
     let t_typ0 = std::time::Instant::now();
     let mut instances = datagen_rs::typology::schedule_p(
         seed,
-        seed,
+        aseed,
         total_txns,
         pop,
         start_us,
@@ -821,6 +1009,11 @@ fn pacs008_main() {
         |i| w.country(i),
         &perturb,
     );
+    if epoch > 0 {
+        for i in instances.iter_mut() {
+            i.id = format!("{}-e{epoch:04}", i.id);
+        }
+    }
     // Place every instance on the baseline calendar (see placement.rs).
     datagen_rs::placement::place_instances(&mut instances, &gcal, start_us, end_us);
     let mut typ_by_file: Vec<Vec<TypRow>> = (0..total_files).map(|_| Vec::new()).collect();
@@ -863,7 +1056,7 @@ fn pacs008_main() {
                 .push((inst.suppress_start_us, inst.suppress_end_us));
         }
     }
-    let mut trng = Rng::new((seed as u64) ^ 0x7791);
+    let mut trng = Rng::new((aseed as u64) ^ 0x7791);
     // Shaped [first, last] in-window row per instance, for the manifest.
     let mut inst_bounds: HashMap<String, (i64, i64)> = HashMap::new();
     // Calendar mass of each instance's last emitted row: a multi-cycle run
@@ -969,7 +1162,7 @@ fn pacs008_main() {
     // random rows only; scheduled rows carry uids n_base_total.. n_base_all.
     let regular = datagen_rs::regular::Regular::build(&w.activity, n_base_all, seed);
     let n_base_total: u64 = regular.n_rand;
-    let base_seed = splitmix64((seed as u64) ^ 0xBA5E_0000_0000_0001);
+    let base_seed = splitmix64((aseed as u64) ^ 0xBA5E_0000_0000_0001);
     let base_mass = move |i: u64| -> f64 {
         (i as f64 + hash_frac(i, base_seed as i64)) / n_base_total.max(1) as f64
     };
@@ -1048,9 +1241,9 @@ fn pacs008_main() {
     // and uid. Originators are activity-weighted customers outside any
     // dormancy window; amounts come from a per-row stream keyed by the row's
     // uid, drawn the way a base row's amount is.
-    let (planted, negative_rows) = datagen_rs::screening::plant(
-        &screening,
-        seed,
+    let (mut planted, negative_rows) = datagen_rs::screening::plant(
+        screening,
+        aseed,
         &gcal,
         start_us,
         end_us,
@@ -1066,6 +1259,11 @@ fn pacs008_main() {
         |o| w.country(o as usize),
         |o, t| !in_suppress_window(&is_suppressed, &suppress_windows, o, t),
     );
+    if epoch > 0 {
+        for pl in planted.iter_mut() {
+            pl.inst.id = format!("{}-e{epoch:04}", pl.inst.id);
+        }
+    }
     let screen_amount = |uid: u64, o: u64| -> f64 {
         let mut rng = Rng::new(splitmix64(
             uid ^ datagen_rs::screening::SCREEN_SALT ^ 0xA307,
@@ -1176,6 +1374,17 @@ fn pacs008_main() {
         // multipart adds request overhead with no benefit.
         // This cycle's instances: those whose last emitted row is in its
         // slice (an instance with no emitted rows goes by its window end).
+        // The manifest's UETRs carry the epoch, as the bronze rows' do.
+        let salted;
+        let salted_uids: &HashMap<String, Vec<u64>> = if uid_salt == 0 {
+            &inst_uids
+        } else {
+            salted = inst_uids
+                .iter()
+                .map(|(k, v)| (k.clone(), v.iter().map(|u| u ^ uid_salt).collect()))
+                .collect();
+            &salted
+        };
         let mine: Vec<datagen_rs::typology::Instance> = instances
             .iter()
             .chain(screen_instances.iter())
@@ -1189,19 +1398,29 @@ fn pacs008_main() {
             .cloned()
             .collect();
         let man_bytes = encode_parquet(
-            &build_manifest_x(&mine, seed, &inst_uids, &perturb, &screen_extra),
+            &build_manifest_x(&mine, seed, salted_uids, &perturb, &screen_extra),
             8 * 1024 * 1024,
         );
+        // Scheduling took a while: a live epoch stopped meanwhile writes no
+        // manifest (nothing of it is written yet).
+        if epoch > 0 {
+            if let Some(reason) = cont.and_then(|d| d.stop_now(&sink)) {
+                eprintln!("continuous: node={node_id} stopped by {reason} before epoch {epoch}");
+                return EpochEnd::Stopped;
+            }
+        }
         ref_bytes += man_bytes.len() as u64;
         ref_files += 1;
-        sink.put(
-            &cycle::ref_key("manifest/manifest.parquet", cycle_n),
-            man_bytes,
-        );
+        let man_key = if epoch == 0 {
+            cycle::ref_key("manifest/manifest.parquet", cycle_n)
+        } else {
+            format!("manifest/manifest-e{epoch:04}.parquet")
+        };
+        sink.put(&man_key, man_bytes);
 
-        if cycle_n == 0 {
+        if cycle_n == 0 && epoch == 0 {
             let mut acct_mpu = sink.put_multipart("bronze/account.parquet");
-            write_account_to(&w, &mut acct_mpu);
+            write_account_to(w, &mut acct_mpu);
             let acct_bytes = acct_mpu.bytes_written();
             acct_mpu
                 .finish()
@@ -1212,13 +1431,13 @@ fn pacs008_main() {
             // The watchlist is an input the bank holds (the published list
             // versions), not ground truth: which listed party was paid is only
             // in the manifest. Before party, which silver-stream waits for.
-            let wl_bytes = encode_parquet(&watchlist_batch(&screening), 1024 * 1024);
+            let wl_bytes = encode_parquet(&watchlist_batch(screening), 1024 * 1024);
             ref_bytes += wl_bytes.len() as u64;
             ref_files += 1;
             sink.put("bronze/watchlist.parquet", wl_bytes);
 
             let mut party_mpu = sink.put_multipart("bronze/party.parquet");
-            write_party_to(&w, &instances, &mut party_mpu);
+            write_party_to(w, &instances, &mut party_mpu);
             let party_bytes = party_mpu.bytes_written();
             party_mpu
                 .finish()
@@ -1259,10 +1478,20 @@ fn pacs008_main() {
                         .iter()
                         .any(|r| in_slice(gcal.mass_at(r.ts_us)))
             })
+            // Paced restart: files already written are not written again.
+            .filter(|&fid| {
+                let name = if epoch == 0 {
+                    format!("part-{fid:06}.parquet")
+                } else {
+                    cycle::epoch_part_key(fid, epoch)
+                };
+                !present.contains(&name)
+            })
             .collect()
     } else {
         Vec::new()
     };
+    let mut stopped: Option<&'static str> = None;
     let gen_done = AtomicBool::new(false);
     std::thread::scope(|s| {
         // Ensure the reporter thread always terminates -- even if the par_iter
@@ -1290,7 +1519,9 @@ fn pacs008_main() {
                 );
             });
         }
-        my_files.par_iter().for_each(|&fid| {
+        // One bronze file's rows in time order, as build_batch takes them;
+        // None for a multi-cycle file with nothing in this cycle's slice.
+        let file_rows = |fid: i64| -> Option<Batch<'static>> {
             let typ: Vec<&TypRow> = typ_by_file[fid as usize]
                 .iter()
                 .filter(|r| in_slice(gcal.mass_at(r.ts_us)))
@@ -1447,7 +1678,7 @@ fn pacs008_main() {
             }
             // A multi-cycle file with nothing in this cycle's slice is not written.
             if cycles > 1 && orig.is_empty() {
-                return;
+                return None;
             }
 
             // sort by ts
@@ -1461,27 +1692,29 @@ fn pacs008_main() {
             let ccy2: Vec<&'static str> = idx.iter().map(|&i| ccy[i]).collect();
             // Permute the pre-assigned uid[] with the same sort so each row's
             // UETR derivation lines up with its position in the batch.
-            let uid: Vec<u64> = idx.iter().map(|&i| uid_pre[i]).collect();
-            let tb = std::time::Instant::now();
-            let batch = build_batch(
-                &w,
-                &Batch {
-                    orig: orig2,
-                    bene: bene2,
-                    ts_us: ts2,
-                    amount: amt2,
-                    ccy: ccy2,
-                    uid,
-                },
-            );
-            build_ns.fetch_add(tb.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            let uid: Vec<u64> = idx.iter().map(|&i| uid_pre[i] ^ uid_salt).collect();
+            Some(Batch {
+                orig: orig2,
+                bene: bene2,
+                ts_us: ts2,
+                amount: amt2,
+                ccy: ccy2,
+                uid,
+            })
+        };
+        // Write one bronze file and count it.
+        let write_file = |fid: i64, batch: &arrow::record_batch::RecordBatch| {
             let tw = std::time::Instant::now();
             // Slight overshoot on the pre-alloc so ArrowWriter rarely reallocs
             // (only used by DeliveryMode::Batch; continuous streams via MpuWriter).
             let cap_hint = (file_size as usize + file_size as usize / 8).max(1024 * 1024);
-            let key = cycle::pacs_key(fid, cycle_n);
+            let key = if epoch == 0 {
+                cycle::pacs_key(fid, cycle_n)
+            } else {
+                format!("bronze/pacs008/{}", cycle::epoch_part_key(fid, epoch))
+            };
             let tu = std::time::Instant::now();
-            let sz = write_bronze_file(&sink, &key, &batch, cap_hint, delivery);
+            let sz = write_bronze_file(&sink, &key, batch, cap_hint, delivery);
             // upload_ns counts write + upload for continuous; write_ns is 0 for
             // continuous because the streaming write IS the upload. Keep the
             // interpretation clear in the summary line below.
@@ -1490,7 +1723,38 @@ fn pacs008_main() {
             total_bytes.fetch_add(sz, Ordering::Relaxed);
             files_written.fetch_add(1, Ordering::Relaxed);
             rows_written.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
-        });
+        };
+        let emit = |fid: i64| {
+            let Some(rows) = file_rows(fid) else {
+                return;
+            };
+            let tb = std::time::Instant::now();
+            let batch = build_batch(w, &rows);
+            build_ns.fetch_add(tb.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            write_file(fid, &batch);
+        };
+        match cont {
+            // One corpus: every file at once.
+            None => my_files.par_iter().for_each(|&fid| emit(fid)),
+            // Continuous: each thread takes the next file in order when it is
+            // free (no thread waits for another), until the deadline or the
+            // stop marker.
+            Some(d) => {
+                let next = AtomicU64::new(0);
+                (0..rayon::current_num_threads())
+                    .into_par_iter()
+                    .for_each(|_| {
+                        while d.stop(&sink).is_none() {
+                            let k = next.fetch_add(1, Ordering::Relaxed) as usize;
+                            let Some(&fid) = my_files.get(k) else {
+                                break;
+                            };
+                            emit(fid);
+                        }
+                    });
+                stopped = d.reason();
+            }
+        }
         // gen_done is set by the StopGuard on scope exit (normal or panic).
     });
     let total_bytes = total_bytes.load(Ordering::Relaxed);
@@ -1527,24 +1791,11 @@ fn pacs008_main() {
     // A reference-only pod (a raw split run; Lakebench always renders
     // --mode all) is not one of the corpus's nodes: its marker would take
     // bronze node 0's key, so it writes none.
-    if mode != "reference" {
-        write_marker(
-            &sink,
-            &corpus_args,
-            cycle_n,
-            node_id,
-            datagen_rs::corpus::NodeTotals {
-                files_written,
-                rows_written,
-                bytes_written: total_bytes,
-            },
-        );
-    }
-
     // Machine-readable per-pod metrics line for the lakebench aggregator.
     // See datagen_rs::metrics for the schema; lakebench parses on prefix
-    // `LB_METRICS_JSON `.
-    PodMetrics {
+    // `LB_METRICS_JSON `. A continuous run emits it once, at its end
+    // (pacs008_run), from epoch 0's record.
+    let m = PodMetrics {
         schema: "financial".into(),
         node_id,
         node_count: total_nodes,
@@ -1574,8 +1825,51 @@ fn pacs008_main() {
         encode_parquet_s: write_s,
         s3_put_s: up_s,
         ..Default::default()
+    };
+    if let Some(reason) = stopped {
+        eprintln!(
+            "continuous: node={} stopped by {} in epoch {} after {} files ({} bytes) of it",
+            node_id, reason, epoch, files_written, total_bytes
+        );
+        if epoch == 0 && !resumed && cont.is_some() {
+            // Stopped inside the first epoch: this process wrote all the
+            // node wrote, so the partial epoch is the run's record.
+            *RUN_METRICS.lock().unwrap() = Some(m);
+        } else {
+            add_epoch_totals(files_written, total_bytes, rows_written);
+        }
+        return EpochEnd::Stopped;
     }
-    .emit();
+    let totals = datagen_rs::corpus::NodeTotals {
+        files_written,
+        rows_written,
+        bytes_written: total_bytes,
+    };
+    if epoch > 0 {
+        let doc = datagen_rs::corpus::marker_json(
+            &corpus_args,
+            epoch,
+            node_id,
+            totals,
+            &datagen_rs::corpus::utc_now(),
+        );
+        sink.put(&epoch_marker_key(epoch, node_id), doc.into_bytes());
+        eprintln!(
+            "continuous: node={} epoch={} files={} bytes={}",
+            node_id, epoch, files_written, total_bytes
+        );
+        add_epoch_totals(files_written, total_bytes, rows_written);
+        return EpochEnd::Complete;
+    }
+    if mode != "reference" {
+        write_marker(&sink, &corpus_args, cycle_n, node_id, totals);
+    }
+
+    match cont {
+        Some(_) => *RUN_METRICS.lock().unwrap() = Some(m),
+        None => m.emit(),
+    }
+    EpochEnd::Complete
 }
 
 /// Read LB_POD_CPU_REQUEST_MILLI from the environment. The K8s Job template
@@ -1607,6 +1901,16 @@ fn read_cpu_request_millicores() -> Option<u64> {
 // in Rng::new). Node id affects only which subset of file ids this pod owns;
 // the file content depends only on (seed, file_id), so two pods writing the
 // same fid produce identical bytes.
+//
+// Continuous delivery (--deliver-until): the pod writes its files at full
+// speed, epoch after epoch, until the deadline or the stop marker
+// `_corpus/stop`. Epoch e of file fid has file id g = e * total_files + fid
+// and key part-eNNNN-FFFFFF; its rows fall in the time slice of its round,
+// g / total_nodes, slices being span * nodes / files long, so event time
+// advances with delivery and slices never overlap. A restarted pod resumes at
+// its first file not yet in the listing, after checking the files there are
+// this configuration's (`_corpus/continuous-node-NNNN.json`). A pod restarted past
+// its deadline or the stop marker writes its marker and exits 0.
 // ---------------------------------------------------------------------------
 fn customer360_main() {
     if robustness_flag() {
@@ -1725,13 +2029,16 @@ fn customer360_main() {
             .expect("failed to size rayon pool");
     }
     // Delivery mode (Wave 2 D3, 2026-09-28); see the pacs008 branch for the
-    // full semantic. Default batch preserves the current pinned-digest tests.
+    // full semantic.
     let delivery = parse_delivery_mode();
     eprintln!("delivery_mode={}", delivery.name());
+    let until = deliver_until_arg(cycle_n, c360_cycles);
+    let paced = until.is_some();
+    let deliver_until = until.unwrap_or(0);
 
     // The corpus arguments as resolved, for the marker and for
     // --print-resolved-args, which exits here before any S3 client.
-    let corpus_args = serde_json::json!({
+    let mut corpus_args = serde_json::json!({
         "schema": "customer360",
         "seed_ref": seed.to_string(),
         "cycles": c360_cycles,
@@ -1775,6 +2082,42 @@ fn customer360_main() {
         );
         std::process::exit(2);
     }
+    let my_files: Vec<i64> = (0..total_files)
+        .filter(|fid| fid % total_nodes == node_id)
+        .collect();
+    // Paced: each round of total_nodes files covers one slice of the window.
+    let slice_us: i64 =
+        ((ts_end_us - ts_start_us) as i128 * total_nodes as i128 / total_files as i128) as i64;
+    if paced {
+        if my_files.is_empty() {
+            eprintln!(
+                "node {} of {} owns none of the {} files: raise --target-tb or run fewer pods",
+                node_id, total_nodes, total_files
+            );
+            std::process::exit(2);
+        }
+        if slice_us <= customer360::SESSION_TIMESPAN_US {
+            // A slice is floor(window x pods / files), so the fewest pods
+            // that pass are ceil((span + 1) x files / window); never more
+            // pods than files (a pod would own none).
+            let window = (ts_end_us - ts_start_us) as i128;
+            let need = (customer360::SESSION_TIMESPAN_US as i128 + 1) * total_files as i128;
+            let min_pods = (need + window - 1) / window;
+            let pods = if min_pods <= total_files as i128 {
+                format!("run at least {min_pods} pods (datagen.parallelism), ")
+            } else {
+                String::new()
+            };
+            eprintln!(
+                "continuous delivery needs each round's time slice above 30 min (a session's span); \
+                 got {:.1} min: {}widen --timestamp-start/--timestamp-end or lower --target-tb",
+                slice_us as f64 / 60e6,
+                pods
+            );
+            std::process::exit(2);
+        }
+        corpus_args["continuous"] = serde_json::json!(true);
+    }
     // Every argument check is above, so a printed resolution is one the run
     // would accept.
     maybe_print_resolved_args(&corpus_args);
@@ -1788,10 +2131,25 @@ fn customer360_main() {
     let loyalty = std::sync::Arc::new(LoyaltyLookup::build(seed as u64, customer_id_max));
     let cid_sampler = std::sync::Arc::new(CustomerIdSampler::new(customer_id_max));
     let t_setup = t0.elapsed().as_secs_f64();
-
-    let my_files: Vec<i64> = (0..total_files)
-        .filter(|fid| fid % total_nodes == node_id)
-        .collect();
+    // Paced: the files already written (a restarted pod resumes after them).
+    let present: HashSet<String> = if paced {
+        sink.list_keys("").into_iter().map(|(k, _)| k).collect()
+    } else {
+        HashSet::new()
+    };
+    if paced {
+        // This node's paced files already in the prefix: a restart's.
+        let own_present = present
+            .iter()
+            .filter(|k| {
+                matches!(cycle::parse_epoch_part_key(k),
+                    Some((_, f)) if f < total_files && f % total_nodes == node_id)
+            })
+            .count() as u64;
+        continuous_identity(&sink, &corpus_args, node_id, own_present, deliver_until);
+    }
+    let mut paced_stop = "";
+    let mut paced_next: u64 = 0;
 
     let total_bytes = AtomicU64::new(0);
     let files_written = AtomicU64::new(0);
@@ -1825,34 +2183,127 @@ fn customer360_main() {
                 );
             });
         }
-        my_files.par_iter().for_each(|&fid| {
-            let cfg = customer360::Config {
+        // One file's generator config: its stream is (seed, file id). A paced
+        // file (epoch given) takes its global sequence index as its file id
+        // and its round's time slice as its window.
+        let file_cfg = |fid: i64, epoch: Option<u64>| {
+            let (file_id, lo, hi) = match epoch {
+                None => (
+                    cycle::c360_file_id(fid as u64, cycle_n),
+                    ts_start_us,
+                    ts_end_us,
+                ),
+                Some(e) => {
+                    // The global sequence index: a dense, disjoint file id.
+                    let g = e as i64 * total_files + fid;
+                    let lo = ts_start_us + (g / total_nodes) * slice_us;
+                    (g as u64, lo, lo + slice_us)
+                }
+            };
+            customer360::Config {
                 seed: seed as u64,
-                file_id: cycle::c360_file_id(fid as u64, cycle_n),
+                file_id,
                 rows_per_file,
                 customer_id_max,
                 dirty_ratio,
                 duplicate_email_pct,
                 payload_kb,
-                timestamp_start_us: ts_start_us,
-                timestamp_end_us: ts_end_us,
+                timestamp_start_us: lo,
+                timestamp_end_us: hi,
+            }
+        };
+        // Write one file and count it.
+        let write_file =
+            |fid: i64, epoch: Option<u64>, batch: &arrow::record_batch::RecordBatch| {
+                let tw = std::time::Instant::now();
+                let cap_hint = (file_size_bytes + file_size_bytes / 8).max(1024 * 1024);
+                // key is relative to S3Sink.prefix (set from --prefix). Sink prepends.
+                let key = match epoch {
+                    None => cycle::c360_key(fid, cycle_n),
+                    Some(e) => cycle::epoch_part_key(fid, e),
+                };
+                let tu = std::time::Instant::now();
+                let sz = write_bronze_file(&sink, &key, batch, cap_hint, delivery);
+                write_ns.fetch_add(tw.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                upload_ns.fetch_add(tu.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                total_bytes.fetch_add(sz, Ordering::Relaxed);
+                files_written.fetch_add(1, Ordering::Relaxed);
+                rows_written.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
             };
-            let tb = std::time::Instant::now();
-            let batch = customer360::build_batch(&cfg, &loyalty, &cid_sampler);
-            build_ns.fetch_add(tb.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-            let tw = std::time::Instant::now();
-            let cap_hint = (file_size_bytes + file_size_bytes / 8).max(1024 * 1024);
-            // key is relative to S3Sink.prefix (set from --prefix). Sink prepends.
-            let key = cycle::c360_key(fid, cycle_n);
-            let tu = std::time::Instant::now();
-            let sz = write_bronze_file(&sink, &key, &batch, cap_hint, delivery);
-            write_ns.fetch_add(tw.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            upload_ns.fetch_add(tu.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            total_bytes.fetch_add(sz, Ordering::Relaxed);
-            files_written.fetch_add(1, Ordering::Relaxed);
-            rows_written.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
-        });
+        if !paced {
+            my_files.par_iter().for_each(|&fid| {
+                let tb = std::time::Instant::now();
+                let batch = customer360::build_batch(&file_cfg(fid, None), &loyalty, &cid_sampler);
+                build_ns.fetch_add(tb.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                write_file(fid, None, &batch);
+            });
+            return;
+        }
+        // Paced: this pod's j-th file is epoch j / own of my_files[j % own].
+        let own = my_files.len() as u64;
+        let seq = |j: u64| (my_files[(j % own) as usize], j / own);
+        let key_of = |j: u64| {
+            let (fid, e) = seq(j);
+            cycle::epoch_part_key(fid, e)
+        };
+        let delivery = Delivery::new(deliver_until);
+        // The last global index whose time slice ends by year 9999 and whose
+        // row ids fit i64: past it the pod fails loud.
+        let g_limit = ((MAX_TS_US - ts_start_us as i128) / slice_us as i128 - 1)
+            .saturating_mul(total_nodes as i128)
+            .min(i64::MAX as i128 / rows_per_file as i128 - 1);
+        let mut j: u64 = 0;
+        while present.contains(&key_of(j)) {
+            j += 1;
+        }
+        eprintln!(
+            "continuous: node={} until={} slice={:.1} min resume_at={} present={}",
+            node_id,
+            deliver_until,
+            slice_us as f64 / 60e6,
+            j,
+            present.len()
+        );
+        // Each thread takes the next index in order when it is free (no thread
+        // waits for another), until the deadline or the stop marker.
+        let next = AtomicU64::new(j);
+        (0..rayon::current_num_threads())
+            .into_par_iter()
+            .for_each(|_| {
+                while delivery.stop(&sink).is_none() {
+                    let jj = next.fetch_add(1, Ordering::Relaxed);
+                    if present.contains(&key_of(jj)) {
+                        continue;
+                    }
+                    let (fid, e) = seq(jj);
+                    if (e as i128) * total_files as i128 + fid as i128 > g_limit {
+                        eprintln!(
+                            "continuous delivery reached its limit at epoch {}: event time \
+                         past year 9999 or row ids past i64; widen the timestamp window, \
+                         raise --target-tb or shorten the window",
+                            e
+                        );
+                        std::process::exit(2);
+                    }
+                    let tb = std::time::Instant::now();
+                    let batch =
+                        customer360::build_batch(&file_cfg(fid, Some(e)), &loyalty, &cid_sampler);
+                    build_ns.fetch_add(tb.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    write_file(fid, Some(e), &batch);
+                    if delivery.log_due() {
+                        eprintln!(
+                            "continuous: node={} files={} bytes={} epoch={}",
+                            node_id,
+                            files_written.load(Ordering::Relaxed),
+                            total_bytes.load(Ordering::Relaxed),
+                            jj / own
+                        );
+                    }
+                }
+            });
+        paced_stop = delivery.reason().unwrap_or("deadline");
+        j = next.load(Ordering::Relaxed);
+        paced_next = j;
         // gen_done is set by the StopGuard on scope exit (normal or panic).
     });
 
@@ -1890,17 +2341,45 @@ fn customer360_main() {
         up_s
     );
 
-    write_marker(
-        &sink,
-        &corpus_args,
-        cycle_n,
-        node_id,
+    // Paced: the marker counts every file of this node in the listing, so a
+    // restarted pod's totals include what it wrote before the restart.
+    let totals = if paced {
+        let (mut f, mut b) = (0u64, 0u64);
+        for (k, sz) in sink.list_keys("") {
+            if let Some((_, fid)) = cycle::parse_epoch_part_key(&k) {
+                if fid < total_files && fid % total_nodes == node_id {
+                    f += 1;
+                    b += sz;
+                }
+            }
+        }
+        eprintln!(
+            "continuous: node={} stopped by {} next_file={} epoch={} node_files={} node_bytes={} \
+             this_run_files={} this_run_bytes={} ({:.1} MB/s over {:.0}s)",
+            node_id,
+            paced_stop,
+            paced_next,
+            paced_next / my_files.len() as u64,
+            f,
+            b,
+            files_written,
+            total_bytes,
+            total_bytes as f64 / t_gen.max(1e-9) / 1e6,
+            t_gen
+        );
+        datagen_rs::corpus::NodeTotals {
+            files_written: f,
+            rows_written: f * rows_per_file as u64,
+            bytes_written: b,
+        }
+    } else {
         datagen_rs::corpus::NodeTotals {
             files_written,
             rows_written,
             bytes_written: total_bytes,
-        },
-    );
+        }
+    };
+    write_marker(&sink, &corpus_args, cycle_n, node_id, totals);
 
     // Machine-readable per-pod metrics line for the lakebench aggregator.
     // See datagen_rs::metrics for the schema; lakebench parses on prefix
@@ -1933,6 +2412,173 @@ fn customer360_main() {
     }
     .emit();
 }
+
+/// Wall-clock now, in unix seconds.
+fn unix_now_s() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// The stop marker, relative to --prefix: once present, no new file starts.
+const STOP_KEY: &str = "_corpus/stop";
+
+/// Continuous delivery (--deliver-until): the unix second after which no new
+/// file starts; None without the flag. Exits 2 on a bad value, or with
+/// --cycle/--cycles.
+fn deliver_until_arg(cycle_n: u64, cycles: u64) -> Option<i64> {
+    if !bare_flag_given("--deliver-until") {
+        return None;
+    }
+    let until: i64 = strict_arg("--deliver-until", 0);
+    if until <= 0 {
+        eprintln!("--deliver-until must be unix seconds; got {}", until);
+        std::process::exit(2);
+    }
+    if cycles > 1 || cycle_n > 0 {
+        eprintln!("--deliver-until does not combine with --cycle or --cycles");
+        std::process::exit(2);
+    }
+    Some(until)
+}
+
+/// Before a paced node's first file of this process. Files of this node
+/// already in the prefix (a restart's) must be this configuration's: the
+/// node records its corpus_args hash before its first file, so a run never
+/// resumes past, or counts, another configuration's files. With none, a stop
+/// marker or a passed deadline means the run ended before it began. Exits 2
+/// on any of these; otherwise records the hash for a fresh node.
+fn continuous_identity(
+    sink: &S3Sink,
+    corpus_args: &serde_json::Value,
+    node_id: i64,
+    own_present: u64,
+    until: i64,
+) {
+    let ident_key = format!(
+        "{}/continuous-node-{:04}.json",
+        datagen_rs::corpus::MARKER_DIR,
+        node_id
+    );
+    let ident = datagen_rs::corpus::corpus_args_sha256(corpus_args);
+    if own_present > 0 {
+        let recorded = sink
+            .get(&ident_key)
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v["corpus_args_sha256"].as_str().map(str::to_string));
+        if recorded.as_deref() != Some(ident.as_str()) {
+            eprintln!(
+                "the prefix holds {} paced files of node {} from another configuration \
+                 (or with no recorded one): clear the prefix before a continuous run",
+                own_present, node_id
+            );
+            std::process::exit(2);
+        }
+        return;
+    }
+    if sink.exists(STOP_KEY) {
+        eprintln!(
+            "a stop marker ({}) is present before node {} delivered anything: \
+             clear the prefix before a continuous run",
+            STOP_KEY, node_id
+        );
+        std::process::exit(2);
+    }
+    if until <= unix_now_s() {
+        eprintln!(
+            "--deliver-until {} has passed and node {} has delivered nothing",
+            until, node_id
+        );
+        std::process::exit(2);
+    }
+    let doc = serde_json::json!({ "corpus_args_sha256": ident });
+    sink.put(&ident_key, doc.to_string().into_bytes());
+}
+
+/// When continuous delivery stops: the deadline, or the stop marker (one
+/// thread checks it at most every 10 s). Shared by the writer threads, each
+/// of which asks before it starts a file.
+struct Delivery {
+    until: i64,
+    next_check_ms: AtomicU64,
+    next_log_ms: AtomicU64,
+    /// 0 running, 1 deadline, 2 stop marker.
+    stopped: std::sync::atomic::AtomicU8,
+}
+
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+impl Delivery {
+    fn new(until: i64) -> Self {
+        Delivery {
+            until,
+            next_check_ms: AtomicU64::new(0),
+            next_log_ms: AtomicU64::new(unix_now_ms() + 60_000),
+            stopped: std::sync::atomic::AtomicU8::new(0),
+        }
+    }
+
+    /// Why delivery stops now, or None to start the next file.
+    fn stop(&self, sink: &S3Sink) -> Option<&'static str> {
+        match self.stopped.load(Ordering::Relaxed) {
+            1 => return Some("deadline"),
+            2 => return Some("stop marker"),
+            _ => {}
+        }
+        if unix_now_s() >= self.until {
+            self.stopped.store(1, Ordering::Relaxed);
+            return Some("deadline");
+        }
+        let now = unix_now_ms();
+        let due = self.next_check_ms.load(Ordering::Relaxed);
+        if now >= due
+            && self
+                .next_check_ms
+                .compare_exchange(due, now + 10_000, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            && sink.exists(STOP_KEY)
+        {
+            self.stopped.store(2, Ordering::Relaxed);
+            return Some("stop marker");
+        }
+        None
+    }
+
+    /// `stop` without the 10 s throttle on the marker probe.
+    fn stop_now(&self, sink: &S3Sink) -> Option<&'static str> {
+        self.next_check_ms.store(0, Ordering::Relaxed);
+        self.stop(sink)
+    }
+
+    /// The reason delivery stopped, if it did.
+    fn reason(&self) -> Option<&'static str> {
+        match self.stopped.load(Ordering::Relaxed) {
+            1 => Some("deadline"),
+            2 => Some("stop marker"),
+            _ => None,
+        }
+    }
+
+    /// True for one caller about once a minute (for a progress line).
+    fn log_due(&self) -> bool {
+        let now = unix_now_ms();
+        let due = self.next_log_ms.load(Ordering::Relaxed);
+        now >= due
+            && self
+                .next_log_ms
+                .compare_exchange(due, now + 60_000, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+    }
+}
+
+/// 9999-12-31T23:59:59.999999Z: event time must stay below it.
+const MAX_TS_US: i128 = 253_402_300_799_999_999;
 
 /// Parse a YYYY-MM-DD string into microseconds since the Unix epoch (UTC).
 /// Returns None on malformed input. Uses `days_from_civil` for the calendar
@@ -2013,11 +2659,12 @@ mod classification {
             Err("per node, recorded in the marker's node_id"),
         ),
         ("--cycle", Err("per cycle, recorded in the marker's cycle")),
-        (
-            "--threads",
-            Err("thread count; output is thread-invariant (pinned)"),
-        ),
+        ("--threads", Err("thread count; output is thread-invariant")),
         ("--workers", Err("thread count alias")),
+        (
+            "--deliver-until",
+            Err("delivery deadline; the files written are the marker's totals"),
+        ),
         ("--print-resolved-args", Err("a mode that writes nothing")),
         ("--version", Err("a mode that writes nothing")),
     ];

@@ -46,7 +46,7 @@ DEFAULT_SCALE = 1.0
 #: ``--credentials-env`` default: the config references
 #: ``${LAKEBENCH_S3_ACCESS_KEY}`` and ``${LAKEBENCH_S3_SECRET_KEY}``.
 DEFAULT_CREDENTIALS_ENV = "LAKEBENCH_S3"
-#: Non-comment lines in the default output (design 02 section 2.5).
+#: Non-comment lines in the default output.
 LINE_BUDGET = 12
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

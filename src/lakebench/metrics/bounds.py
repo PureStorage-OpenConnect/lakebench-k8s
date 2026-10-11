@@ -8,8 +8,8 @@ bound the run.
 
 The trickle (``max_files_per_trigger``) is not a bound kind: it is set on
 every continuous run, so putting it in ``bound_kinds`` would move every
-continuous identity. ``trickle_bound`` says whether it held intake (SPEC
-section 8: a trickle was set and the pipeline kept pace); the experiment
+continuous identity. ``trickle_bound`` says whether it held intake (a
+trickle was set and the pipeline kept pace); the experiment
 block records the answer in ``limits.trickle_bound`` and adds one line to
 ``limits.bound``. Readers of a stored record that lacks it call
 ``record_trickle_bound``.
@@ -42,6 +42,18 @@ BOUND_ML_LOOP_EXECUTOR_CAP = "ML loop executor cap"
 
 #: ``limits.bound`` lines that come from the trickle start with this.
 TRICKLE_LINE_PREFIX = "trickle:"
+#: The binding-caps line for a continuous run whose intake datagen's
+#: offered load set (``datagen_line``) starts with this. Like the trickle it
+#: is not a bound kind: it labels the throughputs, not the run's identity.
+DATAGEN_LINE_PREFIX = "datagen offered load:"
+#: ``limits.bound`` lines for a stage's trigger interval start with this.
+TRIGGER_LINE_PREFIX = "trigger interval:"
+#: Each stream and its interval key in the config snapshot's ``sustained``.
+_TRIGGER_KEYS = (
+    ("bronze-ingest", "bronze_trigger_interval"),
+    ("silver-stream", "silver_trigger_interval"),
+    ("gold-refresh", "gold_refresh_interval"),
+)
 
 
 @dataclass(frozen=True)
@@ -138,6 +150,79 @@ def bound_entries(
         for kind, _line in out:
             if not is_registered(kind):
                 raise ValueError(f"bound kind {kind!r} is not in BOUND_KINDS")
+    return out
+
+
+def evidence_cap_lines(capped: Any) -> list[str]:
+    """One line per AML typology whose recall the evidence cap bounds, from
+    ``financial_scoring.recall_bounded_by_evidence_cap`` (typology -> its
+    designated rules with an alert cut at max_txns_per_alert). A binding-caps
+    line, not a bound kind: it bounds a workload result (recall), which no
+    registry metric carries."""
+    if not isinstance(capped, Mapping):
+        return []
+    return [
+        f"evidence cap: {typ} recall bounded ({', '.join(str(r) for r in rules)} "
+        "alerts cut at max_txns_per_alert)"
+        for typ, rules in sorted(capped.items())
+        if rules
+    ]
+
+
+def datagen_line(source: Any) -> str | None:
+    """The binding-caps line for a continuous run whose intake was set by
+    the run's own datagen, from a metrics.json dict or a PipelineMetrics;
+    None otherwise. Datagen sets it when bronze took about every row datagen
+    wrote (``datagen_ahead`` False: no backlog, so rows/s and the paces are
+    datagen's rate, not the pipeline's capacity), or when datagen offered
+    less than it was sized for (``stage_capacity.datagen.fell_short``)."""
+    if isinstance(source, Mapping):
+        pb = source.get("pipeline_benchmark") or {}
+        if not isinstance(pb, Mapping):
+            return None
+        mode = pb.get("pipeline_mode")
+        ahead = (pb.get("scores") or {}).get("datagen_ahead")
+        capacity = pb.get("stage_capacity") or {}
+    else:
+        pb = getattr(source, "pipeline_benchmark", None)
+        if pb is None:
+            return None
+        mode = getattr(pb, "pipeline_mode", None)
+        ahead = getattr(pb, "datagen_ahead", None)
+        capacity = getattr(pb, "stage_capacity", None) or {}
+    if mode not in ("sustained", "continuous"):
+        return None
+    dg = capacity.get("datagen") if isinstance(capacity, Mapping) else None
+    dg = dg if isinstance(dg, Mapping) else {}
+    if dg.get("fell_short"):
+        return (
+            f"{DATAGEN_LINE_PREFIX} datagen wrote {dg.get('measured_mb_s')} MB/s of the "
+            f"{dg.get('sized_mb_s')} MB/s it was sized for; rows/s and the paces are its "
+            "rate, not the pipeline's capacity"
+        )
+    if ahead is False:
+        return (
+            f"{DATAGEN_LINE_PREFIX} bronze took about every row datagen wrote (no backlog); "
+            "rows/s and the paces are datagen's rate, not the pipeline's capacity"
+        )
+    return None
+
+
+def trigger_lines(snapshot: Mapping[str, Any], *, trickle: bool) -> list[str]:
+    """One line per continuous stream on a timer (``limits.trigger_bound``):
+    a Lakebench setting (default or config), not the stack, sets how stale
+    its output can get, so the line labels the freshness numbers. It is not a
+    bound kind (the interval is in the config already). Bronze is left out
+    under a *trickle*, whose line names its cadence."""
+    sustained = snapshot.get("sustained") or {}
+    out = []
+    for stage, key in _TRIGGER_KEYS:
+        seconds = _interval_seconds(sustained.get(key))
+        if seconds and not (trickle and stage == "bronze-ingest"):
+            out.append(
+                f"{TRIGGER_LINE_PREFIX} {stage} runs every {seconds:g} s ({key}): between "
+                "runs its output is up to that much older than the freshness measured at each run"
+            )
     return out
 
 
@@ -374,6 +459,21 @@ def binding_caps(record: Any) -> list[str]:
     tb = record_trickle_bound(record)
     if tb:
         lines.append(trickle_line(tb))
+    dg = datagen_line(record)
+    if dg:
+        lines.append(dg)
+    # The evidence cap on AML recall, from the scoring record.
+    scoring = (
+        record.get("financial_scoring")
+        if isinstance(record, Mapping)
+        else getattr(record, "financial_scoring", None)
+    )
+    if isinstance(scoring, Mapping):
+        lines += [
+            line
+            for line in evidence_cap_lines(scoring.get("recall_bounded_by_evidence_cap"))
+            if line not in lines
+        ]
     return lines
 
 

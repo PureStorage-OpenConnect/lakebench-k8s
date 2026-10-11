@@ -36,6 +36,12 @@ class ExitCode(IntEnum):
     INTERRUPTED = 130
 
 
+#: Codes no command produces any more. They keep their number and are never
+#: given another meaning, so a script written against an older release never
+#: misreads one.
+RESERVED: frozenset[ExitCode] = frozenset({ExitCode.REQUIREMENT_UNMET})
+
+
 MEANINGS: dict[ExitCode, str] = {
     ExitCode.OK: "Success: the run passed or the read succeeded.",
     ExitCode.FAILED: (
@@ -60,8 +66,7 @@ MEANINGS: dict[ExitCode, str] = {
     ),
     ExitCode.INCOMPLETE: "Incomplete and safe to re-run: for example the namespace is still terminating.",
     ExitCode.REQUIREMENT_UNMET: (
-        "Requirement unmet: a reproduction drifted outside its tolerance, was asked "
-        "to verify at another commit, or could only be verified out of band."
+        "Reserved, never reused: no command exits 14 since `reproduce` was removed in 1.7.1."
     ),
     ExitCode.INTERRUPTED: "Interrupted (SIGINT, Ctrl-C; for `run` also SIGTERM).",
 }
@@ -219,27 +224,9 @@ PATHS: tuple[ExitPath, ...] = (
         "container still starting, no previous container for `--previous`)",
         v16_code=0,
     ),
-    ExitPath(
-        "financial.reproduce.mismatch",
-        _C.FAILED,
-        "`financial reproduce` ran the alert's rule on the snapshots its run's gold read and "
-        "did not reproduce the alert (no match, several, different related transactions), "
-        "or the rule declined to run",
-    ),
-    ExitPath(
-        "financial.reproduce.not_found",
-        _C.FAILED,
-        "`financial reproduce` found no such alert in gold.alerts, or one another run wrote",
-    ),
     # 2
     ExitPath("click.usage", _C.USAGE, "an unknown flag, a missing argument or a bad value"),
     ExitPath("config.validation", _C.USAGE, "the config fails to load or validate", v16_code=1),
-    ExitPath(
-        "financial.reproduce.no_record",
-        _C.USAGE,
-        "`financial reproduce` found no AML batch run record of the deployment on this host "
-        "(or none for `--run`)",
-    ),
     ExitPath(
         "config.unsupported",
         _C.USAGE,
@@ -287,24 +274,17 @@ PATHS: tuple[ExitPath, ...] = (
     ExitPath(
         "run.protected_corpus",
         _C.USAGE,
-        "a command that reads or scores data was given a protected AML corpus (a config "
-        "whose role or seed is the evaluation or robustness one, or a run record from one), "
-        "or `generate --registered-corpus` a config that names none; or bronze-verify (or its "
-        "check before a `run --stage` subset) refused the corpus: its manifest comes from a "
-        "held-out or spent seed, gives back no corpus seed, is missing where one is required, "
-        "or the held-out record cannot be read",
+        "a protected AML corpus (evaluation or robustness role or seed, or a run record from "
+        "one) reached a command that reads or scores data; `generate --registered-corpus` got "
+        "a config naming none; or bronze-verify, or its check before `run --stage`, refused "
+        "the manifest (held-out or spent seed, no corpus seed, missing, unreadable)",
     ),
     ExitPath(
         "alias.refused",
         _C.USAGE,
         "a removed command (`clean bronze`, `clean data`, `clean metrics`, `clean "
-        "journal`, `compare`); the message names the replacement, and no argument is echoed",
+        "journal`); the message names the replacement, and no argument is echoed",
         v16_code=0,
-    ),
-    ExitPath(
-        "reproduce.report_required",
-        _C.USAGE,
-        "`reproduce` of a registered look's package without --report (a look is never rerun)",
     ),
     ExitPath(
         "admin.version_change_needs_flag",
@@ -314,21 +294,10 @@ PATHS: tuple[ExitPath, ...] = (
     ),
     # 3
     ExitPath(
-        "reproduce.existing_namespace",
+        "deploy.existing_namespace",
         _C.REFUSED,
-        "`reproduce` would reuse a namespace or bucket that already exists",
-        v16_code=2,
-    ),
-    ExitPath(
-        "reproduce.nonce_changed",
-        _C.REFUSED,
-        "the deployment `reproduce` created was replaced before its run or its destroy",
-    ),
-    ExitPath(
-        "reproduce.held_out",
-        _C.REFUSED,
-        "`reproduce` was given a package from a held-out corpus whose look has not run, "
-        "or whose seed or look record cannot be read",
+        "`deploy --require-new` found the namespace or a bucket already exists; nothing "
+        "that existed was changed",
     ),
     ExitPath(
         "destroy.incarnation_mismatch",
@@ -477,6 +446,12 @@ PATHS: tuple[ExitPath, ...] = (
         v16_code=0,
     ),
     ExitPath(
+        "run.no_corpus",
+        _C.PREREQUISITE,
+        "a `run` that reuses the corpus (`--skip-generate`, or one cycle without "
+        "`--generate`) finds no corpus in bronze: nothing was generated yet",
+    ),
+    ExitPath(
         "s3.unreachable",
         _C.PREREQUISITE,
         "`generate` or `run --generate` cannot read the bronze bucket to check it is empty, "
@@ -487,13 +462,6 @@ PATHS: tuple[ExitPath, ...] = (
         "financial.k8s_unreachable",
         _C.PREREQUISITE,
         "a `financial` command cannot reach the Kubernetes API",
-        v16_code=1,
-    ),
-    ExitPath(
-        "financial.reproduce.snapshot_gone",
-        _C.PREREQUISITE,
-        "`financial reproduce` cannot read what the alert's run read: the run recorded no "
-        "read snapshots (before 1.7), or a snapshot expired and the table's content changed",
         v16_code=1,
     ),
     ExitPath(
@@ -533,27 +501,7 @@ PATHS: tuple[ExitPath, ...] = (
         "`destroy` finished its steps but the namespace is still terminating",
         v16_code=4,
     ),
-    # 14
-    ExitPath(
-        "reproduce.drift",
-        _C.REQUIREMENT_UNMET,
-        "`reproduce` ran and a metric drifted outside its tolerance band (correctness, "
-        "or performance), or the run did not follow the package's protocol",
-        v16_code=2,
-    ),
-    ExitPath(
-        "reproduce.commit_drift",
-        _C.REQUIREMENT_UNMET,
-        "`reproduce` was asked to verify a package recorded at another commit, "
-        "without --allow-commit-drift",
-        v16_code=2,
-    ),
-    ExitPath(
-        "reproduce.verify_out_of_band",
-        _C.REQUIREMENT_UNMET,
-        "`reproduce --report` of a registered look: the report does not match the look "
-        "record, or the record holds no report sha256",
-    ),
+    # 14: reserved, no producer
     # 130
     ExitPath(
         "sigint",
@@ -621,14 +569,14 @@ def render_markdown() -> str:
         "",
         '"Produced by" lists the named paths the test suite drives to each code.',
         "Commands reach the same codes on other paths too; a code with no named",
-        "path yet says so.",
+        "path yet says so, and a reserved code says it is reserved.",
         "",
         "Several paths share a code (3 covers every safety refusal). With",
         "`LB_EXIT_PATH_FILE` set to a file name, `lakebench` appends one line",
         "`<code> <path>...` to that file as it exits (`<code> -` when no path is",
         "named), so a script can tell `destroy.incarnation_mismatch` from",
-        "`lease.held` without reading message text. `deploy`, `destroy`, `generate`,",
-        "the bronze and datagen gates of `run` and `reproduce` name every refusal and",
+        "`lease.held` without reading message text. `deploy`, `destroy`, `generate`",
+        "and the bronze and datagen gates of `run` name every refusal and",
         "`destroy.namespace_terminating`; other commands may write `<code> -`.",
         "",
         "| Code | Name | Meaning | Produced by |",
@@ -636,8 +584,9 @@ def render_markdown() -> str:
     ]
     for code in ExitCode:
         names = ", ".join(f"`{p.name}`" for p in live if p.code == code)
+        empty = "none (reserved)" if code in RESERVED else "no command yet"
         lines.append(
-            f"| {int(code)} | `{code.name}` | {_cell(MEANINGS[code])} | {names or 'no command yet'} |"
+            f"| {int(code)} | `{code.name}` | {_cell(MEANINGS[code])} | {names or empty} |"
         )
     lines += [
         "",
@@ -655,14 +604,15 @@ def render_markdown() -> str:
         "",
         "## Errors and output",
         "",
-        "Status lines (`ERROR`, `WARN`, `OK` and `...`) go to stderr; panels,",
-        "tables and stage headers are still on stdout. An error starts with",
-        "one `ERROR` line saying what went wrong; typed errors add `Why`, `Next`",
-        "(the fix) and `Where` lines when they apply. An error Lakebench does",
-        "not classify prints one line, not a traceback; set `LAKEBENCH_DEBUG=1`",
-        "to get the traceback. Machine output (`--format json` and `--format csv`",
-        "on `query` and `report`) goes to plain stdout, unwrapped, so",
-        "it can be piped to a parser.",
+        "- Status lines (`ERROR`, `WARN`, `OK` and `...`) go to stderr. Panels,",
+        "  tables and stage headers go to stdout.",
+        "- An error starts with one `ERROR` line saying what went wrong. Typed",
+        "  errors add `Why`, `Next` (the fix) and `Where` lines when they apply.",
+        "- An error Lakebench does not classify prints one line, not a",
+        "  traceback. Set `LAKEBENCH_DEBUG=1` to get the traceback.",
+        "- Machine output (`--format json` and `--format csv` on `query` and",
+        "  `report`) goes to plain stdout, unwrapped, so it can be piped to a",
+        "  parser.",
     ]
     if LEGACY_CODES:
         lines += [

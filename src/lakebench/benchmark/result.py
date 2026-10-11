@@ -6,6 +6,7 @@ implementations import the result type.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 
@@ -20,12 +21,29 @@ class QueryExecutorResult:
     rows_returned: int
     raw_output: str
     error: str | None = None
-    # benchmark.fingerprint dict, set only by an executor's fingerprint_query.
-    fingerprint: dict | None = None
 
     @property
     def success(self) -> bool:
         return self.error is None
+
+
+def last_json_line(output: str) -> dict | None:
+    """The last line of *output* that parses as a JSON object, or None.
+
+    DuckDB prints a progress bar on stdout (even to a pipe) for a query past
+    2 s, so the payload is not necessarily the only line.
+    """
+    for line in reversed((output or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
 
 
 _TRACEBACK_HEADER = "Traceback (most recent call last):"

@@ -30,6 +30,7 @@ Call ``close()`` from ``finally:`` of ``_stop_streams``; it never raises.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -46,6 +47,34 @@ _POLL_INTERVAL_S = 2.0
 
 # How long to wait for a terminating kubectl subprocess to exit before SIGKILL.
 _TERMINATE_GRACE_S = 2.0
+
+# The RFC 3339 stamp ``kubectl logs --timestamps`` puts before each line.
+_STAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d) ")
+
+# Lines matched at the end of the kept copy to find where the live log
+# continues it (a single line can repeat).
+_OVERLAP_LINES = 3
+
+
+def merge_logs(kept: str | None, live: str | None) -> str | None:
+    """The driver's whole log from *kept* (the capture since the pod
+    started) and *live* (the pod log now, which kubelet rotation trims at
+    the front): the kept lines, then the live lines after the last ones the
+    two share. With no shared lines the live log is appended whole."""
+    if not kept:
+        return live
+    if not live:
+        return kept
+    k = kept.splitlines()
+    v = live.splitlines()
+    tail = k[-_OVERLAP_LINES:]
+    for i in range(len(v) - len(tail), -1, -1):
+        if v[i : i + len(tail)] == tail:
+            rest = v[i + len(tail) :]
+            return "\n".join(k + rest) + "\n"
+    if "\n".join(v) in kept:
+        return kept
+    return "\n".join(k + v) + "\n"
 
 
 class DriverLogCapturer:
@@ -88,6 +117,19 @@ class DriverLogCapturer:
             target=self._poll_loop, name="lb-driver-log-capturer", daemon=True
         )
         self._thread.start()
+
+    def text(self, app: str) -> str | None:
+        """The kept log of *app*'s current driver pod (its newest capture),
+        without the ``--timestamps`` stamps; None when none was kept."""
+        with self._lock:
+            captures = list(self._captures.get(app, []))
+        if not captures:
+            return None
+        try:
+            raw = captures[-1][2].read_text(errors="replace")
+        except OSError:
+            return None
+        return "".join(_STAMP.sub("", line, count=1) for line in raw.splitlines(keepends=True))
 
     def close(self) -> None:
         """Stop watching and terminate every kubectl log process.

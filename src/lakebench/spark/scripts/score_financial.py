@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 
 from common import env, log
 from pyspark.sql import SparkSession
@@ -220,7 +219,7 @@ def check_status_run(status_run_id: str, own_run_id: str) -> None:
 
     ``own_run_id`` is this job's LB_RUN_ID. Batch gold jobs run per cycle as
     ``<run>-c<n>``, so that form of this run counts as this run. Without a run
-    id (``lakebench financial score`` outside a run) the status decides.
+    id (a job submitted without ``LB_RUN_ID``) the status decides.
     """
     if not own_run_id:
         return
@@ -234,7 +233,7 @@ def check_status_run(status_run_id: str, own_run_id: str) -> None:
 
 
 def _scores_by_code(spark, alerts, manifest_uetrs, alert_uetrs, target_of, ran):
-    """Per-reason-code recall and false positives (SPEC section 8, K30): as
+    """Per-reason-code recall and false positives: as
     per-rule recall and FP, split by code; an alert counts once per code it
     carries.
 
@@ -729,7 +728,7 @@ def covered_instances(manifest, sealed_uetrs, id_map, entity_keys):
 
 def _excluded_typologies(status_rows: list[dict]) -> dict[str, str]:
     """typology -> reason, for a typology whose designated rules were all
-    skipped as excluded from this mode (W1 and W5 to W8 in continuous)."""
+    skipped as excluded from this mode (W1, W7 and W8 in continuous)."""
     by_typ: dict[str, list[dict]] = {}
     for r in status_rows:
         if r.get("target_typology"):
@@ -813,6 +812,20 @@ def score_covered(spark, manifest, ids: dict, own_run_id: str):
     covered_manifest = manifest.join(
         per_inst.where(col("covered")).select("typology_id").distinct(), "typology_id", "left_semi"
     )
+    # Continuous W5 is the transaction screen only: a sanctions instance
+    # paid before its listing is detectable by a rescreen alone, so it is
+    # left out of covered recall and counted, never a miss.
+    rescreen_only: dict = {}
+    if "injection_parameters" in manifest.columns:
+        only = col("injection_parameters").getItem("detectable_by") == lit("rescreen")
+        rescreen_only = {
+            r["typology_type"]: int(r["n"])
+            for r in covered_manifest.filter(only)
+            .groupBy("typology_type")
+            .agg(scount(lit(1)).alias("n"))
+            .collect()
+        }
+        covered_manifest = covered_manifest.filter(~coalesce(only, lit(False)))
 
     # Recall and the chance floor over covered instances; FP and precision
     # over the full manifest.
@@ -841,6 +854,7 @@ def score_covered(spark, manifest, ids: dict, own_run_id: str):
                 "corpus_instances": corpus_n,
                 "coverage": (covered_n / corpus_n) if corpus_n else None,
                 "no_participant_txns": int(c["no_participant"] or 0),
+                "rescreen_only_excluded": rescreen_only.get(typ, 0),
                 "detection_status": full.get("detection_status"),
                 "designated_rules": full.get("designated_rules"),
                 "workload_category": full.get("workload_category"),
@@ -968,58 +982,6 @@ def _write_not_scored(spark, output: str, reason: str, ids: dict | None) -> None
     log(f"Wrote recall.json sidecar: {_json_uri(output)}")
 
 
-_READ_SNAPSHOT_ARG = re.compile(
-    r"^(?P<table>[A-Za-z0-9_.]+)=(?P<snapshot>-?\d+|none|unknown):(?P<total>\d+|null)$"
-)
-
-
-def read_snapshot_fingerprints(spark, values) -> list[dict]:
-    """Fingerprint every column of each snapshot gold-finalize read
-    (``--read-snapshot <table>=<snapshot>:<records>``, metrics/read_snapshots.py),
-    for financial reproduce: ``[{table, snapshot, total_records, rows, fp,
-    cols_sha}]``, with ``error`` instead of a fingerprint when the snapshot
-    is not known or cannot be read. Runs before maintenance, so the snapshots
-    are still there; never raises. Logs one ``[read-snapshot-fp]`` line per
-    snapshot."""
-    from common import frame_fingerprint
-
-    out: list[dict] = []
-    for value in values or []:
-        m = _READ_SNAPSHOT_ARG.match(value or "")
-        if not m:
-            log(f"[read-snapshot-fp] ignored a malformed value {value!r}")
-            continue
-        snap = m["snapshot"]
-        entry = {
-            "table": m["table"],
-            "snapshot": int(snap) if snap.lstrip("-").isdigit() else snap,
-            "total_records": None if m["total"] == "null" else int(m["total"]),
-            "rows": None,
-            "fp": None,
-            "cols_sha": None,
-        }
-        if not isinstance(entry["snapshot"], int):
-            entry["error"] = f"gold read no known snapshot ({snap})"
-            log(f"[read-snapshot-fp] table={m['table']} snapshot={snap} error=unknown snapshot")
-            out.append(entry)
-            continue
-        try:
-            df = spark.sql(
-                f"SELECT * FROM {CATALOG}.{m['table']} VERSION AS OF {entry['snapshot']}"
-            )
-            rows, fp, cols_sha = frame_fingerprint(df, df.columns)
-            entry.update(rows=int(rows), fp=str(fp), cols_sha=str(cols_sha))
-            log(
-                f"[read-snapshot-fp] table={m['table']} snapshot={entry['snapshot']} "
-                f"rows={rows} fp={fp} cols={cols_sha}"
-            )
-        except Exception as e:  # noqa: BLE001 -- recorded; scoring goes on
-            entry["error"] = f"{type(e).__name__}: {e}"[:300]
-            log(f"[read-snapshot-fp] table={m['table']} snapshot={snap} error={entry['error']}")
-        out.append(entry)
-    return out
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compute recall + FP rate from manifest + alerts")
     parser.add_argument("--manifest", required=True, help="S3 URI to manifest.parquet")
@@ -1030,17 +992,10 @@ def main() -> None:
             default=None,
             help=f"Covered mode: {table} snapshot of the last completed tick",
         )
-    parser.add_argument(
-        "--read-snapshot",
-        action="append",
-        default=[],
-        help="Batch: <table>=<snapshot>:<records> gold-finalize read; fingerprinted for "
-        "financial reproduce (repeatable)",
-    )
     args = parser.parse_args()
 
     spark = SparkSession.builder.appName("lb-score-financial").getOrCreate()
-    # LB-126: force sort-merge joins. The recall/FP joins explode
+    # Force sort-merge joins. The recall/FP joins explode
     # gold.alerts.related_txn_ids to (alert_id, uetr) -- at realistic alert
     # volumes (100k+ alerts, each with a related-txn array) that side is far
     # larger than Spark's size estimate, so auto-broadcast tries to build a
@@ -1119,9 +1074,6 @@ def main() -> None:
 
     per_typology, summary = compute_scores(spark, manifest, alerts, status_rows)
     summary["run_id"] = current_run_id
-    # What gold read, fingerprinted for financial reproduce (before the
-    # run's maintenance expires anything).
-    summary["read_snapshots"] = read_snapshot_fingerprints(spark, args.read_snapshot)
     # Loud on purpose: a subject silver does not call a customer has its
     # designated alert dropped by the customer-scoped rules.
     check = _run_subject_check(spark, manifest, status_rows)
@@ -1162,7 +1114,7 @@ def main() -> None:
     n_rows = per_typology.count()
     log(f"Wrote recall.parquet: {n_rows} typology rows")
 
-    # LB-123: write a small recall.json sidecar next to recall.parquet so
+    # Write a small recall.json sidecar next to recall.parquet so
     # `lakebench run` can fold recall into the batch scorecard using boto3
     # alone -- the CLI has no pandas/pyarrow to read the parquet. Written as
     # a single object through the already-configured S3A FileSystem, so no

@@ -1,4 +1,4 @@
-"""Support states for workload x architecture x mode (DESIGN.md section 6.5).
+"""Support states for workload x architecture x mode.
 
 Support is judged in four layers:
 
@@ -7,7 +7,7 @@ Support is judged in four layers:
 3. Mode-compatible: ``WORKLOAD_MODES`` lists the pipeline mode.
 4. Validated: the release validation record
    (``validated_combinations.yaml`` beside this module) lists the workload x
-   recipe x mode with the run ids that validated it on the release tree.
+   recipe x mode with the run ids that validated it for this release.
 
 Passing all four is ``supported``; passing 1 to 3 only is ``unverified``;
 failing any of 1 to 3 is ``unsupported`` and refused before a run. This module
@@ -33,7 +33,7 @@ MODES: tuple[str, ...] = ("batch", "continuous")
 #: The release validation record. Package data: shipped in the wheel.
 VALIDATION_RECORD = Path(__file__).with_name("validated_combinations.yaml")
 
-#: SPEC section 11: (workload, mode, recipe, scale) of every release row.
+#: The release matrix: (workload, mode, recipe, scale) of every release row.
 RELEASE_MATRIX: tuple[tuple[str, str, str, float], ...] = (
     ("customer360", "batch", "hive-iceberg-spark-trino", 1),
     ("customer360", "batch", "polaris-iceberg-spark-trino", 1),
@@ -53,7 +53,7 @@ RELEASE_MATRIX: tuple[tuple[str, str, str, float], ...] = (
     ("financial", "batch", "hive-iceberg-spark-trino", 10),
 )
 
-#: SPEC section 11's Spark minor and table format version per row, by
+#: The release matrix's Spark minor and table format version per row, by
 #: (workload, mode, recipe). The support record is keyed by them
 #: (config/support.py), so a row's runs must use these versions.
 _ICEBERG, _SPARK41, _SPARK40 = "1.11.0", "4.1", "4.0"
@@ -90,12 +90,12 @@ WORKLOAD_LABELS: dict[str, str] = {
 AML_CONTINUOUS_RULES: tuple[str, ...] = (
     "W4_risk_propagation",
     "W2_structuring",
+    "W5_sanctions_match",
+    "W6_pep_counterparty",
     "W17_layering_chain",
     "W3_round_tripping",
 )
 AML_CONTINUOUS_SKIPPED_RULES: tuple[str, ...] = (
-    "W5_sanctions_match",
-    "W6_pep_counterparty",
     "W1_connected_components",
     "W7_cross_border_high_risk",
     "W8_dormant_reactivation",
@@ -110,8 +110,12 @@ def _rule_ids(rules: tuple[str, ...]) -> str:
 MODE_NOTES: dict[tuple[str, str], str] = {
     ("financial", "continuous"): (
         f"AML continuous runs detection rules {_rule_ids(AML_CONTINUOUS_RULES)} each tick "
-        f"and records {_rule_ids(AML_CONTINUOUS_SKIPPED_RULES)} as not run. Its results depend on when detection ran relative to "
-        "arrival, so no end-of-run result check is recorded."
+        f"and records {_rule_ids(AML_CONTINUOUS_SKIPPED_RULES)} as not run (from 1.7.1; "
+        "earlier records name the rules they ran). W4 raises one alert per entity per "
+        "week, and W5 screens payments as they arrive, with no rescreen of earlier "
+        "payments when a list version is published. Its results "
+        "depend on when detection ran relative to arrival, so two continuous runs "
+        "cannot show the same results."
     ),
 }
 
@@ -165,9 +169,8 @@ class ValidationRecordError(ValueError):
 #: format version a recipe can run on.
 ValidationKey = tuple[str, str, str, str, str]
 
-_ENTRY_KEYS = ("workload", "recipe", "mode", "spark", "table_format_version", "tree", "runs")
+_ENTRY_KEYS = ("workload", "recipe", "mode", "spark", "table_format_version", "runs")
 _SPARK_MINOR = re.compile(r"^\d+\.\d+$")
-_SHA40 = re.compile(r"^[0-9a-f]{40}$")
 
 
 @dataclass(frozen=True)
@@ -177,7 +180,6 @@ class Validation:
     mode: str
     spark: str
     table_format_version: str
-    tree: str
     runs: tuple[str, ...]
 
     @property
@@ -376,7 +378,7 @@ def matrix_versions_problem(
 ) -> str | None:
     """Why (workload, mode, recipe) at Spark *spark* and format *version*
     cannot be a validation entry, or None: it must be a release-matrix row
-    (``RELEASE_MATRIX_VERSIONS``, SPEC section 11) at that
+    (``RELEASE_MATRIX_VERSIONS``) at that
     row's versions. A valid tuple outside the matrix is published
     unverified, so an entry for it is refused rather than stamped."""
     fmt = (components_of(recipe) or ("", ""))[1]
@@ -405,8 +407,8 @@ def load_validation_record(path: Path | None = None) -> dict[ValidationKey, Vali
     Refuses (ValidationRecordError) a record that lists anything layers 1 to
     3 refuse, an unknown recipe, a row without its Spark minor or table
     format version, a version pair the job builder cannot run, a row that is
-    not a release-matrix row at that row's versions, a tree that is not a
-    40-hex commit, an entry with no run ids, or the same key twice.
+    not a release-matrix row at that row's versions, an entry with no run
+    ids, or the same key twice.
     A record that lists an unsupported combination would otherwise stamp it
     "supported".
     """
@@ -439,7 +441,6 @@ def load_validation_record(path: Path | None = None) -> dict[ValidationKey, Vali
         mode = _as_str(entry, "mode", where)
         spark = _as_str(entry, "spark", where)
         version = _as_str(entry, "table_format_version", where)
-        tree = _as_str(entry, "tree", where)
         if mode not in MODES:
             raise ValidationRecordError(f"{where}: mode must be one of {', '.join(MODES)}")
         comps = components_of(recipe) if recipe != "default" else None
@@ -459,8 +460,6 @@ def load_validation_record(path: Path | None = None) -> dict[ValidationKey, Vali
         ) or matrix_versions_problem(workload, mode, recipe, spark, version)
         if version_problem:
             raise ValidationRecordError(f"{where}: {version_problem}")
-        if not _SHA40.match(tree):
-            raise ValidationRecordError(f"{where}: tree must be the 40-hex freeze commit")
         runs = entry.get("runs")
         if (
             not isinstance(runs, list)
@@ -468,7 +467,7 @@ def load_validation_record(path: Path | None = None) -> dict[ValidationKey, Vali
             or not all(isinstance(r, str) and r.strip() for r in runs)
         ):
             raise ValidationRecordError(f"{where}: 'runs' must list at least one run id")
-        v = Validation(workload, recipe, mode, spark, version, tree, tuple(r.strip() for r in runs))
+        v = Validation(workload, recipe, mode, spark, version, tuple(r.strip() for r in runs))
         if v.key in out:
             raise ValidationRecordError(
                 f"{where}: {workload} x {recipe} x {mode} on "
@@ -519,7 +518,7 @@ def support_state(
     spark: str | None = None,
     table_format_version: str | None = None,
 ) -> dict[str, Any]:
-    """The DESIGN 6.5 support state of one workload x architecture x mode
+    """The support state of one workload x architecture x mode
     at one Spark minor (*spark*) and table format version.
 
     Returns ``{"state", "basis", ...}``. ``supported`` only when the release
@@ -549,7 +548,7 @@ def support_state(
     state, basis = band
     out["scale_note"] = basis
     if state == UNSUPPORTED or out["state"] == SUPPORTED:
-        for k in ("validation_runs", "validation_tree"):
+        for k in ("validation_runs",):
             out.pop(k, None)
         out.update(state=state, basis=basis)
     return out
@@ -635,11 +634,11 @@ def _support_state(
         out.update(
             state=SUPPORTED,
             basis=(
-                f"validated on {versions_label(v.spark, comps[1], v.table_format_version)}, "
-                f"release tree {v.tree[:12]}, by {', '.join(v.runs)}"
+                f"validated for this release on "
+                f"{versions_label(v.spark, comps[1], v.table_format_version)}, "
+                f"by {', '.join(v.runs)}"
             ),
             validation_runs=list(v.runs),
-            validation_tree=v.tree,
         )
         return withdraw_if_code_changed(out, provenance)
     out.update(
@@ -664,7 +663,7 @@ def withdraw_if_code_changed(
         or not end.get("code_changed_during_run")
     ):
         return out
-    for k in ("validation_runs", "validation_tree"):
+    for k in ("validation_runs",):
         out.pop(k, None)
     out.update(
         state=UNVERIFIED,
@@ -725,7 +724,7 @@ def _matrix_cell(
             basis="validated on "
             + "; ".join(
                 f"{versions_label(v.spark, comps[1], v.table_format_version)} "
-                f"(release tree {v.tree[:12]}, {', '.join(v.runs)})"
+                f"(validated for this release, {', '.join(v.runs)})"
                 for v in listed
             )
             + "; any other Spark minor or table format version is unverified",
@@ -791,7 +790,7 @@ _QUERY_LABELS = {
 }
 
 
-#: The general version rule under the support table (SPEC 13 item 8).
+#: The general version rule under the support table.
 VERSION_NOTE = (
     "A supported cell names the Spark minor and table format version its validation "
     "runs used; the same cell on any other Spark minor or format version is unverified. "
@@ -874,8 +873,6 @@ DOCS_WITH_BLOCKS: dict[str, tuple[str, ...]] = {
     "docs/compatibility-matrix.md": ("recipe-components", "support-states"),
     "docs/recipes.md": ("support-states",),
     "docs/architecture.md": ("recipe-components",),
-    "docs/supported-components.md": ("recipe-components",),
-    "README.md": ("support-states",),
 }
 
 

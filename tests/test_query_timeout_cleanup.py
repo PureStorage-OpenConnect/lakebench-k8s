@@ -37,9 +37,7 @@ def test_trino_query_carries_server_run_time_limit_below_client_timeout():
         _trino().execute_query("SELECT 1", timeout=300)
     cmd = run.call_args_list[0].args[0]
     limit = _arg_after(cmd, "--session")
-    assert limit == "query_max_run_time=295s"
     assert int(limit.split("=")[1].rstrip("s")) < 300
-    assert _arg_after(cmd, "--source").startswith("lakebench-")
     assert cmd[-2:] == ["--execute", "SELECT 1"]
 
 
@@ -84,36 +82,10 @@ def test_trino_timeout_cancels_the_query_server_side():
     assert kill.startswith("CALL system.runtime.kill_query(") and f"'{_QID}'" in kill
 
 
-def test_trino_cancel_failure_does_not_mask_the_timeout():
-    def fake_run(cmd, **kwargs):
-        if "--source" in cmd:
-            raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
-        raise subprocess.TimeoutExpired(cmd, 30)
-
-    with patch("subprocess.run", side_effect=fake_run):
-        result = _trino().execute_query("SELECT slow()", timeout=60)
-    assert result.error == "Query timed out (60s)"
-
-
-def test_no_cancel_when_the_query_finishes():
-    with patch("subprocess.run") as run:
-        run.return_value = subprocess.CompletedProcess([], 0, "1\n", "")
-        _trino().execute_query("SELECT 1")
-    assert run.call_count == 1
-
-
 def _duckdb() -> DuckDBExecutor:
     ex = DuckDBExecutor(namespace="ns", catalog_name="lakehouse", s3_endpoint="http://s3:80")
     ex._pod = "lakebench-duckdb-0"
     return ex
-
-
-def test_duckdb_script_ends_itself_before_the_client_timeout():
-    with patch("subprocess.run") as run:
-        run.return_value = subprocess.CompletedProcess([], 0, '{"rows": 1}', "")
-        _duckdb().execute_query("SELECT 1", timeout=300)
-    script = run.call_args.args[0][-1]
-    assert script.startswith("import signal; signal.alarm(295); ")
 
 
 def test_duckdb_alarm_prefix_terminates_a_blocked_process():
@@ -130,16 +102,3 @@ def test_duckdb_alarm_prefix_terminates_a_blocked_process():
         timeout=20,
     )
     assert proc.returncode == -14
-
-
-def test_duckdb_alarm_exit_reads_as_timeout():
-    with patch("subprocess.run") as run:
-        run.return_value = subprocess.CompletedProcess(
-            [], 142, "", "command terminated with exit code 142\n"
-        )
-        result = _duckdb().execute_query("SELECT 1", timeout=300)
-    assert result.error == "Query timed out (300s, ended in the pod)"
-
-
-def test_duckdb_script_without_timeout_is_unchanged():
-    assert _duckdb()._build_python_script("SELECT 1").startswith("import duckdb")

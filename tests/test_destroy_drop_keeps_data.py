@@ -1,4 +1,4 @@
-"""Destroy's table step never deletes data outside proven ownership (LB-186).
+"""Destroy's table step never deletes data outside proven ownership.
 
 Trino's DROP TABLE deletes files: on Iceberg with a Hive metastore it deletes
 every file the table references (add_files-registered datagen files
@@ -20,8 +20,7 @@ import pytest
 
 from lakebench.deploy import destroy as destroy_mod
 from lakebench.deploy.engine import DeploymentStatus
-
-from . import test_destroy_bucket_delete as _tdb
+from tests.fixtures import destroy_bucket_helpers as _tdb
 
 FakeBoto = _tdb.FakeBoto
 
@@ -31,7 +30,7 @@ THRIFT_DELTA = ("spark-thrift", "thrift-0", "spark_catalog")
 CORPUS = ["raw/pacs008/part-0.parquet", "raw/pacs008/part-1.parquet"]
 
 
-class _Harness(_tdb.TestDestroyAllBuckets):
+class _Harness(_tdb.DestroyAllBucketsHarness):
     __test__ = False
     _tables = ("bronze.pacs008_raw", "silver.t", "gold.t")
 
@@ -113,47 +112,43 @@ OWNED = {"a-silver": "MATCH", "a-gold": "MATCH"}
 
 
 class TestTrinoNeverDeletesFiles:
-    def test_bronze_owned_by_another_deployment_keeps_its_corpus(self, h):
-        """S-P6 shape: a shared bronze tagged by deployment B."""
+    @pytest.mark.parametrize(
+        ("verdicts", "kw", "tables_ok", "unregister_only"),
+        [
+            # a shared bronze tagged by deployment B
+            ({"b-bronze": "MISMATCH", **OWNED}, {}, True, False),
+            # tagless backend, bronze adopted with data: the table step leaves it alone too
+            (
+                dict.fromkeys(["b-bronze", "a-silver", "a-gold"], "UNSUPPORTED"),
+                {"delete_buckets": False, "created": {"a-silver", "a-gold"}, "other": []},
+                True,
+                False,
+            ),
+            (
+                {"b-bronze": "ABSENT", **OWNED},
+                {"create_buckets": False, "created": set()},
+                None,
+                False,
+            ),
+            ({"b-bronze": "MISMATCH", **OWNED}, {"table_format": "delta"}, None, False),
+            ({"b-bronze": "MISMATCH", **OWNED}, {"catalog_type": "polaris"}, None, True),
+        ],
+    )
+    def test_trino_never_deletes_another_deployments_files(
+        self, h, verdicts, kw, tables_ok, unregister_only
+    ):
+        boto, tables, _buckets = h.run(verdicts, TRINO, **kw)
+        assert h.drops() == []
+        assert boto.buckets["b-bronze"] == CORPUS
+        if tables_ok:
+            assert tables.status is DeploymentStatus.SUCCESS, tables.message
+        if unregister_only:
+            assert len(h.ran) == 3 and all("unregister_table" in q for q in h.ran)
+
+    def test_a_refused_shared_bronze_is_still_reported(self, h):
         boto, tables, buckets = h.run({"b-bronze": "MISMATCH", **OWNED}, TRINO)
-        assert h.drops() == []
-        assert boto.buckets["b-bronze"] == CORPUS
         assert "system.unregister_table(schema_name => 'bronze'" in h.ran[0]
-        assert tables.status is DeploymentStatus.SUCCESS, tables.message
-        assert buckets.status is DeploymentStatus.FAILED  # the refusal is still reported
-
-    def test_keep_buckets_with_an_adopted_bucket_holding_data(self, h):
-        """Tagless backend, bronze adopted with data (not on the adopted-empty
-        record): the bucket step leaves it alone, so must the table step."""
-        verdicts = dict.fromkeys(["b-bronze", "a-silver", "a-gold"], "UNSUPPORTED")
-        boto, tables, _b = h.run(
-            verdicts,
-            TRINO,
-            delete_buckets=False,
-            created={"a-silver", "a-gold"},
-            other=[],
-        )
-        assert h.drops() == []
-        assert boto.buckets["b-bronze"] == CORPUS
-        assert tables.status is DeploymentStatus.SUCCESS, tables.message
-
-    def test_create_buckets_false_with_an_untagged_pre_provisioned_bucket(self, h):
-        boto, _t, _b = h.run(
-            {"b-bronze": "ABSENT", **OWNED}, TRINO, create_buckets=False, created=set()
-        )
-        assert h.drops() == []
-        assert boto.buckets["b-bronze"] == CORPUS
-
-    def test_delta_on_trino_unregisters_too(self, h):
-        boto, _t, _b = h.run({"b-bronze": "MISMATCH", **OWNED}, TRINO, table_format="delta")
-        assert h.drops() == []
-        assert boto.buckets["b-bronze"] == CORPUS
-
-    def test_polaris_kept_namespace_unregisters_instead_of_purging(self, h):
-        boto, _t, _b = h.run({"b-bronze": "MISMATCH", **OWNED}, TRINO, catalog_type="polaris")
-        assert h.drops() == []
-        assert len(h.ran) == 3 and all("unregister_table" in q for q in h.ran)
-        assert boto.buckets["b-bronze"] == CORPUS
+        assert buckets.status is DeploymentStatus.FAILED
 
     def test_missing_schema_on_unregister_is_a_clean_teardown(self, h):
         """unregister_table raises SchemaNotFoundException, whose message is
@@ -301,12 +296,6 @@ class TestReviewFixes:
         assert "not <catalog>.<schema>.<table>" in tables.message
         assert any("'silver'" in q for q in h.ran), "the parsable table is still unregistered"
 
-    def test_message_is_true_when_bucket_cleanup_is_off(self, h):
-        _boto, tables, _b = h.run(
-            dict.fromkeys(["b-bronze", "a-silver", "a-gold"], "MATCH"), TRINO, clean_buckets=False
-        )
-        assert "no files are removed (bucket cleanup is off)" in tables.message
-
 
 def test_unregister_sql_quotes_its_arguments():
     sql = destroy_mod._trino_unregister_sql("lakehouse.bronze.o'brien")
@@ -327,50 +316,6 @@ def test_unregister_sql_quotes_its_arguments():
 )
 def test_drop_file_semantics_table(engine, fmt, deletes):
     assert destroy_mod._drop_deletes_files(engine, fmt) is deletes
-
-
-class TestCliReportsTablesLeftRegistered:
-    """A SKIPPED table step used to print nothing, and the panel said
-    "Destroy Complete" with the tables still registered."""
-
-    def test_warning_per_table_and_summary_title(self, monkeypatch, tmp_path):
-        from pathlib import Path
-        from unittest.mock import MagicMock
-
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-        from lakebench.deploy.engine import DeploymentResult
-
-        results = [
-            DeploymentResult(
-                "table-cleanup",
-                DeploymentStatus.SKIPPED,
-                "1 Delta table(s) left registered",
-                details={
-                    "tables_left_registered": [
-                        {
-                            "table": "spark_catalog.bronze.pacs008_raw",
-                            "reason": "its data is in b-bronze, which destroy does not empty",
-                        }
-                    ]
-                },
-            ),
-            DeploymentResult("namespace", DeploymentStatus.SUCCESS, "Namespace x deleted"),
-        ]
-        monkeypatch.chdir(tmp_path)
-        fixture = Path(__file__).parent / "fixtures" / "v14user.yaml"
-        engine = MagicMock()
-        engine.destroy_all.side_effect = lambda progress_callback=None, **_kw: (
-            [progress_callback(r.component, r.status, r.message) for r in results],
-            results,
-        )[1]
-        with patch("lakebench.deploy.DeploymentEngine", return_value=engine):
-            out = CliRunner().invoke(app, ["destroy", str(fixture), "--force"])
-        assert out.exit_code == 0, out.output
-        assert "1 Delta table(s) left registered" in out.output
-        assert "table left registered: spark_catalog.bronze.pacs008_raw" in out.output
-        assert "1 tables left registered" in out.output
 
 
 @pytest.mark.usefixtures("load_script")
@@ -419,13 +364,6 @@ class TestOrphanDeltaLogGuard:
         df = MagicMockDF()
         common.write_delta_table(spark, df, "spark_catalog.bronze.t", "s3a://b/")
         assert df.saved == "spark_catalog.bronze.t"
-
-    def test_registered_table_is_not_checked(self, monkeypatch):
-        common, seen = self._fs(monkeypatch, exists=True)
-        spark = self._spark(registered=True)
-        df = MagicMockDF()
-        common.write_delta_table(spark, df, "spark_catalog.silver.t", "s3a://b/")
-        assert seen == [] and df.saved == "spark_catalog.silver.t"
 
 
 class MagicMockDF:

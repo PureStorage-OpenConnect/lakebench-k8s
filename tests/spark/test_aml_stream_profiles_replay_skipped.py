@@ -144,6 +144,7 @@ def test_profiles_replay_is_self_idempotent_on_stream_id_batch_id(spark):
     ss.SILVER_ACCOUNTS = "silver.accounts"
     ss.SILVER_PROFILES = "silver.entity_profiles"
     ss.SILVER_BATCH_VERSIONS = "silver.silver_batch_versions"
+    ss.SILVER_PAIRS = "silver.counterparty_pairs"
     ss.streaming_query_id = lambda _s: "qid-replay"
     spark.sql("CREATE NAMESPACE IF NOT EXISTS lh.silver")
     for ddl in (
@@ -154,6 +155,7 @@ def test_profiles_replay_is_self_idempotent_on_stream_id_batch_id(spark):
         ss.DDL_EDGES,
         ss.DDL_PROFILES,
         ss.DDL_BATCH_VERSIONS,
+        ss.DDL_PAIRS,
     ):
         spark.sql(ddl)
     ss._KYC = None
@@ -166,6 +168,11 @@ def test_profiles_replay_is_self_idempotent_on_stream_id_batch_id(spark):
     _RUNS_STARTED.clear()
     ss._merge_batch(_bronze(spark), 0)
     first = spark.table("lh.silver.entity_profiles").orderBy("entity_id").collect()
+    # Non-degenerate: A (sender) and Z (receiver) have profiles holding the
+    # two payments, so equality below is not two empty tables.
+    assert len(first) == 2, first
+    sender = next(r for r in first if r["txn_count_out"] == 2)
+    assert sender["total_sent_usd"] == Decimal("300.00"), first
 
     # Second apply: NEW run id -> replay_possible=True again. The MERGE
     # runs but its guarded WHEN MATCHED branch fires (same _stream_id,

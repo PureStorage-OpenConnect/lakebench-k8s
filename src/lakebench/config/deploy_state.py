@@ -139,7 +139,7 @@ def _sets_a_name(raw: dict[str, Any]) -> bool:
     """Whether a raw config mapping sets a name of its own.
 
     A name that is a ``${VAR}`` reference does not count: whether it
-    resolved when v1.6 deployed cannot be known now (design check 1 reads
+    resolved when v1.6 deployed cannot be known now (the check reads
     the raw text with no env substitution).
     """
     name = raw.get("name")

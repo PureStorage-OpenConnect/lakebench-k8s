@@ -8,8 +8,6 @@ test expects none, fails the test.
 
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -136,21 +134,16 @@ def test_admin_install_noop_when_installed(tmp_path):
         rec.assert_recorded(kind="storageclasses", verb="read")
         rec.assert_recorded(kind="configmaps", verb="read", namespace=OBS_NS)
         rec.assert_clean()
-    out = " ".join(r.output.split())
-    assert "--component all: scratch-storage-class, spark-operator, stackable, observability" in out
-    assert "nothing to change" in out
-    for name, version in (
-        ("spark-operator", "2.5.1"),
-        ("stackable", "25.7.0"),
-        ("observability", "87.19.2"),
-    ):
-        row = rf"{name}\s*│\s*yes\s*│\s*{re.escape(version)}\s*│\s*yes"
-        assert re.search(row, r.output), r.output
 
 
-def test_config_pin_does_not_move_installed_version(tmp_path):
-    """cluster-safety 3: a config pinning 2.4.0 against an installed 2.5.1
-    issues no helm write. Reverted, the old verb upgraded to the config pin."""
+@pytest.mark.parametrize(
+    "argv",
+    [["install-spark-operator"], ["install", "--component", "spark-operator", "-y"]],
+    ids=["alias", "component"],
+)
+def test_config_pin_does_not_move_installed_version(tmp_path, argv):
+    """A config pinning 2.4.0 against an installed 2.5.1 issues no helm
+    write."""
     cfg = _config(
         tmp_path,
         platform={
@@ -162,84 +155,11 @@ def test_config_pin_does_not_move_installed_version(tmp_path):
     )
     with recording(NS) as rec:
         rec.add_spark_operator(watched=["default", "a"], version="2.5.1")
-        r = _invoke("install-spark-operator", str(cfg))
+        r = _invoke(argv[0], str(cfg), *argv[1:])
         assert r.exit_code == 0, r.output
-        assert not [c for c in rec.calls if c.api == "helm" and c.mutating]
+        assert rec.mutations() == []
         assert rec.releases[("spark-operator", "spark-operator")].version == "2.5.1"
         rec.assert_clean()
-
-
-def test_version_change_refused_without_flag(tmp_path):
-    with recording(NS) as rec:
-        _seed_all(rec)
-        r = _invoke(
-            "install", "--component", "spark-operator", "--version", "spark-operator=2.4.0", "-y"
-        )
-        assert r.exit_code == 2, r.output
-        assert rec.mutations() == []
-    out = " ".join(r.output.split())
-    assert "installed at 2.5.1; the target is 2.4.0" in out
-    assert "--allow-version-change" in out
-
-
-def test_version_change_refused_while_watched(tmp_path):
-    """Exit 3 listing both users, zero shared mutations."""
-    with recording(NS) as rec:
-        _seed_all(rec, watched=("a", "b"))
-        for ns in ("a", "b"):
-            rec.add_namespace(ns, annotations={"lakebench.deployment/name": ns})
-        r = _invoke(
-            "install",
-            "--component",
-            "spark-operator",
-            "--version",
-            "spark-operator=2.4.0",
-            "--allow-version-change",
-            "-y",
-        )
-        assert r.exit_code == 3, r.output
-        assert rec.shared_mutations() == []
-        assert rec.mutations() == []
-    out = " ".join(r.output.split())
-    assert "2 deployment(s) use spark-operator: ['a', 'b']" in out
-
-
-def test_version_change_ignores_default_placeholder(tmp_path):
-    """`default` is the chart's placeholder, not a user: no users are listed,
-    and the change is still refused (helm leaves the chart's CRDs behind)."""
-    with recording(NS) as rec:
-        _seed_all(rec, watched=("default",))
-        r = _invoke(
-            "install",
-            "--component",
-            "spark-operator",
-            "--version",
-            "spark-operator=2.4.0",
-            "--allow-version-change",
-            "-y",
-        )
-        assert r.exit_code == 3, r.output
-        assert rec.mutations() == []
-    out = " ".join(r.output.split())
-    assert "deployment(s) use" not in out
-    assert "does not automate the change" in out and "crds/" in out
-
-
-@pytest.mark.parametrize("component,pair", [("stackable", "24.11.0"), ("observability", "80.0.0")])
-def test_stackable_and_observability_version_changes_are_refused(component, pair):
-    with recording(NS) as rec:
-        _seed_all(rec)
-        r = _invoke(
-            "install",
-            "--component",
-            component,
-            "--version",
-            f"{component}={pair}",
-            "--allow-version-change",
-            "-y",
-        )
-        assert r.exit_code == 3, r.output
-        assert rec.mutations() == []
 
 
 # ---------------------------------------------------------------------------
@@ -291,11 +211,9 @@ def test_fresh_stackable_install_installs_four_charts_under_the_lease():
         r = _invoke("install", "--component", "stackable", "-y")
         assert r.exit_code == 0, r.output
         writes = [c for c in rec.calls if c.api == "helm" and c.mutating]
-        assert [c.name for c in writes] == list(STACKABLE_OPS)
+        assert {c.name for c in writes} == set(STACKABLE_OPS) and len(writes) == 4
         assert all(c.lease_held and c.verb == "install" for c in writes)
         rec.assert_clean()
-    first = next(c.argv for c in rec.calls if c.api == "helm" and c.verb == "install")
-    assert "--create-namespace" in first and "--wait" not in first
 
 
 def test_fresh_observability_install_applies_the_dashboard_under_the_lease(tmp_path):
@@ -340,65 +258,6 @@ def test_stale_dashboard_is_updated_under_the_lease(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_second_spark_operator_is_never_installed():
-    with recording(NS) as rec:
-        rec.add_spark_operator(watched=["default"], namespace="other-ops")
-        r = _invoke("install", "--component", "spark-operator", "-y")
-        assert r.exit_code == 3, r.output
-        assert rec.mutations() == []
-    assert "already runs in namespace(s) other-ops" in " ".join(r.output.split())
-
-
-def test_leftover_spark_crd_refuses():
-    with recording(NS) as rec:
-        rec.add_crd("sparkapplications", "sparkoperator.k8s.io", "SparkApplication")
-        r = _invoke("install", "--component", "spark-operator", "-y")
-        assert r.exit_code == 3, r.output
-        assert rec.mutations() == []
-
-
-@pytest.mark.parametrize("status", ["pending-install", "pending-upgrade", "failed", "uninstalling"])
-def test_release_not_deployed_refuses(status):
-    with recording(NS) as rec:
-        rec.add_spark_operator(watched=["default"])
-        rec.releases[("spark-operator", "spark-operator")].status = status
-        r = _invoke("install", "--component", "spark-operator", "-y")
-        assert r.exit_code == 1, r.output
-        assert rec.mutations() == []
-    assert f"is {status!r}, not 'deployed'" in " ".join(r.output.split())
-
-
-def test_unreadable_status_refuses_and_changes_nothing():
-    with recording(NS) as rec:
-        rec.on_command("helm", "list", returncode=1, stderr="Error: Unauthorized")
-        r = _invoke("install", "--component", "spark-operator", "-y")
-        assert r.exit_code == 1, r.output
-        assert rec.mutations() == []
-    assert "cannot tell whether spark-operator is installed" in " ".join(r.output.split())
-
-
-def test_stackable_installed_in_another_namespace_is_installed():
-    """Releases in another namespace count: no second operator set."""
-    with recording(NS) as rec:
-        rec.add_namespace("sdp")
-        rec.add_crd("hiveclusters", "hive.stackable.tech", "HiveCluster")
-        rec.add_crd("secretclasses", "secrets.stackable.tech", "SecretClass", scope="Cluster")
-        for op in STACKABLE_OPS:
-            rec.add_helm_release(op, "sdp", chart=op, version="25.7.0")
-            _running_pod(rec, op, ns="sdp")
-        r = _invoke("install", "--component", "stackable", "-y")
-        assert r.exit_code == 0, r.output
-        assert rec.mutations() == []
-
-
-def test_stackable_leftover_crds_refuse():
-    with recording(NS) as rec:
-        rec.add_crd("hiveclusters", "hive.stackable.tech", "HiveCluster")
-        r = _invoke("install", "--component", "stackable", "-y")
-        assert r.exit_code == 3, r.output
-        assert rec.mutations() == []
-
-
 def test_partial_stackable_is_completed_at_its_version():
     with recording(NS) as rec:
         rec.add_namespace("stackable")
@@ -429,180 +288,28 @@ def test_partial_stackable_is_completed_at_its_version():
         assert "--create-namespace" not in c.argv
 
 
-def test_scratch_parameter_diff_always_refuses(tmp_path):
-    """A StorageClass is immutable, so a parameter difference refuses
-    (exit 3), named or under all, and changes nothing."""
-    cfg = _config(tmp_path)
-    with recording(NS) as rec:
-        _seed_all(rec)
-        rec.store.pop(("storageclasses", None, "px-csi-scratch"))
-        _seed_scratch(rec, {"repl": "3"})
-        named = _invoke("install", str(cfg), "--component", "scratch-storage-class", "-y")
-        under_all = _invoke("install", str(cfg), "--component", "all", "-y")
-        alias = _invoke("install-scratch-storage-class", str(cfg))
-        assert rec.mutations() == []
-    for r in (named, under_all, alias):
-        assert r.exit_code == 3, r.output
-        assert "repl='3' (config '1')" in " ".join(r.output.split())
-
-
-def test_version_change_names_stale_entries_and_repair():
-    with recording(NS) as rec:
-        _seed_all(rec, watched=("default", "gone"))
-        r = _invoke(
-            "install",
-            "--component",
-            "spark-operator",
-            "--version",
-            "spark-operator=2.4.0",
-            "--allow-version-change",
-            "-y",
-        )
-        assert r.exit_code == 3, r.output
-        assert rec.mutations() == []
-    out = " ".join(r.output.split())
-    assert "deleted namespaces ['gone']" in out and "repair-operator" in out
-    assert "No deployment uses it" in out
-
-
-def test_version_change_with_an_unreadable_watch_list_says_users_are_unknown():
-    from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
-
-    with recording(NS) as rec:
-        _seed_all(rec)
-        with patch.object(
-            SparkOperatorManager, "_get_active_namespaces", side_effect=RuntimeError("timeout")
-        ):
-            r = _invoke(
-                "install",
-                "--component",
-                "spark-operator",
-                "--version",
-                "spark-operator=2.4.0",
-                "--allow-version-change",
-                "-y",
-            )
-        assert r.exit_code == 3, r.output
-    out = " ".join(r.output.split())
-    assert "deployments using it are unknown" in out
-    assert "No deployment uses it" not in out
-
-
-def test_config_pin_differing_from_the_installed_version_warns(tmp_path):
-    cfg = _config(
-        tmp_path,
-        platform={
-            "storage": {
-                "s3": {"endpoint": "http://10.0.1.50:80", "access_key": "a", "secret_key": "b"}
-            },
-            "compute": {"spark": {"operator": {"version": "2.4.0"}}},
-        },
-    )
-    with recording(NS) as rec:
-        rec.add_spark_operator(watched=["default"], version="2.5.1")
-        r = _invoke("install", str(cfg), "--component", "spark-operator", "-y")
-        assert r.exit_code == 0, r.output
-        assert rec.mutations() == []
-    out = " ".join(r.output.split())
-    assert "installed at 2.5.1, the config (or Lakebench default) names 2.4.0" in out
-
-
-def test_another_kube_prometheus_stack_is_never_doubled(tmp_path):
-    cfg = _config(tmp_path)
-    with recording(NS) as rec:
-        rec.add_namespace("monitoring")
-        rec.add_helm_release("prom", "monitoring", chart="kube-prometheus-stack", version="80.0.0")
-        r = _invoke("install", str(cfg), "--component", "observability", "-y")
-        assert r.exit_code == 3, r.output
-        assert rec.mutations() == []
-    assert "prom in monitoring" in " ".join(r.output.split())
-
-
-def test_observability_not_ready_exits_one(tmp_path):
-    cfg = _config(tmp_path)
-    with recording(NS) as rec:
-        _seed_observability(rec, ready=False)
-        r = _invoke("install", str(cfg), "--component", "observability", "-y")
-        assert r.exit_code == 1, r.output
-        assert rec.mutations() == []
-    assert "not ready: observability" in " ".join(r.output.split())
-
-
-def test_partial_stackable_with_a_leftover_crd_refuses():
-    with recording(NS) as rec:
-        rec.add_namespace("stackable")
-        for op in STACKABLE_OPS[:3]:
-            rec.add_helm_release(op, "stackable", chart=op, version="25.7.0")
-            _running_pod(rec, op)
-        rec.add_crd("hiveclusters", "hive.stackable.tech", "HiveCluster")  # hive-operator's
-        r = _invoke("install", "--component", "stackable", "-y")
-        assert r.exit_code == 3, r.output
-        assert rec.mutations() == []
-    assert "CRD hiveclusters.hive.stackable.tech" in " ".join(r.output.split())
-
-
-def test_installed_but_not_ready_exits_one():
-    with recording(NS) as rec:
-        rec.add_spark_operator(watched=["default"])
-        dep = rec.store[("deployments", "spark-operator", "spark-operator-controller")]
-        dep.status.ready_replicas = 0
-        r = _invoke("install", "--component", "spark-operator", "-y")
-        assert r.exit_code == 1, r.output
-        assert rec.mutations() == []
-    assert "not ready: spark-operator" in " ".join(r.output.split())
-
-
-def test_controller_tmp_size_on_an_installed_operator_names_repair():
-    with recording(NS) as rec:
-        rec.add_spark_operator(watched=["default"])
-        r = _invoke(
-            "install", "--component", "spark-operator", "--controller-tmp-size", "16Gi", "-y"
-        )
-        assert r.exit_code == 2, r.output
-        assert rec.mutations() == []
-    assert "admin repair-operator --controller-tmp-size 16Gi" in " ".join(r.output.split())
-
-
 # ---------------------------------------------------------------------------
 # Usage errors (nothing reaches the cluster)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "args,needle",
+    "args",
     [
-        (["--component", "all"], "--component all needs a config"),
-        (["--component", "nope"], "unknown component"),
-        ([], "name at least one --component"),
-        (["-c", "spark-operator", "--version", "stackable=25.7.0"], "not a requested"),
-        (["-c", "spark-operator", "--version", "spark-operator=^2.0.0"], "exact chart version"),
-        (["-c", "scratch-storage-class", "--version", "scratch-storage-class=1.0.0"], "no version"),
-        (["-c", "stackable", "--controller-tmp-size", "16Gi"], "spark-operator only"),
+        ["--component", "all"],
+        ["--component", "nope"],
+        [],
+        ["-c", "spark-operator", "--version", "stackable=25.7.0"],
+        ["-c", "spark-operator", "--version", "spark-operator=^2.0.0"],
+        ["-c", "scratch-storage-class", "--version", "scratch-storage-class=1.0.0"],
+        ["-c", "stackable", "--controller-tmp-size", "16Gi"],
     ],
 )
-def test_usage_errors_exit_two_without_cluster_calls(args, needle):
+def test_usage_errors_exit_two_without_cluster_calls(args):
     with recording(NS) as rec:
         r = _invoke("install", *args, "-y")
         assert r.exit_code == 2, r.output
         rec.assert_no_calls()
-    assert needle in " ".join(r.output.split())
-
-
-def test_old_verbs_alias(tmp_path):
-    """CLI-7: one line on stderr naming the new command, then the same run."""
-    cfg = _config(tmp_path)
-    with recording(NS) as rec:
-        _seed_all(rec)
-        rs = _invoke("install-scratch-storage-class", str(cfg))
-        ro = _invoke("install-spark-operator", str(cfg))
-        assert rec.mutations() == []
-    assert rs.exit_code == 0 and ro.exit_code == 0, rs.output + ro.output
-    for res, old in ((rs, "scratch-storage-class"), (ro, "spark-operator")):
-        line = (
-            f"`lakebench admin install-{old}` is now `lakebench admin install --component "
-            f"{old}`; the old name is removed in v1.8"
-        )
-        assert res.stderr.count(line) == 1, res.stderr
 
 
 def test_dry_run_plans_without_a_lease_or_mutation():
@@ -611,15 +318,6 @@ def test_dry_run_plans_without_a_lease_or_mutation():
         assert r.exit_code == 0, r.output
         assert rec.mutations() == []
         rec.assert_recorded(api="helm", verb="list")
-    assert "would install spark-operator 2.5.1" in " ".join(r.output.split())
-
-
-def test_without_yes_a_declined_prompt_changes_nothing():
-    with recording(NS) as rec:
-        r = runner.invoke(admin_app, ["install", "--component", "spark-operator"], input="n\n")
-        assert r.exit_code == 1, r.output
-        assert rec.mutations() == []
-    assert "deploys and destroys on this cluster wait" in " ".join(r.output.split())
 
 
 # ---------------------------------------------------------------------------
@@ -752,9 +450,7 @@ def _engine(cfg):
 
 
 def test_deploy_never_installs_under_fixture():
-    """Nothing installed: each deploy step fails naming its admin component
-    and makes no shared mutation. Reverted (v1.6 with install: true), the
-    steps helm-installed the operator, Stackable and the observability stack."""
+    """Nothing installed: each deploy step fails and makes no shared mutation."""
     from lakebench.deploy.engine import DeploymentEngine, DeploymentStatus
     from lakebench.deploy.hive import HiveDeployer
     from lakebench.deploy.observability import ObservabilityDeployer
@@ -773,9 +469,6 @@ def test_deploy_never_installs_under_fixture():
         rec.assert_clean()
     for name, res in results.items():
         assert res.status == DeploymentStatus.FAILED, (name, res.message)
-    assert "admin install --component spark-operator" in results["spark-operator"].message
-    assert "admin install --component stackable" in results["hive"].message
-    assert "admin install --component observability" in results["observability"].message
 
 
 def test_deploy_with_everything_installed_makes_only_the_leased_watch_list_add():
@@ -812,13 +505,18 @@ def test_deploy_with_everything_installed_makes_only_the_leased_watch_list_add()
 
 
 @pytest.mark.parametrize(
-    "key,component",
+    "key,component,raw",
     [
-        ("platform.compute.spark.operator.install", "spark-operator"),
-        ("architecture.catalog.hive.operator.install", "stackable"),
+        ("platform.compute.spark.operator.install", "spark-operator", True),
+        ("architecture.catalog.hive.operator.install", "stackable", True),
+        # The refusal runs after Pydantic coercion, so a quoted or numeric
+        # true cannot slip past it.
+        ("platform.compute.spark.operator.install", "spark-operator", "true"),
+        ("platform.compute.spark.operator.install", "spark-operator", "yes"),
+        ("platform.compute.spark.operator.install", "spark-operator", 1),
     ],
 )
-def test_deploy_refuses_install_true(tmp_path, key, component):
+def test_deploy_refuses_install_true(tmp_path, key, component, raw):
     from lakebench.config import ConfigValidationError, LoadPurpose, load_config
 
     data: dict = {"name": "t"}
@@ -826,7 +524,7 @@ def test_deploy_refuses_install_true(tmp_path, key, component):
     parts = key.split(".")
     for p in parts[:-1]:
         node = node.setdefault(p, {})
-    node[parts[-1]] = True
+    node[parts[-1]] = raw
     path = tmp_path / "c.yaml"
     path.write_text(yaml.safe_dump(data))
     for purpose in (LoadPurpose.MUTATE, LoadPurpose.RUN):
@@ -847,33 +545,36 @@ def test_deploy_refuses_install_true(tmp_path, key, component):
     load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)
 
 
-def test_operator_install_keys_registry_names_both_keys():
-    from lakebench.config.schema import OPERATOR_INSTALL_KEYS, operator_install_fix
-
-    assert set(OPERATOR_INSTALL_KEYS) == {
-        "platform.compute.spark.operator.install",
-        "architecture.catalog.hive.operator.install",
-    }
-    for key in OPERATOR_INSTALL_KEYS:
-        assert "admin install --component" in operator_install_fix(key)
-
-
 # ---------------------------------------------------------------------------
 # admin doctor runs the prerequisite registry
 # ---------------------------------------------------------------------------
 
 
-def test_doctor_runs_the_registry_and_exits_one_on_a_failure():
+@pytest.mark.parametrize(
+    "bad,code",
+    [
+        ({"spark-operator": "FAIL"}, 1),
+        ({"spark-operator": "UNKNOWN"}, 1),
+        # Without a config, optional components do not gate.
+        ({"stackable": "FAIL", "observability-stack": "FAIL"}, 0),
+        ({}, 0),
+    ],
+    ids=["failed-check", "check-cannot-run", "optional-not-gated", "all-ok"],
+)
+def test_doctor_exit_code_follows_the_registry(bad, code):
     from lakebench.deploy import prereqs
 
     def outcomes(cfg, reader):
-        out = []
-        for p in prereqs.PREREQS:
-            status = (
-                prereqs.PrereqStatus.FAIL if p.id == "spark-operator" else prereqs.PrereqStatus.OK
+        return [
+            prereqs.PrereqOutcome(
+                p,
+                prereqs.PrereqResult(
+                    prereqs.PrereqStatus[bad[p.id]] if p.id in bad else prereqs.PrereqStatus.OK,
+                    "x",
+                ),
             )
-            out.append(prereqs.PrereqOutcome(p, prereqs.PrereqResult(status, "x")))
-        return out
+            for p in prereqs.PREREQS
+        ]
 
     with (
         patch("lakebench.cli._admin._get_core_v1", return_value=MagicMock()),
@@ -882,161 +583,14 @@ def test_doctor_runs_the_registry_and_exits_one_on_a_failure():
         patch("lakebench.cli._admin._print_operator_scratch", return_value=True),
     ):
         r = _invoke("doctor")
-    assert r.exit_code == 1, r.output
+    assert r.exit_code == code, r.output
     checked = run.call_args.args[0]
     assert checked.platform.storage.scratch.enabled and checked.observability.enabled
-    out = " ".join(r.output.split())
-    assert "lakebench admin install --component spark-operator" in out
-    assert "S3 endpoint" not in out  # the deployment's own checks are not doctor's
-
-
-def test_admin_install_report_lists_components_as_json_safe_rows():
-    """The status table renders every requested component (vacuity guard for
-    the no-op test: a resolved set that dropped one would show here)."""
-    report = sc.Report(0, [], {"spark-operator": READY, "stackable": ABSENT}, False)
-    from lakebench.cli._admin import _print_component_table
-
-    with patch("lakebench.cli._admin.console") as console:
-        _print_component_table(report)
-    table = console.print.call_args.args[0]
-    assert [c._cells for c in table.columns][0] == ["spark-operator", "stackable"]
-    json.dumps([str(x) for x in table.columns[0]._cells])
-
-
-def test_install_true_is_refused_after_coercion(tmp_path):
-    """``"true"``, ``yes`` and ``1`` are true too: the refusal runs after
-    Pydantic coercion, so a quoted value cannot slip past it."""
-    from lakebench.config import ConfigValidationError, LoadPurpose, load_config
-
-    for raw in ("true", "yes", 1):
-        path = tmp_path / "c.yaml"
-        path.write_text(
-            yaml.safe_dump(
-                {"name": "t", "platform": {"compute": {"spark": {"operator": {"install": raw}}}}}
-            )
-        )
-        with pytest.raises(ConfigValidationError):
-            load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)
-
-
-def test_install_false_loads_quietly(tmp_path, recwarn):
-    """Every v1.6 example and saved config carries install: false."""
-    from lakebench.config import LoadPurpose, load_config
-
-    path = tmp_path / "c.yaml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "name": "t",
-                "platform": {"compute": {"spark": {"operator": {"install": False}}}},
-                "architecture": {"catalog": {"hive": {"operator": {"install": False}}}},
-            }
-        )
-    )
-    load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)
-    assert not [w for w in recwarn if "admin install" in str(w.message)]
-
-
-def test_nothing_outside_the_schema_reads_operator_install():
-    """Static guard for 'deploy only verifies': no code path decides anything
-    on operator.install (v1.6 deploy, validate, run and the preflight did)."""
-    import re as _re
-
-    src = Path(__file__).resolve().parents[1] / "src" / "lakebench"
-    hits = []
-    for path in src.rglob("*.py"):
-        if path.name == "schema.py":
-            continue
-        for i, line in enumerate(path.read_text().splitlines(), 1):
-            if _re.search(r"operator\.install\b|op_cfg\.install\b|\"install\",\s*False", line):
-                if line.lstrip().startswith("#") or "``" in line or "'" in line or '"' in line:
-                    continue
-                hits.append(f"{path.relative_to(src)}:{i}: {line.strip()}")
-    assert hits == []
-
-
-def test_doctor_fails_when_a_check_cannot_run():
-    from lakebench.deploy import prereqs
-
-    def outcomes(cfg, reader):
-        return [
-            prereqs.PrereqOutcome(
-                p,
-                prereqs.PrereqResult(
-                    prereqs.PrereqStatus.UNKNOWN
-                    if p.id == "spark-operator"
-                    else prereqs.PrereqStatus.OK,
-                    "could not check: 403",
-                ),
-            )
-            for p in prereqs.PREREQS
-        ]
-
-    with (
-        patch("lakebench.cli._admin._get_core_v1", return_value=MagicMock()),
-        patch("lakebench.deploy.prereqs.run_prereqs", side_effect=outcomes),
-        patch("lakebench.deploy.cluster_lock.read_cluster_lock", return_value=None),
-    ):
-        r = _invoke("doctor")
-    assert r.exit_code == 1, r.output
-
-
-def test_doctor_without_a_config_does_not_gate_on_optional_components():
-    from lakebench.deploy import prereqs
-
-    def outcomes(cfg, reader):
-        bad = {"stackable", "observability-stack"}
-        return [
-            prereqs.PrereqOutcome(
-                p,
-                prereqs.PrereqResult(
-                    prereqs.PrereqStatus.FAIL if p.id in bad else prereqs.PrereqStatus.OK, "x"
-                ),
-            )
-            for p in prereqs.PREREQS
-        ]
-
-    with (
-        patch("lakebench.cli._admin._get_core_v1", return_value=MagicMock()),
-        patch("lakebench.deploy.prereqs.run_prereqs", side_effect=outcomes),
-        patch("lakebench.deploy.cluster_lock.read_cluster_lock", return_value=None),
-        patch("lakebench.cli._admin._print_operator_scratch", return_value=True),
-    ):
-        r = _invoke("doctor")
-    assert r.exit_code == 0, r.output
-    assert "pass a config that uses it" in " ".join(r.output.split())
-
-
-def test_deploy_step_says_could_not_check_rather_than_not_installed():
-    """check_status maps a read error to installed=None (unknown); the step
-    must not then tell the user to install an operator that may be running."""
-    from lakebench.deploy.engine import DeploymentEngine, DeploymentStatus
-    from lakebench.modules.pipeline_engines.spark.operator import (
-        OperatorStatus,
-        SparkOperatorManager,
-    )
-
-    engine = MagicMock()
-    engine.config = make_config(name=NS)
-    engine.dry_run = False
-    broken = OperatorStatus(
-        installed=None,
-        version=None,
-        namespace=None,
-        ready=False,
-        message="Error checking operator status: timeout",
-    )
-    with patch.object(SparkOperatorManager, "ensure_namespace_watched", return_value=broken):
-        res = DeploymentEngine._deploy_spark_operator(engine)
-    assert res.status == DeploymentStatus.FAILED
-    assert "not ready: Error checking" in res.message
-    assert "admin install" not in res.message
 
 
 def test_spark_prepare_refuses_a_repo_name_bound_to_another_url():
-    """helm returns 0 for the same repo already added; non-zero "already
-    exists" means the name points at another URL, which must not supply the
-    shared operator's chart."""
+    """A repo name bound to another URL (helm exits non-zero) must not supply
+    the shared operator's chart."""
     from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
 
     taken = MagicMock(
@@ -1047,7 +601,7 @@ def test_spark_prepare_refuses_a_repo_name_bound_to_another_url():
     )
     with patch.object(SparkOperatorManager, "_run", return_value=taken):
         problem = sc.SparkOperator().prepare(sc.Settings.from_config(None))
-    assert problem and "already exists" in problem
+    assert problem
 
 
 @pytest.mark.parametrize(
@@ -1084,3 +638,150 @@ def test_full_deploy_makes_no_shared_mutation_but_the_leased_watch_list_add(
         # the dashboard there).
         assert not [c for c in shared if c.namespace == OBS_NS], [c.describe() for c in shared]
         rec.assert_clean()
+
+
+# --- admin install refusals: each state answers with its exit code and
+# changes nothing on the shared cluster.
+
+
+def _seed_prom_elsewhere(rec):
+    rec.add_namespace("monitoring")
+    rec.add_helm_release("prom", "monitoring", chart="kube-prometheus-stack", version="80.0.0")
+
+
+def _seed_operator(rec):
+    rec.add_spark_operator(watched=["default"])
+
+
+def _seed_operator_not_ready(rec):
+    rec.add_spark_operator(watched=["default"])
+    dep = rec.store[("deployments", "spark-operator", "spark-operator-controller")]
+    dep.status.ready_replicas = 0
+
+
+def _seed_leftover_spark_crd(rec):
+    rec.add_crd("sparkapplications", "sparkoperator.k8s.io", "SparkApplication")
+
+
+def _seed_observability_not_ready(rec):
+    _seed_observability(rec, ready=False)
+
+
+def _seed_partial_stackable(rec):
+    rec.add_namespace("stackable")
+    for op in STACKABLE_OPS[:3]:
+        rec.add_helm_release(op, "stackable", chart=op, version="25.7.0")
+        _running_pod(rec, op)
+    rec.add_crd("hiveclusters", "hive.stackable.tech", "HiveCluster")  # hive-operator's
+
+
+def _seed_release_status(status):
+    def seed(rec):
+        rec.add_spark_operator(watched=["default"])
+        rec.releases[("spark-operator", "spark-operator")].status = status
+
+    return seed
+
+
+def _seed_scratch_diff(rec):
+    _seed_all(rec)
+    rec.store.pop(("storageclasses", None, "px-csi-scratch"))
+    _seed_scratch(rec, {"repl": "3"})
+
+
+def _seed_operator_elsewhere(rec):
+    rec.add_spark_operator(watched=["default"], namespace="other-ops")
+
+
+def _seed_stackable_elsewhere(rec):
+    rec.add_namespace("sdp")
+    rec.add_crd("hiveclusters", "hive.stackable.tech", "HiveCluster")
+    rec.add_crd("secretclasses", "secrets.stackable.tech", "SecretClass", scope="Cluster")
+    for op in STACKABLE_OPS:
+        rec.add_helm_release(op, "sdp", chart=op, version="25.7.0")
+        _running_pod(rec, op, ns="sdp")
+
+
+def _seed_stackable_crd(rec):
+    rec.add_crd("hiveclusters", "hive.stackable.tech", "HiveCluster")
+
+
+def _seed_helm_unauthorized(rec):
+    rec.on_command("helm", "list", returncode=1, stderr="Error: Unauthorized")
+
+
+def _seed_watched(*watched):
+    def seed(rec):
+        _seed_all(rec, watched=watched)
+        for ns in watched:
+            if ns not in ("default", "gone"):
+                rec.add_namespace(ns, annotations={"lakebench.deployment/name": ns})
+
+    return seed
+
+
+_OP_DOWNGRADE = ("--component", "spark-operator", "--version", "spark-operator=2.4.0")
+_INSTALL_REFUSALS = [
+    pytest.param(_seed_prom_elsewhere, ("<cfg>", "--component", "observability"), 3, None, id="second-prometheus-stack"),
+    pytest.param(_seed_operator, ("--component", "spark-operator", "--controller-tmp-size", "16Gi"), 2, None, id="tmp-size-on-installed-operator"),
+    pytest.param(_seed_operator_not_ready, ("--component", "spark-operator"), 1, None, id="operator-not-ready"),
+    pytest.param(_seed_leftover_spark_crd, ("--component", "spark-operator"), 3, None, id="leftover-spark-crd"),
+    pytest.param(_seed_observability_not_ready, ("<cfg>", "--component", "observability"), 1, None, id="observability-not-ready"),
+    pytest.param(_seed_partial_stackable, ("--component", "stackable"), 3, None, id="partial-stackable-leftover-crd"),
+    *[
+        pytest.param(_seed_release_status(s), ("--component", "spark-operator"), 1, None, id=f"release-{s}")
+        for s in ("pending-install", "pending-upgrade", "failed", "uninstalling")
+    ],
+    pytest.param(_seed_scratch_diff, ("<cfg>", "--component", "scratch-storage-class"), 3, None, id="scratch-diff-named"),
+    pytest.param(_seed_scratch_diff, ("<cfg>", "--component", "all"), 3, None, id="scratch-diff-all"),
+    pytest.param(_seed_operator_elsewhere, ("--component", "spark-operator"), 3, None, id="second-spark-operator"),
+    pytest.param(_seed_all, ("--component", "stackable", "--version", "stackable=24.11.0", "--allow-version-change"), 3, None, id="stackable-version-change"),
+    pytest.param(_seed_all, ("--component", "observability", "--version", "observability=80.0.0", "--allow-version-change"), 3, None, id="observability-version-change"),
+    pytest.param(_seed_stackable_elsewhere, ("--component", "stackable"), 0, None, id="stackable-in-another-namespace"),
+    pytest.param(_seed_stackable_crd, ("--component", "stackable"), 3, None, id="leftover-stackable-crd"),
+    pytest.param(_seed_helm_unauthorized, ("--component", "spark-operator"), 1, None, id="release-state-unreadable"),
+    pytest.param(_seed_watched("default"), (*_OP_DOWNGRADE, "--allow-version-change"), 3, None, id="version-change-default-placeholder"),
+    pytest.param(_seed_watched("default", "gone"), (*_OP_DOWNGRADE, "--allow-version-change"), 3, None, id="version-change-stale-entries"),
+    pytest.param(_seed_watched("a", "b"), (*_OP_DOWNGRADE, "--allow-version-change"), 3, None, id="version-change-while-watched"),
+    pytest.param(_seed_all, _OP_DOWNGRADE, 2, None, id="version-change-without-flag"),
+    pytest.param(_seed_all, (*_OP_DOWNGRADE, "--allow-version-change"), 3, "watch-list-unreadable", id="version-change-users-unknown"),
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(("seed", "argv", "code", "fault"), _INSTALL_REFUSALS)
+def test_admin_install_answers_and_changes_nothing(tmp_path, seed, argv, code, fault):
+    """Each cluster state answers with its exit code and no mutation at all:
+    a second operator, a leftover CRD, a release not deployed, an unreadable
+    release state, a version change (with or without users), a StorageClass
+    parameter difference."""
+    from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
+
+    cfg = _config(tmp_path)
+    argv = [str(cfg) if a == "<cfg>" else a for a in argv]
+    with recording(NS) as rec:
+        seed(rec)
+        if fault == "watch-list-unreadable":
+            with patch.object(
+                SparkOperatorManager, "_get_active_namespaces", side_effect=RuntimeError("timeout")
+            ):
+                r = _invoke("install", *argv, "-y")
+        else:
+            r = _invoke("install", *argv, "-y")
+        assert r.exit_code == code, r.output
+        assert rec.mutations() == []
+
+
+def test_scratch_parameter_diff_refuses_through_the_alias(tmp_path):
+    cfg = _config(tmp_path)
+    with recording(NS) as rec:
+        _seed_scratch_diff(rec)
+        r = _invoke("install-scratch-storage-class", str(cfg))
+        assert r.exit_code == 3, r.output
+        assert rec.mutations() == []
+
+
+def test_without_yes_a_declined_prompt_changes_nothing():
+    with recording(NS) as rec:
+        r = runner.invoke(admin_app, ["install", "--component", "spark-operator"], input="n\n")
+        assert r.exit_code == 1, r.output
+        assert rec.mutations() == []

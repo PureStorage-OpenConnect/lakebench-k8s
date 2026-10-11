@@ -80,9 +80,9 @@ def _pinned_argv(tool: str, cfg_or_context: Any, args: list[str]) -> list[str]:
 # helm gives up (and records the failure) before Python ever stops it.
 HELM_TIMEOUT_MARGIN_S = 30
 # Kept back from a mutating helm call's subprocess timeout for the graceful
-# stop below and a later status-and-rollback step (DESIGN ch01 3.7).
+# stop below and a later status-and-rollback step.
 HELM_RECOVERY_RESERVE_S = 60
-# A mutating helm call is not started with less than this left (3.7).
+# A mutating helm call is not started with less than this left.
 HELM_MIN_START_S = 60
 # On a timeout or an abort the child gets SIGTERM and this long to stop:
 # helm cancels the operation and marks the release failed, rather than the
@@ -189,7 +189,7 @@ def _under_lease(tool: str, args: list[str], kwargs: dict[str, Any]) -> tuple[li
 
     Under the cluster lease the child runs in its own session (a terminal
     Ctrl-C goes to the foreground process group and would otherwise kill a
-    helm upgrade half way, DESIGN ch01 3.6) with a subprocess timeout from
+    helm upgrade half way) with a subprocess timeout from
     the hold budget. A mutating helm call keeps ``HELM_RECOVERY_RESERVE_S``
     of the budget back, is refused with ``LeaseHoldExceeded`` when less than
     ``HELM_MIN_START_S`` would be left for it, and gets its own ``--timeout``

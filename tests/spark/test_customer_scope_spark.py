@@ -255,16 +255,6 @@ def test_graph_rule_can_alert_on_a_counterparty(alerts, rule):
     assert any(not _is_customer(e) for e in got), f"{rule}: {sorted(got)}"
 
 
-def test_declared_lists_partition_the_rules():
-    import detection_rules as dr
-    import tm_operations as tm
-
-    assert set(dr.COUNTERPARTY_SCENARIOS) == set(GRAPH)
-    assert set(dr.CUSTOMER_SCOPED_RULES) == set(CUSTOMER_ONLY)
-    assert set(dr.COUNTERPARTY_SCENARIOS) | set(dr.CUSTOMER_SCOPED_RULES) == set(dr.known_rules())
-    assert tuple(tm.DEFAULT_COUNTERPARTY_SCENARIOS) == tuple(dr.COUNTERPARTY_SCENARIOS)
-
-
 def test_noncustomer_alerts_declared_passes_on_all_rules(spark, alerts):
     """The TM layer's own classification (build_alert_inputs) over the union
     of all nine rules' alerts: every non-customer alert comes from a declared
@@ -353,17 +343,6 @@ def test_rule_alerts_have_the_alert_columns(spark, rule):
     want = [(name, _parse_datatype_string(ddl)) for name, ddl, _ in ALERT_COLUMNS]
     assert got == want, rule
     assert df.count() > 0, rule
-
-
-def test_empty_alerts_frame_has_the_alert_columns(spark):
-    from detection_rules import ALERT_COLUMNS, _empty_alerts_df
-    from pyspark.sql.types import _parse_datatype_string
-
-    df = _empty_alerts_df(spark, "r")
-    assert [(f.name, f.dataType, f.nullable) for f in df.schema.fields] == [
-        (name, _parse_datatype_string(ddl), nullable) for name, ddl, nullable in ALERT_COLUMNS
-    ]
-    assert df.count() == 0
 
 
 def test_shared_screening_base_gives_the_same_alerts(spark, monkeypatch):

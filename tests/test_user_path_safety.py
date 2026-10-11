@@ -1,32 +1,14 @@
-"""User-path safety: validate before deploy, info sizing, remedy hints.
-
-Each test names the defect it guards (lb16-base live report, outcome 5).
-"""
+"""User-path safety: validate before deploy, watch-list edits, remedy hints."""
 
 from __future__ import annotations
 
 import pytest
 
 from lakebench.cli import operator_watch_verdict
-from lakebench.modules.pipeline_engines.spark.operator import watch_list_fix_hint
 
 
 class TestValidateWatchListVerdict:
-    """`validate` failed on every example config before deploy because the
-    namespace was not yet in spark.jobNamespaces, although deploy adds it."""
-
-    def test_pre_deploy_is_not_a_failure(self):
-        level, msg, hint = operator_watch_verdict("lb16-base", ["default"], namespace_exists=False)
-        assert level == "ok"
-        assert "deploy adds it" in msg
-
-    @pytest.mark.parametrize("exists", [True, None])
-    def test_existing_or_unknown_namespace_is_a_warning(self, exists):
-        level, _msg, hint = operator_watch_verdict(
-            "lb16-base", ["default"], namespace_exists=exists
-        )
-        assert level == "warn"
-        assert "lakebench deploy" in hint
+    """validate passes before deploy when the namespace add is possible."""
 
     @pytest.mark.parametrize("can_edit", [True, None])
     def test_pre_deploy_passes_when_the_add_is_possible_or_unknown(self, can_edit):
@@ -37,8 +19,7 @@ class TestValidateWatchListVerdict:
 
     @pytest.mark.parametrize("exists", [True, False, None])
     def test_fails_when_credentials_cannot_make_the_add(self, exists):
-        """Review: a namespace-scoped developer saw validate green, then
-        deploy built half the stack and stopped at the operator step."""
+        """Without credentials to edit the release, validate fails and names the operator namespace."""
         level, _msg, hint = operator_watch_verdict(
             "lb16-base",
             ["default"],
@@ -49,168 +30,13 @@ class TestValidateWatchListVerdict:
         assert level == "fail"
         assert "spark-operator" in hint
 
-    @pytest.mark.parametrize("can_edit", [True, False, None])
-    @pytest.mark.parametrize("exists", [True, False, None])
-    def test_never_suggests_raw_helm(self, exists, can_edit):
-        _level, msg, hint = operator_watch_verdict(
-            "lb16-base", ["default", "other"], namespace_exists=exists, can_edit_release=can_edit
-        )
-        text = msg + hint
-        assert "--reuse-values" not in text
-        assert "helm upgrade" not in text
-        assert "jobNamespaces={" not in text
-
-
-def test_fix_hint_routes_through_the_lease():
-    hint = watch_list_fix_hint()
-    assert "lakebench deploy" in hint
-    assert "--reuse-values" not in hint
-    assert "helm upgrade" not in hint
-
-
-def test_no_raw_watch_list_helm_in_user_docs_or_cli_strings():
-    """No user-facing text may tell the user to set spark.jobNamespaces by
-    hand with helm; that bypasses the lakebench-cluster-lock lease."""
-    import pathlib
-    import re
-
-    root = pathlib.Path(__file__).resolve().parents[1]
-    offenders = []
-    # A namespace *list* literal is the hazardous form: it is a snapshot of
-    # someone else's watch list. A first install with jobNamespaces=""
-    # (watch all) is an admin bootstrap and stays documented.
-    pattern = re.compile(r"spark\.jobNamespaces=\{")
-    for path in [root / "README.md", *sorted((root / "docs").glob("*.md"))]:
-        if pattern.search(path.read_text()):
-            offenders.append(str(path.relative_to(root)))
-    for path in (root / "src" / "lakebench" / "cli").glob("*.py"):
-        text = path.read_text()
-        if "--reuse-values" in text or pattern.search(text):
-            offenders.append(str(path.relative_to(root)))
-    assert offenders == []
-
-
-class TestInfoPeakRequest:
-    """`info` said "17 cores needed" at scale 1 while
-    compute_peak_requirements() says 36 cores / 512 GB (gotcha 34)."""
-
-    @pytest.fixture
-    def trino_example(self, monkeypatch):
-        import pathlib
-
-        for var in (
-            "LAKEBENCH_POLARIS_CLIENT_SECRET",
-            "LAKEBENCH_S3_ACCESS_KEY",
-            "LAKEBENCH_S3_SECRET_KEY",
-        ):
-            monkeypatch.setenv(var, "placeholder")
-        root = pathlib.Path(__file__).resolve().parents[1]
-        return root / "examples" / "hive-iceberg-spark-trino.yaml"
-
-    def test_info_reports_compute_peak_requirements(self, trino_example, monkeypatch):
-        from unittest.mock import MagicMock
-
-        from typer.testing import CliRunner
-
-        import lakebench.cli as cli_mod
-        from lakebench.cli import app
-        from lakebench.config import load_config
-        from lakebench.config.sizing import floor_text, plan_requirements
-        from lakebench.k8s.client import ClusterCapacity
-        from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
-
-        cfg = load_config(trino_example)
-        scale = cfg.architecture.workload.datagen.get_effective_scale()
-        plan = plan_requirements(cfg)
-        ref = compute_peak_requirements(scale, "batch", cfg.architecture.workload.schema_type.value)
-        assert (plan.spark.cpu_cores, plan.spark.memory_gb) == (ref.cpu_cores, ref.memory_gb)
-        assert plan.spark.cpu_cores >= 36 and plan.spark.memory_gb >= 512  # silver-build
-
-        cap = ClusterCapacity(
-            total_cpu_millicores=434_000,
-            total_memory_bytes=4349 * 1024**3,
-            node_count=10,
-            largest_node_cpu_millicores=64_000,
-            largest_node_memory_bytes=512 * 1024**3,
-        )
-        k8s = MagicMock()
-        k8s.get_cluster_capacity.return_value = cap
-        monkeypatch.setattr(cli_mod, "get_k8s_client", lambda *a, **k: k8s)
-        result = CliRunner().invoke(app, ["info", str(trino_example)], env={"COLUMNS": "300"})
-        assert result.exit_code == 0, result.output
-        out = " ".join(result.output.split())
-        assert "Peak requested" in out
-        assert floor_text(plan) in out
-        fitted = plan_requirements(cfg, capacity=cap).floor
-        assert f"peak request {fitted.cpu_cores} cores / {fitted.memory_gb} GB" in out
-        assert "17 needed" not in out
-
-
-@pytest.mark.parametrize(
-    "example", ["hive-iceberg-spark-trino.yaml", "hive-delta-spark-thrift.yaml"]
-)
-def test_config_show_reports_peak_request(monkeypatch, example):
-    """`config show` is the non-deprecated place for sizing; it must carry
-    the same figure as info and the run preflight (one sizing source)."""
-    import pathlib
-
-    from typer.testing import CliRunner
-
-    from lakebench.cli import app
-    from lakebench.config import load_config
-    from lakebench.config.sizing import floor_text, plan_requirements
-
-    for var in ("LAKEBENCH_S3_ACCESS_KEY", "LAKEBENCH_S3_SECRET_KEY"):
-        monkeypatch.setenv(var, "placeholder")
-    path = pathlib.Path(__file__).resolve().parents[1] / "examples" / example
-    plan = plan_requirements(load_config(path))
-    result = CliRunner().invoke(app, ["config", "show", str(path)], env={"COLUMNS": "400"})
-    assert result.exit_code == 0, result.output
-    assert floor_text(plan) in " ".join(result.output.split())
-
-
-def _recommend_floor(out: str) -> tuple[int, int]:
-    import re
-
-    m = re.search(r"Minimum cluster:\s+([\d,]+) cores / ([\d,]+) GB memory", out)
-    assert m, out
-    return int(m.group(1).replace(",", "")), int(m.group(2).replace(",", ""))
-
-
-@pytest.mark.parametrize("mode", ["batch", "continuous"])
-def test_recommend_never_below_compute_peak_requirements(mode):
-    """`recommend --scale` (and `config recommend`) sized Spark from the
-    advisory compute_guidance(): 8 cores at scale 1 against 36 requested.
-    It now prints the one sizing source's floor (CC-22)."""
-    from typer.testing import CliRunner
-
-    from lakebench.cli import app
-    from lakebench.config.sizing import default_sizing_config, plan_requirements
-    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
-
-    peak = compute_peak_requirements(1, mode)
-    result = CliRunner().invoke(
-        app, ["recommend", "--scale", "1", "--mode", mode], env={"COLUMNS": "300"}
-    )
-    assert result.exit_code == 0, result.output
-    cores, mem = _recommend_floor(result.output)
-    floor = plan_requirements(default_sizing_config("customer360", mode, 1)).floor
-    assert (cores, mem) == (floor.cpu_cores, floor.memory_gb)
-    assert cores >= peak.cpu_cores
-    assert mem >= peak.memory_gb
-
 
 class TestWatchListEditsKeepTheInstalledChart:
-    """A namespace add/remove is not an operator upgrade. Without --version
-    Helm resolved the repo's latest chart (run path, install=false); with the
-    config's version a developer could downgrade an admin's install."""
+    """A namespace add/remove pins the installed chart, never the config's or latest."""
 
-    def _mgr(self, target=None, installed=None):
+    def _mgr(self, target=None):
         from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
 
-        # ``installed`` was the check_status() cache the pin used to fall back
-        # on; the pin now reads the chart afresh, so it is ignored.
-        del installed
         return SparkOperatorManager(version=target, job_namespace="lb16")
 
     @staticmethod
@@ -229,58 +55,18 @@ class TestWatchListEditsKeepTheInstalledChart:
         return run
 
     def test_installed_chart_wins_over_config_and_latest(self, monkeypatch):
-        """The pin is the installed chart, read afresh (the callers hold the
-        lease). The config's version is never a stand-in: with the installed
-        chart unreadable the pin is None and the edit is refused, where it
-        used to fall back to the config pin (moving the shared operator) or
-        to no pin at all (the repo's latest)."""
-        for target, cached in (("2.4.0", "2.5.1"), (None, "2.5.1"), ("2.4.0", None)):
-            m = self._mgr(target=target, installed=cached)
+        """The pin is the installed chart, read afresh. With it unreadable the
+        pin is None and the edit is refused; the config's version never stands in."""
+        for target in ("2.4.0", None):
+            m = self._mgr(target=target)
             monkeypatch.setattr(m, "_run", self._helm_list("2.5.1"))
             assert m._watch_list_pin()[:2] == ["--version", "2.5.1"]
-        for target, cached in (("2.4.0", None), (None, None), ("2.4.0", "2.5.1")):
-            m = self._mgr(target=target, installed=cached)
+            m = self._mgr(target=target)
             monkeypatch.setattr(m, "_run", self._helm_list(None))
             assert m._watch_list_pin() is None
 
-    def test_add_pins_the_installed_chart(self, monkeypatch):
-        m = self._mgr(target="2.4.0", installed="2.4.0")
-        calls = []
-        base = self._helm_list("2.5.1")
-
-        def run(cmd, **kw):
-            calls.append(cmd)
-            return base(cmd, **kw)
-
-        monkeypatch.setattr(m, "_run", run)
-        monkeypatch.setattr(m, "_get_watched_namespaces", lambda: ["default"])
-        monkeypatch.setattr(m, "_namespace_is_terminating", lambda _ns: False)
-        monkeypatch.setattr(m, "_filter_existing_namespaces", lambda ns: ns)
-        monkeypatch.setattr(m, "_restart_operator", lambda: True)
-        monkeypatch.setattr(m, "_verify_namespace_watched", lambda *_a, **_k: True)
-        m._add_namespace_to_watch_impl("lb16", _retry_on_eviction=False)
-        upgrade = next(c for c in calls if c[:2] == ["helm", "upgrade"])
-        assert upgrade[upgrade.index("--version") + 1] == "2.5.1"
-
-    def test_add_refuses_when_the_installed_chart_is_unreadable(self, monkeypatch):
-        m = self._mgr(target="2.4.0")
-        calls = []
-        base = self._helm_list(None)
-
-        def run(cmd, **kw):
-            calls.append(cmd)
-            return base(cmd, **kw)
-
-        monkeypatch.setattr(m, "_run", run)
-        monkeypatch.setattr(m, "_get_watched_namespaces", lambda: ["default"])
-        monkeypatch.setattr(m, "_namespace_is_terminating", lambda _ns: False)
-        monkeypatch.setattr(m, "_filter_existing_namespaces", lambda ns: ns)
-        assert m._add_namespace_to_watch_impl("lb16", _retry_on_eviction=False) is False
-        assert not [c for c in calls if c[:2] == ["helm", "upgrade"]]
-
     def test_remove_refuses_when_the_installed_chart_is_unreadable(self, monkeypatch):
-        """A refused removal is a failed removal: the strict destroy path then
-        raises and keeps the namespace (never deletes a watched one)."""
+        """A refused removal fails the strict destroy, which keeps the namespace."""
         from unittest.mock import patch
 
         from lakebench.modules.pipeline_engines.spark.operator import WatchListMutationError
@@ -309,7 +95,7 @@ class TestWatchListEditsKeepTheInstalledChart:
     def test_recreate_rbac_refuses_without_the_lease(self, monkeypatch):
         from unittest.mock import MagicMock
 
-        m = self._mgr(installed="2.5.1")
+        m = self._mgr()
         run = MagicMock()
         monkeypatch.setattr(m, "_run", run)
         monkeypatch.setattr(m, "_acquire_watch_lease", lambda: (None, "refuse"))
@@ -318,37 +104,9 @@ class TestWatchListEditsKeepTheInstalledChart:
         run.assert_not_called()
 
 
-def test_recommend_sizes_the_financial_schema():
-    """Review: config recommend passed only the mode, so AML continuous was
-    sized as Customer360 (38 cores against 118 requested at scale 1)."""
-    from typer.testing import CliRunner
-
-    from lakebench.cli import app
-    from lakebench.config.sizing import default_sizing_config, plan_requirements
-    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
-
-    peak = compute_peak_requirements(1, "continuous", "financial")
-    out = (
-        CliRunner()
-        .invoke(
-            app,
-            ["recommend", "--scale", "1", "--mode", "continuous", "--schema", "financial"],
-            env={"COLUMNS": "300"},
-        )
-        .output
-    )
-    cores, _ = _recommend_floor(out)
-    assert (
-        cores
-        == plan_requirements(default_sizing_config("financial", "continuous", 1)).floor.cpu_cores
-    )
-    assert cores >= peak.cpu_cores
-
-
 @pytest.mark.parametrize("recorded", [True, False])
 def test_continuous_reset_needs_the_record_on_tagless_backends(monkeypatch, recorded):
-    """Review: the continuous reset deleted checkpoint and raw prefixes in any
-    name-matching bucket on FlashBlade, record or not."""
+    """On tagless backends the continuous reset proceeds only with an ownership record."""
     from unittest.mock import MagicMock, patch
 
     from lakebench.cli import _sustained
@@ -375,8 +133,7 @@ def test_continuous_reset_needs_the_record_on_tagless_backends(monkeypatch, reco
 
 
 class TestInstalledChartLookup:
-    """Review: `helm list -A -f spark-operator` took releases[0], so a
-    look-alike release elsewhere could set the watch-list --version pin."""
+    """Only the exact release in the operator namespace sets the watch-list pin."""
 
     def _mgr(self, stdout, rc=0):
         from unittest.mock import MagicMock

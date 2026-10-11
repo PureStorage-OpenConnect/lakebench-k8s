@@ -33,19 +33,23 @@ Environment variables (set by job.py):
     BRONZE_BUCKET        - bucket name (for checkpoint path)
     LB_ICEBERG_CATALOG   - Iceberg catalog name (e.g., "lakehouse")
     CHECKPOINT_LOCATION  - s3a://bronze-bucket/checkpoints/bronze-ingest/
-    TRIGGER_INTERVAL     - e.g., "30 seconds"
+    TRIGGER_INTERVAL     - e.g., "0 seconds" (back to back)
 """
 
 import os
 import time
 
 from common import (
+    LANDED_COLUMN,
     METADATA_DELETE_AFTER_COMMIT,
     METADATA_PREVIOUS_VERSIONS_MAX,
     _s3_table_path,
+    arrival_time,
     await_stream,
     env,
+    landing_batch,
     log,
+    log_landing,
     pipeline_catalog,
     refuse_fresh_checkpoint_over_data,
     replay_possible,
@@ -99,7 +103,7 @@ def write_bronze_batch(
     spark = batch_df.sparkSession
     check_replay = replay_possible(spark)
     batch_start = time.time()
-    count = batch_df.count()
+    batch_df, count, landed_lo, landed_hi = landing_batch(batch_df)
     if count == 0:
         log(f"Batch {batch_id}: empty, skipping")
         return 0
@@ -116,7 +120,6 @@ def write_bronze_batch(
         log(f"Batch {batch_id}: skipped (already committed to {table_name})")
         return 0
 
-    log(f"Batch {batch_id}: writing {count:,} rows to {table_name}")
     writer = batch_df.writeTo(table_name).options(**props)
     if exists:
         writer.append()
@@ -132,8 +135,12 @@ def write_bronze_batch(
         if table_location:
             writer = writer.tableProperty("location", table_location)
         writer.create()
+    # Logged after the commit, as Delta and AML do: a batch whose stream is
+    # stopped mid-write never committed, and the collector counts these lines.
+    log(f"Batch {batch_id}: writing {count:,} rows to {table_name}")
     batch_time = time.time() - batch_start
     log(f"Batch {batch_id}: committed in {batch_time:.1f}s")
+    log_landing(batch_id, landed_lo, landed_hi)
     return count
 
 
@@ -142,7 +149,7 @@ def main() -> None:
     # The catalog silver-stream reads bronze from and the reset drops it in.
     catalog_name = pipeline_catalog()
     checkpoint_location = env("CHECKPOINT_LOCATION")
-    trigger_interval = env("TRIGGER_INTERVAL", "30 seconds")
+    trigger_interval = env("TRIGGER_INTERVAL", "0 seconds")
     max_files_per_trigger = env("MAX_FILES_PER_TRIGGER", "50")
     target_file_size_bytes = env("TARGET_FILE_SIZE_BYTES", "536870912")
 
@@ -174,6 +181,8 @@ def main() -> None:
     except Exception as e:
         log(f"Namespace creation note: {str(e)}")
 
+    arrived = arrival_time(spark, bronze_uri, checkpoint_location)
+
     # Wait for Parquet files in the landing zone, then infer schema. Datagen
     # writes self-describing Parquet; in continuous mode it starts
     # concurrently and may not have written any files yet.
@@ -197,11 +206,13 @@ def main() -> None:
 
     refuse_fresh_checkpoint_over_data(spark, checkpoint_location, table_name)
     table_location = _table_location(bronze_uri, bronze_table_path)
-    stream = (
-        spark.readStream.schema(inferred_schema)
-        .option("maxFilesPerTrigger", max_files_per_trigger)
-        .parquet(landing_zone)
-    )
+    reader = spark.readStream.schema(inferred_schema)
+    # 0: no per-trigger limit, so each micro-batch takes every landed file.
+    if int(max_files_per_trigger) > 0:
+        reader = reader.option("maxFilesPerTrigger", max_files_per_trigger)
+    # Each file's landing time (the object's modification time), for the
+    # landing-to-bronze lag; dropped before the write.
+    stream = reader.parquet(landing_zone).withColumn(LANDED_COLUMN, arrived)
     query = (
         stream.writeStream.foreachBatch(
             lambda df, bid: write_bronze_batch(

@@ -9,7 +9,6 @@ so one test covers both.
 
 from __future__ import annotations
 
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -30,23 +29,8 @@ START = date(2024, 3, 1)
 
 
 @pytest.fixture(scope="module")
-def spark():
-    import os
-
-    from pyspark.sql import SparkSession
-
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    s = (
-        SparkSession.builder.master("local[2]")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "4")
-        .getOrCreate()
-    )
-    prior = s.conf.get("spark.sql.session.timeZone")
-    s.conf.set("spark.sql.session.timeZone", "UTC")
-    yield s
-    s.conf.set("spark.sql.session.timeZone", prior)
-    s.stop()
+def spark(spark_session):
+    return spark_session
 
 
 def _bronze(spark, rows=ROWS, seed=7, ticket_space=90_000):
@@ -95,7 +79,7 @@ def _bronze_counts(bronze):
 
 
 def test_avg_transaction_value_is_per_transaction(pipeline):
-    from pyspark.sql.functions import avg, col
+    from pyspark.sql.functions import avg, coalesce, col, lit
 
     _, silver, gold = pipeline
     want = {
@@ -109,9 +93,16 @@ def test_avg_transaction_value_is_per_transaction(pipeline):
     assert got.keys() == want.keys()
     for d, v in want.items():
         assert got[d] == pytest.approx(round(v, 2), abs=0.006)
-    # About 151 per purchase; the old all-row average was about 27.
-    overall = sum(got.values()) / len(got)
-    assert 120 < overall < 185
+    # The old all-row average counted non-purchase rows as zero; the KPI must
+    # sit clear of it on every day, not just round to the per-purchase value.
+    all_rows = {
+        r["interaction_date"]: r["v"]
+        for r in silver.groupBy("interaction_date")
+        .agg(avg(coalesce(col("transaction_amount"), lit(0.0))).alias("v"))
+        .collect()
+    }
+    for d, v in all_rows.items():
+        assert abs(got[d] - v) > 0.1, (d, got[d], v)
 
 
 def test_visit_averages_exclude_non_visits(pipeline):
@@ -125,11 +116,16 @@ def test_visit_averages_exclude_non_visits(pipeline):
         .agg(avg("page_views").alias("pv"), avg("time_on_site_seconds").alias("tos"))
         .collect()
     }
+    all_rows_pv = {
+        r["interaction_date"]: r["pv"]
+        for r in silver.groupBy("interaction_date").agg(avg("page_views").alias("pv")).collect()
+    }
     for r in gold.collect():
         pv, tos = want[r["interaction_date"]]
         assert r["avg_page_views"] == pytest.approx(round(pv, 1), abs=0.051)
         assert r["avg_time_on_site_seconds"] == pytest.approx(round(tos, 0), abs=0.51)
-        assert 9 < r["avg_page_views"] < 12
+        # Clear of the old all-row average, which counted non-visits as zero.
+        assert abs(r["avg_page_views"] - all_rows_pv[r["interaction_date"]]) > 0.1
 
 
 def test_support_tickets_count_every_support_interaction(spark):

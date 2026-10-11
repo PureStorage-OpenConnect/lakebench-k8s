@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Lakebench's own bookkeeping keys (the owner marker
 # ``.lakebench/owner.json``). They are never user data: every emptiness
 # check, count and size skips them, and every emptying keeps them except
-# destroy's release of a bucket (DESIGN ch01 section 4).
+# destroy's release of a bucket.
 LAKEBENCH_KEY_PREFIX = ".lakebench/"
 # Sorts after every key under LAKEBENCH_KEY_PREFIX (keys list in UTF-8 byte
 # order, and U+10FFFF is the largest code point).
@@ -455,7 +455,9 @@ class S3Client:
             size_bytes=size_bytes,
         )
 
-    def get_bucket_size(self, bucket_name: str, prefix: str = "") -> BucketInfo:
+    def get_bucket_size(
+        self, bucket_name: str, prefix: str = "", exclude_prefix: str = ""
+    ) -> BucketInfo:
         """Get accurate bucket size by paginating all objects.
 
         Unlike :meth:`get_bucket_info`, this paginates through ALL
@@ -465,6 +467,7 @@ class S3Client:
         Args:
             bucket_name: Name of the bucket
             prefix: Optional key prefix to filter by
+            exclude_prefix: Optional key prefix left out of the count
 
         Returns:
             BucketInfo with accurate ``object_count`` and ``size_bytes``
@@ -483,7 +486,10 @@ class S3Client:
 
             for page in paginator.paginate(**paginate_args):
                 objects = [
-                    o for o in page.get("Contents", []) if not is_lakebench_key(o.get("Key", ""))
+                    o
+                    for o in page.get("Contents", [])
+                    if not is_lakebench_key(o.get("Key", ""))
+                    and not (exclude_prefix and o.get("Key", "").startswith(exclude_prefix))
                 ]
                 total_objects += len(objects)
                 total_bytes += sum(obj.get("Size", 0) for obj in objects)
@@ -647,7 +653,7 @@ class S3Client:
                         before_batch()
                     for upload in uploads:
                         # FlashBlade can still list an upload that its async
-                        # GC or a writer has already finished (LB-149). Gone
+                        # GC or a writer has already finished. Gone
                         # is the state we want; step 3 still verifies it.
                         try:
                             self._client.abort_multipart_upload(
@@ -705,7 +711,7 @@ class S3Client:
 
         except ClientError as e:
             # A concurrent destroy of the same deployment can delete the
-            # bucket while this loop is listing it (LB-159).
+            # bucket while this loop is listing it.
             if e.response.get("Error", {}).get("Code", "") in ("NoSuchBucket", "404"):
                 raise S3BucketVanished(  # noqa: B904
                     f"bucket {bucket_name} was deleted while being emptied "
@@ -714,7 +720,7 @@ class S3Client:
             raise S3BucketError(f"Failed to empty bucket {bucket_name}: {e}")  # noqa: B904
 
     def delete_bucket(self, bucket_name: str, max_wait: int = 300) -> bool:
-        """Delete a bucket that ``empty_bucket`` has already emptied (LB-159).
+        """Delete a bucket that ``empty_bucket`` has already emptied.
 
         The caller is responsible for proving the bucket is this
         deployment's; this method only removes it. ``BucketNotEmpty`` is
