@@ -84,7 +84,7 @@ dev = [
     # Pinned like ruff, together with everything mypy reads (stubs and the
     # pydantic plugin), so a stub or plugin release cannot turn CI red on a
     # tree that passed locally.
-    "mypy==1.19.1",
+    "mypy==2.4.0",
     "types-PyYAML==6.0.12.20250915",
     "types-boto3==1.42.38",
     "pydantic==2.12.5",
