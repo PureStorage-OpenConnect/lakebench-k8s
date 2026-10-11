@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Lakebench's own bookkeeping keys (the owner marker
 # ``.lakebench/owner.json``). They are never user data: every emptiness
 # check, count and size skips them, and every emptying keeps them except
-# destroy's release of a bucket (DESIGN ch01 section 4).
+# destroy's release of a bucket.
 LAKEBENCH_KEY_PREFIX = ".lakebench/"
 # Sorts after every key under LAKEBENCH_KEY_PREFIX (keys list in UTF-8 byte
 # order, and U+10FFFF is the largest code point).

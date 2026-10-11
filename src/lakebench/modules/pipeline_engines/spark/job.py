@@ -557,7 +557,7 @@ def balance_executor_need(
 ) -> int:
     """Executors a continuous stage needs to carry the offered load with
     headroom: load / (stage MB/s per core x BALANCE_HEADROOM) / executor
-    cores (DESIGN-CONTINUOUS 4). The load follows scale and schema only, so
+    cores. The load follows scale and schema only, so
     *scale* and *schema* stand in for a config. 0 for a stage with no rate
     (gold-refresh)."""
     import math
@@ -593,7 +593,7 @@ def balance_executor_need(
 
 #: Executor sizes a balance stage grows to, in order, when its need at the
 #: profile's size is above the executor cap (fewer, larger pods put less load
-#: on the Kubernetes API; DESIGN-CONTINUOUS 4b).
+#: on the Kubernetes API).
 _EXECUTOR_CORE_STEPS = (8, 16)
 #: The streaming jobs whose executor size the config may set.
 _EXECUTOR_STAGE_JOBS = ("bronze-ingest", "silver-stream", "gold-refresh")
@@ -641,7 +641,7 @@ def _reshape_executors(
 def kubernetes_client_conf(executors: int) -> dict[str, str]:
     """Spark's Kubernetes client settings for a job of *executors*: pod lists
     from the API server cache, polling that slows as the job grows, and pod
-    requests in bounded waves (DESIGN-CONTINUOUS 4b)."""
+    requests in bounded waves."""
     import math
 
     batch = max(5, min(20, math.ceil(executors / 3)))

@@ -526,7 +526,7 @@ def classify_submission_failure(message: str | None) -> str:
     return first[:300]
 
 
-#: SPEC section 8: BOUNDED BY trickle needs ingested / offered rows at or
+#: BOUNDED BY trickle needs ingested / offered rows at or
 #: above this, and lag at window end within one trigger interval.
 TRICKLE_KEPT_PACE_RATIO = 0.99
 #: Window seconds are recorded to 0.1 s; the last write is not.
@@ -542,8 +542,8 @@ def trickle_kept_pace(
     last_write_offset_s: float | None,
     trigger_s: float | None,
 ) -> dict[str, Any]:
-    """Whether bronze kept pace with what the trickle offered (SPEC section
-    8): ingested / offered rows >= TRICKLE_KEPT_PACE_RATIO, offered rows
+    """Whether bronze kept pace with what the trickle offered:
+    ingested / offered rows >= TRICKLE_KEPT_PACE_RATIO, offered rows
     being the rows the trickle had released (``released_rows``), and lag at
     window end (window seconds less bronze's last write) <= one trigger
     interval.
@@ -585,7 +585,7 @@ def trickle_kept_pace(
 
 
 # ---------------------------------------------------------------------------
-# Lag per handoff and balance (DESIGN-CONTINUOUS 6)
+# Lag per handoff and balance
 # ---------------------------------------------------------------------------
 
 #: The handoffs, upstream first: (name, upstream, the stage that consumes).
@@ -929,7 +929,7 @@ def lag_line(lags: dict[str, Any]) -> str:
 
 def freshness_summary(gold: list[StreamEvent], start: datetime, end: datetime) -> dict[str, Any]:
     """p50, p95 and max of gold's freshness over the cycles inside the window
-    that saw new data (DESIGN-CONTINUOUS 7); None when no cycle measured it."""
+    that saw new data; None when no cycle measured it."""
     values = sorted(
         e.value
         for e in gold

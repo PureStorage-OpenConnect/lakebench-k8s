@@ -1,6 +1,6 @@
 """The corpus series marker and the multi-cycle corpus rules (CD-18, C36-1).
 
-DESIGN ch05 section 7.1: one window function (``config.c360_run``), the
+One window function (``config.c360_run``), the
 series marker ``<prefix>/_corpus/series.json`` (``deploy.corpus``), and the
 rules: ``generate`` and ``run --generate`` refused with cycles > 1; a run
 that reuses the corpus needs a finished marker for the config; a generating

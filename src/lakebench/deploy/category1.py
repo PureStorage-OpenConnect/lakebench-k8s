@@ -1,4 +1,4 @@
-"""The Category-1 teardown registry (cluster-safety 14, DESIGN ch01 section 11).
+"""The Category-1 teardown registry.
 
 With ``create_namespace: false`` the namespace survives ``destroy``, so every
 object Lakebench creates in it must be deleted by name or by a selector, or
@@ -296,7 +296,7 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
 
 # Namespace annotations the category1 step removes from a surviving
 # namespace. ``state-schema`` is written by deploy beside the deploy nonce
-# (DESIGN ch01 d3 N3); removing an absent key is a no-op.
+# so destroy removes it; removing an absent key is a no-op.
 CATEGORY1_ANNOTATIONS: tuple[str, ...] = (
     "lakebench.deployment/state-schema",
     "lakebench.deployment/deps-set",  # the dependency server's verified set

@@ -1,4 +1,4 @@
-"""Characterisation harness for ``lakebench run`` (QA-9, DESIGN ch05 section 1).
+"""Characterisation harness for ``lakebench run`` (QA-9).
 
 Drives the real ``lakebench run`` command (``typer.testing.CliRunner`` on
 ``lakebench.cli.app``) with every cluster, object-store and engine seam
@@ -140,7 +140,7 @@ _IPV6 = re.compile(r"(?<![\w:])(?:[0-9a-fA-F]{1,4}:){4,7}[0-9a-fA-F]{1,4}(?![\w:
 
 
 def scrub_driver_log(text: str, source_name: str, target_name: str = NAME) -> str:
-    """The fixture form of a Spark driver log (SPEC section 6 rule 5).
+    """The fixture form of a Spark driver log.
 
     Keeps only the lines Lakebench's scripts print (``[lb] `` prefix), which
     hold every fact line the collector parses (``=== JOB METRICS``,

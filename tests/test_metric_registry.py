@@ -1,4 +1,4 @@
-"""One source of metric metadata (EVD-2, DESIGN ch03 section 2).
+"""One source of metric metadata (EVD-2).
 
 The report and the collector's
 score_descriptions read unit, direction and band from

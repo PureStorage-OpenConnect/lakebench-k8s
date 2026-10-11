@@ -189,8 +189,8 @@ def _datagen_clamp_note(config: LakebenchConfig, cpu: str) -> str:
 DATAGEN_MIN_PODS = 8
 
 
-#: Continuous load, a published workload definition (DESIGN-CONTINUOUS 4;
-#: owner, 2026-10-07): the MB/s of datagen files a continuous run offers per
+#: Continuous load, a published workload definition (owner,
+#: 2026-10-07): the MB/s of datagen files a continuous run offers per
 #: scale unit. The same scale offers the same load on every system.
 CONTINUOUS_LOAD_MB_S_PER_SCALE: dict[str, float] = {"financial": 4.0, "customer360": 10.0}
 #: MB/s per core (bytes of datagen's files) of datagen and of each streaming

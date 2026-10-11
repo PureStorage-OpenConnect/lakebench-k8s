@@ -1,4 +1,4 @@
-"""Run provenance is complete (EVD-5, DESIGN ch03 section 5).
+"""Run provenance is complete (EVD-5).
 
 A pip-installed run names the commit its wheel was built from; the record
 says which install it was, re-reads the code at run end, names the config

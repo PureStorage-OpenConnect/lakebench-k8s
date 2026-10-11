@@ -8,8 +8,8 @@ bound the run.
 
 The trickle (``max_files_per_trigger``) is not a bound kind: it is set on
 every continuous run, so putting it in ``bound_kinds`` would move every
-continuous identity. ``trickle_bound`` says whether it held intake (SPEC
-section 8: a trickle was set and the pipeline kept pace); the experiment
+continuous identity. ``trickle_bound`` says whether it held intake (a
+trickle was set and the pipeline kept pace); the experiment
 block records the answer in ``limits.trickle_bound`` and adds one line to
 ``limits.bound``. Readers of a stored record that lacks it call
 ``record_trickle_bound``.

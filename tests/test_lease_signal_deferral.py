@@ -1,6 +1,6 @@
 """Signals, children and API calls while the cluster lease is held (SD-22).
 
-Cluster-safety 2 (DESIGN ch01 3.6): a Ctrl-C or SIGTERM inside the lease used
+A Ctrl-C or SIGTERM inside the lease used
 to stop the body between the helm upgrade and the operator restart, and a
 terminal Ctrl-C reached the helm child directly, which leaves the shared
 release ``pending-upgrade`` and blocks every watch-list change on the

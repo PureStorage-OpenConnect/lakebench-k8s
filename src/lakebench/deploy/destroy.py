@@ -3833,7 +3833,7 @@ def destroy_all(
             )
         )
 
-    # Step 8c: the Category-1 registry (cluster-safety 14): what no component
+    # Step 8c: the Category-1 registry: what no component
     # step deleted, and the Category-1 namespace annotations. It matters when
     # create_namespace=false keeps the namespace; with true it runs anyway
     # (one code path) and a failure is only a skip.

@@ -9,7 +9,7 @@ the CLI:
   back (run id, the corpus digest its record observed). ``seal`` is called
   once, immediately before the repetition's ``save_run``.
 - ``member_of_series``: whether a saved repetition record is a member of the
-  series' one corpus (ch03 section 6 "Series corpus identity", which
+  series' one corpus (the rule
   ``metrics.corpus_identity`` applies when the record is built).
 - the manifest ``lakebench-output/series/<id>.json`` (schema ``lb-series/1``),
   rewritten atomically after every repetition. ``passed`` counts only
@@ -86,7 +86,7 @@ class SeriesContext:
             # Persisted whatever the digest: the record is built from it, and
             # a digest that differs from D1 makes the build record the corpus
             # problem "bronze changed during this repetition" and keep the
-            # record's own corpus block (ch03 section 6 step 3).
+            # record's own corpus block.
             if self.inherited is not None and isinstance(inputs, dict):
                 inputs["inherited_corpus"] = self.inherited
             self.sealed = True

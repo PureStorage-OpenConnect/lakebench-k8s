@@ -55,7 +55,7 @@ def test_production_file_loads_strictly():
 
 def test_floor_matches_rust():
     # The Rust floor holds every hash of the Python floor, in order, under the
-    # same salt (SPEC section 10: the current role hashes are compiled into
+    # same salt (the current role hashes are compiled into
     # the generator). A redraw appends to the file and _HELDOUT_FLOOR; it is
     # not finished until heldout.rs carries the same hashes and the default
     # image is rebuilt from it.

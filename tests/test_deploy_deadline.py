@@ -1,4 +1,4 @@
-"""DEP-6: the deploy timeout inside every wait (ch01 s8)."""
+"""DEP-6: the deploy timeout inside every wait."""
 
 from __future__ import annotations
 

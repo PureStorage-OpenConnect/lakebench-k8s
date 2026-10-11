@@ -1,4 +1,4 @@
-"""The run-start checks and the run's dependency provenance (DEP-2, ch01 s2.8).
+"""The run-start checks and the run's dependency provenance (DEP-2).
 
 ``deps.runtime.load_handle`` runs against the recording fake with the real
 code (marker ``real_deps``); the CLI wiring is pinned by the exit-code

@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 #: Columns the time-travel hash leaves out: the batch-version sentinels, so
-#: the hash covers the business columns (SPEC section 8, "Time-travel read").
+#: the hash covers the business columns.
 SENTINEL_COLUMNS = frozenset({"_batch_id", "_stream_id", "ingest_ts", "committed_at"})
 
 #: Record states of a snapshot read back intact (``pass`` also needs at

@@ -1,5 +1,5 @@
 """deps.manifest: the CLI's check of a served set and the ConfigMap it writes
-(DEP-2, ch01 s2.5 steps 4-5), plus the ``platform.deps`` keys (s2.7).
+(DEP-2), plus the ``platform.deps`` keys.
 
 The contract tests at the end run the real ``lb_deps.py`` resolve, show,
 serve and fetch (with the fake tools of ``tests/test_lb_deps.py``), so the

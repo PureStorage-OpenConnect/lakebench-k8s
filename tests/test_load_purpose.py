@@ -67,7 +67,7 @@ def test_nameless_teardown_without_state_refused(tmp_path):
 
 
 def test_v16_state_name_read_verbatim(tmp_path):
-    # R7: the v1.6 name is read, never written. SPEC SAF-2 refuses a v1.6
+    # R7: the v1.6 name is read, never written. SAF-2 refuses a v1.6
     # directory without --name, so teardown and read loads refuse and name
     # it; the override (CC-2's --name) and COMPARE load under it.
     (tmp_path / ".lakebench").mkdir()
@@ -263,7 +263,7 @@ def test_v16_state_teardown_refused_when_siblings_share_the_name(tmp_path):
         assert f"nameless {other}" in msg
         assert "name: lb-20260915-101530" in msg
         assert e.value.siblings == [tmp_path / other]
-    # status reads the same way (SPEC SAF-2: status refuses as destroy does).
+    # status reads the same way (SAF-2: status refuses as destroy does).
     with pytest.raises(ConfigNameRequired):
         load_config(a, purpose=LoadPurpose.READ)
     # Naming the one that deployed it makes it loadable as itself, and the

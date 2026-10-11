@@ -192,7 +192,7 @@ def test_empty_bucket_without_the_flag_generates(tmp_path, monkeypatch, owned):
 def test_owned_corpus_is_refused_without_regenerate(tmp_path, monkeypatch):
     """An owned bronze holding a corpus is not cleared by a plain multi-cycle
     run (1.6 cleared it silently): the run is refused (exit 3) and the corpus
-    stays (DESIGN ch05 7.1 rule 3)."""
+    stays."""
     _seed(monkeypatch, FILES)
     result, keys, calls = _run(tmp_path, monkeypatch, owned=True, argv=["--yes"])
     assert result.exit_code == 3, result.output

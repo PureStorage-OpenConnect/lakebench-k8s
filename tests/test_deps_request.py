@@ -1,4 +1,4 @@
-"""DEP-2 request module (SD-2, ch01 s2.2): coordinates, groups, hosts, hashes.
+"""DEP-2 request module (SD-2): coordinates, groups, hosts, hashes.
 
 Expected coordinates are the Maven facts the SD-1 offline resolve fetched
 from Maven Central on 2026-10-01 (every one resolved), not values read back
@@ -90,7 +90,7 @@ def test_selected_groups_by_workload_and_engine(recipe, schema, groups):
 
 def test_pinset_hash_ignores_size_and_resolve_time():
     """The same file triples give the same pinset_sha256 whatever the
-    repositories or resolve metadata (ch01 s2.2, s2.7)."""
+    repositories or resolve metadata."""
     groups = {"jars": [{"file": "a.jar", "sha256": "11", "size": 1, "coordinate": "g:a:1"}]}
     assert req.pinset_sha256(groups, ["a.jar"]) == req.pinset_sha256(
         {"jars": [{"file": "a.jar", "sha256": "11", "size": 999, "resolved_at": "x"}]}, ["a.jar"]
@@ -117,7 +117,7 @@ def test_request_hash_covers_resolver_image_and_versions():
 
 def test_every_request_field_enters_the_hash():
     """A field that falls out of request_sha256 would let a redeploy keep a
-    set resolved for another request (ch01 s2.3 step 1 skips on the hash)."""
+    set resolved for another request (the resolve skips on the hash)."""
     for field, value in [
         ("py_reference", ("numpy==2.2.7",)),
         ("pypi_index", "http://pypi.mirror/simple/"),
@@ -159,7 +159,7 @@ def _with_deps(recipe="hive-iceberg-spark-trino", schema=None, **deps):
     ],
 )
 def test_configured_mirror_changes_the_request_hash(recipe, schema, deps):
-    """A mirror set in platform.deps alters request_sha256 (ch01 s2.2, s2.7)."""
+    """A mirror set in platform.deps alters request_sha256."""
     public = req.select_request(_with_deps(recipe, schema), tools_digest="t")
     mirrored = req.select_request(_with_deps(recipe, schema, **deps), tools_digest="t")
     assert (

@@ -1,5 +1,4 @@
-"""EVD-1: the verdict is decided from the record alone (DESIGN-v1.7 ch03
-section 1, ER-3).
+"""EVD-1: the verdict is decided from the record alone (ER-3).
 
 Every case starts from a pinned stored record (tests/fixtures/records) and
 edits named fields. The six mutations of the acceptance read PASSED before
@@ -90,7 +89,7 @@ MUTATIONS = {
 
 @pytest.mark.parametrize("name", sorted(MUTATIONS))
 def test_mutated_records_fail(name: str) -> None:
-    """SPEC EVD-1 acceptance: each mutation FAILS on its own gate."""
+    """EVD-1 acceptance: each mutation FAILS on its own gate."""
     run, mutate, gate = MUTATIONS[name]
     rec = sr.load_record(run)
     mutate(rec)

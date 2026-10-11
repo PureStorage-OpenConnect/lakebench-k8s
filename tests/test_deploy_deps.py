@@ -1,4 +1,4 @@
-"""The ``deps`` deploy step (DEP-2, ch01 s2.5) under the recording fixture.
+"""The ``deps`` deploy step (DEP-2) under the recording fixture.
 
 The fake cluster has no controllers: ``Controller`` stands in for the
 Deployment controller and kubelet, creating the server pod after the step's

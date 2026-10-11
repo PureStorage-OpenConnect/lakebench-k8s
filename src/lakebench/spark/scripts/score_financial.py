@@ -234,7 +234,7 @@ def check_status_run(status_run_id: str, own_run_id: str) -> None:
 
 
 def _scores_by_code(spark, alerts, manifest_uetrs, alert_uetrs, target_of, ran):
-    """Per-reason-code recall and false positives (SPEC section 8, K30): as
+    """Per-reason-code recall and false positives: as
     per-rule recall and FP, split by code; an alert counts once per code it
     carries.
 

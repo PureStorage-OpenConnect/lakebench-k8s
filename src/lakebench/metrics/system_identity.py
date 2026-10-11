@@ -355,8 +355,8 @@ def _storage_endpoint(cfg: Any) -> Any:
 def _storage_backend(cfg: Any) -> Any:
     """The conformance module's backend guess. The conformance runner itself
     writes a temporary bucket and objects, so it never runs here; this and
-    the ``Server`` header stand in for its summary (ch03 section 6, main-lane
-    decision 2026-10-01)."""
+    the ``Server`` header stand in for its summary (owner decision
+    2026-10-01)."""
     from lakebench.s3.conformance import detect_backend
 
     endpoint = str(cfg.platform.storage.s3.endpoint or "").strip()

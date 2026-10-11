@@ -1,5 +1,5 @@
 """OD-2 identity groups, identity versions and the stored-block rule (EVD-7,
-ER-10a; DESIGN-v1.7 ch03 sections 0.1 and 6).
+ER-10a).
 
 Stored records come from the ER-1 harness (tests/fixtures/records/). Expected
 values are derived from each record's own fields (recipe, effective

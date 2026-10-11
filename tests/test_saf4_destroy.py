@@ -1,4 +1,4 @@
-"""SAF-4 on destroy (SD-11, DESIGN ch01 3.2 and 3.3) and the lease holder id.
+"""SAF-4 on destroy (SD-11) and the lease holder id.
 
 - The legacy SecretClass cleanup runs inside the cluster lease, and skips
   (keeping them) when the lease stays held.
@@ -133,7 +133,7 @@ def _namespace_deletes(rec: K8sRecorder) -> list:
 
 class TestOperatorPodCheck:
     def test_destroy_refuses_while_pod_lists_namespace(self):
-        """Named case (DESIGN ch01 3.3). Fails reverted: the delete is issued."""
+        """Named case. Fails reverted: the delete is issued."""
         clock = _Clock()
         with recording() as rec:
             results = _destroy(
@@ -197,7 +197,7 @@ class TestOperatorPodCheck:
 
     @pytest.mark.parametrize("status", [500, 404])
     def test_pod_list_error_keeps_namespace(self, status):
-        """Any read error fails closed (DESIGN ch01 3.3), a 404 included: an
+        """Any read error fails closed, a 404 included: an
         unreadable pod list is not "no operator pods"."""
         with recording() as rec:
             rec.fail(verb="list", kind="pods", namespace=OP_NS, status=status)

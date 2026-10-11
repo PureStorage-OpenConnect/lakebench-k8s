@@ -69,7 +69,7 @@ TAG_WORKLOAD_SCHEMA = "lakebench.workload"
 # only when it carries this marker (or is listed in the namespace annotation
 # below); buckets deploy adopted are emptied but kept.
 TAG_CREATED_BY_LAKEBENCH = "lakebench.created"
-# DESIGN ch01 section 4: the cluster that claimed a bucket. Tagged
+# The cluster that claimed a bucket. Tagged
 # backends carry it as a tag, tagless ones (FlashBlade) in the owner marker
 # object. Without it, a deployment of the same name on another cluster that
 # shares the object store could adopt, and later empty, this one's bucket.
@@ -899,7 +899,7 @@ def probe_conditional_put(boto_client: Any, bucket: str) -> bool:
     Writes a throwaway key, ``.lakebench/probe-<uuid4>``, twice with the
     header: enforced means 200 then 412. The probe key is deleted after. It
     never touches the owner marker, so it cannot overwrite a marker another
-    cluster wrote meanwhile (DESIGN ch01 d3 N2).
+    cluster wrote meanwhile.
     """
     import uuid
 
@@ -1278,7 +1278,7 @@ def verify_bucket_ownership(
     created-buckets record. Only that record proves this cluster made a
     bucket (the cross-cluster ownership rule): the adopted-empty record is what 1.6 wrote when it
     adopted another cluster's empty bucket, so it proves nothing. The
-    matrix (DESIGN ch01 section 4):
+    matrix:
 
     - row 1, name and cluster ours: MATCH;
     - rows 2 and 5, name ours, cluster not: FOREIGN_CLUSTER;

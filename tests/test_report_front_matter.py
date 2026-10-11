@@ -1,5 +1,4 @@
-"""RPT-1 and RPT-4: the front matter and the evidence-class stamp
-(DESIGN-v1.7 ch03 section 13).
+"""RPT-1 and RPT-4: the front matter and the evidence-class stamp.
 
 The page and the terminal ``report`` open with the verdict, the evidence
 class, the support state and any binding cap, before any metric. The

@@ -1,4 +1,4 @@
-"""RPT-5 storage multiple (DESIGN-v1.7 ch03 section 17).
+"""RPT-5 storage multiple.
 
 A fake listing and fake metadata answers with known bytes give the expected
 multiple per table, layer and total; raw bronze stays outside the total;

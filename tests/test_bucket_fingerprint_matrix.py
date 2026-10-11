@@ -1,4 +1,4 @@
-"""SAF-10: the cluster fingerprint in bucket ownership (SD-18a, DESIGN ch01 section 4).
+"""SAF-10: the cluster fingerprint in bucket ownership (SD-18a).
 
 One case per row of the verdict matrix, on a tagged backend (the
 ``lakebench.cluster`` tag) and a tagless one (FlashBlade: the

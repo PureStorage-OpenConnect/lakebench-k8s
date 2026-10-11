@@ -167,7 +167,7 @@ def repositories(cfg: LakebenchConfig) -> list[str]:
     """Maven repositories for the lb-deps resolve, in chain order.
 
     The resolve writes them into an explicit ``spark.jars.ivySettings``
-    chain (ch01 s2.3 step 3), so these are the only resolvers it uses and a
+    chain, so these are the only resolvers it uses and a
     configured mirror is the only one. Without a mirror: Maven Central, then
     the Google mirror. Today's runtime ``--packages`` chain is Central,
     ``repos.spark-packages.org``, then the ``spark.jars.repositories`` entry
@@ -192,7 +192,7 @@ def duckdb_extension_repository(cfg: LakebenchConfig) -> str:
 
 
 def selected_groups(cfg: LakebenchConfig) -> tuple[str, ...]:
-    """The groups a deployment needs (ch01 s2.2 table).
+    """The groups a deployment needs.
 
     ``py-reference`` serves the AML reference detector's driver. The design
     also selects it for ``ml_loop.enabled``; the ML loop and its config key

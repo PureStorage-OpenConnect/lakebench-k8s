@@ -1,5 +1,5 @@
-"""RPT-1 report fixes R5, R6, R8, R10, R20 and R21 (DESIGN-v1.7 ch03
-section 14), plus two bottleneck numbers found while building R21.
+"""RPT-1 report fixes R5, R6, R8, R10, R20 and R21,
+plus two bottleneck numbers found while building R21.
 
 Each test asserts the fixed number or label on a stored record against a
 value the test reads from the record itself.

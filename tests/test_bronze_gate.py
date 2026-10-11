@@ -1,4 +1,4 @@
-"""SAF-9: stale bronze on buckets the deployment did not create (SD-17, DESIGN ch01 section 5).
+"""SAF-9: stale bronze on buckets the deployment did not create (SD-17).
 
 One gate, ``bronze_prefix_gate``, decides before any datagen Job whether the
 datagen prefix may be written: an owned bucket's prefix is cleared only with

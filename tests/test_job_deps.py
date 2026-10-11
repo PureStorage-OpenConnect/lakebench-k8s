@@ -1,5 +1,5 @@
 """The consumers of the dependency set: Spark jobs, Spark Thrift, DuckDB
-(DEP-2, ch01 s2.6).
+(DEP-2).
 
 Every Spark job names the set's jars by URL in the manifest's jar order and
 resolves nothing at submit; Thrift and DuckDB fetch the same files and check

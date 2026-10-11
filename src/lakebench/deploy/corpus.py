@@ -1,6 +1,6 @@
 """The corpus series marker: what a generate wrote under the datagen prefix.
 
-``<bronze>/<datagen prefix>/_corpus/series.json`` (DESIGN ch05 section 7.1)
+``<bronze>/<datagen prefix>/_corpus/series.json``
 records the generate that made the corpus: the cycle count, the cycles whose
 datagen Job completed, every cycle's event-time window and the generation
 parameters (``generation``), with the image digest the datagen pods ran.

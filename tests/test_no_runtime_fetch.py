@@ -1,5 +1,5 @@
 """After deploy, no pod fetches a dependency from outside the deployment
-(DEP-2, ch01 s2.10).
+(DEP-2).
 
 Renders every Spark job manifest for every supported recipe, workload and
 mode, the Spark Thrift and DuckDB Deployments and the datagen Job, and fails

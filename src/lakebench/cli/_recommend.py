@@ -304,7 +304,7 @@ def recommend_impl(
     if full < best:
         who = "a run on a corpus generated first" if continuous else "the run"
         # Continuous: a capped stream cannot carry the scale's offered load,
-        # so the balance check fails the run (DESIGN-CONTINUOUS 6).
+        # so the balance check fails the run.
         consequence = ", so it cannot balance and fails" if continuous else " (degraded)"
         console.print(
             f"[yellow]Above scale {full:,} {esc(who)} caps its streams to fit"

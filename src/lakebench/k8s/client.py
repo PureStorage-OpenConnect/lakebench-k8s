@@ -332,7 +332,7 @@ class K8sClient:
         """``_request_timeout`` for a call made while the cluster lease is held.
 
         A deferred signal (``cluster_lock``) waits for the leased work to end,
-        so no request inside the lease may hang (DESIGN ch01 3.6).
+        so no request inside the lease may hang.
         """
         from lakebench.k8s.lease_state import request_timeout_kw
 

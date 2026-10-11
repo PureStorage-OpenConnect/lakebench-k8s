@@ -1239,7 +1239,7 @@ _AML_GOLD_LATE_DATA = {
     ],
 )
 def test_balance_fails_a_stage_whose_lag_climbs(logs, balanced, stage):
-    """The pass rule (DESIGN-CONTINUOUS 6): a stage keeps up when its per-batch
+    """The pass rule: a stage keeps up when its per-batch
     lag trend rose less than one first-half batch time (or trigger interval)
     across the window's second half; the back-to-back sawtooth and gold's
     5-minute timer saw without a trend and still keep up."""

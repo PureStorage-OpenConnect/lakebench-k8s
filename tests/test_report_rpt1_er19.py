@@ -1,4 +1,4 @@
-"""RPT-1 report fixes R1, R2, R3, R4, R7 and R9 (DESIGN-v1.7 ch03 section 14).
+"""RPT-1 report fixes R1, R2, R3, R4, R7 and R9.
 
 Each test asserts the fixed number or label on a stored record against a
 value the test reads from the record itself, not from the renderer.

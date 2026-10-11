@@ -70,7 +70,7 @@ def _status(results: list, component: str) -> str:
 
 
 class TestLegacySecretClassRefcountInline:
-    """``test_destroy_legacy_secretclass_refcount_inline`` (DESIGN ch01 section 9)."""
+    """``test_destroy_legacy_secretclass_refcount_inline``."""
 
     def test_deleted_when_only_this_namespace_exists(self):
         with recording(allow_delete=[f"secretclasses/{n}" for n in LEGACY]) as rec:

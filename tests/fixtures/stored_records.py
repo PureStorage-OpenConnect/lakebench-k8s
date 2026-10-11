@@ -1,7 +1,7 @@
-"""The stored-record regression harness (DESIGN-v1.7 ch03 ER-1).
+"""The stored-record regression harness.
 
 ``tests/fixtures/records/run-<id>/metrics.json`` holds the 24 pinned stored
-records of ch03 section 0.2, each taken through ``tests/fixtures/scrub.py``
+records, each taken through ``tests/fixtures/scrub.py``
 (``MANIFEST.json`` names the source, its sha256 and the rewritten paths).
 ``tests/expected/`` holds the reviewed expected values read from those
 records. Tests for EVD-1 to EVD-13 load records and expectations from here

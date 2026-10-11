@@ -28,7 +28,7 @@ mutation locally. What it does prevent is two ``lakebench`` processes
 racing the same Helm upgrade or the same SCC install through the
 apiserver -- which is what actually broke under parallel UAT.
 
-While the lease is held (cluster-safety 2, DESIGN ch01 3.6):
+While the lease is held:
 
 - ``lease_held()`` is true in the holding context, and
   ``lease_hold_remaining()``/``lease_clamp()`` give the hold budget
@@ -117,7 +117,7 @@ _POLL_INITIAL_SEC = 1.0
 _WAIT_NOTICE_SEC = 30.0
 _POLL_MAX_SEC = 4.0
 
-# How long one holder may keep the lease (DESIGN ch01 3.7). The watch-list
+# How long one holder may keep the lease. The watch-list
 # phases (helm upgrade, rollout waits, restart, the operator pod poll, the
 # namespace delete) fit in LEASE_MAX_HOLD_S. The admin verbs
 # (admin install, repair-operator's per-namespace

@@ -1,7 +1,7 @@
 """ER-1: the stored-record harness and the rule-5 scrubber.
 
 The fixtures under tests/fixtures/records/ are the 24 pinned stored records
-(DESIGN-v1.7 ch03 section 0.2) taken through tests/fixtures/scrub.py. These
+taken through tests/fixtures/scrub.py. These
 tests pin what they say today (tests/expected/), and that the scrubber removes
 endpoints, bucket names and credentials without moving identity.
 """

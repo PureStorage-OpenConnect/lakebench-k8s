@@ -1,4 +1,4 @@
-"""RPT-3 C360 results block (DESIGN-v1.7 ch03 section 16).
+"""RPT-3 C360 results block.
 
 The block shows ``record.c360_correctness``: a chip with passed/total and
 whether the checks gate, failures first with observed, expected and

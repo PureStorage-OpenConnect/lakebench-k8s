@@ -1,9 +1,9 @@
-"""RPT-3 AML results block (DESIGN-v1.7 ch03 section 16), and the cap label
+"""RPT-3 AML results block, and the cap label
 on the AML totals (QUEUE carry from ER-3, invariant 6).
 
 Expected values are read from the record by the test. The per-reason-code
 and covered-recall tables are tested on fixture records edited to carry the
-AM-9 and AM-11 fields as ch04 defines them (``recall_by_code`` /
+AM-9 and AM-11 fields (``recall_by_code`` /
 ``fp_by_code``: ``{rule: {code: fraction}}``; ``mode: "covered"`` with
 ``covered.typologies[]``), since no stored record holds them yet.
 """

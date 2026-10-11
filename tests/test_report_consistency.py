@@ -1,6 +1,6 @@
 """RPT-2: every derived number on a report page agrees with the record.
 
-DESIGN-v1.7 ch03 section 15. The renderer wraps each percentage, total and
+The renderer wraps each percentage, total and
 count it computes in a ``data-lb-derived`` span naming its inputs by record
 path (``lakebench.reports.derived``). This test recomputes each one from the
 record's metrics.json, independently of the renderer's own arithmetic on the

@@ -33,7 +33,7 @@ MODES: tuple[str, ...] = ("batch", "continuous")
 #: The release validation record. Package data: shipped in the wheel.
 VALIDATION_RECORD = Path(__file__).with_name("validated_combinations.yaml")
 
-#: SPEC section 11: (workload, mode, recipe, scale) of every release row.
+#: The release matrix: (workload, mode, recipe, scale) of every release row.
 RELEASE_MATRIX: tuple[tuple[str, str, str, float], ...] = (
     ("customer360", "batch", "hive-iceberg-spark-trino", 1),
     ("customer360", "batch", "polaris-iceberg-spark-trino", 1),
@@ -53,7 +53,7 @@ RELEASE_MATRIX: tuple[tuple[str, str, str, float], ...] = (
     ("financial", "batch", "hive-iceberg-spark-trino", 10),
 )
 
-#: SPEC section 11's Spark minor and table format version per row, by
+#: The release matrix's Spark minor and table format version per row, by
 #: (workload, mode, recipe). The support record is keyed by them
 #: (config/support.py), so a row's runs must use these versions.
 _ICEBERG, _SPARK41, _SPARK40 = "1.11.0", "4.1", "4.0"
@@ -378,7 +378,7 @@ def matrix_versions_problem(
 ) -> str | None:
     """Why (workload, mode, recipe) at Spark *spark* and format *version*
     cannot be a validation entry, or None: it must be a release-matrix row
-    (``RELEASE_MATRIX_VERSIONS``, SPEC section 11) at that
+    (``RELEASE_MATRIX_VERSIONS``) at that
     row's versions. A valid tuple outside the matrix is published
     unverified, so an entry for it is refused rather than stamped."""
     fmt = (components_of(recipe) or ("", ""))[1]
@@ -790,7 +790,7 @@ _QUERY_LABELS = {
 }
 
 
-#: The general version rule under the support table (SPEC 13 item 8).
+#: The general version rule under the support table.
 VERSION_NOTE = (
     "A supported cell names the Spark minor and table format version its validation "
     "runs used; the same cell on any other Spark minor or format version is unverified. "

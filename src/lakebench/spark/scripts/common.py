@@ -1896,7 +1896,7 @@ def pinned_read(spark, table, table_format):
 
 
 def run_c360_gold_stream(spark, silver_tbl, gold_tbl, table_format, write, checkpoint, trigger):
-    """Customer360 continuous gold (DESIGN-CONTINUOUS 2, 5): stream the
+    """Customer360 continuous gold: stream the
     silver table, so each micro-batch is the silver commits since gold's
     position (the checkpoint keeps it across restarts); per batch, pin
     silver, recompute every date the new rows touch and replace them in

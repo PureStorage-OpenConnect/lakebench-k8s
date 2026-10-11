@@ -1,4 +1,4 @@
-"""lb_deps.py: the stdlib resolver, verifier and server of DEP-2 (ch01 s2.3-2.6).
+"""lb_deps.py: the stdlib resolver, verifier and server of DEP-2.
 
 A fake ``spark-submit`` and a fake ``pip`` stand in for the stock image's
 tools; a local HTTP server stands in for the DuckDB extension repository.

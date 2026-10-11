@@ -1,5 +1,5 @@
 """CFG-2 (CC-12): executor overrides are bounded, counted, labelled and kept
-out of evidence. Design 02 section 2.2."""
+out of evidence."""
 
 from __future__ import annotations
 

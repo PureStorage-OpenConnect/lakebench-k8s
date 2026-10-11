@@ -1,4 +1,4 @@
-"""Compaction by engine and blended query sets (EVD-13, DESIGN ch03 section 12).
+"""Compaction by engine and blended query sets (EVD-13).
 
 Trino optimize with a 128 MB threshold and Iceberg rewrite_data_files with
 its defaults are different maintenance, recorded by name. An in-stream

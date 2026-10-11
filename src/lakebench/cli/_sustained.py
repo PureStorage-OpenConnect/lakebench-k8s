@@ -3244,7 +3244,7 @@ LIVE_LAG_SECONDS = 120.0
 
 def _live_lag_line(monitor, submitted: list) -> str:
     """Each handoff's lag now, from the streams' driver logs (the window
-    line; DESIGN-CONTINUOUS 6). Never raises: a log that cannot be read
+    line). Never raises: a log that cannot be read
     leaves its handoff out."""
     from lakebench.metrics.continuous_window import handoff_lags, lag_line
 
@@ -4378,7 +4378,7 @@ def _run_sustained(
                 window_stats_by_job, window_seconds, continuous_datagen=not skip_generate
             )
         )
-        # Balance (DESIGN-CONTINUOUS 6): every stage's handoff lag stayed
+        # Balance: every stage's handoff lag stayed
         # flat through the window, or the run failed and the bottleneck line
         # names the stage and the knob. Overrun is a failure mode, and a
         # growing backlog makes freshness and pace not steady-state numbers.

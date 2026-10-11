@@ -1,6 +1,6 @@
-"""BOUNDED BY trickle and the bound-kind registry (EVD-4, DESIGN ch03 section 4).
+"""BOUNDED BY trickle and the bound-kind registry (EVD-4).
 
-SPEC section 8: a continuous run is BOUNDED BY trickle when a trickle was
+A continuous run is BOUNDED BY trickle when a trickle was
 set and the pipeline kept pace: ingested / offered rows >= 0.99 and lag at
 window end within one trigger interval. The trickle is never a bound kind,
 so no identity moves.
