@@ -85,7 +85,7 @@ dev = [
     # pydantic plugin), so a stub or plugin release cannot turn CI red on a
     # tree that passed locally.
     "mypy==1.19.1",
-    "types-PyYAML==6.0.12.20250915",
+    "types-PyYAML==6.0.12.20260906",
     "types-boto3==1.42.38",
     "pydantic==2.12.5",
     # scripts/check_version.py
