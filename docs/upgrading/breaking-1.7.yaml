@@ -200,7 +200,7 @@
   title: Safety refusals exit 3
   kind: exit-code
   subject:
-  - reproduce.existing_namespace
+  - deploy.existing_namespace
   - destroy.redeployed
   - deploy.identity_foreign
   - run.bronze_nonempty
@@ -236,15 +236,6 @@
   source: src/lakebench/exit_codes.py:PATHS
   text: '`destroy` exits 6 (was 4) when its steps finished but the namespace is still terminating.'
   fix: Treat 6 as "safe to re-run"; check `kubectl get ns` before redeploying the name.
-- id: reproduce-drift-exits-14
-  title: reproduce drift exits 14
-  kind: exit-code
-  subject:
-  - reproduce.drift
-  - reproduce.commit_drift
-  source: src/lakebench/exit_codes.py:PATHS
-  text: '`reproduce` exits 14 (was 2) for metric drift or commit drift without `--allow-commit-drift`.'
-  fix: Treat 14 as "requirement unmet".
 - id: a-datagen-timeout-exits-1
   title: A datagen timeout exits 1
   kind: exit-code
@@ -292,7 +283,7 @@
   subject: scripts/perf_gate.py
   source: scripts/perf_gate.py
   text: '`scripts/perf_gate.py`, its pinned configs (`benchmarks/perf/`) and the baseline store are gone.'
-  fix: Read `lakebench report` for each run side by side; `lakebench reproduce` re-runs a record.
+  fix: Read `lakebench report` for each run side by side.
 - id: deploy-generates-the-polaris-client-secret
   title: Deploy generates the Polaris client secret
   kind: default-change
@@ -342,14 +333,6 @@
   text: '`run` exits 2 before any cluster call on a flag its mode does not use (the list is under `run`
     in docs/cli-reference.md).'
   fix: Drop the flag the mode does not use.
-- id: reproduce-never-destroys-before-its-run
-  title: reproduce never destroys before its run
-  kind: default-change
-  subject: reproduce destroy
-  source: src/lakebench/cli/_reproduce.py:_record
-  text: '`reproduce` refuses (exit 3) an existing namespace or bucket instead of destroying it, and destroys
-    only what it created.'
-  fix: Run `lakebench destroy CONFIG` first to reuse a deployment's name.
 - id: init-writes-a-first-day-config
   title: init writes a first-day config
   kind: default-change
@@ -618,16 +601,8 @@
   kind: default-change
   subject: protected AML corpus
   source: src/lakebench/aml/look_guard.py:refuse_if_protected
-  text: '`run`, `benchmark`, `query`, `reproduce` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.'
+  text: '`run`, `benchmark`, `query` and the `financial` commands refuse an evaluation or robustness AML corpus, by role or by seed, with exit 2, before any cluster call.'
   fix: 'Use the calibration seed or another unregistered seed. A registered look runs only through `scripts/aml_gate.py --registered`, and its corpus is generated only by `lakebench generate --registered-corpus`.'
-- id: financial-reproduce-reruns-the-alerts-rule-on-what-gold-read
-  title: financial reproduce reruns the alert's rule on what gold read
-  kind: exit-code
-  subject:
-  - financial.reproduce.snapshot_gone
-  source: src/lakebench/exit_codes.py:PATHS
-  text: '`financial reproduce` reproduces the alert from the snapshots its run''s gold read, which runs record from 1.7 on: exit 0 when reproduced, 1 when not reproduced or not found, 2 when this host has no record of the run, 4 when those snapshots are gone or the run predates 1.7; 1.6 exited 1 after every reproduction it waited for (it could not reproduce), and 0 after a submit with `--no-wait`, which now refuses first when the record cannot drive a reproduction.'
-  fix: 'Reproduce alerts of 1.7 AML batch runs; `--run RUN_ID` picks a run other than the deployment''s latest.'
 - id: continuous-stages-run-back-to-back-by-default
   title: Continuous stages run back to back by default
   kind: default-change

@@ -177,12 +177,6 @@ A declined or unanswerable confirmation exits 5 (was 1 or 3).
 
 **What to do:** Treat 6 as "safe to re-run"; check `kubectl get ns` before redeploying the name.
 
-### reproduce drift exits 14
-
-`reproduce` exits 14 for metric drift (was 1 for performance drift, 2 for correctness drift) and for commit drift without `--allow-commit-drift` (was 2).
-
-**What to do:** Treat 14 as "requirement unmet".
-
 ### A datagen timeout exits 1
 
 A `run` whose datagen did not finish in time exits 1 (was 5); the record says "datagen timed out".
@@ -219,7 +213,7 @@ A pair with different round counts is not like-for-like.
 
 `scripts/perf_gate.py`, its pinned configs and the baseline store are gone.
 
-**What to do:** Read `lakebench report` for each run side by side; `lakebench reproduce` re-runs a record.
+**What to do:** Read `lakebench report` for each run side by side.
 
 ### Readers take the strictest verdict
 
@@ -293,12 +287,6 @@ A continuous AML run adds one Spark job after the score job to re-read transacti
 
 **What to do:** Allow for the extra job at the end of the run; it grows with the corpus and the number of live snapshots, and stops starting scans before the per-job timeout.
 
-### financial reproduce reruns the alert's rule on what gold read
-
-`financial reproduce` now reproduces the alert from the snapshots its run's gold read. Exits 0 when reproduced, 1 when not, 2 when no local record, 4 when snapshots are gone.
-
-**What to do:** Reproduce alerts of 1.7 AML batch runs; `--run RUN_ID` picks a run other than the deployment's latest.
-
 ### AML bronze-verify stops on a spent or unverifiable corpus
 
 An AML run stops at bronze-verify (exit 2) on a corpus with no manifest or from a held-out or spent seed.
@@ -328,12 +316,6 @@ Executor overrides take 1 to 28 (`driver_cores` 1 to 16) and keep a run out of r
 `run` exits 2 on a flag its mode does not use.
 
 **What to do:** Drop the flag the mode does not use.
-
-### reproduce never destroys before its run
-
-`reproduce` refuses (exit 3) an existing namespace or bucket instead of destroying it.
-
-**What to do:** Run `lakebench destroy CONFIG` first to reuse a deployment's name.
 
 ### init writes a first-day config
 
