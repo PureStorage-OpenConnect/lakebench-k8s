@@ -357,6 +357,7 @@ _PLURAL = {
     "RoleBinding": "rolebindings",
     "HiveCluster": "hiveclusters",
     "PodMonitor": "podmonitors",
+    "Route": "routes",
 }
 
 

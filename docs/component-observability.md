@@ -71,10 +71,18 @@ Each deployment gets a Deployment, a Service, a 1Gi PVC on `px-csi-scratch` by d
 
 - Included when `dashboards_enabled` is `true`. Grafana itself runs either way.
 - User `admin`. Deploy generates a per-deployment password into the Secret `lakebench-grafana` (key `admin-password`).
-- Access:
+- `deploy` prints the Grafana URL and the login when it finishes.
+- On OpenShift, deploy creates a TLS Route (`lakebench-grafana`, edge termination, HTTP redirected to HTTPS) and prints its `https://` URL. Set `grafana_route: false` to skip it. The Route goes with the namespace. Prometheus and the Pushgateway have no login and never get a Route.
+- On other clusters there is no URL to create, so deploy prints the port-forward:
 
 ```bash
-kubectl port-forward -n <namespace> svc/lakebench-grafana 3000:3000
+kubectl port-forward -n <namespace> svc/lakebench-grafana 3000:3000   # then http://localhost:3000
+kubectl port-forward -n <namespace> svc/lakebench-prometheus 9090:9090
+```
+
+- The password is in the Secret if you need it again:
+
+```bash
 kubectl get secret -n <namespace> lakebench-grafana -o jsonpath='{.data.admin-password}' | base64 -d
 ```
 

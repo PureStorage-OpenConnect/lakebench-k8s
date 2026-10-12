@@ -333,6 +333,16 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         when="observability",
     ),
     Cat1Entry(
+        "custom",
+        "routes",
+        name="lakebench-grafana",
+        owner_wi="per-ns-observability",
+        step=CATEGORY1_STEP,
+        group="route.openshift.io",
+        version="v1",
+        when="observability",
+    ),
+    Cat1Entry(
         "core_v1",
         "configmaps",
         name="lakebench-grafana-provisioning",

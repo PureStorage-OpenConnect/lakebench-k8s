@@ -727,12 +727,27 @@ def _deploy_impl(
         )
         if obs_result:
             obs_ns = cfg.get_namespace()
+            from lakebench.deploy.observability import read_grafana_password
+
+            password = read_grafana_password(obs_ns, context=cfg.platform.kubernetes.context)
+            grafana_url = (obs_result.details or {}).get("grafana_url")
             success_msg += (
                 f"\n\n[bold]Monitoring (per-deployment stack in namespace {obs_ns}):[/bold]"
-                f"\n  Grafana login: admin, password from [cyan]kubectl get secret -n {obs_ns} "
-                "lakebench-grafana -o jsonpath='{.data.admin-password}' | base64 -d[/cyan]"
-                f"\n  Local access: [cyan]kubectl port-forward -n {obs_ns} svc/lakebench-grafana 3000:3000[/cyan]"
-                f"\n  Prometheus:   [cyan]kubectl port-forward -n {obs_ns} svc/lakebench-prometheus 9090:9090[/cyan]"
+            )
+            if grafana_url:
+                success_msg += f"\n  Grafana:    [cyan]{esc(grafana_url)}[/cyan]"
+            else:
+                success_msg += (
+                    "\n  Grafana:    [cyan]http://localhost:3000[/cyan] after "
+                    f"[cyan]kubectl port-forward -n {obs_ns} svc/lakebench-grafana 3000:3000[/cyan]"
+                )
+            if password:
+                success_msg += f"\n  Login:      admin / [cyan]{esc(password)}[/cyan]"
+            else:
+                success_msg += f"\n  Login:      admin, password in secret lakebench-grafana (namespace {obs_ns}), key admin-password"
+            success_msg += (
+                "\n  Prometheus: [cyan]http://localhost:9090[/cyan] after "
+                f"[cyan]kubectl port-forward -n {obs_ns} svc/lakebench-prometheus 9090:9090[/cyan]"
             )
 
         if next_steps:

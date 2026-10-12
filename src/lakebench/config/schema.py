@@ -2881,6 +2881,10 @@ class ObservabilityConfig(ConfigModel):
     """Deploy the per-namespace Prometheus and Grafana."""
     dashboards_enabled: bool = True
     """Deploy the Grafana dashboard. Grafana itself still runs."""
+    grafana_route: bool = True
+    """OpenShift only: create a TLS Route to Grafana so it has a URL without a
+    port-forward. Grafana is behind its login; Prometheus and the Pushgateway are
+    never exposed. Ignored on other clusters. Removed with the namespace."""
     retention: str = "7d"
     """Prometheus data retention."""
     storage: str = "10Gi"

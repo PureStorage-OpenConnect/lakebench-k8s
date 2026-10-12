@@ -249,6 +249,51 @@ class TestObservabilityDeployer:
         assert "pushgateway/pushgateway.yaml.j2" in rendered
         assert "prometheus/kubelet-metrics-binding.yaml.j2" in rendered
 
+    @pytest.mark.parametrize(
+        ("openshift", "route_on", "expect_route"),
+        [(True, True, True), (True, False, False), (False, True, False)],
+    )
+    def test_grafana_route_only_on_openshift_when_enabled(self, openshift, route_on, expect_route):
+        from lakebench.deploy.observability import ObservabilityDeployer
+
+        engine = _obs_engine()
+        engine.context["openshift_mode"] = openshift
+        engine.config = make_config(
+            name="lakebench-dep", observability={"enabled": True, "grafana_route": route_on}
+        )
+        with (
+            patch("lakebench.deploy.observability.kubelet_cluster_role_exists", return_value=True),
+            patch("lakebench.deploy.observability._wait_for_deployment_ready", return_value=""),
+            patch("lakebench.deploy.observability.read_grafana_password", return_value=None),
+            patch(
+                "lakebench.deploy.observability.grafana_route_host",
+                return_value="grafana-dep.apps.example.com",
+            ),
+        ):
+            result = ObservabilityDeployer(engine).deploy()
+        rendered = [c.args[0] for c in engine.renderer.render.call_args_list]
+        assert ("grafana/grafana-route.yaml.j2" in rendered) is expect_route
+        url = (result.details or {}).get("grafana_url")
+        assert url == ("https://grafana-dep.apps.example.com" if expect_route else None)
+
+    def test_grafana_route_host_reads_the_admitted_ingress(self):
+        from lakebench.deploy.observability import grafana_route_host
+
+        route = {
+            "spec": {"host": "spec.example.com"},
+            "status": {"ingress": [{"host": "admitted.example.com"}]},
+        }
+        api = MagicMock()
+        api.get_namespaced_custom_object.return_value = route
+        with (
+            patch("kubernetes.client.CustomObjectsApi", return_value=api),
+            patch("lakebench.k8s.target.ClusterTarget.resolve") as resolve,
+        ):
+            resolve.return_value.activate.return_value = None
+            assert grafana_route_host("ns") == "admitted.example.com"
+            api.get_namespaced_custom_object.side_effect = RuntimeError("no route api")
+            assert grafana_route_host("ns") is None
+
     def test_deploy_without_kubelet_role_still_succeeds_with_warning_detail(self):
         from lakebench.deploy.engine import DeploymentStatus
         from lakebench.deploy.observability import ObservabilityDeployer

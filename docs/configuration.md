@@ -760,6 +760,7 @@ Fully-qualified table names (`namespace.table`). The catalog prefix is added at 
 |---|---|---|---|---|
 | `observability.enabled` | boolean | `false` | advanced | Deploy the per-namespace Prometheus and Grafana. |
 | `observability.dashboards_enabled` | boolean | `true` | advanced | Deploy the Grafana dashboard. Grafana itself still runs. |
+| `observability.grafana_route` | boolean | `true` | advanced | OpenShift only: create a TLS Route to Grafana so it has a URL without a port-forward. Grafana is behind its login; Prometheus and the Pushgateway are never exposed. Ignored on other clusters. Removed with the namespace. |
 | `observability.retention` | string | `7d` | advanced | Prometheus data retention. |
 | `observability.storage` | string | `10Gi` | advanced | Prometheus PVC size. |
 | `observability.prometheus_image` | string | `quay.io/prometheus/prometheus:v3.5.0` | advanced | Prometheus image. Tag-pinned; override with a digest for reproducibility. |

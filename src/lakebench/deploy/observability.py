@@ -51,6 +51,8 @@ _NAMESPACE_TEMPLATES = [
     "grafana/dashboard-configmap.yaml.j2",
 ]
 
+_GRAFANA_ROUTE_TEMPLATE = "grafana/grafana-route.yaml.j2"
+
 _PUSHGATEWAY_TEMPLATES = [
     "pushgateway/pushgateway.yaml.j2",
 ]
@@ -141,6 +143,25 @@ def read_grafana_password(namespace: str, context: str | None = None) -> str | N
         return base64.b64decode(enc).decode("utf-8")
     except Exception:
         return None
+
+
+def grafana_route_host(namespace: str, context: str | None = None) -> str | None:
+    """The host of this deployment's Grafana Route, or None (no Route, not OpenShift,
+    or not readable)."""
+    try:
+        from kubernetes import client as k8s_client
+
+        from lakebench.k8s.target import ClusterTarget
+
+        ClusterTarget.resolve(context=context or "").activate()
+        route = k8s_client.CustomObjectsApi().get_namespaced_custom_object(
+            "route.openshift.io", "v1", namespace, "routes", "lakebench-grafana"
+        )
+    except Exception:
+        return None
+    ingress = ((route.get("status") or {}).get("ingress")) or []
+    host = (ingress[0].get("host") if ingress else None) or (route.get("spec") or {}).get("host")
+    return host or None
 
 
 def kubelet_cluster_role_exists(context: str | None = None) -> bool | None:
@@ -244,6 +265,8 @@ class ObservabilityDeployer:
         templates = list(_NAMESPACE_TEMPLATES)
         if not obs.dashboards_enabled:
             templates.remove("grafana/dashboard-configmap.yaml.j2")
+        if obs.grafana_route and base_context.get("openshift_mode"):
+            templates.append(_GRAFANA_ROUTE_TEMPLATE)
         if obs.pushgateway_enabled:
             templates += _PUSHGATEWAY_TEMPLATES
             base_context.update(
@@ -302,6 +325,10 @@ class ObservabilityDeployer:
             "grafana_service": f"lakebench-grafana.{namespace}.svc",
             "kubelet_binding": binding_note or "applied",
         }
+        if obs.grafana_route and base_context.get("openshift_mode"):
+            host = grafana_route_host(namespace, context=self._kube_context())
+            if host:
+                details["grafana_url"] = f"https://{host}"
 
         if prom_wait:
             # Prometheus not Ready is a hard failure: without it the platform

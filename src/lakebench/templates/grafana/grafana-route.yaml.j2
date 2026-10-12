@@ -1,0 +1,20 @@
+{# OpenShift only: a TLS Route to this deployment's Grafana. Prometheus and  #}
+{# the Pushgateway have no login and stay inside the cluster. Removed with   #}
+{# the namespace.                                                            #}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: lakebench-grafana
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: grafana
+spec:
+  to:
+    kind: Service
+    name: lakebench-grafana
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

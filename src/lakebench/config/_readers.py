@@ -387,6 +387,9 @@ READERS: dict[str, str] = {
     "observability.dashboards_enabled": (
         "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
     ),
+    "observability.grafana_route": (
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
+    ),
     "observability.retention": "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack",
     "observability.storage": "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack",
     "observability.prometheus_image": (
