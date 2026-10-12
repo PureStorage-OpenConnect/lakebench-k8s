@@ -48,7 +48,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "polaris-iceberg-spark-trino": {
-        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.1.1-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
             "table_format": {"type": "iceberg"},
@@ -56,7 +56,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "polaris-iceberg-spark-thrift": {
-        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.1.1-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
             "table_format": {"type": "iceberg"},
@@ -64,7 +64,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "polaris-iceberg-spark-none": {
-        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.1.1-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
             "table_format": {"type": "iceberg"},
@@ -80,7 +80,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "polaris-iceberg-spark-duckdb": {
-        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.1.1-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
             "table_format": {"type": "iceberg"},
@@ -98,7 +98,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "hive-delta-spark-thrift": {
-        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.1.1-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
             "table_format": {"type": "delta"},
@@ -106,7 +106,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "hive-delta-spark-none": {
-        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.1.1-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
             "table_format": {"type": "delta"},

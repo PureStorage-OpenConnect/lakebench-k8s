@@ -238,7 +238,7 @@ name: my-lakehouse
 # registries or custom builds.
 images:
   datagen: docker.io/sillidata/lb-datagen:5d7ce61a
-  spark: apache/spark:4.1.1-python3       # the recipe's default; 4.0.2 on Polaris recipes
+  spark: apache/spark:4.1.1-python3       # the recipe's default
   postgres: postgres:17
   polaris: apache/polaris:1.6.0
   trino: trinodb/trino:483
@@ -504,7 +504,7 @@ Container images for every deployed component. Override for air-gapped registrie
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
 | `images.datagen` | string | `docker.io/sillidata/lb-datagen:5d7ce61a` | advanced | Data generator image. Tag-pinned; override with a digest for byte-for-byte reproducibility. In continuous mode it generates until the run window ends: AML as successive 24-month periods of the same bank, Customer360 as successive time slices. |
-| `images.spark` | string | `apache/spark:4.1.1-python3` | advanced | Spark runtime image. Unset: the image of the config's recipe (or of the recipe its components name): `4.1.1-python3` on the Hive recipes, `4.0.2-python3` on the Polaris recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none`; 4.0.2 also when the config writes a table format version Spark 4.1 cannot run (Delta 4.0.0). |
+| `images.spark` | string | `apache/spark:4.1.1-python3` | advanced | Spark runtime image. Unset: the image of the config's recipe (or of the recipe its components name): `4.1.1-python3` on every recipe; `4.0.2-python3` instead when the config writes a table format version Spark 4.1 cannot run (Delta 4.0.0). |
 | `images.postgres` | string | `postgres:17` | advanced | PostgreSQL image (metadata backend). |
 | `images.polaris` | string | `apache/polaris:1.6.0` | advanced | Apache Polaris REST catalog image. |
 | `images.polaris_admin_tool` | string | `apache/polaris-admin-tool:1.6.0` | advanced | Polaris admin tool image; bootstraps the Polaris metastore on a Polaris recipe. |

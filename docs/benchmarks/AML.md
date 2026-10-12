@@ -104,15 +104,14 @@ only on the cells it lists; every other valid combination is unverified.
 | hive-iceberg-spark-thrift | catalog | 4.1.1 | query and pipeline share Spark |
 | hive-iceberg-spark-duckdb | direct storage | 4.1.1 | DuckDB runs no Iceberg maintenance |
 | hive-iceberg-spark-none | none | 4.1.1 | no query benchmark or QpH |
-| polaris-iceberg-spark-trino | catalog | 4.0.2 | |
-| polaris-iceberg-spark-thrift | catalog | 4.0.2 | |
-| polaris-iceberg-spark-duckdb | direct storage | 4.0.2 | as DuckDB above |
-| polaris-iceberg-spark-none | none | 4.0.2 | as none above |
+| polaris-iceberg-spark-trino | catalog | 4.1.1 | |
+| polaris-iceberg-spark-thrift | catalog | 4.1.1 | |
+| polaris-iceberg-spark-duckdb | direct storage | 4.1.1 | as DuckDB above |
+| polaris-iceberg-spark-none | none | 4.1.1 | as none above |
 | hive-delta-spark-{trino,thrift,none} | -- | -- | unsupported, refused at load: the AML stage scripts and DDL are Iceberg-only |
 
 - The pipeline engine is Spark in every recipe. Each recipe names its Spark
-  image (`config/recipes.py`): `apache/spark:4.1.1-python3` on Hive,
-  `apache/spark:4.0.2-python3` on Polaris. A config that sets `images.spark`
+  image (`config/recipes.py`): `apache/spark:4.1.1-python3` on every recipe. A config that sets `images.spark`
   runs that image.
 - The release matrix's AML rows (`config/support.py`): batch
   hive-iceberg-spark-trino at scale 1 and 10, batch

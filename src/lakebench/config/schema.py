@@ -497,8 +497,7 @@ class ImagesConfig(ConfigModel):
     """
     spark: str = "apache/spark:4.1.1-python3"
     """Spark runtime image. Unset: the image of the config's recipe (or of the recipe its
-    components name): `4.1.1-python3` on the Hive recipes, `4.0.2-python3` on the Polaris
-    recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none`; 4.0.2 also when the
+    components name): `4.1.1-python3` on every recipe; `4.0.2-python3` instead when the
     config writes a table format version Spark 4.1 cannot run (Delta 4.0.0).
     """
     postgres: str = "postgres:17"  # Tested with 16, 17, 18

@@ -56,23 +56,23 @@ RELEASE_MATRIX: tuple[tuple[str, str, str, float], ...] = (
 #: The release matrix's Spark minor and table format version per row, by
 #: (workload, mode, recipe). The support record is keyed by them
 #: (config/support.py), so a row's runs must use these versions.
-_ICEBERG, _SPARK41, _SPARK40 = "1.11.0", "4.1", "4.0"
+_ICEBERG, _SPARK41 = "1.11.0", "4.1"
 RELEASE_MATRIX_VERSIONS: dict[tuple[str, str, str], tuple[str, str]] = {
     ("customer360", "batch", "hive-iceberg-spark-trino"): (_SPARK41, _ICEBERG),
-    ("customer360", "batch", "polaris-iceberg-spark-trino"): (_SPARK40, _ICEBERG),
+    ("customer360", "batch", "polaris-iceberg-spark-trino"): (_SPARK41, _ICEBERG),
     ("customer360", "batch", "hive-delta-spark-trino"): (_SPARK41, "4.1.0"),
-    ("customer360", "batch", "hive-delta-spark-thrift"): (_SPARK40, "4.0.0"),
+    ("customer360", "batch", "hive-delta-spark-thrift"): (_SPARK41, "4.1.0"),
     ("customer360", "batch", "hive-iceberg-spark-thrift"): (_SPARK41, _ICEBERG),
-    ("customer360", "batch", "polaris-iceberg-spark-thrift"): (_SPARK40, _ICEBERG),
+    ("customer360", "batch", "polaris-iceberg-spark-thrift"): (_SPARK41, _ICEBERG),
     ("customer360", "batch", "hive-iceberg-spark-duckdb"): (_SPARK41, _ICEBERG),
-    ("customer360", "batch", "polaris-iceberg-spark-duckdb"): (_SPARK40, _ICEBERG),
+    ("customer360", "batch", "polaris-iceberg-spark-duckdb"): (_SPARK41, _ICEBERG),
     ("customer360", "batch", "hive-iceberg-spark-none"): (_SPARK41, _ICEBERG),
     ("customer360", "continuous", "hive-iceberg-spark-trino"): (_SPARK41, _ICEBERG),
     ("customer360", "continuous", "hive-delta-spark-trino"): (_SPARK41, "4.1.0"),
     ("financial", "batch", "hive-iceberg-spark-trino"): (_SPARK41, _ICEBERG),
-    ("financial", "batch", "polaris-iceberg-spark-trino"): (_SPARK40, _ICEBERG),
+    ("financial", "batch", "polaris-iceberg-spark-trino"): (_SPARK41, _ICEBERG),
     ("financial", "continuous", "hive-iceberg-spark-trino"): (_SPARK41, _ICEBERG),
-    ("financial", "continuous", "polaris-iceberg-spark-trino"): (_SPARK40, _ICEBERG),
+    ("financial", "continuous", "polaris-iceberg-spark-trino"): (_SPARK41, _ICEBERG),
 }
 
 _RECORD_NAME = "lakebench/config/validated_combinations.yaml"

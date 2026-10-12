@@ -31,7 +31,7 @@ engine combination is refused at load with the reason.
 - Each recipe has at most one query engine (`none` for ETL only). The benchmark runs against that engine.
 
 <!-- BEGIN GENERATED: recipe-components -->
-<!-- Generated from source. Do not edit by hand. -->
+<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
 | Recipe | Catalog | Table Format | Pipeline Engine | Query Engine |
 |---|---|---|---|---|
@@ -102,23 +102,24 @@ How the state is recorded:
 The table below is generated from the code.
 
 <!-- BEGIN GENERATED: support-states -->
-<!-- Generated from source. Do not edit by hand. -->
+<!-- Generated from the code by `PYTHONPATH=src python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
 | Recipe | Customer 360 batch | Customer 360 continuous | AML (financial) batch | AML (financial) continuous |
 |---|---|---|---|---|
 | `hive-delta-spark-none` | unverified [1] | unverified [1] | unsupported | unsupported |
-| `hive-delta-spark-thrift` | supported (Spark 4.0, Delta 4.0.0) | unverified [1] | unsupported | unsupported |
+| `hive-delta-spark-thrift` | unverified [2] | unverified [1] | unsupported | unsupported |
 | `hive-delta-spark-trino` | supported (Spark 4.1, Delta 4.1.0) | supported (Spark 4.1, Delta 4.1.0) | unsupported | unsupported |
 | `hive-iceberg-spark-duckdb` | supported (Spark 4.1, Iceberg 1.11.0) | unverified [1] | unverified [1] | unverified [1] |
 | `hive-iceberg-spark-none` | supported (Spark 4.1, Iceberg 1.11.0) | unverified [1] | unverified [1] | unverified [1] |
 | `hive-iceberg-spark-thrift` | supported (Spark 4.1, Iceberg 1.11.0) | unverified [1] | unverified [1] | unverified [1] |
 | `hive-iceberg-spark-trino` | supported (Spark 4.1, Iceberg 1.11.0) | supported (Spark 4.1, Iceberg 1.11.0) | supported (Spark 4.1, Iceberg 1.11.0) | supported (Spark 4.1, Iceberg 1.11.0) |
-| `polaris-iceberg-spark-duckdb` | supported (Spark 4.0, Iceberg 1.11.0) | unverified [1] | unverified [1] | unverified [1] |
+| `polaris-iceberg-spark-duckdb` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
 | `polaris-iceberg-spark-none` | unverified [1] | unverified [1] | unverified [1] | unverified [1] |
-| `polaris-iceberg-spark-thrift` | supported (Spark 4.0, Iceberg 1.11.0) | unverified [1] | unverified [1] | unverified [1] |
-| `polaris-iceberg-spark-trino` | supported (Spark 4.0, Iceberg 1.11.0) | unverified [1] | supported (Spark 4.0, Iceberg 1.11.0) | supported (Spark 4.0, Iceberg 1.11.0) |
+| `polaris-iceberg-spark-thrift` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
+| `polaris-iceberg-spark-trino` | unverified [2] | unverified [1] | unverified [2] | unverified [2] |
 
 - [1] unverified: not in this release's validation matrix.
+- [2] unverified: in this release's validation matrix; no validation run is listed yet.
 - **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Use an iceberg recipe (for example recipe: polaris-iceberg-spark-trino), or with no recipe set architecture.table_format.type to iceberg.
 - Any catalog, table format and query engine combination that is not a recipe above is refused at config load for every workload.
 - A supported cell names the Spark minor and table format version its validation runs used; the same cell on any other Spark minor or format version is unverified. Spark 3.5 is unverified and gets no v1.7 features.
@@ -154,7 +155,7 @@ Defaults come from `src/lakebench/config/schema.py` and
 
 | Component | Default | Accepted | Set by |
 |---|---|---|---|
-| Apache Spark | `apache/spark:4.1.1-python3` on the Hive recipes except below; `4.0.2-python3` on the Polaris recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none` | Any 3.5.x, 4.0.x or 4.1.x image with a `-python3` tag. Delta needs 4.x. 4.2 and other minors are refused at load. | `images.spark` |
+| Apache Spark | `apache/spark:4.1.1-python3` on every recipe | Any 3.5.x, 4.0.x or 4.1.x image with a `-python3` tag. Delta needs 4.x. 4.2 and other minors are refused at load. | `images.spark` |
 | Kubeflow Spark Operator | 2.5.1 (Helm chart `spark-operator/spark-operator`, namespace `spark-operator`) | v2.x. v1.x is not supported. | `platform.compute.spark.operator.version` (fresh install only) |
 | Apache Iceberg | 1.11.0; 1.10.1 on a Java 11 Spark 3.5 image; 1.10.1 in local mode | See [Spark + Table Format Version Matrix](#spark--table-format-version-matrix) | `architecture.table_format.iceberg.version` |
 | Delta Lake | `auto`: 4.0.0 on Spark 4.0, 4.1.0 on Spark 4.1 | Only the version matching the Spark minor | `architecture.table_format.delta.version` |
@@ -188,7 +189,7 @@ config, within these limits:
 
 ```yaml
 images:
-  spark: apache/spark:4.0.2-python3
+  spark: apache/spark:4.1.1-python3
   postgres: postgres:17
   polaris: apache/polaris:1.6.0
   trino: trinodb/trino:483

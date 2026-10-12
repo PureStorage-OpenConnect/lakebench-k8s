@@ -127,7 +127,7 @@ def test_every_request_field_enters_the_hash():
         ("duckdb_extension_repository", "http://ext.mirror"),
         ("repositories", ("http://nexus/m2/",)),
         ("jar_coordinates", ("g:a:2",)),
-        ("spark_image", "apache/spark:4.1.1-python3"),
+        ("spark_image", SPARK40),
         ("groups", ("jars",)),
     ]:
         import dataclasses
