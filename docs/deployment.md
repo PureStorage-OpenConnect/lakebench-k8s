@@ -172,14 +172,14 @@ step, including the wait for the cluster lease.
 14. **DuckDB** -- When the query engine is `duckdb`. Its wheel and
     extensions come from the dependency set the same way.
 15. **Observability** -- Only with `observability.enabled: true`.
-    - Prometheus and Grafana come from one shared `kube-prometheus-stack`
-      release in the `lakebench-observability` namespace.
-    - A cluster admin installs it once with
-      `lakebench admin install --component observability`, which also
-      applies the shared Grafana dashboard.
-    - Deploy never installs or changes it: a missing release fails the
-      step. Deploy applies only this deployment's PodMonitors and
-      Pushgateway, in its own namespace.
+    - Deploys Prometheus, Grafana and the Pushgateway in this deployment's
+      namespace. Each deployment runs its own stack; two deployments on the
+      same cluster never collide.
+    - The one cluster-scoped piece is the kubelet-metrics ClusterRole a
+      cluster admin applies once with `lakebench admin install --component
+      observability`. Without it, platform CPU and memory read `not collected`
+      in the report; the stack still deploys.
+    - Deploy waits until Prometheus is Ready. Grafana slowness is a warning.
     - Destroy never uninstalls the shared release.
     - The Pushgateway volume uses StorageClass `px-csi-scratch` unless
       `observability.pushgateway_storage_class` names another; set it on a
@@ -225,22 +225,22 @@ With a config, `status` reads the Kubernetes API and shows the deployment's
 components (PostgreSQL, the configured catalog and query engine) with
 replica counts and readiness, and the datagen job's progress while it runs.
 With only `--namespace`, it lists every component Lakebench can deploy,
-plus the shared Prometheus and Grafana. Exit codes are under
+plus the per-deployment Prometheus and Grafana. Exit codes are under
 [status](cli-reference.md#status).
 
 ## Accessing Monitoring (Observability Stack)
 
-With `observability.enabled: true`, Prometheus and Grafana run in the
-shared `lakebench-observability` namespace.
+With `observability.enabled: true`, Prometheus, Grafana and the Pushgateway
+run in this deployment's namespace. Service names are fixed.
 
-- Grafana's user is `admin`. The chart generates the password per install,
-  and `deploy` prints the command that reads it:
-  `kubectl get secret -n lakebench-observability lakebench-observability-grafana -o jsonpath='{.data.admin-password}' | base64 -d`.
-- The chart shortens service names, so list them first:
+- Grafana user: `admin`. The password is generated per deploy into the
+  Secret `lakebench-grafana`:
+  `kubectl get secret -n <namespace> lakebench-grafana -o jsonpath='{.data.admin-password}' | base64 -d`.
+- Access:
 
 ```bash
-kubectl get svc -n lakebench-observability -l release=lakebench-observability
-kubectl port-forward -n lakebench-observability svc/<grafana service> 3000:80
+kubectl port-forward -n <namespace> svc/lakebench-grafana 3000:3000
+kubectl port-forward -n <namespace> svc/lakebench-prometheus 9090:9090
 ```
 
 The dashboards cover Spark job metrics, Trino query performance, storage

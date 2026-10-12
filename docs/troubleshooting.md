@@ -19,16 +19,17 @@ or another key.
 
 **Cause:** the key once existed and no longer does anything. `images.hive`
 never chose the Hive that runs (the Stackable HiveCluster always runs Hive
-3.1.3); `images.prometheus` and `images.grafana` were never read, because
-Prometheus and Grafana come from the kube-prometheus-stack chart. A removed
-key still at its old default is dropped with a note; any other value is
-refused by the commands that change data, so a config that seems to choose
-something cannot run as if it did.
+3.1.3); `images.prometheus` and `images.grafana` moved to
+`observability.prometheus_image` and `observability.grafana_image` with the
+per-namespace observability port in 1.7.2. A removed key still at its old
+default is dropped with a note; any other value is refused by the commands
+that change data, so a config that seems to choose something cannot run as
+if it did.
 
 **Fix:** delete the key. To pin Prometheus and Grafana, set
-`observability.chart_version`. `destroy`, `status` and the read-only
-commands still load the old config, so you can tear down or inspect a
-deployment made with it.
+`observability.prometheus_image` and `observability.grafana_image`.
+`destroy`, `status` and the read-only commands still load the old config,
+so you can tear down or inspect a deployment made with it.
 
 Code: `src/lakebench/config/schema.py:ImagesConfig`,
 `src/lakebench/config/schema.py:STACKABLE_HIVE_VERSION`.

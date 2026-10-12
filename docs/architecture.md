@@ -28,7 +28,7 @@ benchmarks against it, in three layers.
 | 2. Data architecture | Catalog: Hive Metastore or Apache Polaris. Table format: Iceberg or Delta (Delta only with Hive). Spark runs the medallion pipeline. Query engine: Trino, Spark Thrift Server or DuckDB (DuckDB only with Iceberg) |
 | 3. Observability | Optional Prometheus and Grafana (see below). The CLI writes local JSON metrics per run, for offline analysis and HTML reports |
 
-With observability on, Prometheus scrapes Trino JMX, per-pod CPU and memory, and the Pushgateway that datagen and the Spark stages push to. Grafana renders dashboards. Spark engine metrics are not exported: the Spark UI, which serves them, is off.
+With observability on, each deployment runs its own Prometheus, Grafana and Pushgateway in its namespace. Prometheus scrapes Trino JMX, per-pod CPU and memory from the kubelet, and the Pushgateway that datagen and the Spark stages push to. Grafana renders dashboards. Spark engine metrics are not exported: the Spark UI, which serves them, is off.
 
 ## Medallion Pipeline
 

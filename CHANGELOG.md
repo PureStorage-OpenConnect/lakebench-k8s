@@ -4,6 +4,29 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.2] - Unreleased
+
+### Breaking
+
+- **Observability is now one stack per deployment.** `observability.enabled: true` deploys Prometheus, Grafana and the Pushgateway in the deployment namespace; two deployments on the same cluster never collide and each one's stack goes with its namespace on destroy. The shared `kube-prometheus-stack` Helm release and the `lakebench-observability` namespace are no longer used. See [Observability](docs/component-observability.md).
+- **`lakebench admin install --component observability` now creates one ClusterRole** (`lakebench-kubelet-metrics`) for the kubelet cAdvisor endpoint. It no longer installs a Helm chart. An existing shared release from 1.7.1 or earlier can be removed with `helm uninstall lakebench-observability -n lakebench-observability` once no deployment uses it.
+- **`observability.chart_version` is removed.** Set `observability.prometheus_image` and `observability.grafana_image` (both digest-pinned) instead. A config at the 1.7.1 default loads with a note; any other value is refused by data-changing commands.
+- **`observability.storage_class` is removed.** Set `observability.prometheus_storage_class` instead; empty uses the cluster default.
+- **`lakebench-observability` is no longer a reserved namespace.** `platform.kubernetes.namespace: lakebench-observability` is accepted as a deployment namespace, though it is still not recommended.
+- **Prometheus and Grafana images are digest-pinned.** New defaults: `quay.io/prometheus/prometheus:v3.5.0@sha256:...` and `docker.io/grafana/grafana:12.1.1@sha256:...`.
+- **Deploy's observability preflight is non-blocking.** A missing `lakebench-kubelet-metrics` ClusterRole prints a warning; the stack still deploys and platform CPU and memory read `not collected` in the report.
+- **PodMonitor and sidecar discovery go away.** The three PodMonitor templates (Trino, Spark, Pushgateway) are removed; the per-namespace Prometheus scrapes them directly through its own scrape config. A deploy from 1.7.1 that left PodMonitors behind no longer has anything to scrape them.
+
+### New
+
+- **Per-deployment Grafana password.** Deploy generates one into the `lakebench-grafana` Secret and preserves it across redeploys.
+- **Fixed Service names in each namespace:** `lakebench-prometheus`, `lakebench-grafana`, `lakebench-pushgateway`. Port-forwarding no longer requires looking up chart-truncated names.
+
+### Changed
+
+- **Dashboard variable `namespace` is gone**, now that each Grafana sees only its own deployment. `run_id` still picks among the runs that landed in this namespace.
+- **`admin doctor` observability check** reads whether the kubelet-metrics ClusterRole is present; a fresh cluster surfaces the admin step without failing deploys.
+
 ## [1.7.1] - 2026-10-10
 
 Results from 1.7.1 are not comparable with 1.7.0 for the workloads, modes and metrics listed under Breaking. Fixed entries correct numbers or verdicts that 1.7.0 got wrong.

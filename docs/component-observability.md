@@ -1,17 +1,16 @@
 # Observability
 
-Reference: enable and read the optional Prometheus and Grafana stack, per-deployment Pushgateway, local metrics and reports.
+Reference: enable and read the optional Prometheus and Grafana stack, the per-deployment Pushgateway, local metrics and reports.
 
 ## What it does
 
 - **Always on:** every run writes `metrics.json` and `report.html` locally. Neither needs Prometheus or Grafana.
-- **Optional:** `observability.enabled: true` uses one shared `kube-prometheus-stack` Helm release (Prometheus, Grafana, kube-state-metrics, node-exporter) and gives each deployment a Pushgateway and PodMonitors.
-- Lakebench disables node-exporter on OpenShift, where it needs host access the SCCs block.
-- The stack is independent of the recipe.
+- **Optional:** `observability.enabled: true` deploys its own Prometheus, Grafana and Pushgateway in the deployment namespace. Two deployments on the same cluster never collide; each one's stack goes with its namespace on destroy.
+- The one cluster-scoped grant is a ClusterRole (`lakebench-kubelet-metrics`) that Prometheus binds to for the kubelet cAdvisor endpoint, applied once by `lakebench admin install --component observability`. Without it the stack still deploys; platform CPU and memory read `not collected` in the report.
 
 ## Version and image
 
-- Prometheus and Grafana have no version keys. They come from the chart `observability.chart_version` names. Defaults for it and `pushgateway_image`: [version matrix](compatibility-matrix.md#component-version-matrix).
+- Prometheus and Grafana are pinned by digest in the config schema: `observability.prometheus_image`, `observability.grafana_image`. Pushgateway: `observability.pushgateway_image`. See the [version matrix](compatibility-matrix.md#component-version-matrix).
 - The JMX exporter sidecar image is `images.jmx_exporter`, pinned by digest.
 
 ## Configuration keys
@@ -20,45 +19,48 @@ Reference: enable and read the optional Prometheus and Grafana stack, per-deploy
 
 | Key | Default | Effect |
 |---|---|---|
-| `enabled` | `false` | Use the shared stack and deploy the per-deployment Pushgateway and PodMonitors. Always the full stack. |
-| `dashboards_enabled` | `true` | Sets the chart's `grafana.enabled` on a fresh admin install. |
-| `retention` | `"7d"` | Prometheus retention on a fresh admin install. |
-| `storage` | `"10Gi"` | Prometheus PVC size on a fresh admin install. The PVC uses the cluster default StorageClass. |
-| `chart_version` | [matrix](compatibility-matrix.md#component-version-matrix) | `kube-prometheus-stack` chart a fresh admin install uses. |
+| `enabled` | `false` | Deploy Prometheus, Grafana and the Pushgateway in the deployment namespace. |
+| `dashboards_enabled` | `true` | Apply the Lakebench Overview dashboard ConfigMap. Grafana itself still runs. |
+| `retention` | `"7d"` | Prometheus data retention. |
+| `storage` | `"10Gi"` | Prometheus PVC size. |
+| `prometheus_image` | [matrix](compatibility-matrix.md#component-version-matrix) | Prometheus image. |
+| `grafana_image` | [matrix](compatibility-matrix.md#component-version-matrix) | Grafana image. |
+| `prometheus_storage_class` | `""` | StorageClass of the Prometheus PVC; empty uses the cluster default. |
 | `pushgateway_enabled` | `true` | Per-deployment Pushgateway for live datagen and pipeline metrics. |
-| `pushgateway_image` | [matrix](compatibility-matrix.md#component-version-matrix) | Pushgateway image |
-| `pushgateway_storage` | `"1Gi"` | Pushgateway PVC size |
-| `pushgateway_storage_class` | `"px-csi-scratch"` | Pushgateway PVC StorageClass |
+| `pushgateway_image` | [matrix](compatibility-matrix.md#component-version-matrix) | Pushgateway image. |
+| `pushgateway_storage` | `"1Gi"` | Pushgateway PVC size. |
+| `pushgateway_storage_class` | `"px-csi-scratch"` | Pushgateway PVC StorageClass. |
 
-- An installed release keeps the values it was installed with.
-- Removed observability keys are listed under 1.7.0 in the [changelog](../CHANGELOG.md#170---2026-10-06).
+- Removed keys are listed under 1.7.2 in the [changelog](../CHANGELOG.md).
 
 ## Deploy and destroy
 
-The chart installs cluster-wide objects (CRDs, cluster roles, admission webhooks), so the release named `lakebench-observability` is a shared cluster component, not part of a deployment.
+Everything in the stack lives in the deployment namespace (ownership category 1), except one cluster-scoped ClusterRole and the per-deployment ClusterRoleBinding deploy creates to attach to it.
 
-- **Install:** a cluster admin runs `lakebench admin install --component observability <config>` once. It installs into the `lakebench-observability` namespace, under the cluster lease, only when no release named `lakebench-observability` exists anywhere on the cluster. An existing release is never upgraded or modified.
-- **Dashboard:** the same command applies the shared dashboard ConfigMap, and re-applies it when it differs from this Lakebench's.
-- **Deploy:** `lakebench deploy` only checks that the release exists (a missing one fails the step with the install command). It applies the deployment's PodMonitors and Pushgateway in its own namespace.
-- **Destroy:** never uninstalls the release; another deployment may use it. PodMonitors and Pushgateway go with the deployment's namespace. The dashboard ConfigMap stays in `lakebench-observability`.
-- **Exception:** a release an older Lakebench installed into the deployment's own namespace is removed by destroy, because it served only that namespace.
-- **Removing the shared stack** when no deployment uses it: `helm uninstall lakebench-observability -n lakebench-observability`.
+- **Admin install:** a cluster admin runs `lakebench admin install --component observability <config>` once per cluster. It creates the `lakebench-kubelet-metrics` ClusterRole. No namespace is created, no CRDs, no Helm chart. Idempotent: an existing role is left alone.
+- **Deploy:** `lakebench deploy` applies Prometheus, Grafana, the Pushgateway and (when the ClusterRole is present) a per-deployment ClusterRoleBinding named `lakebench-kubelet-metrics-<namespace>`. It waits until the Prometheus pod is Ready; a Grafana that is slow to start is a warning, not a failure. A missing ClusterRole is a warning; the stack still deploys and platform CPU and memory read `not collected` in the report.
+- **Destroy:** deletes the per-deployment ClusterRoleBinding; the rest goes with the namespace or by the category1 step when the namespace survives.
+- **Removing the ClusterRole** when no deployment uses it: a cluster admin runs `kubectl delete clusterrole lakebench-kubelet-metrics`.
 
-The chart shortens service names, so list them:
+Service names are fixed, so two deployments never clash:
 
 ```bash
-kubectl get svc -n lakebench-observability -l release=lakebench-observability
+kubectl get svc -n <namespace> lakebench-prometheus lakebench-grafana lakebench-pushgateway
 ```
 
-### Prometheus targets
+### Prometheus scrape targets
 
-- Prometheus picks up the PodMonitors of every Lakebench namespace. ServiceMonitor and PodMonitor CRDs handle target discovery.
-- The Spark and Trino PodMonitors are applied whenever the stack is enabled. Only the Trino one finds a target.
-- Spark pipeline jobs run with the Spark UI off (it guards driver memory at large scale). Spark serves its Prometheus endpoint from the UI, so no Spark engine metrics (GC, shuffle, spill, S3A I/O) are collected. Spark stages report rows, bytes and elapsed time through the Pushgateway and `metrics.json`.
+Prometheus runs with a scrape config that targets this deployment only:
+
+- The Pushgateway in this namespace (`honor_labels: true` so pushed `run_id`, `stage` and `job` labels survive).
+- Trino coordinator and workers in this namespace (JMX exporter on port 9090).
+- The kubelet cAdvisor endpoint on every node, filtered at relabel time to this namespace. The per-pod CPU, memory, network and filesystem families are kept; the rest is dropped.
+
+Spark pipeline jobs run with the Spark UI off (it guards driver memory at large scale). Spark serves its Prometheus endpoint from the UI, so no Spark engine metrics (GC, shuffle, spill, S3A I/O) are collected. Spark stages report rows, bytes and elapsed time through the Pushgateway and `metrics.json`.
 
 ### Pushgateway
 
-Each deployment gets a Deployment, a Service, a 1Gi PVC on `px-csi-scratch` by default, and a PodMonitor that scrapes it, in its own namespace.
+Each deployment gets a Deployment, a Service, a 1Gi PVC on `px-csi-scratch` by default, in its own namespace. The deployment's Prometheus scrapes it with `honor_labels: true`.
 
 - Datagen pods push live progress, because a batch pod can finish between two Prometheus scrapes.
 - Spark stages that push their metrics: AML bronze-verify, silver-build, gold-finalize and silver-stream; Customer 360 gold-finalize.
@@ -67,18 +69,23 @@ Each deployment gets a Deployment, a Service, a 1Gi PVC on `px-csi-scratch` by d
 
 ## Grafana
 
-- Included when `dashboards_enabled` is `true`.
-- User `admin`. The chart generates the password per install into the Secret `lakebench-observability-grafana` (key `admin-password`). An install made by 1.6 keeps its `lakebench` password.
-- Access: `kubectl port-forward svc/lakebench-observability-grafana 3000:80 -n lakebench-observability`.
+- Included when `dashboards_enabled` is `true`. Grafana itself runs either way.
+- User `admin`. Deploy generates a per-deployment password into the Secret `lakebench-grafana` (key `admin-password`).
+- Access:
 
-The **Lakebench Overview** dashboard comes from one ConfigMap in `lakebench-observability`. `namespace` and `run_id` variables select the deployment and run. Panels:
+```bash
+kubectl port-forward -n <namespace> svc/lakebench-grafana 3000:3000
+kubectl get secret -n <namespace> lakebench-grafana -o jsonpath='{.data.admin-password}' | base64 -d
+```
+
+The **Lakebench Overview** dashboard is provisioned from a ConfigMap in the deployment namespace. A `run_id` variable selects among the runs that landed in this namespace. Panels:
 
 - datagen throughput (MB/s per pod, labelled as capped by the pod resources Lakebench sets), rows written by pod, phase seconds
 - bronze/silver stage rows (input vs output), silver per-table row counts, pipeline stage elapsed seconds
 - Trino running queries and query throughput
 - CPU usage by pod (containers only, each counted once)
 
-The datagen and pipeline panels read Pushgateway series, so they are empty with `pushgateway_enabled: false`. The `namespace` and `run_id` variables come from the pipeline stage series, so on a fresh deployment the datagen panels stay empty until the first Spark stage reports.
+The datagen and pipeline panels read Pushgateway series, so they are empty with `pushgateway_enabled: false`. The `run_id` variable comes from the pipeline stage series, so on a fresh deployment the datagen panels stay empty until the first Spark stage reports.
 
 ## Local metrics
 
@@ -93,7 +100,7 @@ Every `lakebench run` writes `lakebench-output/runs/run-<id>/metrics.json`. It h
 
 ### Platform metrics
 
-After a run, `PlatformCollector` queries the shared Prometheus for the deployment's namespace over the run window: CPU and memory per pod, and Trino completed and failed queries. The report's Platform Metrics section shows them, or why they were not collected (observability off, Prometheus not found or not reachable, no pod series). No S3 I/O and no Spark engine metrics are collected.
+After a run, `PlatformCollector` queries the deployment's own Prometheus (`http://lakebench-prometheus.<namespace>.svc:9090`) over the run window: CPU and memory per pod, and Trino completed and failed queries. The report's Platform Metrics section shows them, or why they were not collected (observability off, Prometheus not reachable, kubelet role not bound, or no pod series). No S3 I/O and no Spark engine metrics are collected.
 
 ### S3 metrics
 

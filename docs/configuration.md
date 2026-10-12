@@ -68,15 +68,16 @@ The removed keys, with what to do instead (generated from each model's
 | `architecture.table_format.iceberg.file_format` | Iceberg tables are always written as Parquet. |
 | `architecture.table_format.iceberg.properties` | no table property is applied from the config. |
 | `description` | nothing read it; keep notes in a YAML comment. |
-| `images.grafana` | Grafana deploys from the kube-prometheus-stack chart; pin it with observability.chart_version. |
+| `images.grafana` | set observability.grafana_image to pin the per-namespace Grafana (digest-pinned). |
 | `images.hive` | the Stackable HiveCluster always runs Hive 3.1.3 (Hive 4 breaks Iceberg and Trino ANALYZE), whatever images.hive named, and run provenance records 3.1.3. |
-| `images.prometheus` | Prometheus deploys from the kube-prometheus-stack chart; pin it with observability.chart_version. |
+| `images.prometheus` | set observability.prometheus_image to pin the per-namespace Prometheus (digest-pinned). |
 | `images.pull_secrets` | No deployer ever applied it; removed in v1.5. |
-| `observability.prometheus_stack_enabled` | observability.enabled always installs or reuses the full stack, Prometheus included. |
+| `observability.chart_version` | observability no longer deploys the kube-prometheus-stack Helm chart; pin the images with observability.prometheus_image and observability.grafana_image. |
+| `observability.prometheus_stack_enabled` | observability.enabled always deploys the full per-namespace stack. |
 | `observability.reports` | every run writes report.html into its run directory under lakebench-output/runs; 'lakebench report --render' writes a fresh copy to lakebench-output/reports/ without overwriting. |
 | `observability.s3_metrics_enabled` | PodMonitor deployment is not gated on it. |
 | `observability.spark_metrics_enabled` | PodMonitor deployment is not gated on it. |
-| `observability.storage_class` | the Prometheus volume claim is created without a storageClassName, so it uses the cluster default StorageClass. |
+| `observability.storage_class` | set observability.prometheus_storage_class to pick a StorageClass for the Prometheus PVC; empty uses the cluster default. |
 | `platform.compute.spark.driver` | per-executor sizing is fixed in the job profiles; use platform.compute.spark.<job>_executors for counts and driver_memory/driver_cores for the driver. |
 | `platform.compute.spark.executor` | per-executor sizing is fixed in the job profiles; use platform.compute.spark.<job>_executors for counts and driver_memory/driver_cores for the driver. |
 | `platform.storage.s3.secret_ref` | lakebench never reads an existing Secret: deploy writes the S3 Secret from access_key and secret_key. Set those instead (use ${VAR} substitution, for example access_key: "${S3_ACCESS_KEY}", to keep the keys out of the file). |
@@ -757,12 +758,14 @@ Fully-qualified table names (`namespace.table`). The catalog prefix is added at 
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
-| `observability.enabled` | boolean | `false` | advanced | Deploy the observability stack (Prometheus + Grafana). |
-| `observability.dashboards_enabled` | boolean | `true` | advanced | Deploy Grafana dashboards. |
-| `observability.retention` | string | `7d` | advanced | Prometheus data retention period. |
+| `observability.enabled` | boolean | `false` | advanced | Deploy the per-namespace Prometheus and Grafana. |
+| `observability.dashboards_enabled` | boolean | `true` | advanced | Deploy the Grafana dashboard. Grafana itself still runs. |
+| `observability.retention` | string | `7d` | advanced | Prometheus data retention. |
 | `observability.storage` | string | `10Gi` | advanced | Prometheus PVC size. |
-| `observability.chart_version` | string | `87.19.2` | advanced | `kube-prometheus-stack` Helm chart version. Bundles Prometheus and Grafana as one unit -- there is no separate Prometheus/Grafana version field. The version a fresh `lakebench admin install --component observability` uses; an installed release keeps its version. |
-| `observability.pushgateway_enabled` | boolean | `true` | advanced | Deploy a Prometheus Pushgateway for Spark job metrics when observability is enabled. A live view only; `metrics.json` stays the record. |
+| `observability.prometheus_image` | string | `quay.io/prometheus/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996` | advanced | Prometheus image, pinned by digest. |
+| `observability.grafana_image` | string | `docker.io/grafana/grafana:12.1.1@sha256:5749a0e982878aedaa2d320ed14d3bdce7a040a938f482258670009d419a597f` | advanced | Grafana image, pinned by digest. |
+| `observability.prometheus_storage_class` | string | `""` | advanced | StorageClass of the Prometheus PVC; empty uses the cluster default. |
+| `observability.pushgateway_enabled` | boolean | `true` | advanced | Deploy a Prometheus Pushgateway for Spark job metrics. A live view only; ``metrics.json`` stays the record. |
 | `observability.pushgateway_image` | string | `prom/pushgateway:v1.11.1` | advanced | Pushgateway image. |
 | `observability.pushgateway_storage` | string | `1Gi` | advanced | Pushgateway persistent volume size. |
 | `observability.pushgateway_storage_class` | string | `px-csi-scratch` | advanced | StorageClass of the Pushgateway volume. |
