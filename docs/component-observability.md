@@ -10,8 +10,8 @@ Reference: enable and read the optional Prometheus and Grafana stack, the per-de
 
 ## Version and image
 
-- Prometheus and Grafana are pinned by digest in the config schema: `observability.prometheus_image`, `observability.grafana_image`. Pushgateway: `observability.pushgateway_image`. See the [version matrix](compatibility-matrix.md#component-version-matrix).
-- The JMX exporter sidecar image is `images.jmx_exporter`, pinned by digest.
+- Prometheus and Grafana are pinned by tag in the config schema: `observability.prometheus_image`, `observability.grafana_image`. Override with a `name:tag@sha256:...` value for reproducibility. Pushgateway: `observability.pushgateway_image`. See the [version matrix](compatibility-matrix.md#component-version-matrix).
+- The JMX exporter sidecar image is `images.jmx_exporter`, tag-pinned.
 
 ## Configuration keys
 

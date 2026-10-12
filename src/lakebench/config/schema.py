@@ -405,13 +405,8 @@ class ImagesConfig(ConfigModel):
             "(Hive 4 breaks Iceberg and Trino ANALYZE), whatever images.hive named, and run "
             f"provenance records {STACKABLE_HIVE_VERSION}."
         ),
-        "prometheus": (
-            "set observability.prometheus_image to pin the per-namespace Prometheus "
-            "(digest-pinned)."
-        ),
-        "grafana": (
-            "set observability.grafana_image to pin the per-namespace Grafana (digest-pinned)."
-        ),
+        "prometheus": ("set observability.prometheus_image to pin the per-namespace Prometheus."),
+        "grafana": ("set observability.grafana_image to pin the per-namespace Grafana."),
     }
     _removed_defaults: ClassVar[dict[str, Any]] = {
         # Any value naming the Hive that runs changed nothing.
@@ -487,21 +482,18 @@ class ImagesConfig(ConfigModel):
     # its output is byte-identical to 3f4729b6 (AML continuous and batch
     # locally, an AML scale-10 batch corpus on the cluster from an earlier
     # push of this tag built from the same context). The default
-    # names the tag and the digest; the runtime pulls the digest, so a
-    # re-push of the tag cannot move it.
     # 5d7ce61a (datagen_rs tree 5d7ce61aa0c4, pushed 2026-10-09):
     # datagen-v2-rs-0.4. Surnames are synthetic at every scale and the surname
     # and company-head pools grow in proportion to the population, so
     # screening namesakes per watchlist entry stay flat across scale. Every
     # AML corpus differs from 3cb67f92's, scale 1 included; the Customer 360
-    # generator is unchanged.
-    datagen: str = (
-        "docker.io/sillidata/lb-datagen:5d7ce61a"
-        "@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc"
-    )
-    """Data generator image, pinned by tag and digest (the digest is what is pulled).
-    In continuous mode it generates until the run window ends: AML as successive
-    24-month periods of the same bank, Customer360 as successive time slices.
+    # generator is unchanged. Tag-pinned: a run that must be reproduced byte
+    # for byte should set images.datagen with a '@sha256:...' digest.
+    datagen: str = "docker.io/sillidata/lb-datagen:5d7ce61a"
+    """Data generator image. Tag-pinned; override with a digest for byte-for-byte
+    reproducibility. In continuous mode it generates until the run window ends:
+    AML as successive 24-month periods of the same bank, Customer360 as successive
+    time slices.
     """
     spark: str = "apache/spark:4.1.1-python3"
     """Spark runtime image. Unset: the image of the config's recipe (or of the recipe its
@@ -525,14 +517,13 @@ class ImagesConfig(ConfigModel):
     """Python image the DuckDB query engine pod runs in; DuckDB itself is pinned by
     `architecture.query_engine.duckdb.version`.
     """
-    # Bitnami publishes only `latest` for this image now (versioned tags
-    # moved to bitnamilegacy), so the default names it by digest: a re-push of
-    # `latest` cannot change what a deployment runs (checked 2026-10-09).
-    jmx_exporter: str = (
-        "bitnami/jmx-exporter:latest"
-        "@sha256:873527b34b55ca7b8f0b5f7efdf18c93e4337d06709da674ba7284fd3f6316de"
-    )
-    """JMX exporter image for the metrics sidecars, used when observability is enabled."""
+    # Bitnami moved versioned tags to the bitnamilegacy repo; `bitnami/jmx-exporter`
+    # itself now only publishes `:latest`. The default names a versioned tag from
+    # bitnamilegacy (verified pullable 2026-10-12) so a run is reproducible
+    # without baking a digest the registry may garbage-collect.
+    jmx_exporter: str = "bitnamilegacy/jmx-exporter:1.4.0"
+    """JMX exporter image for the metrics sidecars, used when observability is enabled.
+    Tag-pinned; override with a digest for byte-for-byte reproducibility."""
 
     pull_policy: ImagePullPolicy = ImagePullPolicy.ALWAYS
     """`Always`, `IfNotPresent`, or `Never`."""
@@ -2895,16 +2886,10 @@ class ObservabilityConfig(ConfigModel):
     """Prometheus data retention."""
     storage: str = "10Gi"
     """Prometheus PVC size."""
-    prometheus_image: str = (
-        "quay.io/prometheus/prometheus:v3.5.0"
-        "@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996"
-    )
-    """Prometheus image, pinned by digest."""
-    grafana_image: str = (
-        "docker.io/grafana/grafana:12.1.1"
-        "@sha256:5749a0e982878aedaa2d320ed14d3bdce7a040a938f482258670009d419a597f"
-    )
-    """Grafana image, pinned by digest."""
+    prometheus_image: str = "quay.io/prometheus/prometheus:v3.5.0"
+    """Prometheus image. Tag-pinned; override with a digest for reproducibility."""
+    grafana_image: str = "docker.io/grafana/grafana:12.1.1"
+    """Grafana image. Tag-pinned; override with a digest for reproducibility."""
     prometheus_storage_class: str = ""
     """StorageClass of the Prometheus PVC; empty uses the cluster default."""
     pushgateway_enabled: bool = True

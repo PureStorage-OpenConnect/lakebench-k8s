@@ -3,9 +3,9 @@
 Reference: building, testing and configuring a custom data generator image, and how its corpora are identified.
 
 - The generator runs as a container image on Kubernetes.
-- Default image: `docker.io/sillidata/lb-datagen:5d7ce61a` (digest
-  `sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc`),
-  built from `datagen_rs/` (Rust).
+- Default image: `docker.io/sillidata/lb-datagen:5d7ce61a`, built from
+  `datagen_rs/` (Rust). Tag-pinned; set `images.datagen` with a
+  `@sha256:...` suffix to pin a run to a specific digest.
 - It produces the Customer360 schema ([Customer 360 data model](benchmarks/c360/data-model.md#21-bronze-columns-41-arrow-schema-customer360_schema))
   and the Financial `pacs.008` schema, chosen by `--schema`.
 

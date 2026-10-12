@@ -14,9 +14,8 @@ generator image.
   `src/lakebench/config/datagen_lineage.yaml` (`declared:<tag>` when no digest
   was observed). A re-pin with byte-compare evidence keeps the id; any other
   image change moves it (`metrics/corpus_identity.py`).
-- Default image: `docker.io/sillidata/lb-datagen:5d7ce61a`
-  (sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc).
-  It has no lineage row, so its corpora get a corpus id of their own.
+- Default image: `docker.io/sillidata/lb-datagen:5d7ce61a`. It has no
+  lineage row, so its corpora get a corpus id of their own.
 
 **Seed policy.** `datagen.seed` when set, else 42. Any non-negative seed is
 accepted; the AML spent-seed and [registered-look](../../glossary.md#look) guards do not apply, and

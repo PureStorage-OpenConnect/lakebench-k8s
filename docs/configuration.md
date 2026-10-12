@@ -68,9 +68,9 @@ The removed keys, with what to do instead (generated from each model's
 | `architecture.table_format.iceberg.file_format` | Iceberg tables are always written as Parquet. |
 | `architecture.table_format.iceberg.properties` | no table property is applied from the config. |
 | `description` | nothing read it; keep notes in a YAML comment. |
-| `images.grafana` | set observability.grafana_image to pin the per-namespace Grafana (digest-pinned). |
+| `images.grafana` | set observability.grafana_image to pin the per-namespace Grafana. |
 | `images.hive` | the Stackable HiveCluster always runs Hive 3.1.3 (Hive 4 breaks Iceberg and Trino ANALYZE), whatever images.hive named, and run provenance records 3.1.3. |
-| `images.prometheus` | set observability.prometheus_image to pin the per-namespace Prometheus (digest-pinned). |
+| `images.prometheus` | set observability.prometheus_image to pin the per-namespace Prometheus. |
 | `images.pull_secrets` | No deployer ever applied it; removed in v1.5. |
 | `observability.chart_version` | observability no longer deploys the kube-prometheus-stack Helm chart; pin the images with observability.prometheus_image and observability.grafana_image. |
 | `observability.prometheus_stack_enabled` | observability.enabled always deploys the full per-namespace stack. |
@@ -237,7 +237,7 @@ name: my-lakehouse
 # Container images for every component. Override these for air-gapped
 # registries or custom builds.
 images:
-  datagen: docker.io/sillidata/lb-datagen:5d7ce61a@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc
+  datagen: docker.io/sillidata/lb-datagen:5d7ce61a
   spark: apache/spark:4.1.1-python3       # the recipe's default; 4.0.2 on Polaris recipes
   postgres: postgres:17
   polaris: apache/polaris:1.6.0
@@ -503,7 +503,7 @@ Container images for every deployed component. Override for air-gapped registrie
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
-| `images.datagen` | string | `docker.io/sillidata/lb-datagen:5d7ce61a@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc` | advanced | Data generator image, pinned by tag and digest (the digest is what is pulled). In continuous mode it generates until the run window ends: AML as successive 24-month periods of the same bank, Customer360 as successive time slices. |
+| `images.datagen` | string | `docker.io/sillidata/lb-datagen:5d7ce61a` | advanced | Data generator image. Tag-pinned; override with a digest for byte-for-byte reproducibility. In continuous mode it generates until the run window ends: AML as successive 24-month periods of the same bank, Customer360 as successive time slices. |
 | `images.spark` | string | `apache/spark:4.1.1-python3` | advanced | Spark runtime image. Unset: the image of the config's recipe (or of the recipe its components name): `4.1.1-python3` on the Hive recipes, `4.0.2-python3` on the Polaris recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none`; 4.0.2 also when the config writes a table format version Spark 4.1 cannot run (Delta 4.0.0). |
 | `images.postgres` | string | `postgres:17` | advanced | PostgreSQL image (metadata backend). |
 | `images.polaris` | string | `apache/polaris:1.6.0` | advanced | Apache Polaris REST catalog image. |
@@ -511,7 +511,7 @@ Container images for every deployed component. Override for air-gapped registrie
 | `images.unity` | string | `unitycatalog/unitycatalog:main` | advanced | Unity Catalog server image (Unity catalog only; no recipe uses it). |
 | `images.trino` | string | `trinodb/trino:483` | advanced | Trino query engine image. |
 | `images.duckdb` | string | `python:3.11-slim` | advanced | Python image the DuckDB query engine pod runs in; DuckDB itself is pinned by `architecture.query_engine.duckdb.version`. |
-| `images.jmx_exporter` | string | `bitnami/jmx-exporter:latest@sha256:873527b34b55ca7b8f0b5f7efdf18c93e4337d06709da674ba7284fd3f6316de` | advanced | JMX exporter image for the metrics sidecars, used when observability is enabled. |
+| `images.jmx_exporter` | string | `bitnamilegacy/jmx-exporter:1.4.0` | advanced | JMX exporter image for the metrics sidecars, used when observability is enabled. Tag-pinned; override with a digest for byte-for-byte reproducibility. |
 | `images.pull_policy` | one of `Always`, `IfNotPresent`, `Never` | `Always` | advanced | `Always`, `IfNotPresent`, or `Never`. |
 
 ### Platform -- Kubernetes
@@ -762,8 +762,8 @@ Fully-qualified table names (`namespace.table`). The catalog prefix is added at 
 | `observability.dashboards_enabled` | boolean | `true` | advanced | Deploy the Grafana dashboard. Grafana itself still runs. |
 | `observability.retention` | string | `7d` | advanced | Prometheus data retention. |
 | `observability.storage` | string | `10Gi` | advanced | Prometheus PVC size. |
-| `observability.prometheus_image` | string | `quay.io/prometheus/prometheus:v3.5.0@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996` | advanced | Prometheus image, pinned by digest. |
-| `observability.grafana_image` | string | `docker.io/grafana/grafana:12.1.1@sha256:5749a0e982878aedaa2d320ed14d3bdce7a040a938f482258670009d419a597f` | advanced | Grafana image, pinned by digest. |
+| `observability.prometheus_image` | string | `quay.io/prometheus/prometheus:v3.5.0` | advanced | Prometheus image. Tag-pinned; override with a digest for reproducibility. |
+| `observability.grafana_image` | string | `docker.io/grafana/grafana:12.1.1` | advanced | Grafana image. Tag-pinned; override with a digest for reproducibility. |
 | `observability.prometheus_storage_class` | string | `""` | advanced | StorageClass of the Prometheus PVC; empty uses the cluster default. |
 | `observability.pushgateway_enabled` | boolean | `true` | advanced | Deploy a Prometheus Pushgateway for Spark job metrics. A live view only; ``metrics.json`` stays the record. |
 | `observability.pushgateway_image` | string | `prom/pushgateway:v1.11.1` | advanced | Pushgateway image. |

@@ -165,8 +165,8 @@ Defaults come from `src/lakebench/config/schema.py` and
 | Trino | `trinodb/trino:483` | 454 or later with Polaris | `images.trino` |
 | DuckDB | 1.5.5, pip-installed on `python:3.11-slim` (wheel resolved by `lb-deps`) | Iceberg only | `architecture.query_engine.duckdb.version`, `images.duckdb` |
 | PostgreSQL | `postgres:17` | Tested with 16, 17, 18 | `images.postgres` |
-| Prometheus | `quay.io/prometheus/prometheus:v3.5.0`, digest-pinned | Per deployment, in its namespace | `observability.prometheus_image` |
-| Grafana | `docker.io/grafana/grafana:12.1.1`, digest-pinned | Per deployment, in its namespace | `observability.grafana_image` |
+| Prometheus | `quay.io/prometheus/prometheus:v3.5.0` | Per deployment, in its namespace | `observability.prometheus_image` |
+| Grafana | `docker.io/grafana/grafana:12.1.1` | Per deployment, in its namespace | `observability.grafana_image` |
 | Pushgateway | `prom/pushgateway:v1.11.1` | Per deployment, in its namespace | `observability.pushgateway_image` |
 
 The deployment's dependency server (`lb-deps`) resolves the Iceberg or Delta

@@ -21,7 +21,7 @@ identity has two parts.
   corpus.
 
 **Image.** `images.datagen` defaults to
-`docker.io/sillidata/lb-datagen:5d7ce61a@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc`;
+`docker.io/sillidata/lb-datagen:5d7ce61a`;
 the runtime pulls the digest.
 
 - 1.7.0 shipped `lb-datagen:2a36ae21` (`sha256:0502b700...`). Its five-case
