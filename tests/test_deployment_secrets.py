@@ -293,6 +293,8 @@ def _polaris_db(role_out: str, core: FakeCore, cfg: LakebenchConfig | None = Non
             return "CREATE ROLE"
         if sql.startswith("ALTER ROLE"):
             return "ALTER ROLE"
+        if sql.startswith("CREATE SCHEMA"):
+            return "CREATE SCHEMA"
         return "GRANT"
 
     with (
@@ -407,6 +409,8 @@ def test_create_race_falls_through_to_sync():
             return 'ERROR:  role "polaris" already exists'
         if sql.startswith("ALTER ROLE"):
             return "ALTER ROLE"
+        if sql.startswith("CREATE SCHEMA"):
+            return "CREATE SCHEMA"
         return "polaris" if "pg_database" in sql else "GRANT"
 
     with (
@@ -465,3 +469,13 @@ def test_job_redaction_regex_always_hides_the_catalog_credential(user):
     ours = re.match(r"\(\?i:[^)]*\)", regex)
     assert ours and re.search(ours.group(0), "spark.sql.catalog.lakehouse.credential")
     assert user in regex
+
+
+def test_polaris_db_creates_the_schema_polaris_1_8_bootstrap_needs():
+    sqls = _polaris_db("lbrole:0", FakeCore())
+    schema = [s for s in sqls if s.startswith("CREATE SCHEMA")]
+    assert schema == ["CREATE SCHEMA IF NOT EXISTS polaris_schema AUTHORIZATION polaris;"]
+    # After the database and its grants, before anything bootstraps.
+    assert sqls.index(schema[0]) > max(
+        i for i, s in enumerate(sqls) if s.startswith("GRANT ALL ON SCHEMA")
+    )

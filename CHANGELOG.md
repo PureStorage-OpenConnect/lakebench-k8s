@@ -28,9 +28,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Per-deployment Grafana password.** Deploy generates one into the `lakebench-grafana` Secret and preserves it across redeploys.
 - **`deploy` prints how to reach Grafana.** The success panel shows the Grafana URL and the admin login. On OpenShift it creates an edge-TLS Route (`lakebench-grafana`) and prints its `https://` URL; `observability.grafana_route: false` skips it. Elsewhere it prints `http://localhost:3000` and the port-forward. Prometheus and the Pushgateway are never exposed; query Prometheus from Grafana's Explore view (the panel says so).
+- **Polaris deploy creates the `polaris_schema` schema itself.** Polaris 1.8 no longer creates its JDBC schema during `bootstrap` (a DBA task), so deploy runs `CREATE SCHEMA IF NOT EXISTS polaris_schema AUTHORIZATION polaris` in the `polaris` database first. Earlier Polaris releases create the same schema with `IF NOT EXISTS`, so this is safe for them, and an existing deployment already has it.
 - **Fixed Service names in each namespace:** `lakebench-prometheus`, `lakebench-grafana`, `lakebench-pushgateway`. Port-forwarding no longer requires looking up chart-truncated names.
 - **`io` block in the run record.** Storage bytes read and written as the engines report them: every Trino benchmark query (from `system.runtime.tasks`, read once per stream after the timed queries) and the datagen total, each with its basis and time window; Spark stages and other query engines are listed as not measured. Nothing is added inside a timed query. See [Run records](docs/benchmarking/records.md#storage-io).
 - **Storage I/O section in the report.** Trino read and written bytes per round, datagen's total, a MB/s chart from the queries' time windows, and an explicit list of what was not measured. See [HTML report](docs/benchmarking/html-report.md#storage-io).
+- **Workload replay tab in the report.** A batch run opens on a replay of its recorded stage and job windows, row counts and storage rate, beside the Scorecard tab. See [HTML report](docs/benchmarking/html-report.md#views).
 
 ### Changed
 
