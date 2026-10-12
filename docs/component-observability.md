@@ -87,14 +87,14 @@ kubectl port-forward -n <namespace> svc/lakebench-grafana 3000:3000   # then htt
 kubectl get secret -n <namespace> lakebench-grafana -o jsonpath='{.data.admin-password}' | base64 -d
 ```
 
-The **Lakebench Overview** dashboard is provisioned from a ConfigMap in the deployment namespace. A `run_id` variable selects among the runs that landed in this namespace. Panels:
+The **Lakebench Overview** dashboard is provisioned from a ConfigMap in the deployment namespace. A `run_id` variable selects among the runs that landed in this namespace. Rows:
 
-- datagen throughput (MB/s per pod, labelled as capped by the pod resources Lakebench sets), rows written by pod, phase seconds
-- bronze/silver stage rows (input vs output), silver per-table row counts, pipeline stage elapsed seconds
-- Trino running queries and query throughput
-- CPU usage by pod (containers only, each counted once)
+- **Resources by component** (cAdvisor, so they work for batch and continuous runs): CPU, memory, network receive and transmit for datagen, each Spark stage (driver plus executors), Trino coordinator and workers, Polaris, Postgres, the observability pods and the dependency server; Spark executors running by stage; datagen pods running.
+- **Trino** (JMX exporter): queries running and queued, completed and failed per minute, active tasks and queued executor tasks, JVM heap and GC time per pod.
+- **Datagen** (Pushgateway): throughput, rows written, bytes written and elapsed seconds per pod.
+- **Pipeline stages** (Pushgateway): stage rows in and out, stage input size, silver per-table row counts, stage elapsed seconds.
 
-The datagen and pipeline panels read Pushgateway series, so they are empty with `pushgateway_enabled: false`. The `run_id` variable comes from the pipeline stage series, so on a fresh deployment the datagen panels stay empty until the first Spark stage reports.
+Spark itself exposes no metrics: the streaming drivers run with the Spark UI off, which also turns off the Prometheus endpoint, so executor and driver series come from cAdvisor only. Batch stages push stage series to the Pushgateway; continuous stages do not, so the pipeline-stage panels stay empty in a continuous run. The datagen and pipeline panels are empty with `pushgateway_enabled: false`. The `run_id` variable comes from the pipeline stage series, so on a fresh deployment the datagen panels stay empty until the first Spark stage reports.
 
 ## Local metrics
 

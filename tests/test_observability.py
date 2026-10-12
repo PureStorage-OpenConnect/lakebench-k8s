@@ -435,3 +435,41 @@ class TestObservabilityComponent:
         cfg = make_config(observability={"enabled": True})
         assert Observability().versioned is False
         assert Observability().config_version(Settings.from_config(cfg)) is None
+
+
+class TestDashboardTemplate:
+    """The provisioned Grafana dashboard renders to valid JSON Grafana can load."""
+
+    def _dash(self):
+        import json
+
+        import yaml
+
+        from lakebench.deploy.engine import TemplateRenderer
+
+        text = TemplateRenderer().render("grafana/dashboard-configmap.yaml.j2", {"namespace": "ns"})
+        return json.loads(yaml.safe_load(text)["data"]["lakebench-overview.json"])
+
+    def test_panels_are_well_formed(self):
+        d = self._dash()
+        assert d["uid"] == "lakebench-overview"
+        ids = [p["id"] for p in d["panels"]]
+        assert len(ids) == len(set(ids))
+        for p in d["panels"]:
+            g = p["gridPos"]
+            assert 0 <= g["x"] and g["x"] + g["w"] <= 24
+            for t in p.get("targets", []):
+                assert t["expr"] and t["refId"]
+                assert t["datasource"]["uid"] == "${datasource}"
+
+    def test_grafana_legend_templates_survive_jinja(self):
+        d = self._dash()
+        legends = {t["legendFormat"] for p in d["panels"] for t in p.get("targets", [])}
+        assert "{{pod}}" in legends and "pod {{node_id}}" in legends
+
+    def test_resource_panels_cover_every_component(self):
+        d = self._dash()
+        cpu = next(p for p in d["panels"] if p["title"].startswith("CPU by component"))
+        names = {t["legendFormat"] for t in cpu["targets"]}
+        assert {"datagen", "bronze-ingest", "silver-stream", "gold-refresh"} <= names
+        assert {"trino coordinator", "trino workers", "polaris", "postgres"} <= names
