@@ -111,6 +111,7 @@ def run_prerequisites(
             sustained=sustained,
             datagen_runs=datagen_runs,
             sizing_capacity=sizing_capacity,
+            advisory=True,
         )
     )
 
@@ -323,7 +324,7 @@ def deploy_capacity_check(cfg) -> PrereqResult:
     ``run``'s preflight fails closed before anything is measured. A config
     value, or a worker node quantity, it cannot read still refuses.
     """
-    return _check_cluster_capacity(cfg, datagen_runs=False, fail_closed=False)
+    return _check_cluster_capacity(cfg, datagen_runs=False, fail_closed=False, advisory=True)
 
 
 def _check_cluster_capacity(
@@ -333,6 +334,7 @@ def _check_cluster_capacity(
     datagen_runs: bool = True,
     sizing_capacity: Any = SAME_CAPACITY,
     fail_closed: bool = True,
+    advisory: bool = False,
 ) -> PrereqResult:
     """Check that the cluster's free capacity holds the config's floor request.
 
@@ -359,7 +361,8 @@ def _check_cluster_capacity(
     ``CSIStorageCapacity`` its StorageClass publishes; when none is
     published the run is admitted with a warning and the record says
     ``not_measurable``. With *fail_closed* False (``deploy``), capacity that
-    cannot be read passes with a warning instead.
+    cannot be read passes with a warning instead. With *advisory* (``deploy``
+    and ``run``), a shortfall also passes with a warning.
     """
     from lakebench.config.sizing import plan_requirements
     from lakebench.k8s import get_k8s_client
@@ -465,7 +468,7 @@ def _check_cluster_capacity(
             datagen_runs,
             sizing_capacity,
             fallback,
-            advisory=not fail_closed,
+            advisory=advisory,
         )
     except ContextConflictError:
         raise
@@ -497,9 +500,9 @@ def _decide_capacity(
 ) -> PrereqResult:
     """The capacity decision on a free capacity that was read.
 
-    *advisory* (``deploy``) turns a refusal into a passing check whose message
-    carries the shortfalls: the model can be wrong about a cluster, and deploy
-    only creates the stack, so ``run`` is where capacity is enforced.
+    *advisory* turns a refusal into a passing check whose message carries the
+    shortfalls: the model can be wrong about a cluster, so a shortfall warns
+    and the command goes on. A pod that cannot be scheduled shows as Pending.
 
     *fallback* is set (to why free capacity could not be read) when *found*
     is the worker nodes' allocatable instead (``deploy`` only): the check is
@@ -619,7 +622,7 @@ def _decide_capacity(
             name="cluster-capacity",
             passed=True,
             message=(
-                f"WARNING: estimated capacity shortfall, deploy continues -- {summary}: "
+                f"WARNING: estimated capacity shortfall, continuing -- {summary}: "
                 f"{shortfall_text}. {cluster_line.strip().splitlines()[0]}"
             ),
             hint=hint_lines,

@@ -333,7 +333,8 @@ one process is refused (exit 3).
 Online:
 
 - A failing prerequisite, a scratch StorageClass, Spark Operator or
-  Stackable that cannot be checked, or too little free capacity: exit 4.
+  Stackable that cannot be checked: exit 4. Too little free capacity is a
+  warning, not a refusal.
 - A missing shared component prints
   `Next: (cluster admin) lakebench admin install --component <component>`.
 - An unreachable cluster: exit 4, with "use --offline".

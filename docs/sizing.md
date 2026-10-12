@@ -142,9 +142,10 @@ the cluster can still take:
   minus what pods in other namespaces already request. Schedulable means
   Ready, not cordoned, and no `NoSchedule` or `NoExecute` taint. An
   untainted control-plane node counts.
-- **On a shortfall:** the run fails at once with the shortfall, naming the
-  need, the free amount and the allocatable amount. It does not leave pods
-  `Pending` until the job times out.
+- **On a shortfall:** the run prints a warning naming the need, the free
+  amount and the allocatable amount, and goes on. The estimate is a model,
+  not a measurement of the cluster, so a pod that cannot be scheduled shows
+  as `Pending`.
 - **Fails closed:** when the node or pod list cannot be read (no
   permission, an error, a pod on a node the list does not show), the run is
   refused with exit 4, "capacity could not be read".
@@ -166,9 +167,9 @@ the cluster can still take:
 `lakebench deploy` runs the same check, without datagen, before it creates
 anything. So do `run --deploy-only`, `--generate-only` and run's auto-deploy.
 
-- It refuses with exit 4 when free capacity, or the largest free node,
+- It warns, and goes on, when free capacity, or the largest free node,
   cannot hold the pipeline and the always-on pods. It sizes against the
-  worker nodes' allocatable. It has no flag to skip the check.
+  worker nodes' allocatable.
 - When only the pod side cannot be read (a pod list it may not read, a pod
   on a node the list does not show), it checks the workers' allocatable
   instead.
