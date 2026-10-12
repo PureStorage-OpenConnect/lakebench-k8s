@@ -286,9 +286,9 @@ def _check_stackable(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResult:
     return _ok("Stackable hive, secret, listener and commons operators running")
 
 
-# -- observability stack -------------------------------------------------------
+# -- observability (kubelet-metrics ClusterRole) ------------------------------
 
-OBSERVABILITY_RELEASE = "lakebench-observability"
+from lakebench.deploy.observability import KUBELET_METRICS_CLUSTER_ROLE  # noqa: E402
 
 
 def _observability_applies(cfg: LakebenchConfig) -> bool:
@@ -296,17 +296,21 @@ def _observability_applies(cfg: LakebenchConfig) -> bool:
 
 
 def _check_observability(cfg: LakebenchConfig, r: ClusterReader) -> PrereqResult:
-    deps = r.deployments(f"release={OBSERVABILITY_RELEASE}")
-    if not deps:
-        return _fail(f"no {OBSERVABILITY_RELEASE} release found")
-    namespaces = ", ".join(sorted({d.namespace for d in deps}))
-    not_ready = [d.name for d in deps if d.ready_replicas < 1]
-    if not_ready:
+    """Non-blocking: the stack still deploys without the role, with CPU and
+    memory not collected. A missing role is a warning, so admin doctor on a
+    fresh cluster surfaces the admin step without failing deploys."""
+    exists = r.cluster_role_exists(KUBELET_METRICS_CLUSTER_ROLE)
+    if exists is True:
+        return _ok(f"ClusterRole {KUBELET_METRICS_CLUSTER_ROLE} exists")
+    if exists is None:
         return _warn(
-            f"shared observability stack in {namespaces} has no ready replica in "
-            f"{', '.join(not_ready)}"
+            f"cannot read ClusterRole {KUBELET_METRICS_CLUSTER_ROLE}; the per-deployment "
+            "Prometheus still deploys, but platform CPU and memory may read 'not collected'"
         )
-    return _ok(f"shared observability stack ready in {namespaces}")
+    return _warn(
+        f"ClusterRole {KUBELET_METRICS_CLUSTER_ROLE} not found; per-deployment "
+        "Prometheus still deploys, but platform CPU and memory read 'not collected'"
+    )
 
 
 # -- OpenShift SCC -------------------------------------------------------------
@@ -418,20 +422,21 @@ PREREQS: tuple[Prereq, ...] = (
     Prereq(
         id="observability-stack",
         component="observability",
-        title="Shared observability stack",
+        title="Kubelet metrics ClusterRole",
         when="`observability.enabled: true`",
         applies=_observability_applies,
         check=_check_observability,
         fix=(
             "A cluster admin runs `lakebench admin install --component observability "
-            "<config>` once per cluster, or set `observability.enabled: false`. To remove the "
-            f"stack later, a cluster admin runs `helm uninstall {OBSERVABILITY_RELEASE} -n "
-            f"{OBSERVABILITY_RELEASE}` once no deployment uses it."
+            "<config>` once per cluster to enable per-pod CPU and memory. Without it, the "
+            "per-deployment stack still runs; `destroy` removes each deployment's own "
+            "Prometheus, Grafana and Pushgateway with its namespace."
         ),
         doc=(
-            "Metrics go to one shared Prometheus and Grafana (kube-prometheus-stack, release "
-            f"`{OBSERVABILITY_RELEASE}`). Each deployment adds only its own PodMonitors; "
-            "`destroy` never removes the shared release."
+            "Each deployment runs its own Prometheus, Grafana and Pushgateway in its "
+            "namespace. The one cluster-scoped grant is a ClusterRole for the kubelet "
+            f"cAdvisor endpoint (`{KUBELET_METRICS_CLUSTER_ROLE}`); without it, platform "
+            "CPU and memory read 'not collected' in the report."
         ),
     ),
     Prereq(

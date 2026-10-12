@@ -121,25 +121,30 @@ def _preflight_check(cfg) -> None:
             )
             raise typer.Exit(ExitCode.PREREQUISITE)
 
-    # 4. The shared observability stack, when this deploy uses it: deploy
-    # never installs it, so stop before creating anything rather than at the
-    # last step. An unreadable answer is left to the observability step.
+    # 4. Observability runs per deployment, in this namespace: deploy
+    # applies it. Warn if the kubelet-metrics ClusterRole is missing (the
+    # one piece a cluster admin installs); the stack still deploys, but
+    # per-pod CPU and memory read "not collected" in the report.
     if cfg.observability.enabled:
-        release_ns: str | None = ""
         try:
-            from lakebench.deploy.observability import find_observability_release
+            from lakebench.deploy.observability import (
+                KUBELET_METRICS_CLUSTER_ROLE,
+                kubelet_cluster_role_exists,
+            )
 
-            release_ns = find_observability_release(cfg.platform.kubernetes.context or None)
+            present = kubelet_cluster_role_exists(
+                context=cfg.platform.kubernetes.context or None,
+            )
         except Exception:
             logger.debug("Preflight observability check skipped", exc_info=True)
-        if release_ns is None:
-            print_error("The shared observability stack (kube-prometheus-stack) is not installed")
-            print_info(
-                "A cluster admin installs it once:\n"
-                "  lakebench admin install --component observability <config>\n"
-                "Or set observability.enabled: false"
+            present = None
+        if present is False:
+            print_warning(
+                f"ClusterRole {KUBELET_METRICS_CLUSTER_ROLE} is not present; "
+                "platform CPU and memory will read 'not collected' in the report. "
+                "A cluster admin runs 'lakebench admin install --component observability' "
+                "to enable them."
             )
-            raise typer.Exit(ExitCode.PREREQUISITE)
 
 
 def _build_component_list(cfg) -> str:
@@ -720,15 +725,14 @@ def _deploy_impl(
             ),
             None,
         )
-        if obs_result and obs_result.details:
-            # The stack is shared and lives in its own namespace.
-            obs_ns = obs_result.details.get("release_namespace") or cfg.get_namespace()
+        if obs_result:
+            obs_ns = cfg.get_namespace()
             success_msg += (
-                f"\n\n[bold]Monitoring (shared stack in namespace {obs_ns}):[/bold]"
-                f"\n  Services: [cyan]kubectl get svc -n {obs_ns} -l release=lakebench-observability[/cyan]"
+                f"\n\n[bold]Monitoring (per-deployment stack in namespace {obs_ns}):[/bold]"
                 f"\n  Grafana login: admin, password from [cyan]kubectl get secret -n {obs_ns} "
-                "lakebench-observability-grafana -o jsonpath='{.data.admin-password}' | base64 -d[/cyan]"
-                f"\n  Local access: [cyan]kubectl port-forward -n {obs_ns} svc/<grafana service> 3000:80[/cyan]"
+                "lakebench-grafana -o jsonpath='{.data.admin-password}' | base64 -d[/cyan]"
+                f"\n  Local access: [cyan]kubectl port-forward -n {obs_ns} svc/lakebench-grafana 3000:3000[/cyan]"
+                f"\n  Prometheus:   [cyan]kubectl port-forward -n {obs_ns} svc/lakebench-prometheus 9090:9090[/cyan]"
             )
 
         if next_steps:

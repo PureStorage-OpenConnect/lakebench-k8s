@@ -232,6 +232,7 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         owner_wi="registered-seed-secret",
         step=CATEGORY1_STEP,
     ),
+    # Pushgateway: Deployment, Service, PVC.
     *(
         Cat1Entry(
             api,
@@ -247,6 +248,32 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
             ("core_v1", "persistentvolumeclaims"),
         )
     ),
+    # Per-deployment Prometheus: SA + Role + RoleBinding, Deployment, Service,
+    # PVC, scrape ConfigMap.
+    Cat1Entry(
+        "apps_v1",
+        "deployments",
+        name="lakebench-prometheus",
+        owner_wi="per-ns-observability",
+        step=CATEGORY1_STEP,
+        when="observability",
+    ),
+    Cat1Entry(
+        "core_v1",
+        "services",
+        name="lakebench-prometheus",
+        owner_wi="per-ns-observability",
+        step=CATEGORY1_STEP,
+        when="observability",
+    ),
+    Cat1Entry(
+        "core_v1",
+        "persistentvolumeclaims",
+        name="lakebench-prometheus",
+        owner_wi="per-ns-observability",
+        step=CATEGORY1_STEP,
+        when="observability",
+    ),
     Cat1Entry(
         "core_v1",
         "configmaps",
@@ -255,24 +282,71 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         step=CATEGORY1_STEP,
         when="observability",
     ),
-    *(
-        Cat1Entry(
-            "custom",
-            "podmonitors",
-            name=n,
-            owner_wi=_PRE,
-            step=CATEGORY1_STEP,
-            group="monitoring.coreos.com",
-            version="v1",
-            when="observability",
-        )
-        for n in (
-            "lakebench-spark-driver",
-            "lakebench-spark-executor",
-            "lakebench-trino-coordinator",
-            "lakebench-trino-worker",
-            "lakebench-pushgateway",
-        )
+    Cat1Entry(
+        "core_v1",
+        "serviceaccounts",
+        name="lakebench-prometheus",
+        owner_wi="per-ns-observability",
+        step=CATEGORY1_STEP,
+        when="observability",
+    ),
+    Cat1Entry(
+        "rbac_v1",
+        "roles",
+        name="lakebench-prometheus",
+        owner_wi="per-ns-observability",
+        step=CATEGORY1_STEP,
+        when="observability",
+    ),
+    Cat1Entry(
+        "rbac_v1",
+        "rolebindings",
+        name="lakebench-prometheus",
+        owner_wi="per-ns-observability",
+        step=CATEGORY1_STEP,
+        when="observability",
+    ),
+    # Per-deployment Grafana: Secret, provisioning ConfigMap, dashboard
+    # ConfigMap, Deployment, Service.
+    Cat1Entry(
+        "apps_v1",
+        "deployments",
+        name="lakebench-grafana",
+        owner_wi="per-ns-observability",
+        step=CATEGORY1_STEP,
+        when="observability",
+    ),
+    Cat1Entry(
+        "core_v1",
+        "services",
+        name="lakebench-grafana",
+        owner_wi="per-ns-observability",
+        step=CATEGORY1_STEP,
+        when="observability",
+    ),
+    Cat1Entry(
+        "core_v1",
+        "secrets",
+        name="lakebench-grafana",
+        owner_wi="per-ns-observability",
+        step=CATEGORY1_STEP,
+        when="observability",
+    ),
+    Cat1Entry(
+        "core_v1",
+        "configmaps",
+        name="lakebench-grafana-provisioning",
+        owner_wi="per-ns-observability",
+        step=CATEGORY1_STEP,
+        when="observability",
+    ),
+    Cat1Entry(
+        "core_v1",
+        "configmaps",
+        name="lakebench-grafana-dashboard",
+        owner_wi="per-ns-observability",
+        step=CATEGORY1_STEP,
+        when="observability",
     ),
     # The dependency server's objects: last in the category1 step, and the
     # Deployment before its claim so pvc-protection lets the claim go once

@@ -995,8 +995,9 @@ def status(
             components.append(("lakebench-spark-thrift", "Deployment"))
         elif engine == "duckdb":
             components.append(("lakebench-duckdb", "Deployment"))
-        # Observability is a shared stack in its own namespace
-        # (deploy/observability.py), not a component of this deployment.
+        if cfg.observability.enabled:
+            components.append(("lakebench-prometheus", "Deployment"))
+            components.append(("lakebench-grafana", "Deployment"))
     else:
         # Namespace-only mode (no config loaded) -- show all possible components
         components = [
@@ -1007,8 +1008,8 @@ def status(
             ("lakebench-trino-worker", "StatefulSet"),
             ("lakebench-spark-thrift", "Deployment"),
             ("lakebench-duckdb", "Deployment"),
-            ("prometheus-lakebench-observability-ku-prometheus", "StatefulSet"),
-            ("lakebench-observability-grafana", "Deployment"),
+            ("lakebench-prometheus", "Deployment"),
+            ("lakebench-grafana", "Deployment"),
         ]
 
     marks = {

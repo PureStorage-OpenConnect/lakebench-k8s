@@ -384,23 +384,31 @@ READERS: dict[str, str] = {
     "architecture.tables.gold_alert_dispositions": "lakebench.benchmark.executor:get_executor",
     "architecture.tables.gold_cases": "lakebench.benchmark.executor:get_executor",
     "observability.enabled": "lakebench.deploy.datagen:DatagenDeployer._build_datagen_context",
-    "observability.dashboards_enabled": ("lakebench.deploy.observability:build_helm_values"),
-    "observability.retention": "lakebench.deploy.observability:build_helm_values",
-    "observability.storage": "lakebench.deploy.observability:build_helm_values",
-    "observability.chart_version": (
-        "lakebench.deploy.shared_components:Observability.config_version"
+    "observability.dashboards_enabled": (
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
+    ),
+    "observability.retention": "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack",
+    "observability.storage": "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack",
+    "observability.prometheus_image": (
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
+    ),
+    "observability.grafana_image": (
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
+    ),
+    "observability.prometheus_storage_class": (
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
     ),
     "observability.pushgateway_enabled": (
         "lakebench.deploy.datagen:DatagenDeployer._build_datagen_context"
     ),
     "observability.pushgateway_image": (
-        "lakebench.deploy.observability:ObservabilityDeployer._apply_podmonitor_templates"
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
     ),
     "observability.pushgateway_storage": (
-        "lakebench.deploy.observability:ObservabilityDeployer._apply_podmonitor_templates"
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
     ),
     "observability.pushgateway_storage_class": (
-        "lakebench.deploy.observability:ObservabilityDeployer._apply_podmonitor_templates"
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
     ),
     "spark.conf": "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_manifest",
 }

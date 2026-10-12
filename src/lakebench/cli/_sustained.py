@@ -656,20 +656,16 @@ def _run_c360_continuous_reset(
     return True
 
 
+PROMETHEUS_SERVICE_NAME = "lakebench-prometheus"
+
+
 def _find_prometheus_svc(namespace: str, context: str | None = None) -> str | None:
-    """Find the Prometheus service name in the given namespace.
+    """The Prometheus Service name in a deployment's namespace, or None.
 
-    The kube-prometheus-stack Helm chart truncates the service name based on
-    the release name length, so we cannot predict it. We try the K8s Python
-    client first, then fall back to kubectl.
+    One stack per deployment, with a fixed Service name; the function
+    verifies the Service exists before returning it, so callers that want
+    a port-forward target do not try one that is not there.
     """
-    from lakebench.deploy.observability import HELM_RELEASE_NAME
-
-    label = f"release={HELM_RELEASE_NAME},app=kube-prometheus-stack-prometheus"
-
-    # Attempt 1: K8s Python client, on the process's active cluster target
-    # (or this context's, when none is active yet). Never reloads another
-    # context; a conflicting one raises rather than reaching another cluster.
     from lakebench.k8s.target import ClusterTarget, ContextConflictError
 
     try:
@@ -677,35 +673,32 @@ def _find_prometheus_svc(namespace: str, context: str | None = None) -> str | No
 
         ClusterTarget.resolve(context=context or "").activate()
         v1 = k8s_client.CoreV1Api()
-        svcs = v1.list_namespaced_service(namespace, label_selector=label)
-        if svcs.items:
-            return svcs.items[0].metadata.name
+        v1.read_namespaced_service(PROMETHEUS_SERVICE_NAME, namespace)
+        return PROMETHEUS_SERVICE_NAME
     except ContextConflictError:
         raise
     except Exception:
         pass
 
-    # Attempt 2: kubectl fallback
     try:
         result = pinned_kubectl(
             context,
             [
                 "get",
                 "svc",
+                PROMETHEUS_SERVICE_NAME,
                 "-n",
                 namespace,
-                "-l",
-                label,
                 "-o",
-                "jsonpath={.items[0].metadata.name}",
+                "jsonpath={.metadata.name}",
             ],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        svc_name = result.stdout.strip()
-        if result.returncode == 0 and svc_name:
-            return svc_name
+        name = result.stdout.strip()
+        if result.returncode == 0 and name == PROMETHEUS_SERVICE_NAME:
+            return name
     except Exception:
         pass
 
@@ -725,20 +718,12 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
         return
 
     try:
-        from lakebench.deploy.observability import (
-            ObservabilityLookupError,
-            find_observability_release,
-        )
         from lakebench.observability.platform_collector import PlatformCollector
 
         namespace = cfg.get_namespace()
         ctx = cfg.platform.kubernetes.context or None
-        # The stack is shared and lives in its own namespace; metrics are
-        # still filtered to this deployment's namespace below.
-        try:
-            prom_ns = find_observability_release(ctx) or namespace
-        except ObservabilityLookupError:
-            prom_ns = namespace
+        # One stack per deployment: Prometheus lives in this namespace.
+        prom_ns = namespace
         svc_name = _find_prometheus_svc(prom_ns, context=ctx)
         if not svc_name:
             console.print("  [yellow]Could not find Prometheus service[/yellow]")
