@@ -772,7 +772,7 @@ def unbalanced_stages(config: Any, budget: dict[JobType, int] | None = None) -> 
             out.append(
                 f"{job_type} needs ~{need} executors x {profile['executor_cores']} cores to "
                 f"carry the offered load; {why} allows {limit}, so its lag will grow and the run "
-                "will fail the balance check"
+                "will report it as not balanced"
             )
     return out
 

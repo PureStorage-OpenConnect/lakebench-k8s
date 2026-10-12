@@ -880,7 +880,7 @@ needs ~N executors x C cores to carry the offered load; <limit> allows M`.
 
 **Cause:** the cluster's concurrent budget, the executor cap, or an
 executor count set in the config holds the stage below what the load needs.
-The run will start, its lag will grow, and it will fail the balance check.
+The run will start, its lag will grow, and it will report "not balanced" (advisory).
 
 **Fix:** a cluster at least the README's continuous minimum for the scale,
 or a lower scale. AML continuous at scale 100 cannot balance at any size:

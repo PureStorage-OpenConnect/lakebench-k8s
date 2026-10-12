@@ -36,7 +36,7 @@ and that run fails the balance check. Use the figure, or lower the scale.
 | AML | continuous | 10 | 183 cores | 1,682 GB | 154 cores / 1,350 GB | in always on | 14 cores / 54 GB | 3,200 Gi | 4 cores / 40 GB |
 | AML | continuous | 100 | 817 cores | 7,815 GB | 690 cores / 6,110 GB | in always on | 53 cores / 231 GB | 14,600 Gi | 16 cores / 160 GB |
 
-- AML continuous scale 100 cannot balance at any cluster size: silver-stream needs ~45 executors x 16 cores to carry the offered load; the executor cap allows 28, so its lag will grow and the run will fail the balance check. The minimum is the cluster that runs it at the executor cap.
+- AML continuous scale 100 cannot balance at any cluster size: silver-stream needs ~45 executors x 16 cores to carry the offered load; the executor cap allows 28, so its lag will grow and the run will report it as not balanced. The minimum is the cluster that runs it at the executor cap.
 
 <!-- END GENERATED: sizing-detail -->
 

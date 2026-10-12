@@ -32,6 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Dashboard variable `namespace` is gone**, now that each Grafana sees only its own deployment. `run_id` still picks among the runs that landed in this namespace.
 - **`admin doctor` observability check** reads whether the kubelet-metrics ClusterRole is present; a fresh cluster surfaces the admin step without failing deploys.
+- **`destroy` no longer prints auto-sizing warnings.** It sized the config on the way in and logged "cannot balance" for a teardown that applies no sizing. The "cannot balance" text now says the run "will report it as not balanced", matching the advisory check.
 
 ## [1.7.1] - 2026-10-10
 

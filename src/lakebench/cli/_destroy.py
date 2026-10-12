@@ -452,7 +452,7 @@ def _destroy_impl(
     # Destroy
     destroy_start = time.time()
     try:
-        engine = DeploymentEngine(cfg)
+        engine = DeploymentEngine(cfg, quiet_sizing=True)
         results = engine.destroy_all(
             progress_callback=on_progress,
             allow_unverified_cluster=allow_unverified_cluster,
