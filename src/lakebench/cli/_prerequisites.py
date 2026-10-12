@@ -457,7 +457,15 @@ def _check_cluster_capacity(
         )
     try:
         return _decide_capacity(
-            cfg, k8s, found, record, sustained, datagen_runs, sizing_capacity, fallback
+            cfg,
+            k8s,
+            found,
+            record,
+            sustained,
+            datagen_runs,
+            sizing_capacity,
+            fallback,
+            advisory=not fail_closed,
         )
     except ContextConflictError:
         raise
@@ -485,8 +493,13 @@ def _decide_capacity(
     datagen_runs,
     sizing_capacity,
     fallback: str | None = None,
+    advisory: bool = False,
 ) -> PrereqResult:
     """The capacity decision on a free capacity that was read.
+
+    *advisory* (``deploy``) turns a refusal into a passing check whose message
+    carries the shortfalls: the model can be wrong about a cluster, and deploy
+    only creates the stack, so ``run`` is where capacity is enforced.
 
     *fallback* is set (to why free capacity could not be read) when *found*
     is the worker nodes' allocatable instead (``deploy`` only): the check is
@@ -597,6 +610,18 @@ def _decide_capacity(
             f"{free_gb:.1f} GB free of {alloc_cores:.1f} cores / {alloc_gb:.1f} GB "
             "allocatable."
             f"\n{lower} 'scale', free the cluster, or use a larger one."
+        )
+    if advisory and (verdict.status == "refused" or scratch_short or pod_short):
+        shortfall_text = "; ".join(s.strip() for s in shortfalls)
+        return PrereqResult(
+            name="cluster-capacity",
+            passed=True,
+            message=(
+                f"WARNING: estimated capacity shortfall, deploy continues -- {summary}: "
+                f"{shortfall_text}. {cluster_line.strip().splitlines()[0]}"
+            ),
+            hint=hint_lines,
+            record=record,
         )
     if verdict.status == "refused" or scratch_short or pod_short:
         return PrereqResult(

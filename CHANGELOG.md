@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`images.jmx_exporter` moves to a versioned bitnamilegacy tag:** `bitnamilegacy/jmx-exporter:1.4.0` (was `bitnami/jmx-exporter:latest@sha256:...`). Bitnami publishes only `:latest` under its own repo now; the versioned legacy tag is reproducible without the digest trap.
 - **Deploy's observability preflight is non-blocking.** A missing `lakebench-kubelet-metrics` ClusterRole prints a warning; the stack still deploys and platform CPU and memory read `not collected` in the report.
 - **PodMonitor and sidecar discovery go away.** The three PodMonitor templates (Trino, Spark, Pushgateway) are removed; the per-namespace Prometheus scrapes them directly through its own scrape config. A deploy from 1.7.1 that left PodMonitors behind no longer has anything to scrape them.
+- **`deploy`'s capacity check is a warning.** A shortfall from the capacity model prints `WARNING: estimated capacity shortfall, deploy continues` and deploy goes on; unreadable config values and node quantities still refuse. `run` still enforces capacity (`--skip-preflight` skips it).
 
 ### New
 
