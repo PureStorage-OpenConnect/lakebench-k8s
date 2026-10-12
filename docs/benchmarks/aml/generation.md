@@ -21,7 +21,8 @@ identity has two parts.
   corpus.
 
 **Image.** `images.datagen` defaults to
-`docker.io/sillidata/lb-datagen:1.7.1`.
+`docker.io/sillidata/lb-datagen:latest`. Set a versioned tag such as `1.7.1`
+to fix the generator.
 
 - 1.7.0 shipped `lb-datagen:2a36ae21` (`sha256:0502b700...`). Its five-case
   byte-compare against the 1.6 image `lb-datagen:1.6.0` is equal (financial
@@ -31,7 +32,7 @@ identity has two parts.
 - The generator lineage in the corpus identity is the observed image digest,
   mapped through `config/datagen_lineage.yaml`
   ([7.3](execution-rules.md#73-prohibited-changes-invalidate-a-result-or-are-refused)).
-  `1.7.1` has no row there, so its corpora get a corpus id of their own.
+  `latest` has no row there, so its corpora get a corpus id of their own.
 - The registered v1.7 [look](../../glossary.md#look) names `2a36ae21` by digest. A registered look
   never uses a tag: `scripts/aml_gate.py --registered` refuses to start
   without a digest-pinned `--generator-image`, and refuses one that differs

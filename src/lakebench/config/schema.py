@@ -415,82 +415,11 @@ class ImagesConfig(ConfigModel):
         "grafana": "grafana/grafana:10.2.0",
     }
 
-    # Immutable tag = the datagen_rs commit it was built from. Bump it with
-    # every datagen_rs change; :latest drifted from the code it claimed to be.
-    # b6f2905 is the datagen v1.6 sprint tip on integrate (2026-09-28) with
-    # the Python base bumped from the floating python:3.13-slim tag to
-    # python:3.14-slim, digest-pinned so a rebuild reproduces the same
-    # Python layer bytes. Rust source unchanged from 25f1aa8, so corpus
-    # bytes at a fixed seed are unchanged; MODEL_VERSION stays
-    # datagen-v2-rs-0.3. Datagen_rs freeze wiring carried forward from
-    # 25f1aa8: dirty-ratio semantics, screening rates in prereg
-    # 3.6.1, calibration-replicate seed refusal in perturbation_for_seed,
-    # multi-writer guard on --mode reference, S3Sink::put_multipart retry,
-    # --delivery-mode {batch|continuous} MpuWriter switch with continuous
-    # as the Rust binary default, and the #52 registered_looks_open freeze
-    # wiring.
-    # 30603b1 re-fits the datagen peak-RSS memory model: the autosizer
-    # under-sized financial node-0 at scale 100, OOMKilling it at the 17Gi
-    # default. Only datagen_rs/entrypoint.py (thread cap) and config/autosizer.py
-    # (pod memory request) change; the Rust generator is unchanged, so the corpus
-    # is byte-identical -- PROVEN on the pushed image (seed-43 --mode all
-    # byte-compare vs 9382420: 73/73 objects identical, and vs a thread-throttled
-    # run: identical; cargo output pins hold). MODEL_VERSION stays
-    # datagen-v2-rs-0.3, so it belongs to the same freeze under a new tag. This is
-    # the FUNCTIONAL default; it is DISQUALIFIED from generating any D8 / A6 /
-    # registered-look / calibration corpus -- those runs pass an explicit frozen
-    # digest via --generator-image (aml-protocol.md), never this default.
-    # e14d0fd: mimalloc allocator, typology payloads pruned to each
-    # pod's own files, world columns recomputed on demand, fixed 64 MB files,
-    # re-fit memory model with a 16Gi pod cap, delivery-mode forwarding.
-    # AML pod peak at scale 100 fell from 18.18 to 5.70 GiB. Output-neutral,
-    # PROVEN on the pushed image: seed-43 --mode all byte-compare against the
-    # frozen generator (rebuilt from 9382420 source) -- 73/73 objects at 128 MB,
-    # 141/141 at 64 MB, 141/141 with 4 pods, 141/141 thread-throttled. MODEL_VERSION
-    # stays datagen-v2-rs-0.3, same freeze. Functional default, disqualified from
-    # registered-look corpora as below.
-    # 034f998: same Rust source as e14d0fd; entrypoint.py thread-cap model gains
-    # the batch-delivery allowance. Byte-identical to e14d0fd at seed 43 on the
-    # pushed images (141/141 objects), so identical to the frozen generator.
-    # Pushed digest (034f998):
-    # sha256:0dc67b26e6130acebd796082137fde8c6dac57e8cd668039d585ae9d086d29dc
-    #   e14d0fd (sha256:ed57c1580d6babd4a504cda69a93811ab8c92d23f92978adfc4638ab691b0591)
-    # 034f998 and e14d0fd were deleted with the repository wipe of 2026-09-30.
-    # Prior tags (deleted from docker.io between 2026-09-29 22:30 and 23:29;
-    # rebuild from source to reproduce):
-    #   30603b1 (sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16) memory refit
-    #   9382420 (sha256:2faad1cc0252a165a56361a06f159a62ba7c4387c83adfb7c46fe260af23b8f2) live-metrics Pushgateway push
-    #   b6f2905 (sha256:312f9ecfa301b09f696cd04f9b6d44052656041fc293d9d76f0adddd01fbd4f6)
-    #   25f1aa8 (sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7)
-    #   0a83acd (sha256:acdf3925...)
-    #   7c24641 (sha256:c5a6bc80...)
-    # 1.6.0: the v1.6 release image, rebuilt from the same datagen_rs source as
-    # 034f998 (datagen_rs unchanged 034f998..release; base images digest-pinned,
-    # cargo --locked) after the docker.io repository was wiped. Release
-    # tags are the exception to the commit-tag rule above.
-    # Pushed digest (1.6.0): sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
-    # 2a36ae21: the v1.7 release image and v1.7 look image
-    # (sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04);
-    # deleted from docker.io with the repository on 2026-10-06.
-    # 3f4729b6 (sha256:7fbb35f1a94f5aea11a135e93cadbb969a97a37d04c9ce2d227fd7db266083cb):
-    # adds continuous delivery (--deliver-until); batch output is
-    # byte-identical to 4274bb67 on the nine A/B cases. Never released.
-    # 3cb67f92: the 1.7.1 image, tagged by the git tree of datagen_rs/ it was
-    # built from (`git rev-parse <commit>:datagen_rs` starts with it; pushed
-    # 2026-10-07). Builds the AML world once per pod instead of every
-    # continuous epoch and checks for a stop before an epoch's manifest;
-    # its output is byte-identical to 3f4729b6 (AML continuous and batch
-    # locally, an AML scale-10 batch corpus on the cluster from an earlier
-    # push of this tag built from the same context). The default is the
-    # tag 1.7.1, pushed 2026-10-11 from the 1.7.1 release's datagen_rs tree
-    # (9e504f426): datagen-v2-rs-0.4 (its image label still reads rs-0.3, a
-    # stale Dockerfile label). Surnames are synthetic at every scale and the surname
-    # and company-head pools grow in proportion to the population, so
-    # screening namesakes per watchlist entry stay flat across scale. Every
-    # AML corpus differs from 3cb67f92's, scale 1 included; the Customer 360
-    # generator is unchanged. Tag-pinned: a run that must be reproduced byte
-    # for byte should set images.datagen with a '@sha256:...' digest.
-    datagen: str = "docker.io/sillidata/lb-datagen:1.7.1"
+    # The default floats on :latest, the generator the maintainers last pushed.
+    # A run that must be reproduced byte for byte, or compared with an earlier
+    # corpus, should set images.datagen to a versioned tag (1.7.1 is pushed) or
+    # a '@sha256:...' digest: :latest can change the corpus between runs.
+    datagen: str = "docker.io/sillidata/lb-datagen:latest"
     """Data generator image. Tag-pinned; override with a digest for byte-for-byte
     reproducibility. In continuous mode it generates until the run window ends:
     AML as successive 24-month periods of the same bank, Customer360 as successive
