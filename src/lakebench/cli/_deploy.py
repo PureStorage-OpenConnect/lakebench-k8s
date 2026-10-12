@@ -91,7 +91,10 @@ def _preflight_check(cfg) -> None:
                 console.print(f"  [dim]{esc(line)}[/dim]")
         print_info("Nothing was created.")
         raise typer.Exit(ExitCode.PREREQUISITE)
-    print_info(f"cluster-capacity: {esc(capacity.message)}")
+    if capacity.message.startswith("WARNING"):
+        print_warning(f"cluster-capacity: {capacity.message}")
+    else:
+        print_info(f"cluster-capacity: {esc(capacity.message)}")
 
     # 4. Check Stackable CRDs if catalog=hive
     if cfg.architecture.catalog.type.value == "hive":
@@ -506,16 +509,19 @@ def deploy(
             + "; it refuses anything that already exists",
             path="cli.bad_argument",
         )
-    _deploy_impl(
-        resolve_config_path(config_file, file_option),
-        dry_run=dry_run,
-        yes=yes,
-        timeout=timeout,
-        local=local,
-        workdir=workdir,
-        force_legacy=force_legacy,
-        require_new=require_new,
-    )
+    from lakebench.cli._helpers import defer_warnings
+
+    with defer_warnings():
+        _deploy_impl(
+            resolve_config_path(config_file, file_option),
+            dry_run=dry_run,
+            yes=yes,
+            timeout=timeout,
+            local=local,
+            workdir=workdir,
+            force_legacy=force_legacy,
+            require_new=require_new,
+        )
 
 
 def _deploy_impl(

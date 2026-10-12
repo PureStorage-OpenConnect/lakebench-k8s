@@ -479,3 +479,12 @@ def test_polaris_db_creates_the_schema_polaris_1_8_bootstrap_needs():
     assert sqls.index(schema[0]) > max(
         i for i, s in enumerate(sqls) if s.startswith("GRANT ALL ON SCHEMA")
     )
+
+
+def test_bootstrap_job_polls_health_on_the_management_port():
+    """Polaris serves /q/health on 8182; polling the REST port 8181 never
+    succeeds and made every deploy wait out the whole loop."""
+    text = _render("polaris/bootstrap-job.yaml.j2", "polaris-iceberg-spark-trino")
+    assert 'curl -sf "$POLARIS_HEALTH_URI/q/health/ready"' in text
+    assert ":8182" in text.split("POLARIS_HEALTH_URI")[1].splitlines()[1]
+    assert '"$POLARIS_URI/q/health' not in text

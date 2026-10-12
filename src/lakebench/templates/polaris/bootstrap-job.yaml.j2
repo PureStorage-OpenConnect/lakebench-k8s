@@ -70,6 +70,9 @@ spec:
           env:
             - name: POLARIS_URI
               value: "http://lakebench-polaris.{{ namespace }}.svc.cluster.local:{{ polaris_port | default(8181) }}"
+            # Health is served on the management port, not the REST port.
+            - name: POLARIS_HEALTH_URI
+              value: "http://lakebench-polaris.{{ namespace }}.svc.cluster.local:8182"
             - name: CLIENT_ID
               value: "lakebench"
             - name: CLIENT_SECRET
@@ -96,7 +99,7 @@ spec:
 
               echo "Waiting for Polaris to be ready..."
               for i in $(seq 1 30); do
-                if curl -sf "$POLARIS_URI/q/health/ready" >/dev/null 2>&1; then
+                if curl -sf "$POLARIS_HEALTH_URI/q/health/ready" >/dev/null 2>&1; then
                   echo "Polaris is ready"
                   break
                 fi
