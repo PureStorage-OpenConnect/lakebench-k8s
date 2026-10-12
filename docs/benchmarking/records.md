@@ -48,6 +48,24 @@ Each run saves `lakebench-output/runs/run-<id>/metrics.json`:
 | `images_observed` | Image digests the run's pods ran: Spark driver and executors, Trino coordinator, Spark Thrift server. A later different digest per role goes in `images_observed_changed`. |
 | `scratch_as_ran` | Per Spark job, the executor scratch PVC size and storage class as the cluster held them (null without a scratch PVC). |
 
+## Storage I/O
+
+The `io` block holds the storage traffic the engines reported for the run. It is derived from the rest of the record when the record is written, and a record from before the block has less in it. Storage is what the storage clients count; pod network bytes are a separate measurement and are not added to it.
+
+- `intervals`: one per Trino benchmark query and one for datagen. Each has `source`, `stage`, `label` (`benchmark`, `pre_compaction` or `round_<n>`), the `query`, `start` and `end` (UTC, from the engine's clock; null when not recorded), `read_bytes` and `write_bytes`, the basis of each, and `complete`.
+- `null` bytes mean not measured; `0` means measured and zero.
+- `not_measured`: what has no figure and why. Spark stages read `executor_io_not_collected`, a query engine other than Trino `engine_not_instrumented`, and a Trino record from before the block `io_not_recorded`.
+- `totals`: bytes per source, summed over its intervals.
+- `problems`: query samples whose report was missing, for example because the query had left the coordinator's history.
+
+Where the figures come from:
+
+- **Trino:** `physical_input_bytes` and `physical_written_bytes` from `system.runtime.tasks`, read once per query stream after its last query ends, so no timed query is affected. Summed over a query's tasks they equal its `physicalInputDataSize` and `physicalWrittenDataSize`. The decoded size, the output size and the exchange between Trino nodes are not storage and are not read.
+- **Datagen:** `datagen_fleet.total_bytes_written`. Single-run datagen records no start or end time, so its interval has no window and counts as unplaced in a time series.
+- **Not measured:** Spark reads and writes, and storage-side telemetry.
+
+`lakebench.metrics.io.bucket_series` spreads the intervals over fixed time buckets. Each interval's bytes are spread evenly over its own window, so a bucket is no finer than the queries that feed it. Bytes with no window, or outside the requested range, are reported as `unplaced`.
+
 ## Benchmark records
 
 `lakebench benchmark` saves its result under a new run id with `record_kind: "benchmark"` and `parent_run_id` (the run it measured).

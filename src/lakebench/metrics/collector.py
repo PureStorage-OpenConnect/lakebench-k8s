@@ -16,6 +16,7 @@ from typing import Any, ClassVar
 from lakebench._clock import utc_now
 from lakebench.metrics import provenance as _prov
 from lakebench.metrics.experiment import effective_trickle, experiment_inputs
+from lakebench.metrics.io import build_io
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 from lakebench.metrics.metric_registry import descriptions as _registry_descriptions
 from lakebench.metrics.provenance import run_provenance
@@ -673,6 +674,9 @@ class PipelineMetrics:
             d["c360_correctness"] = self.c360_correctness
         token = ((self.config_snapshot or {}).get("s3") or {}).get("endpoint") or "s3-endpoint"
         d = _scrub_address_urls(d, str(token))
+        io = build_io(d)
+        if io is not None:
+            d["io"] = io
         d["verdict"] = verdict_from_record(d).to_dict()
         return d
 

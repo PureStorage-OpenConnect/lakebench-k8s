@@ -28,6 +28,38 @@ _CLEANUP_TIMEOUT_SECONDS = 10
 
 _QUERY_ID_RE = re.compile(r"^[0-9]{8}_[0-9]{6}_[0-9]{5}_[0-9a-z]{5}$")
 
+# The tag each benchmark query carries (``execute_query``), and the tag of the
+# lookup query itself, which is never one of the queries it reports on.
+_SOURCE_RE = re.compile(r"^lakebench-[0-9a-f]{16}$")
+_IO_LOOKUP_SOURCE = "lakebench-io"
+# Sources per lookup query: keeps the kubectl argv short.
+_IO_LOOKUP_BATCH = 40
+
+
+def _io_number(cell: str, kind: type) -> float | int | None:
+    """*cell* as a number, or None for the CLI's empty/NULL spellings."""
+    text = cell.strip()
+    if text in ("", "\\N", "NULL", "null"):
+        return None
+    try:
+        return kind(float(text)) if kind is int else float(text)
+    except ValueError:
+        return None
+
+
+def _parse_io_row(line: str) -> tuple[str, dict[str, float | int | None]] | None:
+    """One TSV row of the lookup in ``TrinoExecutor.query_io``, or None."""
+    cells = line.rstrip("\n").split("\t")
+    if len(cells) != 6 or not _SOURCE_RE.match(cells[0].strip()):
+        return None
+    return cells[0].strip(), {
+        "tasks": _io_number(cells[1], int),
+        "read_bytes": _io_number(cells[2], int),
+        "write_bytes": _io_number(cells[3], int),
+        "start": _io_number(cells[4], float),
+        "end": _io_number(cells[5], float),
+    }
+
 
 def server_run_time_limit(timeout: int) -> int:
     """Seconds for ``query_max_run_time`` given the client timeout."""
@@ -185,6 +217,7 @@ class TrinoExecutor:
                 rows_returned=0,
                 raw_output="",
                 error=f"Query timed out ({timeout}s)",
+                engine_source=source,
             )
 
         if result.returncode != 0:
@@ -196,6 +229,7 @@ class TrinoExecutor:
                 rows_returned=0,
                 raw_output=result.stdout or "",
                 error=error,
+                engine_source=source,
             )
 
         output = result.stdout.strip()
@@ -206,7 +240,67 @@ class TrinoExecutor:
             duration_seconds=elapsed,
             rows_returned=len(rows),
             raw_output=output,
+            engine_source=source,
         )
+
+    def query_io(self, sources: list[str]) -> dict[str, dict[str, float | int | None]]:
+        """Storage bytes and time window of the queries run under *sources*.
+
+        One query against ``system.runtime.tasks`` for all of them, run after
+        the timed queries have finished. ``physical_input_bytes`` and
+        ``physical_written_bytes`` summed over a query's tasks equal the
+        query's ``physicalInputDataSize`` and ``physicalWrittenDataSize``;
+        the other byte columns (processed, output, internal network) are not
+        storage and are not read. A source whose query has left the
+        coordinator's history is absent from the result. Never raises: a
+        failed lookup returns what was read so far.
+        """
+        found: dict[str, dict[str, float | int | None]] = {}
+        wanted = [s for s in dict.fromkeys(sources) if _SOURCE_RE.match(s)]
+        try:
+            pod = self._discover_pod()
+        except (RuntimeError, subprocess.SubprocessError, OSError) as e:
+            logger.warning("Trino I/O lookup skipped: %s", e)
+            return found
+        for i in range(0, len(wanted), _IO_LOOKUP_BATCH):
+            batch = wanted[i : i + _IO_LOOKUP_BATCH]
+            names = ", ".join(f"'{s}'" for s in batch)
+            sql = (
+                "SELECT q.source, count(*), sum(t.physical_input_bytes), "
+                "sum(t.physical_written_bytes), to_unixtime(min(t.created)), "
+                'to_unixtime(max(t."end")) '
+                "FROM system.runtime.tasks t JOIN system.runtime.queries q "
+                "ON t.query_id = q.query_id "
+                f"WHERE q.source IN ({names}) GROUP BY q.source"
+            )
+            try:
+                out = subprocess.run(
+                    self._exec_cmd(
+                        pod,
+                        "--source",
+                        _IO_LOOKUP_SOURCE,
+                        "--session",
+                        f"query_max_run_time={server_run_time_limit(_CLEANUP_TIMEOUT_SECONDS)}s",
+                        "--output-format",
+                        "TSV",
+                        "--execute",
+                        sql,
+                    ),
+                    capture_output=True,
+                    text=True,
+                    timeout=_CLEANUP_TIMEOUT_SECONDS,
+                )
+            except (subprocess.SubprocessError, OSError) as e:
+                logger.warning("Trino I/O lookup failed: %s", e)
+                continue
+            if out.returncode != 0:
+                logger.warning("Trino I/O lookup failed: %s", summarise_engine_error(out.stderr))
+                continue
+            for line in out.stdout.splitlines():
+                parsed = _parse_io_row(line)
+                if parsed is not None:
+                    found[parsed[0]] = parsed[1]
+        return found
 
     def health_check(self) -> bool:
         try:

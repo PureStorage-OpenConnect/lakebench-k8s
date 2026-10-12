@@ -28,10 +28,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Per-deployment Grafana password.** Deploy generates one into the `lakebench-grafana` Secret and preserves it across redeploys.
 - **`deploy` prints how to reach Grafana.** The success panel shows the Grafana URL and the admin login. On OpenShift it creates an edge-TLS Route (`lakebench-grafana`) and prints its `https://` URL; `observability.grafana_route: false` skips it. Elsewhere it prints `http://localhost:3000` and the port-forward. Prometheus and the Pushgateway are never exposed; query Prometheus from Grafana's Explore view (the panel says so).
 - **Fixed Service names in each namespace:** `lakebench-prometheus`, `lakebench-grafana`, `lakebench-pushgateway`. Port-forwarding no longer requires looking up chart-truncated names.
+- **`io` block in the run record.** Storage bytes read and written as the engines report them: every Trino benchmark query (from `system.runtime.tasks`, read once per stream after the timed queries) and the datagen total, each with its basis and time window; Spark stages and other query engines are listed as not measured. Nothing is added inside a timed query. See [Run records](docs/benchmarking/records.md#storage-io).
 
 ### Changed
 
 - **Dashboard variable `namespace` is gone**, now that each Grafana sees only its own deployment. `run_id` still picks among the runs that landed in this namespace.
+- **The Grafana dashboard covers resources and Trino, not only batch pushes.** New rows: CPU, memory and network by component (datagen, each Spark stage, Trino, Polaris, Postgres), Spark executors running by stage, and Trino queries, tasks, JVM heap and GC. These come from cAdvisor and the JMX exporter, so a continuous run shows them; the datagen and stage rows still read Pushgateway series.
 - **`admin doctor` observability check** reads whether the kubelet-metrics ClusterRole is present; a fresh cluster surfaces the admin step without failing deploys.
 - **`destroy` no longer prints auto-sizing warnings.** It sized the config on the way in and logged "cannot balance" for a teardown that applies no sizing. The "cannot balance" text now says the run "will report it as not balanced", matching the advisory check.
 - **"cannot balance" is shown by `plan` and `config recommend` only.** `deploy`, `run` and `generate` no longer print it in their auto-sizing and capacity lines; the run's balance result is still recorded and reported at the end.
