@@ -475,13 +475,15 @@ def test_sustained_prometheus_lookup_refuses_a_second_context(kubeconfig, hosts)
     assert hosts == []
 
 
-def test_observability_lookup_reuses_the_active_target(kubeconfig, hosts) -> None:
-    from lakebench.deploy import observability
+def test_observability_kubelet_role_read_reuses_the_active_target(kubeconfig, hosts) -> None:
+    """The per-namespace observability path reads the kubelet ClusterRole via
+    the K8s client; the read must reuse this process's active cluster target."""
+    from lakebench.deploy.observability import kubelet_cluster_role_exists
 
     ClusterTarget.resolve(context="A").activate()
-    with patch.object(observability, "pinned_kubectl") as kubectl:
-        kubectl.return_value = MagicMock(returncode=1, stdout="", stderr="")
-        observability._find_helm_service("obs", "grafana", context=None)
+    # The function reads the ClusterRole, which the fake kubeconfig cannot
+    # serve, so it returns None; the test is about which cluster was reached.
+    kubelet_cluster_role_exists(context=None)
     assert hosts == [SERVER_A]
 
 

@@ -64,7 +64,7 @@ def _instant_waits(mp: pytest.MonkeyPatch) -> None:
     mp.setattr(PolarisDeployer, "_wait_for_bootstrap_job", lambda *a, **k: True)
     mp.setattr(SparkThriftDeployer, "_wait_for_ready", lambda *a, **k: None)
     mp.setattr(DuckDBDeployer, "_wait_for_ready", lambda *a, **k: None)
-    mp.setattr("lakebench.deploy.observability._wait_for_prometheus", lambda *a, **k: "")
+    mp.setattr("lakebench.deploy.observability._wait_for_deployment_ready", lambda *a, **k: "")
     # SAF-10: deploy stamps buckets with this cluster's fingerprint.
     mp.setattr("lakebench.deploy.ownership.api_server_fingerprint", lambda *a, **k: "fp-test")
     _instant_deps_server(mp)
@@ -125,16 +125,24 @@ def _seed_cluster(rec: K8sRecorder) -> None:
     rec.exec_output = "lbrole:0\nALTER ROLE\nCREATE ROLE\nCREATE DATABASE\nGRANT\n"
     rec.add_spark_operator(watched=["default"])
     rec.add_stackable()
-    # The shared observability stack is installed by admin install; deploy
-    # only verifies it and applies the deployment's own monitors.
-    rec.add_namespace("lakebench-observability")
-    rec.add_helm_release(
-        "lakebench-observability",
-        "lakebench-observability",
-        chart="kube-prometheus-stack",
-        version="87.19.2",
+    # Observability runs per deployment, in the deployment's namespace. The
+    # one cluster-scoped piece is the kubelet-metrics ClusterRole admin
+    # install creates; seed it so deploy's binding step succeeds.
+    rec.add(
+        "clusterroles",
+        {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": {"name": "lakebench-kubelet-metrics"},
+            "rules": [
+                {
+                    "apiGroups": [""],
+                    "resources": ["nodes", "nodes/metrics"],
+                    "verbs": ["get", "list", "watch"],
+                }
+            ],
+        },
     )
-    rec.add_crd("podmonitors", "monitoring.coreos.com", "PodMonitor")
     rec.add_namespace("stackable")
     for op in ("hive-operator", "secret-operator"):
         rec.add(
@@ -428,17 +436,18 @@ def test_category1_observability_entries_tolerate_403_when_off():
 
     with recording(NS) as rec:
         rec.add_namespace(NS)
-        rec.add("podmonitors", {"metadata": {"name": "lakebench-spark-driver"}}, namespace=NS)
-        rec.fail(verb="delete", kind="podmonitors", status=403)
+        rec.add(
+            "configmaps",
+            {"metadata": {"name": "lakebench-prometheus-config"}},
+            namespace=NS,
+        )
+        rec.fail(verb="delete", kind="configmaps", name="lakebench-prometheus-config", status=403)
         result = _category1_step(NS, NS, ns_goes=False)
         assert result.status.value == "success", result.message
-        rec.assert_recorded(
-            verb="delete", kind="persistentvolumeclaims", name="lakebench-pushgateway"
-        )
         # With observability on, the same 403 is a real failure.
         result = _category1_step(NS, NS, ns_goes=False, conditions=frozenset({"observability"}))
         assert result.status.value == "failed"
-        assert "podmonitors/lakebench-spark-driver" in result.message
+        assert "configmaps/lakebench-prometheus-config" in result.message
 
 
 def test_category1_annotation_patch_is_conditional():

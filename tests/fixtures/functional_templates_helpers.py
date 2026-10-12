@@ -39,6 +39,10 @@ def _enrich_context(engine: DeploymentEngine) -> dict:
     ctx.setdefault("postgres_password", "test-hive-db-password")
     ctx.setdefault("prometheus_retention", cfg.observability.retention)
     ctx.setdefault("prometheus_storage", cfg.observability.storage)
+    ctx.setdefault("prometheus_storage_class", cfg.observability.prometheus_storage_class)
+    ctx.setdefault("prometheus_image", cfg.observability.prometheus_image)
+    ctx.setdefault("grafana_image", cfg.observability.grafana_image)
+    ctx.setdefault("grafana_admin_password", "test-grafana-password")
     # Both grafana and prometheus templates use ``pull_policy``.
     ctx.setdefault("pull_policy", cfg.images.pull_policy.value)
 

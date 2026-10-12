@@ -83,15 +83,27 @@ class TestDuckDBBenchmarkWorkflow:
 
 
 # ===========================================================================
-# 6. Observability Deployer Workflow
+# 6. Observability Deployer Workflow (per-namespace)
 # ===========================================================================
 
 
 class TestObservabilityDeployerWorkflow:
     """Tests for ObservabilityDeployer lifecycle."""
 
-    def test_install_builds_correct_helm_values(self):
-        from lakebench.deploy.observability import build_helm_values
+    def _engine(self, cfg):
+        engine = MagicMock()
+        engine.config = cfg
+        engine.dry_run = False
+        engine.context = {"namespace": cfg.get_namespace(), "openshift_mode": False}
+        engine.k8s = MagicMock()
+        engine.renderer = MagicMock()
+        engine.renderer.render.return_value = (
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"
+        )
+        return engine
+
+    def test_deploy_applies_per_namespace_templates(self):
+        from lakebench.deploy.observability import ObservabilityDeployer
 
         cfg = make_config(
             observability={
@@ -101,82 +113,98 @@ class TestObservabilityDeployerWorkflow:
                 "dashboards_enabled": False,
             }
         )
-        values = build_helm_values(cfg.observability)
-        assert values["prometheus.prometheusSpec.retention"] == "14d"
-        storage = [v for k, v in values.items() if k.endswith("resources.requests.storage")]
-        assert storage == ["20Gi"]
-        assert values["grafana.enabled"] == "false"
-
-    def test_deploy_uses_the_shared_release_and_never_installs(self):
-        from lakebench.deploy.observability import (
-            HELM_RELEASE_NAME,
-            OBSERVABILITY_NAMESPACE,
-            ObservabilityDeployer,
-        )
-
-        cfg = make_config(observability={"enabled": True})
-        engine = MagicMock()
-        engine.config = cfg
-        engine.dry_run = False
-
-        deployer = ObservabilityDeployer(engine)
-        listed = json.dumps(
-            [
-                {
-                    "name": HELM_RELEASE_NAME,
-                    "namespace": OBSERVABILITY_NAMESPACE,
-                    "status": "deployed",
-                }
-            ]
-        )
+        engine = self._engine(cfg)
         with (
-            patch("subprocess.run") as mock_run,
-            patch("lakebench.deploy.observability._wait_for_prometheus", return_value=""),
+            patch(
+                "lakebench.deploy.observability.kubelet_cluster_role_exists",
+                return_value=True,
+            ),
+            patch(
+                "lakebench.deploy.observability._wait_for_deployment_ready",
+                return_value="",
+            ),
+            patch(
+                "lakebench.deploy.observability.read_grafana_password",
+                return_value=None,
+            ),
         ):
-            mock_run.return_value = MagicMock(returncode=0, stdout=listed, stderr="")
-            result = deployer.deploy()
+            result = ObservabilityDeployer(engine).deploy()
 
-        assert result.status == DeploymentStatus.SUCCESS
-        cmds = [c.args[0] for c in mock_run.call_args_list]
-        assert [c[:2] for c in cmds if c[0] == "helm"] == [["helm", "list"]]
+        assert result.status == DeploymentStatus.SUCCESS, result.message
+        rendered = [c.args[0] for c in engine.renderer.render.call_args_list]
+        # Dashboards disabled: dashboard template not rendered.
+        assert "grafana/dashboard-configmap.yaml.j2" not in rendered
+        assert "prometheus/prometheus.yaml.j2" in rendered
+        # One of the apply contexts carries the retention + storage from the config.
+        kwargs_lists = [
+            c
+            for c in engine.renderer.render.call_args_list
+            if c.args[0] == "prometheus/prometheus.yaml.j2"
+        ]
+        ctx = kwargs_lists[0].args[1]
+        assert ctx["prometheus_retention"] == "14d"
+        assert ctx["prometheus_storage"] == "20Gi"
 
-    def test_destroy_does_not_uninstall_the_shared_release(self):
+    def test_deploy_succeeds_when_the_role_is_missing(self):
+        """Missing kubelet role is a warning, not a failure; stack still deploys."""
         from lakebench.deploy.observability import ObservabilityDeployer
 
         cfg = make_config(observability={"enabled": True})
-        engine = MagicMock()
-        engine.config = cfg
-        engine.dry_run = False
+        engine = self._engine(cfg)
+        with (
+            patch(
+                "lakebench.deploy.observability.kubelet_cluster_role_exists",
+                return_value=False,
+            ),
+            patch(
+                "lakebench.deploy.observability._wait_for_deployment_ready",
+                return_value="",
+            ),
+            patch(
+                "lakebench.deploy.observability.read_grafana_password",
+                return_value=None,
+            ),
+        ):
+            result = ObservabilityDeployer(engine).deploy()
+        assert result.status == DeploymentStatus.SUCCESS
+        assert "not collected" in result.message
 
-        deployer = ObservabilityDeployer(engine)
+    def test_destroy_removes_the_per_deployment_binding(self):
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            result = deployer.destroy()
+        from lakebench.deploy.observability import (
+            KUBELET_METRICS_CLUSTER_ROLE,
+            ObservabilityDeployer,
+        )
 
-        assert result.status == DeploymentStatus.SKIPPED
-        assert not any("uninstall" in c.args[0] for c in mock_run.call_args_list)
+        cfg = make_config(name="dep-x", observability={"enabled": True})
+        engine = self._engine(cfg)
+        deleted: list[str] = []
 
-    def test_destroy_uninstalls_a_legacy_release_in_its_own_namespace(self):
-        from lakebench.deploy.observability import HELM_RELEASE_NAME, ObservabilityDeployer
+        class FakeRbac:
+            def delete_cluster_role_binding(self, name):
+                deleted.append(name)
+
+        with patch("kubernetes.client.RbacAuthorizationV1Api", return_value=FakeRbac()):
+            result = ObservabilityDeployer(engine).destroy()
+        assert result.status == DeploymentStatus.SUCCESS
+        assert deleted == [f"{KUBELET_METRICS_CLUSTER_ROLE}-dep-x"]
+
+    def test_destroy_tolerates_a_404(self):
+        from kubernetes.client.rest import ApiException
+
+        from lakebench.deploy.observability import ObservabilityDeployer
 
         cfg = make_config(observability={"enabled": True})
-        engine = MagicMock()
-        engine.config = cfg
-        engine.dry_run = False
+        engine = self._engine(cfg)
 
-        deployer = ObservabilityDeployer(engine)
+        class FakeRbac:
+            def delete_cluster_role_binding(self, name):
+                raise ApiException(status=404, reason="Not Found")
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.side_effect = [
-                MagicMock(returncode=0, stdout=HELM_RELEASE_NAME, stderr=""),  # list
-                MagicMock(returncode=1, stdout="", stderr="Error: release not found"),
-            ]
-            result = deployer.destroy()
-
-        # "not found" on the uninstall is treated as already cleaned up
+        with patch("kubernetes.client.RbacAuthorizationV1Api", return_value=FakeRbac()):
+            result = ObservabilityDeployer(engine).destroy()
         assert result.status == DeploymentStatus.SUCCESS
-        assert mock_run.call_args_list[1].args[0][:2] == ["helm", "uninstall"]
+        assert "No kubelet binding" in result.message
 
 
 # ===========================================================================

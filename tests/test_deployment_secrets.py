@@ -240,6 +240,7 @@ def _destroy_secret_deletes(pvc_present: bool, pvc=None, pvc_error=None) -> list
         patch("lakebench.deploy.ownership.verify_bucket_ownership", return_value=match),
         patch("kubernetes.client.CoreV1Api", return_value=core),
         patch("kubernetes.client.RbacAuthorizationV1Api", return_value=MagicMock()),
+        patch("kubernetes.client.AppsV1Api", return_value=MagicMock()),
         patch("kubernetes.client.CustomObjectsApi", return_value=MagicMock()),
         patch("lakebench.spark.SparkOperatorManager", MagicMock()),
         patch("lakebench.deploy.destroy.logger"),
@@ -248,7 +249,7 @@ def _destroy_secret_deletes(pvc_present: bool, pvc=None, pvc_error=None) -> list
     return [c.args[0] for c in core.delete_namespaced_secret.call_args_list]
 
 
-_ALWAYS_DELETED = {"lakebench-ca-certificate", "lakebench-s3-credentials"}
+_ALWAYS_DELETED = {"lakebench-ca-certificate", "lakebench-s3-credentials", "lakebench-grafana"}
 _PVC_BOUND = {ds.HIVE_DB_SECRET, ds.POLARIS_DB_SECRET, ds.POLARIS_CLIENT_SECRET}
 _TERMINATING = SimpleNamespace(metadata=SimpleNamespace(deletion_timestamp="2026-10-01T00:00:00Z"))
 

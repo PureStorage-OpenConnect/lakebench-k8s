@@ -23,7 +23,7 @@ from tests.fixtures.recording_k8s import K8sRecorder, recording
 
 runner = CliRunner()
 NS = "sd10-t"
-OBS_NS = "lakebench-observability"
+OBS_KUBELET_ROLE = "lakebench-kubelet-metrics"
 SCRATCH_PARAMS = {"repl": "1", "io_profile": "auto", "priority_io": "high"}
 STACKABLE_OPS = ("commons-operator", "listener-operator", "secret-operator", "hive-operator")
 
@@ -84,19 +84,23 @@ def _seed_stackable(rec: K8sRecorder) -> None:
         _running_pod(rec, op)
 
 
-def _prometheus_ready(rec: K8sRecorder, ready: bool = True) -> None:
-    """Answer the one-shot Prometheus readiness read (a jsonpath range the
-    fake cannot evaluate)."""
-    rec.on_command("kubectl", "get", "pods", "-n", OBS_NS, stdout="True\n" if ready else "")
-
-
-def _seed_observability(rec: K8sRecorder, *, dashboard: bool = True, ready: bool = True) -> None:
-    rec.add_namespace(OBS_NS)
-    rec.add_helm_release(OBS_NS, OBS_NS, chart="kube-prometheus-stack", version="87.19.2")
-    _prometheus_ready(rec, ready)
-    if dashboard:
-        for doc in sc.Observability.dashboard_manifests():
-            rec.add("configmaps", doc, namespace=OBS_NS)
+def _seed_observability(rec: K8sRecorder) -> None:
+    """Seed the one cluster-scoped observability object (the ClusterRole)."""
+    rec.add(
+        "clusterroles",
+        {
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "ClusterRole",
+            "metadata": {"name": OBS_KUBELET_ROLE},
+            "rules": [
+                {
+                    "apiGroups": [""],
+                    "resources": ["nodes", "nodes/metrics"],
+                    "verbs": ["get", "list", "watch"],
+                }
+            ],
+        },
+    )
 
 
 def _seed_all(rec: K8sRecorder, *, operator_version: str = "2.5.1", watched=("default",)) -> None:
@@ -132,7 +136,7 @@ def test_admin_install_noop_when_installed(tmp_path):
         assert _lease_writes(rec) == []
         rec.assert_recorded(api="helm", verb="list")
         rec.assert_recorded(kind="storageclasses", verb="read")
-        rec.assert_recorded(kind="configmaps", verb="read", namespace=OBS_NS)
+        rec.assert_recorded(kind="clusterroles", verb="read", name=OBS_KUBELET_ROLE)
         rec.assert_clean()
 
 
@@ -216,40 +220,30 @@ def test_fresh_stackable_install_installs_four_charts_under_the_lease():
         rec.assert_clean()
 
 
-def test_fresh_observability_install_applies_the_dashboard_under_the_lease(tmp_path):
+def test_fresh_observability_install_applies_the_clusterrole_under_the_lease(tmp_path):
     cfg = _config(tmp_path)
     with recording(NS) as rec:
-
-        def installed(argv, kwargs):
-            rec.add_namespace(OBS_NS)
-            rec.add_helm_release(OBS_NS, OBS_NS, chart="kube-prometheus-stack", version="87.19.2")
-            return 0, "", ""
-
-        rec.on_command("helm", "install", OBS_NS, handler=installed)
-        with patch("lakebench.deploy.observability._wait_for_prometheus", return_value=None) as w:
-            r = _invoke("install", str(cfg), "--component", "observability", "-y")
-        assert r.exit_code == 0, r.output
-        shared = rec.shared_mutations()
-        assert any(c.api == "helm" and c.verb == "install" for c in shared)
-        assert any(c.kind == "configmaps" and c.namespace == OBS_NS for c in shared)
-        assert all(c.lease_held for c in shared)
-        rec.assert_clean()
-        # readiness is awaited (the full wait, not only the one-shot status read)
-        assert any("timeout_s" not in c.kwargs for c in w.call_args_list)
-    argv = next(c.argv for c in rec.calls if c.api == "helm" and c.verb == "install")
-    assert argv[argv.index("--version") + 1] == "87.19.2"
-    assert not any("adminPassword" in a for a in argv)
-
-
-def test_stale_dashboard_is_updated_under_the_lease(tmp_path):
-    cfg = _config(tmp_path)
-    with recording(NS) as rec:
-        _seed_observability(rec, dashboard=False)
         r = _invoke("install", str(cfg), "--component", "observability", "-y")
         assert r.exit_code == 0, r.output
         shared = rec.shared_mutations()
-        assert shared and all(c.kind == "configmaps" and c.lease_held for c in shared)
+        assert any(c.kind == "clusterroles" and c.name == OBS_KUBELET_ROLE for c in shared), [
+            c.describe() for c in shared
+        ]
+        # No helm interactions for the per-namespace stack.
         assert not [c for c in rec.calls if c.api == "helm" and c.mutating]
+        assert all(c.lease_held for c in shared)
+        rec.assert_clean()
+
+
+def test_observability_installed_is_noop(tmp_path):
+    """The ClusterRole already exists: admin install reports noop and makes
+    no mutation."""
+    cfg = _config(tmp_path)
+    with recording(NS) as rec:
+        _seed_observability(rec)
+        r = _invoke("install", str(cfg), "--component", "observability", "-y")
+        assert r.exit_code == 0, r.output
+        assert rec.mutations() == [], [c.describe() for c in rec.mutations()]
         rec.assert_clean()
 
 
@@ -450,7 +444,9 @@ def _engine(cfg):
 
 
 def test_deploy_never_installs_under_fixture():
-    """Nothing installed: each deploy step fails and makes no shared mutation."""
+    """Nothing installed on the shared cluster: spark-operator and hive fail,
+    observability deploys in the namespace with the kubelet binding skipped
+    (ClusterRole absent), and makes no shared mutation."""
     from lakebench.deploy.engine import DeploymentEngine, DeploymentStatus
     from lakebench.deploy.hive import HiveDeployer
     from lakebench.deploy.observability import ObservabilityDeployer
@@ -458,17 +454,24 @@ def test_deploy_never_installs_under_fixture():
     cfg = make_config(name=NS, observability={"enabled": True})
     with recording(NS) as rec:
         rec.for_config(cfg)
+        rec.add_namespace(NS)
         engine = _engine(cfg)
-        results = {
-            "spark-operator": DeploymentEngine._deploy_spark_operator(engine),
-            "hive": HiveDeployer(engine).deploy(),
-            "observability": ObservabilityDeployer(engine).deploy(),
-        }
+        with patch(
+            "lakebench.deploy.observability._wait_for_deployment_ready",
+            return_value="",
+        ):
+            results = {
+                "spark-operator": DeploymentEngine._deploy_spark_operator(engine),
+                "hive": HiveDeployer(engine).deploy(),
+                "observability": ObservabilityDeployer(engine).deploy(),
+            }
         assert rec.shared_mutations() == [], [c.describe() for c in rec.shared_mutations()]
         assert not [c for c in rec.calls if c.api == "helm" and c.mutating]
         rec.assert_clean()
-    for name, res in results.items():
-        assert res.status == DeploymentStatus.FAILED, (name, res.message)
+    assert results["spark-operator"].status == DeploymentStatus.FAILED
+    assert results["hive"].status == DeploymentStatus.FAILED
+    assert results["observability"].status == DeploymentStatus.SUCCESS
+    assert "not collected" in results["observability"].message
 
 
 def test_deploy_with_everything_installed_makes_only_the_leased_watch_list_add():
@@ -483,7 +486,10 @@ def test_deploy_with_everything_installed_makes_only_the_leased_watch_list_add()
         engine = _engine(cfg)
         with (
             patch.object(DeploymentEngine, "_operator_rbac_exists", return_value=True),
-            patch("lakebench.deploy.observability._wait_for_prometheus", return_value=None),
+            patch(
+                "lakebench.deploy.observability._wait_for_deployment_ready",
+                return_value="",
+            ),
         ):
             op = DeploymentEngine._deploy_spark_operator(engine)
             obs = ObservabilityDeployer(engine).deploy()
@@ -493,7 +499,10 @@ def test_deploy_with_everything_installed_makes_only_the_leased_watch_list_add()
         assert shared, "the watch-list add must reach the fake"
         assert all(c.lease_held for c in shared)
         assert {(c.api, c.verb) for c in shared if c.api == "helm"} == {("helm", "upgrade")}
-        assert not [c for c in shared if c.namespace == OBS_NS]
+        # Deploy creates the per-namespace ClusterRoleBinding; the ClusterRole
+        # itself was created by admin install and is only read.
+        cluster_mutations = [c for c in shared if c.kind in {"clusterroles"}]
+        assert not cluster_mutations, [c.describe() for c in cluster_mutations]
         rec.assert_clean()
     upgrade = next(c.argv for c in rec.calls if c.api == "helm" and c.verb == "upgrade")
     assert upgrade[upgrade.index("--version") + 1] == "2.5.1"
@@ -634,19 +643,13 @@ def test_full_deploy_makes_no_shared_mutation_but_the_leased_watch_list_add(
         helm = {(c.verb, c.name) for c in rec.calls if c.api == "helm" and c.mutating}
         assert helm == {("upgrade", "spark-operator")}, helm
         assert not [c for c in shared if c.kind in ("storageclasses", "customresourcedefinitions")]
-        # Nothing in the shared observability namespace (v1.6 deploy applied
-        # the dashboard there).
-        assert not [c for c in shared if c.namespace == OBS_NS], [c.describe() for c in shared]
+        # Deploy never applies the ClusterRole, only its ClusterRoleBinding.
+        assert not [c for c in shared if c.kind == "clusterroles"], [c.describe() for c in shared]
         rec.assert_clean()
 
 
 # --- admin install refusals: each state answers with its exit code and
 # changes nothing on the shared cluster.
-
-
-def _seed_prom_elsewhere(rec):
-    rec.add_namespace("monitoring")
-    rec.add_helm_release("prom", "monitoring", chart="kube-prometheus-stack", version="80.0.0")
 
 
 def _seed_operator(rec):
@@ -663,8 +666,8 @@ def _seed_leftover_spark_crd(rec):
     rec.add_crd("sparkapplications", "sparkoperator.k8s.io", "SparkApplication")
 
 
-def _seed_observability_not_ready(rec):
-    _seed_observability(rec, ready=False)
+def _seed_observability_only(rec):
+    _seed_observability(rec)
 
 
 def _seed_partial_stackable(rec):
@@ -722,11 +725,9 @@ def _seed_watched(*watched):
 
 _OP_DOWNGRADE = ("--component", "spark-operator", "--version", "spark-operator=2.4.0")
 _INSTALL_REFUSALS = [
-    pytest.param(_seed_prom_elsewhere, ("<cfg>", "--component", "observability"), 3, None, id="second-prometheus-stack"),
     pytest.param(_seed_operator, ("--component", "spark-operator", "--controller-tmp-size", "16Gi"), 2, None, id="tmp-size-on-installed-operator"),
     pytest.param(_seed_operator_not_ready, ("--component", "spark-operator"), 1, None, id="operator-not-ready"),
     pytest.param(_seed_leftover_spark_crd, ("--component", "spark-operator"), 3, None, id="leftover-spark-crd"),
-    pytest.param(_seed_observability_not_ready, ("<cfg>", "--component", "observability"), 1, None, id="observability-not-ready"),
     pytest.param(_seed_partial_stackable, ("--component", "stackable"), 3, None, id="partial-stackable-leftover-crd"),
     *[
         pytest.param(_seed_release_status(s), ("--component", "spark-operator"), 1, None, id=f"release-{s}")
@@ -736,7 +737,6 @@ _INSTALL_REFUSALS = [
     pytest.param(_seed_scratch_diff, ("<cfg>", "--component", "all"), 3, None, id="scratch-diff-all"),
     pytest.param(_seed_operator_elsewhere, ("--component", "spark-operator"), 3, None, id="second-spark-operator"),
     pytest.param(_seed_all, ("--component", "stackable", "--version", "stackable=24.11.0", "--allow-version-change"), 3, None, id="stackable-version-change"),
-    pytest.param(_seed_all, ("--component", "observability", "--version", "observability=80.0.0", "--allow-version-change"), 3, None, id="observability-version-change"),
     pytest.param(_seed_stackable_elsewhere, ("--component", "stackable"), 0, None, id="stackable-in-another-namespace"),
     pytest.param(_seed_stackable_crd, ("--component", "stackable"), 3, None, id="leftover-stackable-crd"),
     pytest.param(_seed_helm_unauthorized, ("--component", "spark-operator"), 1, None, id="release-state-unreadable"),
