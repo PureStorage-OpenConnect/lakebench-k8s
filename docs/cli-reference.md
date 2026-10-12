@@ -87,7 +87,7 @@ lakebench init [OPTIONS]
 - `--credentials-env PREFIX`: the file references `${PREFIX_ACCESS_KEY}` and
   `${PREFIX_SECRET_KEY}`.
 - `--from OLD`: see
-  [Converting a 1.6 config](../UPGRADING-1.7.md#converting-a-16-config-with-init---from).
+  [Converting an older config](configuration.md#converting-an-older-config).
 
 What `init` writes:
 

@@ -185,9 +185,10 @@ workload:
 Every deploy records the nonce it stamps on the namespace in
 `.lakebench/<name>.json` beside the config. A nameless config can read or
 tear down only a deployment its directory proves is its own, and
-`--name NAME` names one. The rules, the v1.6 `.lakebench/state.json` and
-moving a deployment's directory are in
-[UPGRADING-1.7.md](../UPGRADING-1.7.md#nameless-configs-and-deploy-state).
+`--name NAME` names one. A copied directory, or one
+deployed from another host, is refused (exit 3). Use
+`python -m lakebench.config.deploy_state relocate CONFIG NEWDIR` to move a
+deployment's directory.
 
 ## Defaults for omitted sections
 
@@ -856,8 +857,10 @@ Job defaults (`SPARK_CONF_DEFAULTS`), which a `spark.conf` value replaces:
 | `spark.memory.fraction` | `0.8` | Fraction of heap for execution + storage. |
 | `spark.memory.storageFraction` | `0.3` | Fraction of `memory.fraction` for storage. |
 
-How 1.6 handled these defaults is in
-[UPGRADING-1.7.md](../UPGRADING-1.7.md#sparkconf-defaults-before-17).
+Before 1.7 these defaults were the schema default of `spark.conf`, so
+setting any key there dropped all of them. They now stay. A config that
+still carries the 1.6 default map loads with a note for the Lakebench-set
+keys in it.
 
 ## Scale Factors
 
@@ -1095,8 +1098,33 @@ current format:
 - It lists every moved or dropped key.
 - It writes nothing unless the new file loads to the same settings.
 
-The full rules are in
-[UPGRADING-1.7.md](../UPGRADING-1.7.md#converting-a-16-config-with-init---from).
+A 1.6 config before conversion:
+
+```yaml
+endpoint: http://10.0.1.50:80
+scale: 10
+architecture:
+  catalog: polaris
+  table_format: iceberg
+  pipeline: spark
+  query_engine: trino
+```
+
+After `init --from`:
+
+```yaml
+name: my-deployment
+recipe: polaris-iceberg-spark-trino
+workload:
+  schema: customer360
+  scale: 10
+platform:
+  storage:
+    s3:
+      endpoint: http://10.0.1.50:80
+      access_key: ${LAKEBENCH_S3_ACCESS_KEY}
+      secret_key: ${LAKEBENCH_S3_SECRET_KEY}
+```
 
 ### Recipes and components
 

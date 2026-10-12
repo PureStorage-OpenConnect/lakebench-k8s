@@ -31,7 +31,7 @@ Reference: enable and read the optional Prometheus and Grafana stack, per-deploy
 | `pushgateway_storage_class` | `"px-csi-scratch"` | Pushgateway PVC StorageClass |
 
 - An installed release keeps the values it was installed with.
-- See [UPGRADING-1.7.md](../UPGRADING-1.7.md) for removed observability keys.
+- Removed observability keys are listed under 1.7.0 in the [changelog](../CHANGELOG.md#170---2026-10-06).
 
 ## Deploy and destroy
 

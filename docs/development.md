@@ -114,8 +114,8 @@ Supporting directories:
 ### Makefile targets
 
 `make help` lists the common targets. The table has every one except the
-release steps (`make release-check` and `make rc-<step>`, see
-[RELEASING.md](../RELEASING.md)).
+release steps (`make release-check` and `make rc-<step>`), which the
+Makefile describes.
 
 | Target | Description |
 |--------|-------------|
@@ -433,8 +433,7 @@ The [extension rules](#adding-a-workload-design-rules) list the five parts
 a workload brings: a generator schema with a seed policy and dimensions,
 stage scripts per mode, a correctness contract, a query set with its own
 `query_set_id`, and a compatibility declaration. A change to synthetic data
-also needs a reference detector and a leakage check
-([review rules](../CONTRIBUTING.md#review)).
+also needs a reference detector and a leakage check.
 
 Its benchmark specification describes what the code does, section by section,
 with a source pointer for each statement:
@@ -882,4 +881,3 @@ Each chunk's `WHERE` (statement form:
   executor profiles.
 - [Operators and catalogs](recipes.md#choosing-a-catalog): the Spark Operator and
   the metastores in depth.
-- [Releasing](../RELEASING.md): how a release is cut.

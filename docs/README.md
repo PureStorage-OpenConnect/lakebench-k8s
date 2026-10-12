@@ -9,7 +9,6 @@ workload experiments.
   first report, teardown
 - [Deployment](deployment.md): installing the CLI, deploy, status, destroy
 - [Prerequisites](prerequisites.md): every cluster check and its fix
-- [Upgrading to 1.7](../UPGRADING-1.7.md): every breaking change from 1.6
 
 ## Workloads
 
@@ -90,5 +89,3 @@ Components:
 - [Contributing](../CONTRIBUTING.md): setup, test tiers, pull requests and
   style
 - [Development Guide](development.md): code map, CI, extension points
-- [Releasing](../RELEASING.md): cutting a release
-- [Security](../SECURITY.md): reporting a vulnerability

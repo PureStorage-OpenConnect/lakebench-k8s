@@ -14,7 +14,7 @@ Hive Metastore (HMS) is the metadata catalog for Iceberg and Delta tables. It tr
 ## Version and image
 
 - The metastore runs Stackable's image. Version and why Hive 4 is not used: [version matrix](compatibility-matrix.md#component-version-matrix). Hive 4 fails Iceberg `get_table` with TApplicationException.
-- No config key selects it. `images.hive` is removed ([UPGRADING-1.7.md](../UPGRADING-1.7.md#config-fields-nothing-read-are-removed)).
+- No config key selects it. `images.hive` is removed (1.7.0 in the [changelog](../CHANGELOG.md#170---2026-10-06)).
 
 ## Stackable operator
 

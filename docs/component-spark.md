@@ -94,7 +94,7 @@ Spark settings live under `platform.compute.spark`, `platform.storage.scratch`, 
 
 - Executor count overrides above 28 are refused by the commands that change data; `destroy` and read commands drop them with a note.
 - Unset `*_executor_cores`: bronze-ingest and silver-stream grow to 8 or 16 cores when the offered load needs more executors than the cap (keeping total cores), unless their `*_executors` count is set. gold-refresh is never grown.
-- Batch jobs take only a count override. The removed `platform.compute.spark.driver` and `.executor` blocks and `scratch.size` are listed in [UPGRADING-1.7.md](../UPGRADING-1.7.md#sizing-settings-that-sized-nothing-are-removed).
+- Batch jobs take only a count override. The removed `platform.compute.spark.driver` and `.executor` blocks and `scratch.size` are listed under 1.7.0 in the [changelog](../CHANGELOG.md#170---2026-10-06).
 
 ### Spark conf (S3A, shuffle, memory)
 

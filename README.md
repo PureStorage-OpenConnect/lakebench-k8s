@@ -199,7 +199,6 @@ fix.
 - [Recipes](docs/recipes.md): supported architectural compositions
 - [Results & Comparison](docs/README.md#results--comparison): measurements
   and interpretation
-- [Upgrading to 1.7](UPGRADING-1.7.md): every breaking change from 1.6
 
 ## License
 

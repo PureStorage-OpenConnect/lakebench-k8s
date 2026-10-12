@@ -36,8 +36,7 @@ refuses ``mode=None`` for a key whose unit, direction or band differs by
 mode (``ModeRequired``), and answers it with every mode's caps when only the
 caps differ.
 
-History of band and direction changes to published metrics (to be named in
-UPGRADING-1.7.md):
+History of band and direction changes to published metrics:
 
 - 1.7: direction had been derived from name tokens. ``qph_degradation_pct``
   is lower is better (was higher). Not directional (were higher or lower):

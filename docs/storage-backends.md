@@ -29,7 +29,7 @@ All keys live under `platform.storage.s3`. Defaults from `S3Config` in `config/s
 - Lakebench reads S3 credentials only from `access_key` and `secret_key`. `deploy` renders the `lakebench-s3-credentials` Secret from them; the CLI's S3 client uses the same fields.
 - Keep keys out of the file with `${VAR}` substitution, e.g. `access_key: "${LAKEBENCH_S3_ACCESS_KEY}"`.
 - Without credentials the config loads, and `lakebench deploy` refuses to start.
-- `secret_ref` is removed ([UPGRADING-1.7.md](../UPGRADING-1.7.md#config-fields-nothing-read-are-removed)): nothing ever read an existing Secret.
+- `secret_ref` is removed (1.7.0 in the [changelog](../CHANGELOG.md#170---2026-10-06)): nothing ever read an existing Secret.
 
 ## Required permissions
 

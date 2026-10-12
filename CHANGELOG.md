@@ -112,7 +112,7 @@ Results from 1.7.1 are not comparable with 1.7.0 for the workloads, modes and me
 ## [1.7.0] - 2026-10-06
 
 ### Breaking changes
-One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1.7.md says what to do about each. The entries after them give the detail.
+One line per breaking change. The entries after them give the detail.
 
 - Twenty config keys nothing read are removed: at its 1.6 default each loads with a note; another value is refused by the commands that change data.
 - `platform.compute.spark.driver`, `.executor` and `platform.storage.scratch.size` sized nothing: set to other than their 1.6 default, they are refused.
@@ -181,32 +181,32 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
 - A run that reuses bronze exits 3 when its corpus series marker is unfinished or made for another cycle count, window or generation, or is missing on a multi-cycle config or over later cycles' files (4 when bronze cannot be read); a multi-cycle run over a non-empty datagen prefix exits 3 without `--regenerate`; `generate` or `run --generate-only` on a multi-cycle config and `run --skip-generate` on a multi-cycle AML config exit 2.
 - The default datagen image is `lb-datagen:2a36ae21`, pinned by digest: the v1.7 look image. A config that does not set `images.datagen` generates with it where v1.6 used `lb-datagen:1.6.0`; its output on the five byte-compare cases is byte-identical to 1.6.0, and the lineage table maps it to the 1.6.0 root.
 
-- **The Hive recipes default to Spark 4.1.1.** Hive-based recipes take `apache/spark:4.1.1-python3`; Polaris recipes stay on 4.0.2. Pin `images.spark: apache/spark:4.0.2-python3` to keep the old image. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **The verdict is decided from the record.** A PASSED verdict now requires rows in every layer, the expected AML rules, a batch scale ratio of at least 0.95, and no empty query answer. `run` exits 1 when the verdict is not PASSED; `report` takes the stricter of stored and recomputed verdicts. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **Multi-cycle runs and reused corpora check a corpus series marker.** Every generate writes `_corpus/series.json`; a run reusing bronze checks the marker and exits 3 on a mismatch or incomplete generate. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **Executor overrides are bounded, counted and kept out of evidence.** Executors take 1 to 28 and `driver_cores` 1 to 16; larger values are refused. Overrides enter the capacity check and the experiment identity. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **`run` needs a 1.7 deploy.** Jobs take jars from the deployment's dependency server; a 1.6 deployment exits 4. Redeploy once after upgrading. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **`clean bronze`, `clean data`, `clean metrics` and `clean journal` are refused** (exit 2). Use `lakebench run CONFIG --generate --regenerate` for bronze and `clean silver`/`clean gold` for data. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **Renamed commands print one line and are removed in v1.8.** `results`, `admin install-spark-operator` and `admin install-scratch-storage-class` are hidden aliases of their replacements. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **`benchmark` and `query` no longer write into a run's record.** `benchmark` saves a record of its own; `query` prints its result and no longer appends it. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **`run` refuses arguments it used to ignore, before any cluster call.** Conflicting or mode-inappropriate flags exit 2 before contacting the cluster. The full list is under `run` in docs/cli-reference.md. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **`reproduce` no longer destroys before its run.** It refuses an existing namespace or bucket (exit 3). Run `lakebench destroy CONFIG` first. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **The Hive recipes default to Spark 4.1.1.** Hive-based recipes take `apache/spark:4.1.1-python3`; Polaris recipes stay on 4.0.2. Pin `images.spark: apache/spark:4.0.2-python3` to keep the old image.
+- **The verdict is decided from the record.** A PASSED verdict now requires rows in every layer, the expected AML rules, a batch scale ratio of at least 0.95, and no empty query answer. `run` exits 1 when the verdict is not PASSED; `report` takes the stricter of stored and recomputed verdicts.
+- **Multi-cycle runs and reused corpora check a corpus series marker.** Every generate writes `_corpus/series.json`; a run reusing bronze checks the marker and exits 3 on a mismatch or incomplete generate.
+- **Executor overrides are bounded, counted and kept out of evidence.** Executors take 1 to 28 and `driver_cores` 1 to 16; larger values are refused. Overrides enter the capacity check and the experiment identity.
+- **`run` needs a 1.7 deploy.** Jobs take jars from the deployment's dependency server; a 1.6 deployment exits 4. Redeploy once after upgrading.
+- **`clean bronze`, `clean data`, `clean metrics` and `clean journal` are refused** (exit 2). Use `lakebench run CONFIG --generate --regenerate` for bronze and `clean silver`/`clean gold` for data.
+- **Renamed commands print one line and are removed in v1.8.** `results`, `admin install-spark-operator` and `admin install-scratch-storage-class` are hidden aliases of their replacements.
+- **`benchmark` and `query` no longer write into a run's record.** `benchmark` saves a record of its own; `query` prints its result and no longer appends it.
+- **`run` refuses arguments it used to ignore, before any cluster call.** Conflicting or mode-inappropriate flags exit 2 before contacting the cluster. The full list is under `run` in docs/cli-reference.md.
+- **`reproduce` no longer destroys before its run.** It refuses an existing namespace or bucket (exit 3). Run `lakebench destroy CONFIG` first.
 - **Continuous runs recorded before the round count was stored compare on their rounds.** A record with no stored `limits.benchmark_rounds` reads it from its rounds, so a pair with different round counts now reads not like-for-like.
-- **`init` writes a first-day config, and the wizard is removed.** A 12-line config with a unique name, `recipe:`, scale 1, and `${VAR}` credentials. The interactive wizard and `--access-key`/`--secret-key` are gone. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **A component that contradicts its recipe is refused at load.** A catalog, format or engine that differs from the recipe fails commands that change data. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **`${VAR}` is substituted per value, not in the file text.** Environment values are no longer parsed as YAML, so secrets with special characters work. Two edge cases fail: unclosed defaults and references inside flow syntax. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **`init` writes a first-day config, and the wizard is removed.** A 12-line config with a unique name, `recipe:`, scale 1, and `${VAR}` credentials. The interactive wizard and `--access-key`/`--secret-key` are gone.
+- **A component that contradicts its recipe is refused at load.** A catalog, format or engine that differs from the recipe fails commands that change data.
+- **`${VAR}` is substituted per value, not in the file text.** Environment values are no longer parsed as YAML, so secrets with special characters work. Two edge cases fail: unclosed defaults and references inside flow syntax.
 - **A config with no `recipe:`, or `recipe: default`, is deprecated.** It still resolves as before and loads with a note. v1.8 requires `recipe:`.
-- **Deploy never installs a shared component; `lakebench admin install --component` does.** Shared components (scratch StorageClass, Spark Operator, Stackable, observability) are installed once by a cluster admin. `deploy` only checks them. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **`admin install` never changes an installed component.** It installs what is missing with `helm install` (never an upgrade). A version change is refused unless `--allow-version-change` is given. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **Deploy never installs a shared component; `lakebench admin install --component` does.** Shared components (scratch StorageClass, Spark Operator, Stackable, observability) are installed once by a cluster admin. `deploy` only checks them.
+- **`admin install` never changes an installed component.** It installs what is missing with `helm install` (never an upgrade). A version change is refused unless `--allow-version-change` is given.
 - **`admin install-spark-operator` and `admin install-scratch-storage-class` are aliases** of `admin install --component`. `install-spark-operator --version` no longer upgrades an installed operator.
 - **The watch-list edits never fall back to the config's operator version.** `deploy`, `run` and `destroy` pin the installed chart, read inside the cluster lease.
 - **`admin doctor` runs the prerequisite checks** of `docs/prerequisites.md` for the shared components and exits 1 when one fails.
-- **A config needs a `name:` to change data.** Commands that change data refuse a nameless config. A v1.6 directory needs `name:` added to the config that deployed it. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **A config needs a `name:` to change data.** Commands that change data refuse a nameless config. A v1.6 directory needs `name:` added to the config that deployed it.
 - **Removed config keys are refused by the commands that change data,** with what to do instead. Read-only commands list dropped keys in an "Upgrade notes" block.
 - **Counts are bounded at load.** Zero, negative or out-of-range counts for replicas, cores and generators are refused.
-- **Settings that were recorded but not honoured are refused.** `spark.driver`, `spark.executor` and `scratch.size` sized nothing; they are removed. Use `<job>_executors`, `driver_memory` or `driver_cores` instead. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **Config fields nothing read are removed.** Twenty config keys (images, observability flags, properties, and others) that had no consumer are removed; a key at its v1.6 default loads with a note. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
-- **`spark.conf` merges over the job defaults; keys Lakebench sets are refused.** `spark.conf` now holds your own keys only; each job starts from proven defaults. Keys Lakebench or its scripts set are refused. See [UPGRADING-1.7.md](UPGRADING-1.7.md) for migration steps.
+- **Settings that were recorded but not honoured are refused.** `spark.driver`, `spark.executor` and `scratch.size` sized nothing; they are removed. Use `<job>_executors`, `driver_memory` or `driver_cores` instead.
+- **Config fields nothing read are removed.** Twenty config keys (images, observability flags, properties, and others) that had no consumer are removed; a key at its v1.6 default loads with a note.
+- **`spark.conf` merges over the job defaults; keys Lakebench sets are refused.** `spark.conf` now holds your own keys only; each job starts from proven defaults. Keys Lakebench or its scripts set are refused.
 - **`operator.install: true` is refused.** Shared operators are installed with `admin install`; `deploy` only checks them.
 - **`lakebench run` refuses benchmark settings it does not run.** A config with `mode: throughput|composite`, `cache: cold` or `streams` above 1 is refused by `run`; use `lakebench benchmark` with those flags.
 - **Flat top-level config keys are deprecated.** They still load with a note naming the nested key to write.
@@ -285,7 +285,7 @@ One line per breaking change, from docs/upgrading/breaking-1.7.yaml; UPGRADING-1
   the change is not compared with QpH after it; workload version `aml-2`
   covers it. Batch and continuous records are still never
   compared with each other (the mode is a workload identity key).
-- **`RELEASING.md` and `make release-check`.** One release process: the
+- **`make release-check`.** One release process: the
   scripted steps run in order with `make release-check VERSION=X.Y.Z`
   (`DRY=1` for the dry run, `make rc-<step>` for one step), and the
   owner-only steps are a checklist. It replaces `docs/releasing.md`.
@@ -2332,4 +2332,4 @@ with 1.6; the first section lists why.
   check.
 
 
-For releases before 1.6.0, see [CHANGELOG-archive.md](CHANGELOG-archive.md).
+Releases before 1.6.0 are in the repository history.
