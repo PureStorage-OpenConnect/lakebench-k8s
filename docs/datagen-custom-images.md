@@ -3,8 +3,8 @@
 Reference: building, testing and configuring a custom data generator image, and how its corpora are identified.
 
 - The generator runs as a container image on Kubernetes.
-- Default image: `docker.io/sillidata/lb-datagen:5d7ce61a`, built from
-  `datagen_rs/` (Rust). Tag-pinned; set `images.datagen` with a
+- Default image: `docker.io/sillidata/lb-datagen:1.7.1`, built from
+  `datagen_rs/` (Rust) at the 1.7.1 release tree. Tag-pinned; set `images.datagen` with a
   `@sha256:...` suffix to pin a run to a specific digest.
 - It produces the Customer360 schema ([Customer 360 data model](benchmarks/c360/data-model.md#21-bronze-columns-41-arrow-schema-customer360_schema))
   and the Financial `pacs.008` schema, chosen by `--schema`.
@@ -76,7 +76,7 @@ images:
 - The registered v1.7 looks pin `lb-datagen:2a36ae21` (digest
   `sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`),
   which 1.7.0 shipped as its default.
-- The 1.7.1 default `5d7ce61a` has no lineage row, so its corpora get a corpus
+- The default `1.7.1` has no lineage row, so its corpora get a corpus
   id of their own.
 - The run records the configured image reference. AML results from a modified
   generator are not comparable with results from the look image.

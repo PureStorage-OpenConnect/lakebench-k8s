@@ -237,7 +237,7 @@ name: my-lakehouse
 # Container images for every component. Override these for air-gapped
 # registries or custom builds.
 images:
-  datagen: docker.io/sillidata/lb-datagen:5d7ce61a
+  datagen: docker.io/sillidata/lb-datagen:1.7.1
   spark: apache/spark:4.1.1-python3       # the recipe's default
   postgres: postgres:17
   polaris: apache/polaris:1.6.0
@@ -503,7 +503,7 @@ Container images for every deployed component. Override for air-gapped registrie
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
-| `images.datagen` | string | `docker.io/sillidata/lb-datagen:5d7ce61a` | advanced | Data generator image. Tag-pinned; override with a digest for byte-for-byte reproducibility. In continuous mode it generates until the run window ends: AML as successive 24-month periods of the same bank, Customer360 as successive time slices. |
+| `images.datagen` | string | `docker.io/sillidata/lb-datagen:1.7.1` | advanced | Data generator image. Tag-pinned; override with a digest for byte-for-byte reproducibility. In continuous mode it generates until the run window ends: AML as successive 24-month periods of the same bank, Customer360 as successive time slices. |
 | `images.spark` | string | `apache/spark:4.1.1-python3` | advanced | Spark runtime image. Unset: the image of the config's recipe (or of the recipe its components name): `4.1.1-python3` on every recipe; `4.0.2-python3` instead when the config writes a table format version Spark 4.1 cannot run (Delta 4.0.0). |
 | `images.postgres` | string | `postgres:17` | advanced | PostgreSQL image (metadata backend). |
 | `images.polaris` | string | `apache/polaris:1.6.0` | advanced | Apache Polaris REST catalog image. |

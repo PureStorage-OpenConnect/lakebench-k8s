@@ -481,15 +481,16 @@ class ImagesConfig(ConfigModel):
     # continuous epoch and checks for a stop before an epoch's manifest;
     # its output is byte-identical to 3f4729b6 (AML continuous and batch
     # locally, an AML scale-10 batch corpus on the cluster from an earlier
-    # push of this tag built from the same context). The default
-    # 5d7ce61a (datagen_rs tree 5d7ce61aa0c4, pushed 2026-10-09):
-    # datagen-v2-rs-0.4. Surnames are synthetic at every scale and the surname
+    # push of this tag built from the same context). The default is the
+    # tag 1.7.1, pushed 2026-10-11 from the 1.7.1 release's datagen_rs tree
+    # (9e504f426): datagen-v2-rs-0.4 (its image label still reads rs-0.3, a
+    # stale Dockerfile label). Surnames are synthetic at every scale and the surname
     # and company-head pools grow in proportion to the population, so
     # screening namesakes per watchlist entry stay flat across scale. Every
     # AML corpus differs from 3cb67f92's, scale 1 included; the Customer 360
     # generator is unchanged. Tag-pinned: a run that must be reproduced byte
     # for byte should set images.datagen with a '@sha256:...' digest.
-    datagen: str = "docker.io/sillidata/lb-datagen:5d7ce61a"
+    datagen: str = "docker.io/sillidata/lb-datagen:1.7.1"
     """Data generator image. Tag-pinned; override with a digest for byte-for-byte
     reproducibility. In continuous mode it generates until the run window ends:
     AML as successive 24-month periods of the same bank, Customer360 as successive
