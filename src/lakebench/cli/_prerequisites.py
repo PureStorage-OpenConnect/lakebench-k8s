@@ -534,7 +534,9 @@ def _decide_capacity(
     plan = verdict.plan
     gib = 1024**3
     shortfalls = list(verdict.shortfalls)
-    warnings = list(verdict.warnings)
+    # Balance is advisory and shown by `plan` and `config recommend`; the
+    # preflight of deploy and run does not repeat it.
+    warnings = [w for w in verdict.warnings if not w.startswith("cannot balance")]
 
     pod = plan.largest_pod
     pod_short = not fallback and not found.pod_fits(pod.cpu_cores, pod.memory_gb)

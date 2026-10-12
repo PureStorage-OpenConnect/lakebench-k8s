@@ -875,7 +875,7 @@ rate: raise it past the need.
 
 ### "cannot balance" before a continuous run
 
-**Symptom:** `run` or `config recommend` warns `cannot balance: <stage>
+**Symptom:** `plan` or `config recommend` warns `cannot balance: <stage>
 needs ~N executors x C cores to carry the offered load; <limit> allows M`.
 
 **Cause:** the cluster's concurrent budget, the executor cap, or an
