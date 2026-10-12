@@ -26,6 +26,18 @@ A one-line banner shows pipeline mode, Customer 360 scale factor, the recipe (`c
 
 The delivered `report.html` predates any look naming the run, so it reads "development"; `lakebench report --render` afterwards reads the look.
 
+## Views
+
+A batch run of Customer 360 or AML opens on two tabs: **Workload replay** and **Scorecard**. The Scorecard is the page described below. A run with no replay (continuous mode, for now) shows the Scorecard alone.
+
+The replay plays the recorded timeline back, with play and pause, 1x/2x/4x speed, restart, a scrubber and a click on any stage:
+
+- **Workload**: the five stages with their recorded row counts (datagen, bronze, silver, gold) and the number of successful benchmark queries, and the Spark jobs with their recorded durations.
+- **Pipeline**: one bar per handoff, filling over the downstream stage's recorded window.
+- **Platform**: the storage lane from the record's [`io` block](records.md#storage-io), MB/s read and written. Compute, Network and Kubernetes are listed as not measured.
+- **Recorded** is a stage or job window, a row count, a byte count. **Derived** is the running count and the handoff bars, which grow over a recorded window because the record holds the window and the final figure, not the figure in between. Nothing is simulated.
+- The page embeds its data as one JSON block, and a test compares it with the stored record. Where the record has no window (datagen) or no figure (Spark stage bytes), the replay says so rather than drawing a curve.
+
 ## Summary cards
 
 | Mode | Cards |
