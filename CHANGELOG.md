@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Every recipe defaults to Spark 4.1.1.** The Polaris recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none` move from `apache/spark:4.0.2-python3` to `apache/spark:4.1.1-python3` (Delta follows to 4.1.0 at `auto`). A config that does not set `images.spark` runs 4.1.1 where 1.7.1 ran 4.0.2; redeploy before `run`. Pin `images.spark: apache/spark:4.0.2-python3` to keep the old image. A Delta 4.0.0 config still takes the 4.0 image. Local mode keeps its own 4.0.2 jars.
 - **The release matrix moves with it, and the 4.0 validation entries are dropped.** The six `validated_combinations.yaml` entries recorded on Spark 4.0 (Polaris Customer 360 batch for trino, thrift and duckdb, Polaris AML batch and continuous, `hive-delta-spark-thrift`) no longer match the matrix, so those rows read `unverified` until they are re-run on 4.1.
 - **`deploy`'s capacity check is a warning.** A shortfall from the capacity model prints `WARNING: estimated capacity shortfall, deploy continues` and deploy goes on; unreadable config values and node quantities still refuse. `run` still enforces capacity (`--skip-preflight` skips it).
+- **The continuous balance check is advisory.** A stage whose lag grew through the window's second half prints `balance (advisory): ...`, is recorded in `continuous.balance`, and shows as "not balanced" in the report, but no longer fails the run (1.7.1 failed it with `balance gate: ...`). Other continuous gates, such as the ingest ratio, still apply.
 
 ### New
 

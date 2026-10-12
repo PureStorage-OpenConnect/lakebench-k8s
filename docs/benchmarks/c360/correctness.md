@@ -112,8 +112,10 @@ A continuous run fails unless, inside the window:
 - gold freshness was measured;
 - every stream's driver log has timestamped stage lines;
 - the pipeline was balanced: no handoff's lag rose by more than one cadence
-  across the window's second half (fails with "balance gate: ..." and a
-  bottleneck line; see [Benchmarking](../../benchmarking.md)).
+  across the window's second half (advisory: a stage that fell behind prints
+  "balance (advisory): ..." with a bottleneck line and the Balance card reads
+  "not balanced", but the run is not failed; see
+  [Benchmarking](../../benchmarking.md)).
 
 ### 5.4 Run equivalence
 

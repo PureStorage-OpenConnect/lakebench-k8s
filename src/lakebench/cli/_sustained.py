@@ -4411,10 +4411,11 @@ def _run_sustained(
             "store_clock_offset_s": store_clock_offset(driver_logs.get("bronze-ingest")),
         }
         # The streams' own problems: a stage that fell behind still ran the
-        # window, so the balance gate fails the run without failing a stream.
+        # window. Balance is advisory: the record and the report carry it, and
+        # the run is judged on what committed.
         stream_problems = list(window_problems)
         if balance_record["measured"] and not balance_record["balanced"]:
-            window_problems.append(f"balance gate: {balance_record['bottleneck']}")
+            print_warning(f"balance (advisory): {balance_record['bottleneck']}")
         # The verdict names what failed instead of "crashed or was
         # interrupted".
         if collector.current_run is not None:

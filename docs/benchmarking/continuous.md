@@ -54,7 +54,7 @@ Gate and answer checks: [verdict.md](verdict.md). Tuning: [continuous-tuning.md]
 - A configured `gold_refresh_interval` is not in it; it is labelled beside it (`experiment.limits.trigger_bound`). Readers see data up to one refresh interval older.
 - With `--skip-generate`, a file written before bronze started counts from when bronze took it. `continuous.freshness.from` says which.
 - `continuous.freshness`: `p50_s`, `p95_s`, `max_s` over cycles that saw new data, `cycles`, `from`, `store_clock_offset_s`.
-- The balance gate, not freshness, decides whether gold kept up ([verdict.md](verdict.md#continuous-gate)).
+- The balance check, not freshness, says whether gold kept up (advisory: it warns and is recorded, it does not fail the run) ([verdict.md](verdict.md#continuous-gate)).
 
 ## Offered load and regimes
 

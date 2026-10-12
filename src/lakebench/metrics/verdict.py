@@ -431,10 +431,10 @@ def compute_badge_status(
             )
         elif freshness_pct > 0.5:
             # Reported, not judged: whether gold kept up is the balance
-            # gate (its lag did not climb through the window).
+            # check (its lag did not climb through the window).
             warnings.append(
                 f"Gold freshness {pb.data_freshness_seconds:,.0f}s "
-                f"({freshness_pct:.0%} of run duration); the balance gate judges "
+                f"({freshness_pct:.0%} of run duration); the balance check reports "
                 "whether gold kept up"
             )
 

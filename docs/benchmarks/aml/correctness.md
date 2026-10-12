@@ -36,7 +36,7 @@ at a fixed seed but not checked; check them from `metrics.json`
 | Continuous: gold-refresh drained ([4.5](pipeline.md#45-continuous-drain-and-tick-records)) | drain check | yes |
 | Continuous: gold-refresh logs present, a cumulative-alerts line, peak alerts > 0 | AML continuous gate | yes |
 | Continuous: ingest ratio at least 0.95, unless the [trickle](../../glossary.md#trickle) bounded intake and the pipeline kept pace, or a capacity run with bronze at capacity (then a warning) | record gates | yes |
-| Continuous: balanced; no handoff's lag rose by more than one cadence across the window's second half | balance gate | yes; peak gold freshness is reported beside it, never gated |
+| Continuous: balanced; no handoff's lag rose by more than one cadence across the window's second half | balance check | no (warning); recorded and shown in the report's Balance card, peak gold freshness beside it |
 
 No AML query has fixed expected results, and Lakebench does not compare
 query answers between runs: a reader compares row counts by eye

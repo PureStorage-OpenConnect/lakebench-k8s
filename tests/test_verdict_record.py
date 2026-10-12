@@ -958,10 +958,10 @@ def _stale(rec: dict, ahead: bool) -> None:
     pb.setdefault("config_snapshot", {})["datagen_continuous"] = True
 
 
-@pytest.mark.parametrize(("ahead", "says"), [(False, "balance gate"), (True, "capacity run")])
+@pytest.mark.parametrize(("ahead", "says"), [(False, "balance check"), (True, "capacity run")])
 def test_stale_gold_is_reported_not_failed(ahead, says) -> None:
     """Peak freshness is a number beside the verdict: whether gold kept up
-    is the balance gate's (lag not climbing), so stale gold warns and never
+    is the balance check's (lag not climbing), so stale gold warns and never
     fails the run on its own."""
     rec = sr.load_record(C360_CONT)
     _stale(rec, ahead)

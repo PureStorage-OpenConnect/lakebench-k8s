@@ -854,11 +854,12 @@ pipeline's tables are still valid.
 **Fix:** run `lakebench status <config>` to check the engine's health, then
 run the benchmark on its own with `lakebench benchmark <config>`.
 
-### A continuous run FAILED "not balanced"
+### A continuous run reports "not balanced"
 
-**Symptom:** the run ends `FAILED` with `balance gate: not balanced:
+**Symptom:** the run prints `balance (advisory): not balanced:
 <stage> fell behind <upstream>: its lag grew Ns across the window's second
-half ...` and the report's Balance card says "not balanced".
+half ...` and the report's Balance card says "not balanced". The run is not
+failed on this.
 
 **Cause:** that stage could not carry the scale's offered load. The lag of
 the commits waiting for it, sampled once per batch, rose by more than one

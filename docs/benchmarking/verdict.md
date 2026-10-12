@@ -32,7 +32,8 @@ A continuous run passes only on continuous processing inside the window. With go
 - gold refreshed on new silver data fewer than 2 times after that write (a `(silver idle)` cycle, one that read no silver, or one that read no more silver rows than the last does not count);
 - gold freshness was not measured inside the window;
 - a stream's driver log could not be read;
-- the pipeline was not balanced: a stage's lag, sampled once per batch, rose by more than one cadence across the second half. The bottleneck line names the stage and executor setting ([continuous-tuning.md](continuous-tuning.md)). With under three samples there, the end lag must be no larger than the first half's peak, or within two cadences. Unmeasurable balance does not fail. Datagen to bronze is not judged under `--skip-generate` or with `max_files_per_trigger` set.
+
+Balance is advisory. When a stage's lag, sampled once per batch, rose by more than one cadence across the second half, `run` prints `balance (advisory): ...` naming the stage and executor setting ([continuous-tuning.md](continuous-tuning.md)), the Balance card reads "not balanced", and the run is not failed on it. With under three samples there, the end lag must be no larger than the first half's peak, or within two cadences. Unmeasurable balance reads "not measured". Datagen to bronze is not judged under `--skip-generate` or with `max_files_per_trigger` set.
 
 Corpus out after half the window: the run passes (`window_arrival_fraction` shows it), and freshness skips gold cycles after silver stopped growing.
 
