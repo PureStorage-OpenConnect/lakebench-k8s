@@ -77,8 +77,9 @@ Each deployment gets a Deployment, a Service, a 1Gi PVC on `px-csi-scratch` by d
 
 ```bash
 kubectl port-forward -n <namespace> svc/lakebench-grafana 3000:3000   # then http://localhost:3000
-kubectl port-forward -n <namespace> svc/lakebench-prometheus 9090:9090
 ```
+
+- To query Prometheus, use Grafana: Explore, data source **Prometheus**. Prometheus has no login, so it has no URL; a direct port-forward still works if you want the raw UI: `kubectl port-forward -n <namespace> svc/lakebench-prometheus 9090:9090`.
 
 - The password is in the Secret if you need it again:
 

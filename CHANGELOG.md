@@ -26,7 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### New
 
 - **Per-deployment Grafana password.** Deploy generates one into the `lakebench-grafana` Secret and preserves it across redeploys.
-- **`deploy` prints how to reach Grafana.** The success panel shows the Grafana URL and the admin login. On OpenShift it creates an edge-TLS Route (`lakebench-grafana`) and prints its `https://` URL; `observability.grafana_route: false` skips it. Elsewhere it prints `http://localhost:3000` and the port-forward. Prometheus and the Pushgateway are never exposed.
+- **`deploy` prints how to reach Grafana.** The success panel shows the Grafana URL and the admin login. On OpenShift it creates an edge-TLS Route (`lakebench-grafana`) and prints its `https://` URL; `observability.grafana_route: false` skips it. Elsewhere it prints `http://localhost:3000` and the port-forward. Prometheus and the Pushgateway are never exposed; query Prometheus from Grafana's Explore view (the panel says so).
 - **Fixed Service names in each namespace:** `lakebench-prometheus`, `lakebench-grafana`, `lakebench-pushgateway`. Port-forwarding no longer requires looking up chart-truncated names.
 
 ### Changed

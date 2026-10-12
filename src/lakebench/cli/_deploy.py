@@ -745,10 +745,7 @@ def _deploy_impl(
                 success_msg += f"\n  Login:      admin / [cyan]{esc(password)}[/cyan]"
             else:
                 success_msg += f"\n  Login:      admin, password in secret lakebench-grafana (namespace {obs_ns}), key admin-password"
-            success_msg += (
-                "\n  Prometheus: [cyan]http://localhost:9090[/cyan] after "
-                f"[cyan]kubectl port-forward -n {obs_ns} svc/lakebench-prometheus 9090:9090[/cyan]"
-            )
+            success_msg += "\n  Queries:    Grafana, Explore, data source Prometheus"
 
         if next_steps:
             success_msg += _next_steps(cfg, config_file)
