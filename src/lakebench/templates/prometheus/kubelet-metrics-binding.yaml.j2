@@ -1,0 +1,21 @@
+{# Per-deployment binding of lakebench-prometheus (service account in the      #}
+{# deployment namespace) to the shared lakebench-kubelet-metrics ClusterRole.  #}
+{# Deploy applies it; destroy deletes it. A deploy without permission to       #}
+{# create ClusterRoleBindings logs the problem and continues; platform CPU     #}
+{# and memory then read ``not collected``.                                    #}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lakebench-kubelet-metrics-{{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus-rbac
+    lakebench.deployment/namespace: {{ namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lakebench-kubelet-metrics
+subjects:
+  - kind: ServiceAccount
+    name: lakebench-prometheus
+    namespace: {{ namespace }}

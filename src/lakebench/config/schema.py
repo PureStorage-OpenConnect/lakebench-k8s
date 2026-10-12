@@ -406,12 +406,11 @@ class ImagesConfig(ConfigModel):
             f"provenance records {STACKABLE_HIVE_VERSION}."
         ),
         "prometheus": (
-            "Prometheus deploys from the kube-prometheus-stack chart; pin it with "
-            "observability.chart_version."
+            "set observability.prometheus_image to pin the per-namespace Prometheus "
+            "(digest-pinned)."
         ),
         "grafana": (
-            "Grafana deploys from the kube-prometheus-stack chart; pin it with "
-            "observability.chart_version."
+            "set observability.grafana_image to pin the per-namespace Grafana (digest-pinned)."
         ),
     }
     _removed_defaults: ClassVar[dict[str, Any]] = {
@@ -2882,38 +2881,35 @@ class ArchitectureConfig(ConfigModel):
 class ObservabilityConfig(ConfigModel):
     """Layer 3: Observability configuration.
 
-    Flat model -- use top-level keys (enabled, dashboards_enabled, etc.).
-    Deeply nested YAML (metrics.prometheus.enabled) is rejected to prevent
-    silent data loss (see BUG-029).
+    One stack per deployment: Prometheus, Grafana and the Pushgateway live in
+    the deployment namespace, go with it on destroy, and never collide with
+    another deployment on the cluster. Flat model: nested YAML such as
+    ``metrics.prometheus.enabled`` is rejected (BUG-029).
     """
 
     enabled: bool = False
-    """Deploy the observability stack (Prometheus + Grafana)."""
+    """Deploy the per-namespace Prometheus and Grafana."""
     dashboards_enabled: bool = True
-    """Deploy Grafana dashboards."""
+    """Deploy the Grafana dashboard. Grafana itself still runs."""
     retention: str = "7d"
-    """Prometheus data retention period."""
+    """Prometheus data retention."""
     storage: str = "10Gi"
     """Prometheus PVC size."""
-    # kube-prometheus-stack chart version (bundles Prometheus + Grafana +
-    # node-exporter + kube-state-metrics as one unit). Pinned as of 2026-07-27
-    # -- the deploy previously carried no --version flag at all, so it
-    # silently tracked whatever the Helm repo served at install time. That
-    # currently resolves to Prometheus v3.13.1 + Grafana v13.1.x.
-    chart_version: str = "87.19.2"
-    """`kube-prometheus-stack` Helm chart version. Bundles Prometheus and Grafana as one unit
-    -- there is no separate Prometheus/Grafana version field. The version a fresh `lakebench
-    admin install --component observability` uses; an installed release keeps its version.
-    """
-    # Per-deployment Prometheus Pushgateway for live datagen + bronze->silver
-    # metrics (batch jobs Prometheus pull cannot catch). Deployed only when
-    # observability is enabled; a best-effort live view, never a published
-    # source (metrics.json stays authoritative). See
-    # docs/internal/observability-pushgateway.md.
+    prometheus_image: str = (
+        "quay.io/prometheus/prometheus:v3.5.0"
+        "@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996"
+    )
+    """Prometheus image, pinned by digest."""
+    grafana_image: str = (
+        "docker.io/grafana/grafana:12.1.1"
+        "@sha256:5749a0e982878aedaa2d320ed14d3bdce7a040a938f482258670009d419a597f"
+    )
+    """Grafana image, pinned by digest."""
+    prometheus_storage_class: str = ""
+    """StorageClass of the Prometheus PVC; empty uses the cluster default."""
     pushgateway_enabled: bool = True
-    """Deploy a Prometheus Pushgateway for Spark job metrics when observability is
-    enabled. A live view only; `metrics.json` stays the record.
-    """
+    """Deploy a Prometheus Pushgateway for Spark job metrics. A live view
+    only; ``metrics.json`` stays the record."""
     pushgateway_image: str = "prom/pushgateway:v1.11.1"
     """Pushgateway image."""
     pushgateway_storage: str = "1Gi"
@@ -2928,14 +2924,19 @@ class ObservabilityConfig(ConfigModel):
             "lakebench-output/reports/ without overwriting."
         ),
         "storage_class": (
-            "the Prometheus volume claim is created without a storageClassName, so it "
-            "uses the cluster default StorageClass."
+            "set observability.prometheus_storage_class to pick a StorageClass for the "
+            "Prometheus PVC; empty uses the cluster default."
         ),
         "prometheus_stack_enabled": (
-            "observability.enabled always installs or reuses the full stack, Prometheus included."
+            "observability.enabled always deploys the full per-namespace stack."
         ),
         "s3_metrics_enabled": "PodMonitor deployment is not gated on it.",
         "spark_metrics_enabled": "PodMonitor deployment is not gated on it.",
+        "chart_version": (
+            "observability no longer deploys the kube-prometheus-stack Helm chart; "
+            "pin the images with observability.prometheus_image and "
+            "observability.grafana_image."
+        ),
     }
     _removed_defaults: ClassVar[dict[str, Any]] = {
         "reports": {
@@ -3156,7 +3157,6 @@ def resolve_workload_location(data: dict[str, Any]) -> dict[str, Any]:
 # Namespaces that hold state shared by every deployment. A deployment may not
 # use one: destroy deletes the deployment's namespace.
 RESERVED_NAMESPACES: dict[str, str] = {
-    "lakebench-observability": "the shared kube-prometheus-stack release",
     "lakebench-system": "the cluster lease",
 }
 

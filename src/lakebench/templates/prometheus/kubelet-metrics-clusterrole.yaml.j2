@@ -1,0 +1,17 @@
+{# One ClusterRole, created by ``lakebench admin install --component            #}
+{# observability``. Each deployment's Prometheus binds to it in its namespace   #}
+{# (see kubelet-metrics-binding.yaml.j2) so it can read per-pod CPU and memory  #}
+{# from the kubelet's cAdvisor endpoint. Without it the kubelet target is      #}
+{# ``up=0`` and the report reads ``not collected`` for CPU and memory; the    #}
+{# rest of the stack is unaffected.                                           #}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lakebench-kubelet-metrics
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus-rbac
+rules:
+  - apiGroups: [""]
+    resources: [nodes, nodes/metrics]
+    verbs: [get, list, watch]
