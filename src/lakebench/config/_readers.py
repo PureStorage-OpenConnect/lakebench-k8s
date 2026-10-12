@@ -76,22 +76,13 @@ READERS: dict[str, str] = {
     "platform.compute.spark.gold_executors": (
         "lakebench.modules.pipeline_engines.spark.job:executor_override"
     ),
-    "platform.compute.spark.bronze_ingest_executors": (
-        "lakebench.modules.pipeline_engines.spark.job:executor_override"
-    ),
-    "platform.compute.spark.silver_stream_executors": (
-        "lakebench.modules.pipeline_engines.spark.job:executor_override"
-    ),
-    "platform.compute.spark.gold_refresh_executors": (
-        "lakebench.modules.pipeline_engines.spark.job:executor_override"
-    ),
-    "platform.compute.spark.bronze_ingest_executor_cores": (
+    "platform.compute.spark.bronze_executor_cores": (
         "lakebench.modules.pipeline_engines.spark.job:_executor_cores_override"
     ),
-    "platform.compute.spark.silver_stream_executor_cores": (
+    "platform.compute.spark.silver_executor_cores": (
         "lakebench.modules.pipeline_engines.spark.job:_executor_cores_override"
     ),
-    "platform.compute.spark.gold_refresh_executor_cores": (
+    "platform.compute.spark.gold_executor_cores": (
         "lakebench.modules.pipeline_engines.spark.job:_executor_cores_override"
     ),
     "platform.compute.spark.driver_memory": (

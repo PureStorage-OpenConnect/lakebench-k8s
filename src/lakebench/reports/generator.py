@@ -388,6 +388,74 @@ def _qph_stop_warning(metrics) -> str:
     )
 
 
+def _rate_chart_svg(
+    read: list[float],
+    write: list[float],
+    step: float,
+    start: datetime,
+    end: datetime,
+    width: int = 700,
+    height: int = 150,
+) -> str:
+    """Read and written MB/s per time bucket as inline SVG (no scripts).
+
+    The bars are rates over the bucket: the bytes in it over its length. A
+    bucket is no finer than the intervals feeding it, so the chart shows
+    where bytes were moved, not how evenly.
+    """
+    n = len(read)
+    if n == 0 or not (any(read) or any(write)):
+        return ""
+    rates_r = [v / step / 1e6 for v in read]
+    rates_w = [v / step / 1e6 for v in write]
+    top = max(max(rates_r), max(rates_w)) or 1.0
+    ml, mr, mt, mb = 56, 12, 14, 30
+    pw, ph = width - ml - mr, height - mt - mb
+    slot = pw / n
+    bar = max(1.0, slot * 0.42)
+
+    def y(v: float) -> float:
+        return mt + ph - (v / top) * ph
+
+    bars = ""
+    for i in range(n):
+        x = ml + i * slot
+        for k, (v, color) in enumerate(((rates_r[i], "#2563eb"), (rates_w[i], "#d97706"))):
+            if v > 0:
+                bars += (
+                    f'<rect x="{x + k * bar:.1f}" y="{y(v):.1f}" width="{bar:.1f}" '
+                    f'height="{mt + ph - y(v):.1f}" fill="{color}"/>'
+                )
+    grid = ""
+    for frac in (0, 0.5, 1):
+        gy = mt + ph - frac * ph
+        grid += (
+            f'<line x1="{ml}" x2="{ml + pw}" y1="{gy:.1f}" y2="{gy:.1f}" stroke="#e2e8f0"/>'
+            f'<text x="{ml - 6}" y="{gy + 3:.1f}" text-anchor="end" fill="#64748b" '
+            f'font-size="10">{top * frac:,.1f}</text>'
+        )
+    axis = (
+        f'<text x="{ml}" y="{height - 14}" fill="#64748b" font-size="10">{start:%H:%M:%S} UTC</text>'
+        f'<text x="{ml + pw}" y="{height - 14}" text-anchor="end" fill="#64748b" '
+        f'font-size="10">{end:%H:%M:%S} UTC</text>'
+        f'<text x="{ml + pw / 2}" y="{height - 2}" text-anchor="middle" fill="#64748b" '
+        f'font-size="10">MB/s per {step:g} s</text>'
+    )
+    legend = (
+        f'<rect x="{ml}" y="2" width="9" height="9" fill="#2563eb"/>'
+        f'<text x="{ml + 13}" y="10" fill="#64748b" font-size="10">read</text>'
+        f'<rect x="{ml + 52}" y="2" width="9" height="9" fill="#d97706"/>'
+        f'<text x="{ml + 65}" y="10" fill="#64748b" font-size="10">written</text>'
+    )
+    return (
+        f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" role="img" '
+        f'aria-label="Storage read and write rate over time" '
+        f'style="width: 100%; max-width: {width}px; height: auto; margin-top: 0.75rem;">'
+        f"<title>Storage read and write rate over time</title>"
+        f"{grid}{bars}{axis}{legend}</svg>"
+    )
+
+
 class ReportGenerator:
     """Generates HTML benchmark reports."""
 
@@ -1729,7 +1797,8 @@ class ReportGenerator:
         pipeline_bench_html = self._generate_pipeline_benchmark_section(metrics)
         summary_html = self._generate_summary(metrics)
         config_html = (
-            self._generate_storage_multiple_section(metrics)
+            self._generate_storage_io_section(metrics)
+            + self._generate_storage_multiple_section(metrics)
             + self._generate_resources_section(metrics)
             + self._generate_config_section(metrics)
             + self._generate_experiment_section(metrics)
@@ -3353,6 +3422,186 @@ class ReportGenerator:
             </table>
             {detail_cards}
             {domain_detail}
+        </section>
+        """
+
+    def _generate_storage_io_section(self, metrics: PipelineMetrics) -> str:
+        """Storage I/O (metrics/io.py): the bytes the engines reported reading
+        from and writing to storage, per source and round, a rate over time,
+        and what was not measured. Pod network traffic and storage-array
+        telemetry are not part of it."""
+        from lakebench.metrics.io import bucket_series
+        from lakebench.reports import derived as dv
+
+        to_dict = getattr(metrics, "to_dict", None)
+        try:
+            io = to_dict().get("io") if callable(to_dict) else None
+        except Exception:  # noqa: BLE001 - a section must never break the page
+            io = None
+        if not isinstance(io, dict):
+            return ""
+        intervals = [i for i in io.get("intervals") or [] if isinstance(i, dict)]
+        not_measured = [n for n in io.get("not_measured") or [] if isinstance(n, dict)]
+        if not intervals and not not_measured:
+            return ""
+        e = _html_escape
+
+        def size(value, path: str | None, applicable: bool = True) -> str:
+            if not applicable:
+                return '<span title="this source does not do that">n/a</span>'
+            if value is None or not path:
+                return '<span title="not measured">not measured</span>'
+            if value >= 1024**3:
+                return dv.total(
+                    value / 1024**3, paths=dv.product(path, "/1073741824"), fmt=".2f", suffix=" GiB"
+                )
+            return dv.total(
+                value / 1024**2, paths=dv.product(path, "/1048576"), fmt=".2f", suffix=" MiB"
+            )
+
+        def clock(stamp: str | None) -> datetime | None:
+            try:
+                return datetime.fromisoformat(stamp.replace("Z", "+00:00")) if stamp else None
+            except ValueError:
+                return None
+
+        def round_name(label: str) -> str:
+            if label == "pre_compaction":
+                return "before maintenance"
+            if label.startswith("round_"):
+                return f"in-stream round {label.split('_', 1)[1]}"
+            return label
+
+        sources = {
+            "trino": "Trino queries",
+            "datagen": "Datagen",
+            "spark-thrift": "Spark Thrift queries",
+            "duckdb": "DuckDB queries",
+        }
+        groups: dict[tuple[str, str], list[dict]] = {}
+        for iv in intervals:
+            groups.setdefault((str(iv.get("source")), str(iv.get("label"))), []).append(iv)
+
+        rows = []
+        for (source, label), ivs in groups.items():
+            paths = ivs[0].get("paths") or {}
+            totals = {}
+            for direction in ("read", "write"):
+                vals = [
+                    i.get(f"{direction}_bytes")
+                    for i in ivs
+                    if i.get(f"{direction}_bytes") is not None
+                ]
+                totals[direction] = sum(vals) if vals else None
+            starts = [t for t in (clock(i.get("start")) for i in ivs) if t]
+            ends = [t for t in (clock(i.get("end")) for i in ivs) if t]
+            if starts and ends:
+                lo, hi = min(starts), max(ends)
+                window = (
+                    f"{lo:%H:%M:%S}\u2013{hi:%H:%M:%S} UTC "
+                    f"<small>({(hi - lo).total_seconds():,.0f} s)</small>"
+                )
+            else:
+                window = (
+                    '<span title="the run did not record when this ran">no window recorded</span>'
+                )
+            partial = (
+                ""
+                if all(i.get("complete") for i in ivs)
+                else (' <small title="some query samples had no storage report">(partial)</small>')
+            )
+            basis = sorted(
+                {b for i in ivs for b in (i.get("read_basis"), i.get("write_basis")) if b}
+            )
+            rows.append(
+                f"<tr><td>{e(sources.get(source, source))}</td>"
+                f"<td>{e(round_name(label) if source != 'datagen' else 'generate')}</td>"
+                f"<td>{size(totals['read'], paths.get('read'), bool(ivs[0].get('read_basis')))}</td>"
+                f"<td>{size(totals['write'], paths.get('write'), bool(ivs[0].get('write_basis')))}"
+                f"{partial}</td>"
+                f"<td>{window}</td>"
+                f"<td><small>{e(', '.join(b.replace('_', ' ') for b in basis))}</small></td></tr>"
+            )
+        table = (
+            "<table><thead><tr><th>Source</th><th>Round</th><th>Read</th><th>Written</th>"
+            "<th>Window</th><th>Basis</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+            if rows
+            else ""
+        )
+
+        # A rate over time from the intervals that have a window.
+        placed = [i for i in intervals if i.get("start") and i.get("end")]
+        chart = ""
+        stamps = [t for i in placed for t in (clock(i["start"]), clock(i["end"])) if t]
+        if stamps:
+            lo, hi = min(stamps), max(stamps)
+            span = (hi - lo).total_seconds()
+            if span >= 1:
+                step = next((s for s in (1, 2, 5, 10, 15, 30, 60, 120, 300) if span / s <= 80), 600)
+                series = bucket_series(
+                    placed, step_seconds=step, start=lo.isoformat(), end=hi.isoformat()
+                )
+                chart = _rate_chart_svg(series["read"], series["write"], step, lo, hi)
+        unplaced = [
+            i
+            for i in intervals
+            if not (i.get("start") and i.get("end"))
+            and (i.get("read_bytes") or i.get("write_bytes"))
+        ]
+        notes = []
+        if unplaced:
+            names = ", ".join(
+                sorted({sources.get(str(i.get("source")), str(i.get("source"))) for i in unplaced})
+            )
+            notes.append(f"Not on the chart (no time window recorded): {names}.")
+        reasons = {
+            "executor_io_not_collected": "executor storage I/O is not collected",
+            "engine_not_instrumented": "this query engine does not report storage I/O",
+            "io_not_recorded": "this record predates the storage I/O report",
+        }
+        by_reason: dict[tuple[str, str], list[dict]] = {}
+        for n in not_measured:
+            by_reason.setdefault((str(n.get("source")), str(n.get("reason"))), []).append(n)
+        for (source, reason), entries in sorted(by_reason.items()):
+            stages = {str(n.get("stage")) for n in entries}
+            if stages == {"query"}:
+                # A query engine: name the rounds that have no report.
+                rounds = sorted(round_name(str(n["label"])) for n in entries if n.get("label"))
+                subject = f"{sources.get(source, source)}"
+                detail = ", ".join(dict.fromkeys(rounds))
+            else:
+                subject = source.capitalize()
+                detail = ", ".join(sorted(stages))
+                directions = {n.get("direction") for n in entries}
+                if directions >= {"read", "write"}:
+                    detail += "; read and write"
+            notes.append(
+                f"Not measured, {e(subject)}{f' ({e(detail)})' if detail else ''}: "
+                f"{e(reasons.get(reason, reason))}."
+            )
+        for problem in io.get("problems") or []:
+            notes.append(str(problem))
+        notes.append(
+            "Bytes are what the engines report reading from and writing to storage. Pod network "
+            "traffic and storage-array telemetry are not included, and bytes from different "
+            "sources are not added together."
+        )
+        note_html = "".join(
+            f'<p style="color: var(--text-muted); font-size: 0.8125rem;">{n}</p>'
+            if n.startswith("Not measured")
+            else f'<p style="color: var(--text-muted); font-size: 0.8125rem;">{e(n)}</p>'
+            for n in notes
+        )
+        return f"""
+        <section>
+            <h2>Storage I/O</h2>
+            <p style="font-size: 0.875rem;">Bytes the engines reported reading from and writing
+            to storage during the run. A figure that was not measured says so; it is never
+            shown as zero.</p>
+            {table}
+            {chart}
+            {note_html}
         </section>
         """
 

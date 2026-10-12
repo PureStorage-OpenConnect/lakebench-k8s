@@ -706,9 +706,9 @@ def _median_batch_seconds(
 
 #: The executor-count key a stage is resized with.
 _EXECUTOR_KNOB = {
-    "bronze-ingest": "bronze_ingest_executors",
-    "silver-stream": "silver_stream_executors",
-    "gold-refresh": "gold_refresh_executors",
+    "bronze-ingest": "bronze_executors",
+    "silver-stream": "silver_executors",
+    "gold-refresh": "gold_executors",
 }
 
 

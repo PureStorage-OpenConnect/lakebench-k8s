@@ -124,15 +124,16 @@ platform:
   #
   #     ## Per-executor sizing (cores, memory, overhead, scratch PVC) is fixed
   #     ## in the job profiles, proven at 1 TB+ scale.
-  #     ## Per-job executor count overrides (null = auto from scale factor).
-  #     ## Per-executor sizing (cores, memory, PVC) stays fixed from the proven profiles.
+  #     ## Per-stage executor counts (null = auto). The run's mode picks the job:
+  #     ## bronze-verify or bronze-ingest, silver-build or silver-stream,
+  #     ## gold-finalize or gold-refresh. Per-executor memory and PVC stay fixed.
   #     # bronze_executors: null
   #     # silver_executors: null
   #     # gold_executors: null
-  #     ## Continuous-mode job executor overrides
-  #     # bronze_ingest_executors: null
-  #     # silver_stream_executors: null
-  #     # gold_refresh_executors: null
+  #     ## Continuous mode only: cores per executor (1-16)
+  #     # bronze_executor_cores: null
+  #     # silver_executor_cores: null
+  #     # gold_executor_cores: null
   #     ## Global driver resource overrides
   #     # driver_memory: "8g"
   #     # driver_cores: 4

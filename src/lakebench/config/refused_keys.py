@@ -118,9 +118,6 @@ REFUSED_KEYS: tuple[RefusedKey, ...] = (
             "bronze_executors",
             "silver_executors",
             "gold_executors",
-            "bronze_ingest_executors",
-            "silver_stream_executors",
-            "gold_refresh_executors",
             "driver_cores",
         )
     ),

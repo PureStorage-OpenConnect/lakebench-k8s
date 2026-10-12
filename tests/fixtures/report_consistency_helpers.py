@@ -247,6 +247,7 @@ _FRACTION_UNITS = frozenset(
 
 
 _GIB = "/1073741824"
+_MIB = "/1048576"
 
 
 _HOUR = "/3600"
@@ -273,15 +274,25 @@ def unit_problems(span: DerivedSpan) -> list[str]:
     for t in terms:
         factors = _split(t, "*")
         paths = [f for f in factors if not f.startswith("/") and not _is_number(f)]
-        if _GIB in factors and not any(f.endswith("_bytes") for f in paths):
+        if _GIB in factors and not any(_is_bytes_field(f) for f in paths):
             out.append(f"{span.inputs!r}: GiB conversion on a field that is not bytes")
+        if _MIB in factors and not any(_is_bytes_field(f) for f in paths):
+            out.append(f"{span.inputs!r}: MiB conversion on a field that is not bytes")
         if _HOUR in factors and not any(f.endswith("_seconds") for f in paths):
             out.append(f"{span.inputs!r}: hour conversion on a field that is not seconds")
         # A ``*_gb`` field already holds GiB (bytes / 1024**3 when recorded).
         gib_field = any(f.endswith("_gb") for f in paths)
         if span.suffix.strip() == "GiB" and _GIB not in factors and not gib_field:
             out.append(f"{span.inputs!r}: shown in GiB without the byte conversion")
+        if span.suffix.strip() == "MiB" and _MIB not in factors:
+            out.append(f"{span.inputs!r}: shown in MiB without the byte conversion")
     return out
+
+
+def _is_bytes_field(path: str) -> bool:
+    """Whether the last key of *path* names a byte count (``physical_bytes``,
+    ``total_bytes_written``)."""
+    return "_bytes" in path.rsplit(".", 1)[-1]
 
 
 def _is_number(s: str) -> bool:

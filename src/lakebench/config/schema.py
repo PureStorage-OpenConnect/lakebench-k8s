@@ -712,78 +712,77 @@ class SparkComputeConfig(ConfigModel):
     _removed_keys: ClassVar[dict[str, str]] = {
         "driver": (
             "per-executor sizing is fixed in the job profiles; use "
-            "platform.compute.spark.<job>_executors for counts and "
+            "platform.compute.spark.<stage>_executors for counts and "
             "driver_memory/driver_cores for the driver."
         ),
         "executor": (
             "per-executor sizing is fixed in the job profiles; use "
-            "platform.compute.spark.<job>_executors for counts and "
+            "platform.compute.spark.<stage>_executors for counts and "
             "driver_memory/driver_cores for the driver."
         ),
+        # One key per medallion stage: it sizes the stage's job in the run's mode.
+        "bronze_ingest_executors": "use bronze_executors, which sizes bronze-ingest in continuous mode and bronze-verify in batch mode.",
+        "silver_stream_executors": "use silver_executors, which sizes silver-stream in continuous mode and silver-build in batch mode.",
+        "gold_refresh_executors": "use gold_executors, which sizes gold-refresh in continuous mode and gold-finalize in batch mode.",
+        "bronze_ingest_executor_cores": "use bronze_executor_cores.",
+        "silver_stream_executor_cores": "use silver_executor_cores.",
+        "gold_refresh_executor_cores": "use gold_executor_cores.",
     }
     # The v1.6 defaults, which v1.6 save_config wrote into every config.
     _removed_defaults: ClassVar[dict[str, Any]] = {
         "driver": {"cores": 4, "memory": "8g"},
         "executor": {"instances": 8, "cores": 4, "memory": "48g", "memory_overhead": "12g"},
+        # A null left in a saved config sizes nothing; any count is refused.
+        "bronze_ingest_executors": None,
+        "silver_stream_executors": None,
+        "gold_refresh_executors": None,
+        "bronze_ingest_executor_cores": None,
+        "silver_stream_executor_cores": None,
+        "gold_refresh_executor_cores": None,
     }
 
     operator: SparkOperatorConfig = Field(default_factory=SparkOperatorConfig)
     """The shared Kubeflow Spark Operator that runs the stage jobs."""
 
-    # Per-job executor count overrides (None = auto from scale).
-    # When set, these override the auto-scaled executor count for that job.
-    # Per-executor sizing (cores, memory, PVC) remains fixed from proven profiles.
+    # Per-stage executor overrides (None = auto). A stage key sizes the stage's
+    # job in the run's mode: bronze-verify or bronze-ingest, silver-build or
+    # silver-stream, gold-finalize or gold-refresh. Per-executor memory and
+    # scratch stay with the proven job profiles.
     bronze_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override bronze-verify executor count (1--28). Null = auto from scale.",
+        description="Override the bronze stage's executor count (1--28): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = auto (from scale in batch, from the offered load in continuous).",
     )
     silver_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override silver-build executor count (1--28). Null = auto from scale.",
+        description="Override the silver stage's executor count (1--28): silver-build in batch mode, silver-stream in continuous mode. Null = auto (from scale in batch, from the offered load in continuous).",
     )
     gold_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override gold-finalize executor count (1--28). Null = auto from scale.",
+        description="Override the gold stage's executor count (1--28): gold-finalize in batch mode, gold-refresh in continuous mode. Null = auto from scale.",
     )
-
-    # Streaming job executor count overrides (None = auto from scale).
-    bronze_ingest_executors: int | None = Field(
-        default=None,
-        ge=1,
-        description="Override bronze-ingest executor count (1--28). Null = auto from scale.",
-    )
-    silver_stream_executors: int | None = Field(
-        default=None,
-        ge=1,
-        description="Override silver-stream executor count (1--28). Null = auto from scale.",
-    )
-    gold_refresh_executors: int | None = Field(
-        default=None,
-        ge=1,
-        description="Override gold-refresh executor count (1--28). Null = auto from scale.",
-    )
-    # Streaming executor size overrides (None = the profile's, grown to 8 or 16
-    # cores when the offered load needs more cores than the executor cap).
-    bronze_ingest_executor_cores: int | None = Field(
+    # Continuous-mode executor size overrides (None = the profile's, grown to 8
+    # or 16 cores when the offered load needs more cores than the executor cap).
+    # Batch jobs keep their profile's cores.
+    bronze_executor_cores: int | None = Field(
         default=None,
         ge=1,
         le=16,
-        description="Override bronze-ingest cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_ingest_executors` is set.",
+        description="Continuous mode: override bronze-ingest cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_executors` is set.",
     )
-    silver_stream_executor_cores: int | None = Field(
+    silver_executor_cores: int | None = Field(
         default=None,
         ge=1,
         le=16,
-        description="Override silver-stream cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_stream_executors` is set.",
+        description="Continuous mode: override silver-stream cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_executors` is set.",
     )
-    gold_refresh_executor_cores: int | None = Field(
+    gold_executor_cores: int | None = Field(
         default=None,
         ge=1,
         le=16,
-        description="Override gold-refresh cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically.",
+        description="Continuous mode: override gold-refresh cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically.",
     )
 
     # Driver resource overrides (None = use profile defaults).
@@ -822,9 +821,6 @@ class SparkComputeConfig(ConfigModel):
         "bronze_executors",
         "silver_executors",
         "gold_executors",
-        "bronze_ingest_executors",
-        "silver_stream_executors",
-        "gold_refresh_executors",
         "driver_cores",
         mode="after",
     )

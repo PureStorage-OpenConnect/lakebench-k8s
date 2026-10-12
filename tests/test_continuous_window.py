@@ -1320,13 +1320,13 @@ def _gold_slows_with_tm(tm_s: float) -> str:
             _SILVER_SLOWS,
             {"silver-stream": {"executors": 28, "balance_need": 40}},
             {"silver-stream": 28},
-            "platform.compute.spark.silver_stream_executor_cores",
+            "platform.compute.spark.silver_executor_cores",
         ),
         (
             _SILVER_SLOWS,
             {"silver-stream": {"executors": 6, "balance_need": 10}},
             {"silver-stream": 6},
-            "platform.compute.spark.silver_stream_executors",
+            "platform.compute.spark.silver_executors",
         ),
         (
             {**_SILVER_STEADY, "gold-refresh": _gold_slows_with_tm(40.0)},

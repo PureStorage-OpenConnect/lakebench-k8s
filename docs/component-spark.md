@@ -85,15 +85,14 @@ Spark settings live under `platform.compute.spark`, `platform.storage.scratch`, 
 |---|---|---|
 | `platform.compute.spark.driver_cores` | `null` | Replaces the profile's driver cores for every job. At most 16. |
 | `platform.compute.spark.driver_memory` | `null` | Replaces the profile's driver memory for every job (e.g. `16g`). Must be a whole number with unit k, m, g or t. Use on small nodes or at scale 500+, where the driver holds more Iceberg commit metadata. |
-| `bronze_executors`, `silver_executors`, `gold_executors` | `null` | Batch executor count. Set, it bypasses the scaling formula for that job. |
-| `bronze_ingest_executors`, `silver_stream_executors`, `gold_refresh_executors` | `null` | Continuous executor count. Set, it bypasses the scaling formula and the shared-cluster Lakebench cap. |
-| `bronze_ingest_executor_cores`, `silver_stream_executor_cores`, `gold_refresh_executor_cores` | `null` | Continuous executor size, 1-16 cores. Memory and scratch per core follow the profile; the count is unchanged, so total cores grow. |
+| `bronze_executors`, `silver_executors`, `gold_executors` | `null` | Executor count of the stage's job in the run's mode (bronze-verify or bronze-ingest, silver-build or silver-stream, gold-finalize or gold-refresh). Set, it bypasses the scaling formula and, in continuous mode, the shared-cluster Lakebench cap. |
+| `bronze_executor_cores`, `silver_executor_cores`, `gold_executor_cores` | `null` | Continuous mode only: executor size, 1-16 cores. Memory and scratch per core follow the profile; the count is unchanged, so total cores grow. Batch jobs ignore it. |
 | `platform.storage.scratch.enabled` | `false` | Portworx scratch PVCs for executors. Unset, a batch run at scale 50 and above turns it on. |
 | `platform.storage.scratch.storage_class` | `px-csi-scratch` | Scratch StorageClass. Must be `repl=1`. |
 | `spark.conf` | `{}` | Spark conf merged over the job defaults (below). |
 
 - Executor count overrides above 28 are refused by the commands that change data; `destroy` and read commands drop them with a note.
-- Unset `*_executor_cores`: bronze-ingest and silver-stream grow to 8 or 16 cores when the offered load needs more executors than the cap (keeping total cores), unless their `*_executors` count is set. gold-refresh is never grown.
+- Unset `<stage>_executor_cores`: bronze-ingest and silver-stream grow to 8 or 16 cores when the offered load needs more executors than the cap (keeping total cores), unless the stage's `<stage>_executors` count is set. gold-refresh is never grown.
 - Batch jobs take only a count override. The removed `platform.compute.spark.driver` and `.executor` blocks and `scratch.size` are listed under 1.7.0 in the [changelog](../CHANGELOG.md#170---2026-10-06).
 
 ### Spark conf (S3A, shuffle, memory)
@@ -200,7 +199,7 @@ When enabled, each executor gets a dynamically provisioned PVC at `/tmp/spark-lo
 
 - **Batch, per-scale profile:** the stage's `scratch_gib_per_scale` x scale / executors, rounded up, between 50Gi and the profile's `scratch_size` (the ceiling). Examples: Customer 360 silver-build gets 8 x 50Gi at scale 1, 8 x 75Gi at scale 10 and 18 x 300Gi at scale 100; AML bronze-verify with 16 executors at scale 10 gets 50Gi each.
 - **No per-scale need** (c360 bronze-verify, 50Gi, and the streaming jobs): `scratch_size`. A widened streaming executor's PVC grows with its cores.
-- To change scratch, change the executor count (`platform.compute.spark.<job>_executors`). There is no size field.
+- To change scratch, change the executor count (`platform.compute.spark.<stage>_executors`). There is no size field.
 - `metrics.json` records the size per job as `config_snapshot.scratch.size_per_job`.
 - The StorageClass must use `repl=1`: `repl=2+` doubles storage with no benefit for recomputable shuffle data.
 - `lakebench deploy` only checks that the StorageClass exists. A cluster admin creates it once with `lakebench admin install --component scratch-storage-class`.

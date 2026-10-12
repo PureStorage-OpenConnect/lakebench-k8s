@@ -724,6 +724,16 @@
 
         
         <section>
+            <h2>Storage I/O</h2>
+            <p style="font-size: 0.875rem;">Bytes the engines reported reading from and writing
+            to storage during the run. A figure that was not measured says so; it is never
+            shown as zero.</p>
+            
+            
+            <p style="color: var(--text-muted); font-size: 0.8125rem;">Not measured, Spark (bronze, gold, silver; read and write): executor storage I/O is not collected.</p><p style="color: var(--text-muted); font-size: 0.8125rem;">Not measured, Trino queries (benchmark, in-stream round 1, in-stream round 2, in-stream round 3, in-stream round 4): this record predates the storage I/O report.</p><p style="color: var(--text-muted); font-size: 0.8125rem;">Bytes are what the engines report reading from and writing to storage. Pod network traffic and storage-array telemetry are not included, and bytes from different sources are not added together.</p>
+        </section>
+        
+        <section>
             <h2>Resources as run</h2>
             <table>
                 <thead>

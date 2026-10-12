@@ -756,6 +756,16 @@
 
         
         <section>
+            <h2>Storage I/O</h2>
+            <p style="font-size: 0.875rem;">Bytes the engines reported reading from and writing
+            to storage during the run. A figure that was not measured says so; it is never
+            shown as zero.</p>
+            <table><thead><tr><th>Source</th><th>Round</th><th>Read</th><th>Written</th><th>Window</th><th>Basis</th></tr></thead><tbody><tr><td>Datagen</td><td>generate</td><td><span title="this source does not do that">n/a</span></td><td><span data-lb-derived="total" data-lb-inputs="datagen_fleet.total_bytes_written*/1073741824" data-lb-fmt=".2f" data-lb-suffix=" GiB">8.49 GiB</span></td><td><span title="the run did not record when this ran">no window recorded</span></td><td><small>datagen fleet</small></td></tr></tbody></table>
+            
+            <p style="color: var(--text-muted); font-size: 0.8125rem;">Not on the chart (no time window recorded): Datagen.</p><p style="color: var(--text-muted); font-size: 0.8125rem;">Not measured, Spark (bronze, gold, silver; read and write): executor storage I/O is not collected.</p><p style="color: var(--text-muted); font-size: 0.8125rem;">Not measured, Trino queries (before maintenance, benchmark): this record predates the storage I/O report.</p><p style="color: var(--text-muted); font-size: 0.8125rem;">Bytes are what the engines report reading from and writing to storage. Pod network traffic and storage-array telemetry are not included, and bytes from different sources are not added together.</p>
+        </section>
+        
+        <section>
             <h2>Resources as run</h2>
             <table>
                 <thead>

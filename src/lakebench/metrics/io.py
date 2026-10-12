@@ -50,25 +50,26 @@ def _parse(stamp: str) -> datetime:
     return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
 
 
-def _benchmarks(record: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
-    """The benchmark rounds of the record with a label each.
+def _benchmarks(record: Mapping[str, Any]) -> list[tuple[str, str, Mapping[str, Any]]]:
+    """The benchmark rounds of the record: a label, the record path of the
+    round, and the round itself.
 
     ``pipeline_benchmark.query_benchmark`` mirrors ``benchmark`` and is not
     read, so a round is never counted twice.
     """
-    out: list[tuple[str, Mapping[str, Any]]] = []
+    out: list[tuple[str, str, Mapping[str, Any]]] = []
     pre = (record.get("pipeline_benchmark") or {}).get("pre_compaction_benchmark")
     if isinstance(pre, Mapping) and pre.get("queries"):
-        out.append(("pre_compaction", pre))
+        out.append(("pre_compaction", "pipeline_benchmark.pre_compaction_benchmark", pre))
     bench = record.get("benchmark")
     if isinstance(bench, Mapping) and bench.get("queries"):
-        out.append(("benchmark", bench))
+        out.append(("benchmark", "benchmark", bench))
     for i, rnd in enumerate(record.get("benchmark_rounds") or []):
         if not isinstance(rnd, Mapping) or not rnd.get("queries"):
             continue
         meta = rnd.get("round_meta") or {}
         index = rnd.get("index", meta.get("round_index", i + 1))
-        out.append((f"round_{index}", rnd))
+        out.append((f"round_{index}", f"benchmark_rounds[{i}]", rnd))
     return out
 
 
@@ -85,12 +86,18 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
     problems: list[str] = []
 
     short = 0
-    for label, bench in _benchmarks(record):
+    for label, group, bench in _benchmarks(record):
         engine = bench.get("engine") or "trino"
         queries = bench.get("queries") or []
         if engine != "trino":
             not_measured.append(
-                {"source": engine, "stage": "query", "direction": "both", "reason": REASON_ENGINE}
+                {
+                    "source": engine,
+                    "stage": "query",
+                    "label": label,
+                    "direction": "both",
+                    "reason": REASON_ENGINE,
+                }
             )
             continue
         for q in queries:
@@ -115,6 +122,12 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
                     "read_basis": BASIS_TRINO_READ,
                     "write_basis": BASIS_TRINO_WRITE,
                     "complete": captured == samples and samples > 0,
+                    # Where the figures sit in the record, as a path covering
+                    # every query of the round: a rendered total can name it.
+                    "paths": {
+                        "read": f"{group}.queries[*].io.read_bytes",
+                        "write": f"{group}.queries[*].io.write_bytes",
+                    },
                 }
             )
         if not any(isinstance(q, Mapping) and isinstance(q.get("io"), Mapping) for q in queries):
@@ -122,6 +135,7 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
                 {
                     "source": "trino",
                     "stage": "query",
+                    "label": label,
                     "direction": "both",
                     "reason": REASON_NOT_RECORDED,
                 }
@@ -130,7 +144,10 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
         problems.append(f"trino: {short} query sample(s) had no I/O report")
     # One entry per round would repeat itself.
     not_measured = list(
-        {(n["source"], n["stage"], n["direction"], n["reason"]): n for n in not_measured}.values()
+        {
+            (n["source"], n["stage"], n.get("label"), n["direction"], n["reason"]): n
+            for n in not_measured
+        }.values()
     )
 
     fleet = record.get("datagen_fleet")
@@ -157,6 +174,7 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
                 "read_basis": None,
                 "write_basis": BASIS_DATAGEN,
                 "complete": int(fleet.get("pods_missing") or 0) == 0,
+                "paths": {"read": None, "write": "datagen_fleet.total_bytes_written"},
             }
         )
 

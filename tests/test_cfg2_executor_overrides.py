@@ -89,7 +89,7 @@ def test_a_continuous_override_is_counted_in_the_capacity_plan():
 
     cfg = make_config(
         architecture={"pipeline": {"mode": "continuous"}},
-        platform={"compute": {"spark": {"gold_refresh_executors": 10}}},
+        platform={"compute": {"spark": {"gold_executors": 10}}},
     )
     base = plan_requirements(make_config(architecture={"pipeline": {"mode": "continuous"}}))
     plan = plan_requirements(cfg)
@@ -170,9 +170,7 @@ def test_overrides_recorded_for_the_run_mode_only():
 
     cfg = make_config(
         platform={
-            "compute": {
-                "spark": {"silver_executors": 12, "gold_refresh_executors": 3, "driver_cores": 8}
-            }
+            "compute": {"spark": {"silver_executors": 12, "gold_executors": 3, "driver_cores": 8}}
         }
     )
     with warnings.catch_warnings():
@@ -180,8 +178,8 @@ def test_overrides_recorded_for_the_run_mode_only():
         batch = experiment_inputs(cfg, run_mode="batch")["architecture"]
         cont = experiment_inputs(cfg, run_mode="continuous")["architecture"]
         local = experiment_inputs(cfg, run_mode="batch", system="local")["architecture"]
-    assert batch["spark_executor_overrides"] == {"silver": 12}
-    assert cont["spark_executor_overrides"] == {"gold_refresh": 3}
+    assert batch["spark_executor_overrides"] == {"silver": 12, "gold": 3}
+    assert cont["spark_executor_overrides"] == {"silver_stream": 12, "gold_refresh": 3}
     assert batch["spark_driver_overrides"] == {"driver_cores": 8}
     assert "spark_executor_overrides" not in local and "spark_driver_overrides" not in local
 
@@ -313,3 +311,53 @@ def test_the_identity_fallback_reads_the_run_mode():
     assert cmp.optional_keys(rec["experiment"], rec)["spark executor overrides"] == {
         "gold_refresh": 3
     }
+
+
+# -- 6. one key per stage -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("stage", "batch_job", "streaming_job"),
+    [
+        ("bronze", "bronze-verify", "bronze-ingest"),
+        ("silver", "silver-build", "silver-stream"),
+        ("gold", "gold-finalize", "gold-refresh"),
+    ],
+)
+def test_a_stage_key_sizes_the_stages_job_in_either_mode(stage, batch_job, streaming_job):
+    cfg = make_config(platform={"compute": {"spark": {f"{stage}_executors": 9}}})
+    assert executor_override(batch_job, cfg) == 9
+    assert executor_override(streaming_job, cfg) == 9
+
+
+def test_the_bronze_verify_preflight_of_a_continuous_run_keeps_its_profile():
+    from lakebench.modules.pipeline_engines.spark.job import stage_key_applies
+
+    cont = make_config(
+        architecture={"pipeline": {"mode": "continuous"}},
+        platform={"compute": {"spark": {"bronze_executors": 24}}},
+    )
+    batch = make_config(platform={"compute": {"spark": {"bronze_executors": 24}}})
+    assert stage_key_applies("bronze-ingest", cont)
+    assert not stage_key_applies("bronze-verify", cont)
+    assert stage_key_applies("bronze-verify", batch)
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("bronze_ingest_executors", "bronze_executors"),
+        ("silver_stream_executors", "silver_executors"),
+        ("gold_refresh_executors", "gold_executors"),
+        ("bronze_ingest_executor_cores", "bronze_executor_cores"),
+        ("silver_stream_executor_cores", "silver_executor_cores"),
+        ("gold_refresh_executor_cores", "gold_executor_cores"),
+    ],
+)
+def test_the_old_streaming_keys_are_refused_and_name_their_replacement(tmp_path, old, new):
+    path = _write(tmp_path, {old: 8})
+    with pytest.raises(Exception, match=new):
+        load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)
+    # A null left in a saved config sizes nothing, so it still loads.
+    path = _write(tmp_path, {old: None})
+    assert load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)

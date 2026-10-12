@@ -2803,11 +2803,8 @@ SNAPSHOT_SOURCE_FIELDS: frozenset[str] = frozenset(
         "images.trino",
         "name",
         "platform.compute.spark.bronze_executors",
-        "platform.compute.spark.bronze_ingest_executors",
         "platform.compute.spark.gold_executors",
-        "platform.compute.spark.gold_refresh_executors",
         "platform.compute.spark.silver_executors",
-        "platform.compute.spark.silver_stream_executors",
         "platform.storage.s3.buckets.bronze",
         "platform.storage.s3.buckets.gold",
         "platform.storage.s3.buckets.silver",
@@ -2845,9 +2842,12 @@ def build_config_snapshot(
         fingerprint_inputs,
         scratch_size_per_job,
     )
-    from lakebench.modules.pipeline_engines.spark.job import streaming_shape
+    from lakebench.modules.pipeline_engines.spark.job import (
+        EXECUTOR_OVERRIDE_FIELDS,
+        executor_override,
+        streaming_shape,
+    )
 
-    spark = cfg.platform.compute.spark
     datagen = cfg.architecture.workload.datagen
     pipeline = cfg.architecture.pipeline
     s3 = cfg.platform.storage.s3
@@ -2880,12 +2880,8 @@ def build_config_snapshot(
         },
         "spark": {
             "executor_overrides": {
-                "bronze": spark.bronze_executors,
-                "silver": spark.silver_executors,
-                "gold": spark.gold_executors,
-                "bronze_ingest": spark.bronze_ingest_executors,
-                "silver_stream": spark.silver_stream_executors,
-                "gold_refresh": spark.gold_refresh_executors,
+                key: executor_override(job_type, cfg)
+                for job_type, (_field, key) in EXECUTOR_OVERRIDE_FIELDS.items()
             },
             **({"streaming_shape": streaming_shape(cfg)} if _continuous else {}),
         },

@@ -78,8 +78,14 @@ The removed keys, with what to do instead (generated from each model's
 | `observability.s3_metrics_enabled` | PodMonitor deployment is not gated on it. |
 | `observability.spark_metrics_enabled` | PodMonitor deployment is not gated on it. |
 | `observability.storage_class` | set observability.prometheus_storage_class to pick a StorageClass for the Prometheus PVC; empty uses the cluster default. |
-| `platform.compute.spark.driver` | per-executor sizing is fixed in the job profiles; use platform.compute.spark.<job>_executors for counts and driver_memory/driver_cores for the driver. |
-| `platform.compute.spark.executor` | per-executor sizing is fixed in the job profiles; use platform.compute.spark.<job>_executors for counts and driver_memory/driver_cores for the driver. |
+| `platform.compute.spark.bronze_ingest_executor_cores` | use bronze_executor_cores. |
+| `platform.compute.spark.bronze_ingest_executors` | use bronze_executors, which sizes bronze-ingest in continuous mode and bronze-verify in batch mode. |
+| `platform.compute.spark.driver` | per-executor sizing is fixed in the job profiles; use platform.compute.spark.<stage>_executors for counts and driver_memory/driver_cores for the driver. |
+| `platform.compute.spark.executor` | per-executor sizing is fixed in the job profiles; use platform.compute.spark.<stage>_executors for counts and driver_memory/driver_cores for the driver. |
+| `platform.compute.spark.gold_refresh_executor_cores` | use gold_executor_cores. |
+| `platform.compute.spark.gold_refresh_executors` | use gold_executors, which sizes gold-refresh in continuous mode and gold-finalize in batch mode. |
+| `platform.compute.spark.silver_stream_executor_cores` | use silver_executor_cores. |
+| `platform.compute.spark.silver_stream_executors` | use silver_executors, which sizes silver-stream in continuous mode and silver-build in batch mode. |
 | `platform.storage.s3.secret_ref` | lakebench never reads an existing Secret: deploy writes the S3 Secret from access_key and secret_key. Set those instead (use ${VAR} substitution, for example access_key: "${S3_ACCESS_KEY}", to keep the keys out of the file). |
 | `platform.storage.scratch.create_storage_class` | lakebench no longer creates StorageClasses; a cluster admin runs 'lakebench admin install --component scratch-storage-class' once. |
 | `platform.storage.scratch.size` | per-job scratch comes from the job profiles (silver-build: 60 GiB x scale / executors, 50-300Gi). |
@@ -205,9 +211,10 @@ deployment's directory.
 What to tune first as you scale up:
 
 1. `datagen.scale` -- the data volume.
-2. `compute.spark.*_executors` -- per-job executor counts. Batch executor
-   size is fixed in the job profiles; continuous streams also take
-   `*_executor_cores`. See [Executor Override Guide](#executor-override-guide).
+2. `compute.spark.<stage>_executors` -- per-stage executor counts (one key each
+   for bronze, silver and gold, used by whichever job the mode runs). Batch
+   executor size is fixed in the job profiles; continuous streams also take
+   `<stage>_executor_cores`. See [Executor Override Guide](#executor-override-guide).
 3. `query_engine.trino.worker` -- match replicas and memory to the cluster.
 4. `scratch` and `postgres` storage classes -- match them to the storage
    provider.
@@ -293,18 +300,19 @@ platform:
       # profile. The v1.6 driver and executor blocks are refused (they sized
       # nothing).
 
-      # Per-job executor count overrides (null = auto from scale factor).
-      # Batch per-executor sizing (cores, memory, PVC) is fixed from proven
-      # profiles. Continuous streams take bronze_ingest_executor_cores,
-      # silver_stream_executor_cores and gold_refresh_executor_cores.
+      # Per-stage executor counts (null = auto). One key per stage; the run's
+      # mode picks the job: bronze-verify or bronze-ingest, silver-build or
+      # silver-stream, gold-finalize or gold-refresh. Per-executor memory and
+      # PVC are fixed from proven profiles.
       bronze_executors: null
       silver_executors: null
       gold_executors: null
 
-      # Streaming job overrides (continuous mode).
-      bronze_ingest_executors: null
-      silver_stream_executors: null
-      gold_refresh_executors: null
+      # Continuous mode only: cores per executor for each stage's stream
+      # (1-16; memory and scratch follow the profile). Batch ignores them.
+      bronze_executor_cores: null
+      silver_executor_cores: null
+      gold_executor_cores: null
 
       # Global driver overrides (null = profile default).
       driver_memory: null
@@ -413,8 +421,21 @@ spark:
 
 ### Executor Override Guide
 
-A per-job executor override (`silver_executors`, `gold_executors` and the
-rest) replaces the scaling formula for one job.
+A per-stage executor override (`bronze_executors`, `silver_executors`,
+`gold_executors`) replaces the scaling formula for the stage's job. The run's
+mode picks the job:
+
+| Key | Batch runs | Continuous runs |
+|---|---|---|
+| `bronze_executors` | bronze-verify | bronze-ingest |
+| `silver_executors` | silver-build | silver-stream |
+| `gold_executors` | gold-finalize | gold-refresh |
+
+The bronze-verify pass that a continuous run starts with (it registers the
+bronze table) keeps its profile and does not take `bronze_executors`. The v1.7
+keys `bronze_ingest_executors`, `silver_stream_executors` and
+`gold_refresh_executors` (and their `_executor_cores`) are removed: the
+commands that change data refuse them and name the new key.
 
 - Each takes 1 to 28, the Lakebench cap. A larger value is
   refused by the commands that change data; `destroy`, `status` and the
@@ -556,15 +577,12 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `platform.compute.spark.operator.install` | boolean | `false` | advanced | Refused when `true`: deploy never installs the shared operator; a cluster admin runs `lakebench admin install --component spark-operator`. `false` loads as before. |
 | `platform.compute.spark.operator.namespace` | string | `spark-operator` | advanced | Namespace for the Spark Operator. |
 | `platform.compute.spark.operator.version` | string | `2.5.1` | advanced | Chart version a fresh `admin install` uses. v2.x required. An installed operator keeps its version. |
-| `platform.compute.spark.bronze_executors` | integer or null | `null` | advanced | Override bronze-verify executor count (1--28). Null = auto from scale. |
-| `platform.compute.spark.silver_executors` | integer or null | `null` | advanced | Override silver-build executor count (1--28). Null = auto from scale. |
-| `platform.compute.spark.gold_executors` | integer or null | `null` | advanced | Override gold-finalize executor count (1--28). Null = auto from scale. |
-| `platform.compute.spark.bronze_ingest_executors` | integer or null | `null` | advanced | Override bronze-ingest executor count (1--28). Null = auto from scale. |
-| `platform.compute.spark.silver_stream_executors` | integer or null | `null` | advanced | Override silver-stream executor count (1--28). Null = auto from scale. |
-| `platform.compute.spark.gold_refresh_executors` | integer or null | `null` | advanced | Override gold-refresh executor count (1--28). Null = auto from scale. |
-| `platform.compute.spark.bronze_ingest_executor_cores` | integer or null | `null` | advanced | Override bronze-ingest cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_ingest_executors` is set. |
-| `platform.compute.spark.silver_stream_executor_cores` | integer or null | `null` | advanced | Override silver-stream cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_stream_executors` is set. |
-| `platform.compute.spark.gold_refresh_executor_cores` | integer or null | `null` | advanced | Override gold-refresh cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically. |
+| `platform.compute.spark.bronze_executors` | integer or null | `null` | advanced | Override the bronze stage's executor count (1--28): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = auto (from scale in batch, from the offered load in continuous). |
+| `platform.compute.spark.silver_executors` | integer or null | `null` | advanced | Override the silver stage's executor count (1--28): silver-build in batch mode, silver-stream in continuous mode. Null = auto (from scale in batch, from the offered load in continuous). |
+| `platform.compute.spark.gold_executors` | integer or null | `null` | advanced | Override the gold stage's executor count (1--28): gold-finalize in batch mode, gold-refresh in continuous mode. Null = auto from scale. |
+| `platform.compute.spark.bronze_executor_cores` | integer or null | `null` | advanced | Continuous mode: override bronze-ingest cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_executors` is set. |
+| `platform.compute.spark.silver_executor_cores` | integer or null | `null` | advanced | Continuous mode: override silver-stream cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_executors` is set. |
+| `platform.compute.spark.gold_executor_cores` | integer or null | `null` | advanced | Continuous mode: override gold-refresh cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically. |
 | `platform.compute.spark.driver_memory` | string or null | `null` | advanced | Global driver memory override (e.g., `16g`). Null = profile default. |
 | `platform.compute.spark.driver_cores` | integer or null | `null` | advanced | Override driver cores (1--16). Null = profile default (typically 4). |
 
@@ -812,7 +830,7 @@ Refused keys:
 - A `spark.conf` key Lakebench sets for the job is refused at load by the
   commands that change data, naming the setting that controls it instead.
   For example `spark.sql.shuffle.partitions` follows the executor count,
-  `platform.compute.spark.<job>_executors`. `destroy`, `status` and the
+  `platform.compute.spark.<stage>_executors`. `destroy`, `status` and the
   read-only commands drop it with a note.
 - `spark.driver.maxResultSize` is the one Lakebench-set key a user value
   replaces.
@@ -964,7 +982,7 @@ Continuous streams ([Continuous sizing](sizing.md#continuous-sizing)):
 
 - A stage that needs more than the profile's cap grows its executors to 8,
   then 16 cores, within the largest node. Lakebench then sets its
-  `*_executor_cores` and says so.
+  `<stage>_executor_cores` and says so.
 - gold-refresh is never grown automatically.
 
 `lakebench info <config>` prints the resolved per-job counts. It is hidden

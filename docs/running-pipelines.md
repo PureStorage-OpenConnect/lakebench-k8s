@@ -493,7 +493,7 @@ lakebench report                                # build a report from a previous
 
 - Formula, per-job table and AML overrides:
   [Auto-Scaling](component-spark.md#auto-scaling).
-- Count overrides (`platform.compute.spark.<job>_executors`), driver memory
+- Count overrides (`platform.compute.spark.<stage>_executors`), driver memory
   and tested ranges: [Executor Override Guide](configuration.md#executor-override-guide).
 - Counts grow more slowly than the data, so data per executor grows with
   scale.

@@ -868,7 +868,7 @@ or, back to back, its median batch time in the window's first half. The line giv
 executors and the count the load needs.
 
 **Fix:** raise the setting the line names (for example
-`platform.compute.spark.silver_stream_executors`), run on a larger cluster
+`platform.compute.spark.silver_executors`), run on a larger cluster
 (the README's continuous minimum carries each scale balanced), or lower the
 scale. A stage that already had its full need ran below the sizing default
 rate: raise it past the need.

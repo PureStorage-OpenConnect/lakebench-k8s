@@ -329,7 +329,13 @@ def test_an_older_trino_record_says_not_recorded():
     io = build_io(rec)
     assert io["intervals"] == []
     assert io["not_measured"] == [
-        {"source": "trino", "stage": "query", "direction": "both", "reason": REASON_NOT_RECORDED}
+        {
+            "source": "trino",
+            "stage": "query",
+            "label": "benchmark",
+            "direction": "both",
+            "reason": REASON_NOT_RECORDED,
+        }
     ]
 
 
@@ -337,7 +343,13 @@ def test_other_query_engines_are_not_instrumented():
     rec = {"benchmark": _bench([{"name": "Q1"}], engine="duckdb")}
     io = build_io(rec)
     assert io["not_measured"] == [
-        {"source": "duckdb", "stage": "query", "direction": "both", "reason": REASON_ENGINE}
+        {
+            "source": "duckdb",
+            "stage": "query",
+            "label": "benchmark",
+            "direction": "both",
+            "reason": REASON_ENGINE,
+        }
     ]
 
 
@@ -444,12 +456,10 @@ def test_stored_batch_record_gets_an_io_block_from_what_it_holds():
     assert io["version"] == 1
     sources = {i["source"] for i in io["intervals"]}
     assert "datagen" in sources  # this record has a fleet
-    assert {
-        "source": "trino",
-        "stage": "query",
-        "direction": "both",
-        "reason": REASON_NOT_RECORDED,
-    } in io["not_measured"]
+    assert any(
+        n["source"] == "trino" and n["label"] == "benchmark" and n["reason"] == REASON_NOT_RECORDED
+        for n in io["not_measured"]
+    )
     assert any(n["source"] == "spark" and n["stage"] == "silver" for n in io["not_measured"])
 
 
@@ -470,3 +480,84 @@ def test_io_survives_a_load_and_save():
     assert first["io"]["totals"]["trino"]["read_bytes"] == 4096
     # a second pass over the saved record gives the same block
     assert _load(first).to_dict()["io"] == first["io"]
+
+
+# -- the report section ----------------------------------------------------------
+
+
+def _inject_trino_io(rec, *, windows=True):
+    """*rec* with Trino I/O on every benchmark query; returns (read, written) totals."""
+    read = written = 0
+    for k, q in enumerate(rec["benchmark"]["queries"]):
+        q["io"] = {
+            "read_bytes": 40_000_000 + k * 3_000_000,
+            "write_bytes": 0,
+            "start_epoch": 1_800_000_000.0 + k * 6 if windows else None,
+            "end_epoch": 1_800_000_000.0 + k * 6 + 4.5 if windows else None,
+            "samples": 3,
+            "captured": 3,
+        }
+        read += q["io"]["read_bytes"]
+        written += q["io"]["write_bytes"]
+    return read, written
+
+
+def _section(html: str) -> str:
+    start = html.index("<h2>Storage I/O</h2>")
+    return html[start : html.index("</section>", start)]
+
+
+def _render(rec) -> str:
+    from tests.fixtures.report_goldens import render_metrics
+
+    return render_metrics(_load(copy.deepcopy(rec)))
+
+
+def test_report_totals_name_the_record_fields_they_come_from():
+    from tests.fixtures.report_consistency_helpers import mismatches
+
+    rec = load_record("1320bd")
+    read, _ = _inject_trino_io(rec)
+    html = _render(rec)
+    section = _section(html)
+    assert 'data-lb-inputs="benchmark.queries[*].io.read_bytes*/1048576"' in section
+    assert f"{read / 1024**2:.2f} MiB" in section
+    # the datagen total points at the fleet field, and the page agrees with the record
+    assert 'data-lb-inputs="datagen_fleet.total_bytes_written*/1073741824"' in section
+    assert mismatches(rec, html) == []
+
+
+def test_report_draws_a_rate_chart_only_when_bytes_have_a_window():
+    rec = load_record("1320bd")
+    _inject_trino_io(rec, windows=True)
+    assert "<svg" in _section(_render(rec))
+    assert "MB/s per" in _section(_render(rec))
+    rec = load_record("1320bd")
+    _inject_trino_io(rec, windows=False)
+    section = _section(_render(rec))
+    assert "<svg" not in section
+    assert "no time window recorded" in section
+
+
+def test_report_says_not_measured_rather_than_zero():
+    section = _section(_render(load_record("1320bd")))
+    assert "not measured" in section and "n/a" in section  # datagen reads nothing
+    assert "Not measured, Spark (bronze, gold, silver; read and write)" in section
+    assert "0.00" not in section
+
+
+def test_a_zero_that_was_measured_is_shown_as_zero():
+    rec = load_record("1320bd")
+    _inject_trino_io(rec)
+    assert "0.00 MiB" in _section(_render(rec))  # Trino wrote nothing during the benchmark
+
+
+def test_rate_chart_is_empty_without_bytes():
+    from datetime import datetime, timezone
+
+    from lakebench.reports.generator import _rate_chart_svg
+
+    t = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert _rate_chart_svg([0.0, 0.0], [0.0, 0.0], 5.0, t, t) == ""
+    svg = _rate_chart_svg([5e6, 0.0], [0.0, 1e6], 5.0, t, t)
+    assert svg.startswith("<svg") and "read" in svg and "written" in svg

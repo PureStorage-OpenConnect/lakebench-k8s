@@ -99,6 +99,16 @@ The `c360_correctness` checks ([gating rules](scorecard.md#customer-360-expected
 - Checks not passed come first (failing the run, other failures, unchecked) with observed, expected and tolerance. Passed checks follow, collapsed: pipeline (invariant and reconcile), benchmark shapes, statistical.
 - A note stored with an older record (for example "reporting only", from before the gating checks were approved) is shown as recorded, not as the current rule.
 
+## Storage I/O
+
+The bytes the engines reported reading from and writing to storage, from the record's [`io` block](records.md#storage-io). It sits before Storage multiple.
+
+- A table with one row per source and round: Trino queries (the benchmark, the round before maintenance, each in-stream round) and datagen. Read and written bytes, the window the bytes fall in (UTC, the engine's clock), and the basis of each figure.
+- Each total names its record field, so the number on the page is checkable against `metrics.json`.
+- A rate chart, MB/s read and written per time bucket. Each interval's bytes are spread evenly over its own window, so a bucket is no finer than the queries feeding it. Bytes with no recorded window (datagen) are listed under the chart as not on it.
+- "Not measured" is stated, never shown as zero: Spark stages (executor I/O is not collected), a query engine other than Trino, and a Trino round whose record predates the block. "n/a" marks a direction a source does not have (datagen reads nothing). A figure that was measured as zero reads `0.00 MiB`.
+- Pod network traffic and storage-array telemetry are not part of it, and bytes from different sources are not added together.
+
 ## Storage multiple
 
 Physical bytes over logical bytes, per table, per layer and in total, measured once at run end: after the post-maintenance round (batch), or after the streams stop (continuous; AML after the gold-refresh [drain](../glossary.md#drain), stream stop and score job). It is a condition of the maintenance policy stated with it, not a system score (`storage_multiple_total` is diagnostic).

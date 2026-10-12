@@ -567,9 +567,9 @@ def _executor_cores_override(job_type: str, config: Any | None) -> int | None:
         return None
     spark = config.platform.compute.spark
     value = {
-        "bronze-ingest": spark.bronze_ingest_executor_cores,
-        "silver-stream": spark.silver_stream_executor_cores,
-        "gold-refresh": spark.gold_refresh_executor_cores,
+        "bronze-ingest": spark.bronze_executor_cores,
+        "silver-stream": spark.silver_executor_cores,
+        "gold-refresh": spark.gold_executor_cores,
     }.get(job_type)
     return int(value) if value is not None else None
 
@@ -642,7 +642,7 @@ def stage_profile(
 
 def _cores_set(job_type: str, config: Any | None) -> bool:
     """Whether the config itself sets *job_type*'s ``*_executor_cores``."""
-    field = f"{job_type.replace('-', '_')}_executor_cores"
+    field = f"{job_type.split('-')[0]}_executor_cores"
     return config is not None and field in config.platform.compute.spark.model_fields_set
 
 
@@ -684,8 +684,8 @@ def fit_executor_cores(config: Any, node_cpu_m: int, node_mem_b: int) -> list[st
     config sets). Returns the autosizer change lines."""
     spark = config.platform.compute.spark
     fields = {
-        "bronze-ingest": "bronze_ingest_executor_cores",
-        "silver-stream": "silver_stream_executor_cores",
+        "bronze-ingest": "bronze_executor_cores",
+        "silver-stream": "silver_executor_cores",
     }
     out: list[str] = []
     for job_type, field in fields.items():
@@ -793,30 +793,48 @@ EXECUTOR_OVERRIDE_FIELDS: dict[str, tuple[str, str]] = {
     "bronze-verify": ("bronze_executors", "bronze"),
     "silver-build": ("silver_executors", "silver"),
     "gold-finalize": ("gold_executors", "gold"),
-    "bronze-ingest": ("bronze_ingest_executors", "bronze_ingest"),
-    "silver-stream": ("silver_stream_executors", "silver_stream"),
-    "gold-refresh": ("gold_refresh_executors", "gold_refresh"),
+    "bronze-ingest": ("bronze_executors", "bronze_ingest"),
+    "silver-stream": ("silver_executors", "silver_stream"),
+    "gold-refresh": ("gold_executors", "gold_refresh"),
 }
+
+_STREAMING_JOBS = frozenset({"bronze-ingest", "silver-stream", "gold-refresh"})
+
+
+def stage_key_applies(job_type: str, config: Any) -> bool:
+    """Whether the stage key sizes *job_type* in this config's mode.
+
+    False for a batch job in a continuous config: the bronze-verify preflight
+    (it registers the bronze table) keeps its profile and does not take the
+    ``bronze_executors`` count meant for bronze-ingest.
+    """
+    from lakebench.config.schema import is_continuous_mode
+
+    return not (
+        job_type not in _STREAMING_JOBS and is_continuous_mode(config.architecture.pipeline.mode)
+    )
 
 
 def executor_override(job_type: str, config: Any | None) -> int | None:
-    """The executor count *config* sets for *job_type*, or None (the scale
-    count applies). An explicit count wins over the scale count and the
-    continuous concurrent budget."""
-    if config is None:
+    """The executor count *config* sets for *job_type*, or None (the auto
+    count applies). An explicit count wins over the auto count and the
+    continuous concurrent budget.
+
+    A stage key sizes both of the stage's jobs (bronze-verify and
+    bronze-ingest take ``bronze_executors``); the run's mode decides which
+    of them runs. See ``stage_key_applies`` for the one job that runs in the
+    other mode.
+    """
+    if config is None or job_type not in EXECUTOR_OVERRIDE_FIELDS:
         return None
-    spark = config.platform.compute.spark
+    field = EXECUTOR_OVERRIDE_FIELDS[job_type][0]
     # Read by name (the schema walk proves each field has this reader); the
-    # names are the first column of EXECUTOR_OVERRIDE_FIELDS (a test holds
-    # the two equal).
+    # names are the first column of EXECUTOR_OVERRIDE_FIELDS.
     value = {
-        "bronze-verify": spark.bronze_executors,
-        "silver-build": spark.silver_executors,
-        "gold-finalize": spark.gold_executors,
-        "bronze-ingest": spark.bronze_ingest_executors,
-        "silver-stream": spark.silver_stream_executors,
-        "gold-refresh": spark.gold_refresh_executors,
-    }.get(job_type)
+        "bronze_executors": config.platform.compute.spark.bronze_executors,
+        "silver_executors": config.platform.compute.spark.silver_executors,
+        "gold_executors": config.platform.compute.spark.gold_executors,
+    }[field]
     return int(value) if value is not None else None
 
 
@@ -2366,7 +2384,11 @@ class SparkJobManager:
                 executor_count = budget[job_type]
 
         # Per-job executor override (user escape hatch)
-        override = executor_override(job_type.value, cfg)
+        override = (
+            executor_override(job_type.value, cfg)
+            if stage_key_applies(job_type.value, cfg)
+            else None
+        )
         if job_type in _STREAMING_JOB_TYPES and override is None and capped_from != executor_count:
             # After the override check: an explicit count wins over the
             # budget, so there is nothing to warn about then.
