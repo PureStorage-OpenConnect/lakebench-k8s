@@ -523,8 +523,8 @@ _CSS = """
 @media(prefers-reduced-motion:reduce){#lb-replay .step.current .art svg{animation:none}}
 #lb-replay .art svg{width:100%;height:100%;max-height:130px;transform-origin:center}
 #lb-replay .value{border-top:1px solid #e7eee7;padding-top:9px;margin-top:auto}
-#lb-replay .value strong{font-size:clamp(18px,2.4vw,27px);letter-spacing:-.7px;display:block;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:clip}
-#lb-replay .step.current .value strong{font-size:clamp(22px,2.9vw,34px)}
+#lb-replay .value strong{font-size:clamp(15px,1.55vw,22px);letter-spacing:-.6px;display:block;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:clip}
+#lb-replay .step.current .value strong{font-size:clamp(22px,2.7vw,34px)}
 #lb-replay .value label{font-size:12px;color:#778b7d}
 #lb-replay .phasepanel{margin:1px 12px 6px;border:1px solid #d9e7dd;background:#f7faf7;border-radius:9px;padding:8px 12px;min-height:78px;display:grid;grid-template-columns:1.2fr 2.3fr;gap:14px;align-items:center}
 #lb-replay .phasename small{font-size:12px;color:#518166;font-weight:750}
@@ -642,9 +642,10 @@ function phaseNote(i,s,ff){
  if(D.kind!=='sustained')return ff===null?'no window recorded':ff===0?'not started':ff===1?'complete':Math.round(ff*100)+'% of the stage window';
  // All five cards share one measured window, so a per-stage percentage is
  // meaningless. Count the recorded events of the focused stage instead.
- var ev=(s.events||[]).filter(function(e){return e<=t});
  if(ff===null)return 'no window recorded';
- if(ev.length&&s.steps)return 'cycle '+ev.length+' of '+s.steps.length;
+ if(s.steps){var c=0;for(var i=0;i<s.steps.length;i++)if(s.steps[i][0]<=t)c++;
+  return c?'cycle '+Math.min(c,s.steps.length)+' of '+s.steps.length:'streaming · '+fmtT(t)+' into the window'}
+ var ev=(s.events||[]).filter(function(e){return e<=t});
  if(ev.length>1)return ev.length+' recorded events';
  return 'streaming · '+fmtT(t)+' into the window';
 }
@@ -676,7 +677,7 @@ function draw(){
   $('[data-f="'+i+'"]').style.width=(fb===null?0:fb*100)+'%';
   $('[data-h="'+i+'"]').textContent=fb===null?'NR':fb===0?'Waiting':fb===1?'Complete':'Processing';
   $('[data-s="'+i+'"]').textContent=fb===null?'no window recorded':fb===0?'Awaiting upstream':fb===1?'Output available':Math.round(fb*100)+'% of '+b.name}
- var k=st?Math.min(st.read.length-1,Math.floor(t/st.step)):0;
+ var k=st?Math.max(0,Math.min(st.read.length-1,Math.floor(t/st.step))):0;
  if(lane==='lag'){
   $('#rp-lname').textContent='Lag behind upstream';
   $('#rp-lval').textContent=D.handoffs.map(function(h){var v=lagAt(h);return v===null?'-':fmtLag(v)}).join(' · ');
@@ -709,7 +710,7 @@ function draw(){
  plot('#rp-eplot',[{v:RATE,c:'#4b9d78'}],RMAX);
  $('[data-act=clock]').textContent=fmtT(t)+' / '+fmtT(T);
  $('[data-act=seek]').value=t}
-function tick(now){if(playing){t=Math.min(T,t+(now-last)/1000*speed*Math.max(1,T/60));if(t>=T){playing=false;$('[data-act=play]').textContent='▶ Play'}draw()}last=now;requestAnimationFrame(tick)}
+function tick(now){if(playing){t=Math.max(0,Math.min(T,t+Math.max(0,now-last)/1000*speed*Math.max(1,T/60)));if(t>=T){playing=false;$('[data-act=play]').textContent='▶ Play'}draw()}last=now;requestAnimationFrame(tick)}
 root.querySelectorAll('.step').forEach(function(c){c.onclick=function(){sel=+c.dataset.step;draw()};c.onkeydown=function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();sel=+c.dataset.step;draw()}}});
 root.querySelectorAll('[data-lane]').forEach(function(b){b.onclick=function(){lane=b.dataset.lane;root.querySelectorAll('[data-lane]').forEach(function(x){x.classList.toggle('on',x===b)});draw()}});
 $('[data-act=play]').onclick=function(e){if(t>=T)t=0;playing=!playing;last=performance.now();e.currentTarget.textContent=playing?'Ⅱ Pause':'▶ Play'};
