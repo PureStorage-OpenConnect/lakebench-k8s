@@ -527,7 +527,7 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
 
 _CSS = """
 #lb-replay .headline{display:flex;align-items:end;justify-content:space-between;gap:12px;min-height:40px}
-#lb-replay .eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:#5f8b73;font-weight:800}
+#lb-replay .eyebrow{font-size:12px;letter-spacing:.2px;color:#5f8b73;font-weight:700}
 #lb-replay .headline h1{font-size:25px;margin:1px 0 0;letter-spacing:-1.1px}
 #lb-replay .headline-right{display:flex;gap:26px}
 #lb-replay .headline-right .mini{display:grid;gap:2px}
@@ -541,7 +541,7 @@ _CSS = """
 #lb-replay .step.current{flex:1.9;background:#fff;border:2px solid #6ba886;opacity:1;box-shadow:0 6px 22px #3164461a}
 #lb-replay .step.done{opacity:.9}
 #lb-replay .step[data-id="4"].current{border-color:#9071b2}
-#lb-replay .step small{font-size:12px;text-transform:uppercase;letter-spacing:.7px;font-weight:850;color:#567b67}
+#lb-replay .step small{font-size:13px;letter-spacing:.2px;font-weight:750;color:#567b67}
 #lb-replay .step h2{font-size:26px;letter-spacing:-.8px;margin:0}
 #lb-replay .step .implementation{font-size:13px;color:#778a7e}
 #lb-replay .art{height:100px;flex:1;min-height:70px;display:flex;align-items:center;justify-content:center;background:#f3f8f4;border-radius:8px;overflow:hidden}
@@ -562,23 +562,18 @@ _CSS = """
 /* The strip mirrors the card flex weights (set from JS) so each box tracks
    the width of the card above it. */
 #lb-replay .execstrip{display:flex;gap:10px;padding:6px 16px 12px;align-items:stretch}
-#lb-replay .xbox{flex:1;min-width:0;padding:9px 11px;background:#fff;border:1px solid #dfe9e0;border-radius:9px;transition:flex .4s}
-#lb-replay .xbox b{font-size:11px;text-transform:uppercase;letter-spacing:.6px;font-weight:800;color:#6a8073;display:block}
-#lb-replay .xbox strong{font-size:19px;display:block;margin-top:3px;letter-spacing:-.4px;font-variant-numeric:tabular-nums}
-#lb-replay .xbox span{font-size:11px;color:#819084}
+#lb-replay .xbox{flex:1;min-width:0;padding:10px 12px;background:#f7fbf8;border:1px solid #dae7dd;border-radius:9px;transition:flex .4s}
+#lb-replay .xbox b{font-size:13px;font-weight:700;color:#3f5a4c;display:block}
+#lb-replay .xbox .track{height:6px;border-radius:10px;background:#e7f0e8;overflow:hidden;margin:8px 0 6px}
+#lb-replay .xbox .fill{height:100%;width:0;background:#73ad8b;transition:width .25s}
+#lb-replay .xbox strong{font-size:15px;display:block;letter-spacing:-.2px;font-variant-numeric:tabular-nums;color:#277352}
+#lb-replay .xbox span{font-size:11px;color:#7f9184}
 #lb-replay .xbox.bottleneck{border-color:#d98a86;background:#fdf1f0;box-shadow:0 0 0 1px #d98a8655}
 #lb-replay .xbox.bottleneck b{color:#b4574f}
 #lb-replay .xbox.bottleneck strong{color:#a8463e}
-#lb-replay .pipe-head,#lb-replay .platform-head{display:flex;align-items:center;justify-content:space-between;padding:4px 14px 2px;font-weight:750;font-size:14px}
-#lb-replay .pipe-head small,#lb-replay .platform-head small{font-size:11px;font-weight:450;color:#859187}
-#lb-replay .pipe{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;padding:3px 12px 7px}
-#lb-replay .handoff{border:1px solid #dae7dd;border-radius:8px;padding:10px 12px;background:#f7fbf8;min-width:0}
-#lb-replay .handoff-head{display:flex;align-items:center;justify-content:space-between;gap:5px}
-#lb-replay .handoff b{font-size:13px}
-#lb-replay .handoff strong{font-size:14px;color:#277352}
-#lb-replay .track{height:6px;border-radius:10px;background:#e7f0e8;overflow:hidden;margin-top:8px}
-#lb-replay .fill{height:100%;width:0;background:#73ad8b;transition:width .2s}
-#lb-replay .handoff .sub{font-size:11px;color:#7f9184;margin-top:3px}
+#lb-replay .xbox.bottleneck .fill{background:#d98a86}
+#lb-replay .platform-head{display:flex;align-items:center;justify-content:space-between;padding:4px 14px 2px;font-weight:750;font-size:14px}
+#lb-replay .platform-head small{font-size:11px;font-weight:450;color:#859187}
 #lb-replay .platform{margin:0 12px 6px;border:1px solid #dce6dd;background:#fafdfa;border-radius:8px;padding:10px 14px;flex:0 0 232px;min-height:0}
 #lb-replay .platformnav{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
 #lb-replay .platformnav button{border:1px solid #d7e5dc;border-radius:6px;background:#fff;color:#57715e;padding:5px 11px;font-size:12px}
@@ -597,7 +592,7 @@ _CSS = """
 #lb-replay .controls .mark{font-size:11px;color:#d6e5d8;white-space:nowrap}
 /* Short viewports: keep everything inside one frame without scroll. */
 @media(max-height:820px){#lb-replay .runsteps{min-height:170px;padding:9px 12px 6px}#lb-replay .step{padding:11px;gap:5px}#lb-replay .step h2{font-size:21px}#lb-replay .art{min-height:46px}#lb-replay .value strong{font-size:24px}#lb-replay .step.current .value strong{font-size:27px}#lb-replay .phasepanel{min-height:64px}#lb-replay .traces{height:108px}#lb-replay .platform{flex-basis:168px}}
-@media(max-width:900px){#lb-replay .runsteps{overflow-x:auto;min-height:310px}#lb-replay .step{flex:0 0 175px}#lb-replay .step.current{flex:0 0 245px}#lb-replay .pipe{grid-template-columns:repeat(2,1fr)}#lb-replay .phasepanel{grid-template-columns:1fr}#lb-replay .platform{flex:auto}#lb-replay .traces{height:170px}#lb-replay .controls{position:sticky;bottom:0}}
+@media(max-width:900px){#lb-replay .runsteps{overflow-x:auto;min-height:310px}#lb-replay .step{flex:0 0 175px}#lb-replay .step.current{flex:0 0 245px}#lb-replay .execstrip{flex-wrap:wrap}#lb-replay .xbox{flex:0 0 46%}#lb-replay .execmark{display:none}#lb-replay .platform{flex:auto}#lb-replay .traces{height:170px}#lb-replay .controls{position:sticky;bottom:0}}
 
 #lb-replay{font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#1c332c;margin-bottom:1.5rem}
 #lb-replay *{box-sizing:border-box}
@@ -704,15 +699,25 @@ function draw(){
  var f=S[focus],ff=frac(f);
  $('#rp-phase').textContent=f.phase+' · '+f.name;
  $('#rp-phasenote').textContent=phaseNote(focus,f,ff);
- S.forEach(function(s,i){var x=s.exec||{},bx=root.querySelector('[data-x="'+i+'"]');if(!bx)return;
-  var started=s.start!=null&&s.start<=t;
-  bx.querySelector('[data-xv="'+i+'"]').textContent=!started?'-':x.tput==null?'NR':x.tput.toFixed(3)+' GB/s';
-  bx.querySelector('[data-xs="'+i+'"]').textContent=!started?'not started':x.elapsed!=null?fmtT(x.elapsed)+' elapsed':'';
-  bx.classList.toggle('bottleneck',!!x.bottleneck&&started)});
- if(D.kind==='sustained')lagBars();else for(var i=0;i<4;i++){var b=S[i+1],fb=frac(b);
-  $('[data-f="'+i+'"]').style.width=(fb===null?0:fb*100)+'%';
-  $('[data-h="'+i+'"]').textContent=fb===null?'NR':fb===0?'Waiting':fb===1?'Complete':'Processing';
-  $('[data-s="'+i+'"]').textContent=fb===null?'no window recorded':fb===0?'Awaiting upstream':fb===1?'Output available':Math.round(fb*100)+'% of '+b.name}
+ // The pipeline box of each stage: its inbound handoff's lag, keeps-up, and
+ // the red bottleneck. Generate and the last stage have no inbound handoff.
+ S.forEach(function(s,i){var bx=root.querySelector('[data-x="'+i+'"]');if(!bx)return;
+  var hi=+bx.dataset.lagh,x=s.exec||{},started=s.start!=null&&s.start<=t;
+  var strong=bx.querySelector('[data-xv="'+i+'"]'),span=bx.querySelector('[data-xs="'+i+'"]'),fill=bx.querySelector('[data-xf="'+i+'"]');
+  if(D.kind==='sustained'){
+   if(hi<0){strong.textContent=started?'streaming':'-';span.textContent='';fill.style.width='0%';bx.classList.remove('bottleneck');return}
+   var h=D.handoffs[hi],v=lagAt(h);
+   strong.textContent=v===null?'-':fmtLag(v)+' behind';
+   span.textContent=v===null?'':h.keeps_up===false?'falls behind the arrival rate':'keeps up';
+   fill.style.width=(v===null?0:Math.min(100,v/LMAX*100))+'%';
+   bx.classList.toggle('bottleneck',!!x.bottleneck&&started);
+  }else{
+   var fb=frac(s);
+   strong.textContent=fb===null?'-':fb===0?'Waiting':fb===1?'Complete':Math.round(fb*100)+'%';
+   span.textContent=fb===null?'no window recorded':fb===0?'Awaiting upstream':fb===1?'Output available':'processing';
+   fill.style.width=(fb===null?0:fb*100)+'%';
+   bx.classList.remove('bottleneck');
+  }});
  var k=st?Math.max(0,Math.min(st.read.length-1,Math.floor(t/st.step))):0;
  if(lane==='lag'){
   $('#rp-lname').textContent='Lag behind upstream';
@@ -721,7 +726,10 @@ function draw(){
  else if(lane==='storage'){
   $('#rp-legend').innerHTML='';
   $('#rp-lname').textContent='Storage / S3';
-  var spark=S.some(function(s){return s.key!=='datagen'&&s.key!=='query'&&s.start!=null&&t>=s.start&&t<s.end});
+  // In a batch run the S3 lane excludes Spark bytes, so the number is NR
+  // while a Spark stage runs. A sustained run streams all window long, so
+  // that gate would blank it forever; the lane is the recorded series, show it.
+  var spark=D.kind!=='sustained'&&S.some(function(s){return s.key!=='datagen'&&s.key!=='query'&&s.start!=null&&t>=s.start&&t<s.end});
   $('#rp-lval').textContent=!st||spark?'NR':st.read[k].toFixed(1)+' MB/s read · '+st.write[k].toFixed(1)+' MB/s written';
   plot('#rp-lplot',st?[{v:st.read,c:'#37876d'},{v:st.write,c:'#be904a'}]:[],SMAX)}
  else{
@@ -775,26 +783,18 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         f'<div class="value"><strong>-</strong><label>{e(s["label"])}</label></div></article>'
         for i, s in enumerate(stages)
     )
+    # The pipeline row: one box per stage, lined up under its card, showing
+    # the lag of the stage's inbound handoff (stage i <- handoff i-1) and
+    # whether it keeps up. The bottleneck box is drawn red. Generate and the
+    # last stage have no inbound handoff, so they carry no lag.
+    nhand = len(data.get("handoffs") or []) if data.get("kind") == "sustained" else 4
     execboxes = "".join(
-        f'<div class="xbox" data-x="{i}"><b>{e(s["phase"])}</b>'
+        f'<div class="xbox" data-x="{i}" data-lagh="{i - 1 if 1 <= i <= nhand else -1}">'
+        f'<b>{e(s["phase"])}</b>'
+        f'<div class="track"><div class="fill" data-xf="{i}"></div></div>'
         f'<strong data-xv="{i}">-</strong><span data-xs="{i}"></span></div>'
         for i, s in enumerate(stages)
     )
-    pipe = "".join(
-        f'<div class="handoff"><div class="handoff-head"><b>{e(stages[i]["phase"])} → '
-        f'{e(stages[i + 1]["phase"])}</b><strong data-h="{i}">Waiting</strong></div>'
-        f'<div class="track"><div class="fill" data-f="{i}"></div></div>'
-        f'<div class="sub" data-s="{i}"></div></div>'
-        for i in range(4)
-    )
-    if data.get("kind") == "sustained":
-        pipe = "".join(
-            f'<div class="handoff"><div class="handoff-head"><b>{e(h["label"])}</b>'
-            f'<strong data-h="{i}">Waiting</strong></div>'
-            f'<div class="track"><div class="fill" data-f="{i}"></div></div>'
-            f'<div class="sub" data-s="{i}"></div></div>'
-            for i, h in enumerate(data["handoffs"])
-        )
     lanes = list(data["not_measured"])
     if not data["storage"]:
         lanes.insert(0, "Storage")
@@ -859,12 +859,10 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         "<span>run length</span></div></div></div>"
         '<div class="canvas"><div class="layer-head">Workload</div>'
         f'<div class="runsteps">{steps}</div>'
-        '<div class="exechead"><div><small>Stage throughput</small>'
+        '<div class="exechead"><div><small>Pipeline</small>'
         '<strong id="rp-phase">-</strong><span id="rp-phasenote"></span></div>'
-        f'<div class="execmark" id="rp-execmark">{"Recorded GB/s and elapsed per stage; red is the stage the balance check says fell behind." if data.get("kind") == "sustained" else "Recorded GB/s and elapsed per stage."}</div></div>'
+        f'<div class="execmark" id="rp-execmark">{"Lag behind the stage upstream; red is the stage the balance check says fell behind." if data.get("kind") == "sustained" else "Each stage fills as its recorded window runs."}</div></div>'
         f'<div class="execstrip">{execboxes}</div></div>'
-        '<div class="pipe-head">Pipeline</div>'
-        f'<div class="pipe">{pipe}</div>'
         '<div class="platform-head">Platform</div>'
         f'<div class="platform"><div class="platformnav">{nav}</div>'
         '<div class="traces"><div class="graph"><div class="charttitle">'
