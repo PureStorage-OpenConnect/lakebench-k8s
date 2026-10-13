@@ -1114,8 +1114,8 @@ The limits on Spark, Iceberg, Delta, Hive and Polaris versions are in
 for what it writes and [CLI Reference](cli-reference.md#init) for the flags.
 The lines a first run needs are live. The keys a deployment usually tunes
 follow in schema order, in sections opened by a banner, commented at their
-defaults with a description above each (lines starting `##` are prose, lines
-starting `# ` are keys left at their defaults). Remove the leading `# ` from a
+defaults, with a short note under each banner (lines starting `##` are
+guidance, lines starting `# ` are keys left at their defaults). Remove the leading `# ` from a
 key, and from the block lines above it, to set it. Every key it leaves out
 keeps its default and is described on this page.
 

@@ -183,7 +183,7 @@ def test_derived_and_auto_sized_defaults_do_not_pin_a_value():
     text = first_day_config(name="drv-t", endpoint="http://s3:80")
     assert "bronze: drv-t-bronze" in text
     assert "bronze: lakebench-bronze" not in text
-    assert "Unset, it is sized from the scale and the cluster." in text
+    assert "sized from the scale" in text  # the datagen section note
     assert not re.search(r"(?m)^#\s+pattern:", text)  # a deprecated key is not offered
 
 

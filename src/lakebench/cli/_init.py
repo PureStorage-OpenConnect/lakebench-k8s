@@ -182,7 +182,6 @@ _DISPLAY_RENAMES = (
     ("architecture.workload.", "workload."),
     ("architecture.pipeline.sustained.", "architecture.pipeline.continuous."),
 )
-_DESCRIPTION_CHARS = 300
 #: The keys a deployment usually tunes. The file lists these, the keys it
 #: writes live and the recipe's own components; every other key keeps its
 #: default and is described in docs/configuration.md. A test checks that each
@@ -264,16 +263,6 @@ _TUNED_PREFIXES = ("architecture.pipeline.continuous.",)
 _WRAP = 78
 #: A second-level block opens with a marker only when it holds this many keys.
 _BANNER_MIN_KEYS = 3
-#: Types the default value already shows, so the line says nothing about them.
-_OBVIOUS_TYPES = {"string", "boolean", "integer", "number"}
-#: Keys whose schema default is a floor, not what a run uses: unset, the run
-#: sizes them. The sentence is added to the description so an uncommented line
-#: is not taken to be the automatic value.
-_AUTO_SIZED = {
-    "workload.datagen.parallelism": "Unset, it is sized from the scale and the cluster.",
-    "workload.datagen.cpu": "Unset, it is sized from the scale and the cluster.",
-    "workload.datagen.memory": "Unset, it is sized from the workload, the scale and the cpu.",
-}
 
 
 def _display(path: str) -> str:
@@ -364,14 +353,29 @@ def _default_text(field: Any) -> str:
     return _scalar(value)
 
 
-def _first_sentence(description: str | None) -> str:
-    text = " ".join((description or "").split())
-    if not text:
-        return ""
-    text = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
-    if len(text) > _DESCRIPTION_CHARS:
-        text = text[:_DESCRIPTION_CHARS].rsplit(" ", 1)[0].rstrip(",;:") + " ..."
-    return text
+#: One short note under each section's banner, in place of a line per key.
+#: A section absent here gets the banner alone.
+_SECTION_GUIDE = {
+    "images": "Container images. Set these to your registry's copies; tags only, no digests.",
+    "platform": "Where the deployment runs: the cluster context and namespace, the S3\n"
+    "store and its credentials, and the CPU, memory and storage the pods get.",
+    "platform.storage": "S3 endpoint, credentials and bucket names, and the scratch volumes\n"
+    "Spark and Trino spill to. Bucket names default to <name>-<layer>.",
+    "platform.compute": "Sizing for Spark and its drivers. Unset executor counts are sized\n"
+    "from the scale; set them only to pin a stage.",
+    "architecture": "The recipe fixes catalog, table format and engines; leave those\n"
+    "commented. Query-engine and pipeline settings follow.",
+    "architecture.query_engine": "Trino coordinator and worker sizing.",
+    "architecture.pipeline": "Batch or continuous mode. The continuous keys set the run length,\n"
+    "the cadence of each stage and the silver write mode.",
+    "architecture.benchmark": "Which benchmark and how it is scored.",
+    "workload": "What is generated and queried: scale, datagen pods and the\n"
+    "time-travel operations. Unset datagen sizing follows the scale.",
+    "workload.datagen": "Datagen pods. Parallelism, cpu and memory are sized from the scale\n"
+    "and the cluster when unset; the values shown are floors.",
+    "observability": "Prometheus, Grafana and the metrics the report reads.",
+    "spark": "Spark configuration passed through to every job.",
+}
 
 
 def _is_tuned(path: str) -> bool:
@@ -397,7 +401,7 @@ def _template_tree(
             node = node.setdefault(part, {})
         if path in active:
             seen.add(path)
-            description = _first_sentence(field.description)
+            description = ""
             node[parts[-1]] = (path, _scalar(active[path]), comments.get(path, ""), description)
             continue
         if path in owned:
@@ -407,12 +411,10 @@ def _template_tree(
         note = _type_text(field.annotation)
         bounds = _range_text(field)
         if bounds:
-            note = f"{note}, {bounds}"
-        elif note in _OBVIOUS_TYPES:
-            note = ""  # the value shows it
-        description = _first_sentence(field.description)
-        if path in _AUTO_SIZED:
-            description = f"{description} {_AUTO_SIZED[path]}".strip()
+            note = bounds
+        elif not note.startswith("one of"):
+            note = ""  # the value shows the type
+        description = ""
         text = derived.get(path) or _default_text(field)
         node[parts[-1]] = (path, text, note, description)
     missing = set(active) - seen
@@ -421,24 +423,23 @@ def _template_tree(
     return tree
 
 
-def _banner(label: str, heavy: bool) -> list[str]:
-    """A section marker made of prose lines (``##``)."""
+def _banner(label: str, heavy: bool, guide: str = "") -> list[str]:
+    """A section marker made of prose lines (``##``), then its guidance."""
+    notes = [f"## {ln}" for ln in guide.splitlines()]
     if heavy:
         rule = "## " + "=" * (_WRAP - 2)
-        return [rule, f"## {label}", rule]
-    return [f"## ---- {label} ".ljust(_WRAP + 1, "-")]
+        return [rule, f"## {label}", rule, *notes]
+    return [f"## ---- {label} ".ljust(_WRAP + 1, "-"), *notes]
 
 
 def _template_lines(tree: dict[str, Any], active_paths: set[str]) -> list[str]:
     """The tree as lines.
 
     Three kinds of line, told apart by their start: ``##`` is prose (a banner
-    or a description), ``# `` is a key left at its default (the YAML line with
-    ``# `` in front), and anything else is live. A blank line separates one
-    key from the next, and the top two levels of the tree open with a banner.
+    or section guidance), ``# `` is a key left at its default (the YAML line with
+    ``# `` in front), and anything else is live. The top two levels of
+    the tree open with a banner and a short note on the section.
     """
-    import textwrap
-
     lines: list[str] = []
 
     def live(path: str) -> bool:
@@ -458,28 +459,22 @@ def _template_lines(tree: dict[str, Any], active_paths: set[str]) -> list[str]:
             if isinstance(child, dict):
                 if depth == 0 or (depth == 1 and size(child) >= _BANNER_MIN_KEYS):
                     blank()
-                    lines.extend(_banner(key.upper() if depth == 0 else path, depth == 0))
+                    lines.extend(
+                        _banner(
+                            key.upper() if depth == 0 else path,
+                            depth == 0,
+                            _SECTION_GUIDE.get(path, ""),
+                        )
+                    )
                 header = f"{pad}{key}:"
                 lines.append(header if live(path) else f"# {header}")
                 walk(child, depth + 1, f"{path}.")
                 continue
-            _, text, note, description = child
-            lead = "##" + (pad or " ")
-            if description:
-                lines.extend(
-                    textwrap.wrap(
-                        description,
-                        width=_WRAP,
-                        initial_indent=lead,
-                        subsequent_indent=lead,
-                        break_on_hyphens=False,
-                    )
-                )
+            _, text, note, _description = child
             line = f"{pad}{key}: {text}"
             if note:
                 line = f"{line}  # {note}"
             lines.append(line if path in active_paths else f"# {line}")
-            blank()
 
     walk(tree, 0, "")
     while lines and lines[-1] == "":
@@ -536,7 +531,7 @@ def first_day_config(
     lines = [
         "## Written by `lakebench init`.",
         "##",
-        "## Lines that start with '##' are descriptions. Lines with no '#' in front are set",
+        "## Lines that start with '##' are guidance. Lines with no '#' in front are set",
         "## for this deployment. The keys a deployment usually tunes follow at their",
         "## defaults, commented out with '# ': remove the '# ' from the key, and from the",
         "## block lines above it, to set it. Every other key keeps its default; the",
