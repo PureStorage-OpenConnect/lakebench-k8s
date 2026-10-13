@@ -125,6 +125,20 @@ _HANDOFFS = ("datagen->bronze", "bronze->silver", "silver->gold")
 _MAX_BUCKETS = 240
 
 
+def _exec_box(stage: Mapping[str, Any] | None, bottleneck: bool) -> dict[str, Any]:
+    """The per-stage execution box: recorded throughput and elapsed time, and
+    whether the balance check named this stage as the one that fell behind.
+    A stage with no recorded throughput shows NR; *bottleneck* is only ever
+    true for a sustained run, where the balance handoff recorded keeps_up."""
+    tput = (stage or {}).get("throughput_gb_per_second")
+    elapsed = (stage or {}).get("elapsed_seconds")
+    return {
+        "tput": round(float(tput), 3) if isinstance(tput, (int, float)) and tput else None,
+        "elapsed": round(float(elapsed), 1) if isinstance(elapsed, (int, float)) else None,
+        "bottleneck": bool(bottleneck),
+    }
+
+
 def _epoch(stamp: Any) -> float | None:
     if not stamp:
         return None
@@ -271,9 +285,10 @@ def _sustained(
     # Recorded moments the stage did something: the focus follows them. The
     # first non-zero lag of a handoff is when work first waited at it; gold ticks
     # and query rounds are the recorded completions.
+    balance_h = (cont.get("balance") or {}).get("handoffs") or {}
     first_sample: list[float | None] = []
     for name in _HANDOFFS:
-        raw = ((cont.get("balance") or {}).get("handoffs") or {}).get(name) or {}
+        raw = balance_h.get(name) or {}
         pts = [
             float(a)
             for a, b in raw.get("samples") or []
@@ -287,12 +302,23 @@ def _sustained(
         ([first_sample[2]] if first_sample[2] is not None else []) + [r[0] for r in steps],
         [r[0] for r in round_steps] if c360 else [],
     ]
+    # The stage the balance check says fell behind: its handoff recorded
+    # keeps_up False. _STREAMS[i] drives _STAGE_KEYS[i+1] (bronze, silver, gold).
+    behind = {
+        _STREAMS[i]
+        for i, name in enumerate(_HANDOFFS)
+        if (balance_h.get(name) or {}).get("keeps_up") is False
+    }
+    stage_key_for_stream = {"bronze-ingest": "bronze", "silver-stream": "silver", "gold-refresh": "gold"}
+    bottleneck_keys = {stage_key_for_stream[s] for s in behind}
     stages = []
     for idx, (start, value, path, rows) in enumerate(spec):
         placed = start is not None and w1 is not None
+        key = _STAGE_KEYS[idx]
         stages.append(
             {
-                "key": _STAGE_KEYS[idx],
+                "key": key,
+                "exec": _exec_box(by_name.get(key), key in bottleneck_keys),
                 "phase": profile["phases"][idx],
                 "name": profile["names"][idx],
                 "impl": profile["impl"][idx],
@@ -327,7 +353,6 @@ def _sustained(
     ]
     handoffs = []
     lag_series = []
-    balance_h = (cont.get("balance") or {}).get("handoffs") or {}
     for i, name in enumerate(_HANDOFFS):
         h = balance_h.get(name)
         samples = [
@@ -409,6 +434,9 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
         stages.append(
             {
                 "key": key,
+                # Batch stages run in sequence, so there is no balance check and
+                # no bottleneck; the box shows throughput only.
+                "exec": _exec_box(rec, False),
                 "phase": profile["phases"][idx],
                 "name": profile["names"][idx],
                 "impl": (profile.get("impl") or _IMPL)[idx],
@@ -526,16 +554,21 @@ _CSS = """
 #lb-replay .value strong{font-size:clamp(15px,1.55vw,22px);letter-spacing:-.6px;display:block;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:clip}
 #lb-replay .step.current .value strong{font-size:clamp(22px,2.7vw,34px)}
 #lb-replay .value label{font-size:12px;color:#778b7d}
-#lb-replay .phasepanel{margin:1px 12px 6px;border:1px solid #d9e7dd;background:#f7faf7;border-radius:9px;padding:8px 12px;min-height:78px;display:grid;grid-template-columns:1.2fr 2.3fr;gap:14px;align-items:center}
-#lb-replay .phasename small{font-size:12px;color:#518166;font-weight:750}
-#lb-replay .phasename strong{display:block;font-size:18px;margin-top:3px;letter-spacing:-.3px}
-#lb-replay .phasename span{font-size:12px;color:#778b7e}
-#lb-replay .jobs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
-#lb-replay .job{padding:8px;background:white;border:1px solid #dfe9e0;border-radius:6px;min-width:0}
-#lb-replay .job b{font-size:12px;color:#617f69;display:block}
-#lb-replay .job strong{font-size:19px;display:block;margin-top:4px}
-#lb-replay .job span{font-size:11px;color:#819084}
-#lb-replay .job.on{border-color:#81b79a;background:#edf8f0}
+#lb-replay .exechead{display:flex;align-items:baseline;justify-content:space-between;gap:14px;padding:4px 16px 0}
+#lb-replay .exechead small{font-size:12px;color:#518166;font-weight:750}
+#lb-replay .exechead strong{font-size:16px;margin-left:8px;letter-spacing:-.3px}
+#lb-replay .exechead #rp-phasenote{font-size:12px;color:#778b7e;margin-left:8px}
+#lb-replay .execmark{font-size:11px;color:#8a978c;max-width:46%;text-align:right}
+/* The strip mirrors the card flex weights (set from JS) so each box tracks
+   the width of the card above it. */
+#lb-replay .execstrip{display:flex;gap:10px;padding:6px 16px 12px;align-items:stretch}
+#lb-replay .xbox{flex:1;min-width:0;padding:9px 11px;background:#fff;border:1px solid #dfe9e0;border-radius:9px;transition:flex .4s}
+#lb-replay .xbox b{font-size:11px;text-transform:uppercase;letter-spacing:.6px;font-weight:800;color:#6a8073;display:block}
+#lb-replay .xbox strong{font-size:19px;display:block;margin-top:3px;letter-spacing:-.4px;font-variant-numeric:tabular-nums}
+#lb-replay .xbox span{font-size:11px;color:#819084}
+#lb-replay .xbox.bottleneck{border-color:#d98a86;background:#fdf1f0;box-shadow:0 0 0 1px #d98a8655}
+#lb-replay .xbox.bottleneck b{color:#b4574f}
+#lb-replay .xbox.bottleneck strong{color:#a8463e}
 #lb-replay .pipe-head,#lb-replay .platform-head{display:flex;align-items:center;justify-content:space-between;padding:4px 14px 2px;font-weight:750;font-size:14px}
 #lb-replay .pipe-head small,#lb-replay .platform-head small{font-size:11px;font-weight:450;color:#859187}
 #lb-replay .pipe{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;padding:3px 12px 7px}
@@ -664,15 +697,18 @@ function draw(){
  // the cycle whose alerts land, so when the focus reaches the scoring stage in
  // an AML sustained run the alert card enlarges with it.
  var pair=sel===null&&D.kind==='sustained'&&D.pair&&focus===D.pair[0]?D.pair[1]:-1;
- S.forEach(function(s,i){var on=i===focus||i===pair;root.querySelector('[data-step="'+i+'"]').classList.toggle('current',on)});
+ S.forEach(function(s,i){var on=i===focus||i===pair;
+  var card=root.querySelector('[data-step="'+i+'"]');card.classList.toggle('current',on);
+  // Mirror the card's flex onto the box below it, so the box lines up.
+  var box=root.querySelector('[data-x="'+i+'"]');if(box)box.style.flex=on?'1.9':'1'});
  var f=S[focus],ff=frac(f);
  $('#rp-phase').textContent=f.phase+' · '+f.name;
  $('#rp-phasenote').textContent=phaseNote(focus,f,ff);
- J.forEach(function(j,i){var c=root.querySelector('[data-job="'+i+'"]');
-  var js=(j.start==null||j.end==null)?null:(t<j.start?'waiting':t>=j.end?'done':'running');
-  c.classList.toggle('on',js==='running');
-  c.querySelector('strong').textContent=js===null?'-':js;
-  c.querySelector('span').textContent=js==='done'?(j.success===false?'failed':j.elapsed!=null?j.elapsed.toFixed(1)+' s':''):js==='running'?'streaming':js==='waiting'?'not started':''});
+ S.forEach(function(s,i){var x=s.exec||{},bx=root.querySelector('[data-x="'+i+'"]');if(!bx)return;
+  var started=s.start!=null&&s.start<=t;
+  bx.querySelector('[data-xv="'+i+'"]').textContent=!started?'-':x.tput==null?'NR':x.tput.toFixed(3)+' GB/s';
+  bx.querySelector('[data-xs="'+i+'"]').textContent=!started?'not started':x.elapsed!=null?fmtT(x.elapsed)+' elapsed':'';
+  bx.classList.toggle('bottleneck',!!x.bottleneck&&started)});
  if(D.kind==='sustained')lagBars();else for(var i=0;i<4;i++){var b=S[i+1],fb=frac(b);
   $('[data-f="'+i+'"]').style.width=(fb===null?0:fb*100)+'%';
   $('[data-h="'+i+'"]').textContent=fb===null?'NR':fb===0?'Waiting':fb===1?'Complete':'Processing';
@@ -739,9 +775,10 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         f'<div class="value"><strong>-</strong><label>{e(s["label"])}</label></div></article>'
         for i, s in enumerate(stages)
     )
-    jobs = "".join(
-        f'<div class="job" data-job="{i}"><b>{e(str(j["name"]))}</b><strong>-</strong><span></span></div>'
-        for i, j in enumerate(data["jobs"])
+    execboxes = "".join(
+        f'<div class="xbox" data-x="{i}"><b>{e(s["phase"])}</b>'
+        f'<strong data-xv="{i}">-</strong><span data-xs="{i}"></span></div>'
+        for i, s in enumerate(stages)
     )
     pipe = "".join(
         f'<div class="handoff"><div class="handoff-head"><b>{e(stages[i]["phase"])} → '
@@ -822,9 +859,10 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         "<span>run length</span></div></div></div>"
         '<div class="canvas"><div class="layer-head">Workload</div>'
         f'<div class="runsteps">{steps}</div>'
-        f'<div class="phasepanel"><div class="phasename"><small>{"Continuous" if data.get("kind") == "sustained" else "Batch"} execution</small>'
+        '<div class="exechead"><div><small>Stage throughput</small>'
         '<strong id="rp-phase">-</strong><span id="rp-phasenote"></span></div>'
-        f'<div class="jobs">{jobs}</div></div>'
+        f'<div class="execmark" id="rp-execmark">{"Recorded GB/s and elapsed per stage; red is the stage the balance check says fell behind." if data.get("kind") == "sustained" else "Recorded GB/s and elapsed per stage."}</div></div>'
+        f'<div class="execstrip">{execboxes}</div></div>'
         '<div class="pipe-head">Pipeline</div>'
         f'<div class="pipe">{pipe}</div>'
         '<div class="platform-head">Platform</div>'
