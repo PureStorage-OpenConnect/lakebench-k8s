@@ -434,10 +434,13 @@ def front_matter(record: Any) -> FrontMatter:
     )
 
 
-def rich_markup(fm: FrontMatter) -> str:
-    """The front matter as Rich markup, for the terminal ``report`` and the
-    end-of-run panel."""
-    from rich.markup import escape
+def rich_renderable(fm: FrontMatter):
+    """The front matter as a Rich renderable, for the terminal ``report`` and
+    the end-of-run summary: a label column and a value column that wraps
+    under itself, with no box to fall out of line on a narrow terminal."""
+    from rich.console import Group
+    from rich.table import Table
+    from rich.text import Text
 
     colour = (
         "green"
@@ -446,33 +449,47 @@ def rich_markup(fm: FrontMatter) -> str:
         if fm.verdict == "PASSED"
         else "red"
     )
-    lines = []
+    fields = Table.grid(padding=(0, 2))
+    fields.add_column(style="bold", no_wrap=True)
+    fields.add_column(overflow="fold")
     for label, text in fm.lines():
-        value = f"[{colour}]{escape(text)}[/{colour}]" if label == "Verdict" else escape(text)
-        lines.append(f"[bold]{label}:[/bold] {value}")
+        fields.add_row(label, Text(text, style=colour if label == "Verdict" else ""))
     notes = [*fm.qualifiers, *(fm.warnings[1:] if fm.verdict == "PASSED" else fm.warnings)]
-    lines.extend(f"[yellow]- {escape(n)}[/yellow]" for n in notes)
+    parts: list = [fields]
+    if notes:
+        bullets = Table.grid(padding=(0, 1))
+        bullets.add_column(no_wrap=True)
+        bullets.add_column(overflow="fold")
+        for note in notes:
+            bullets.add_row(Text("-", style="yellow"), Text(note, style="yellow"))
+        parts += [Text(""), bullets]
     if fm.limits:
-        lines.append("[bold]What limits interpretation:[/bold]")
-        lines.extend(f"  - {escape(item)}" for item in fm.limits)
-    return "\n".join(lines)
+        bullets = Table.grid(padding=(0, 1))
+        bullets.add_column(no_wrap=True)
+        bullets.add_column(overflow="fold")
+        for item in fm.limits:
+            bullets.add_row("-", Text(item))
+        parts += [Text(""), Text("What limits interpretation", style="bold"), bullets]
+    return Group(*parts)
 
 
 def print_front_matter(metrics, console, *, storage=None, run_id: str | None = None) -> None:
-    """Print the front matter panel for *metrics*, or for the record
+    """Print the front matter block for *metrics*, or for the record
     *storage* holds for *run_id* when given (read back after a save). Never
     raises: a run that finished is not failed by its summary."""
     import logging
 
     from rich.markup import escape
-    from rich.panel import Panel
+    from rich.rule import Rule
 
     try:
         if storage is not None and run_id:
             metrics = storage.load_run(run_id) or metrics
         fm = front_matter(metrics)
         title = "Read this first: run " + escape(str(metrics.run_id))
-        console.print(Panel(rich_markup(fm), title=title, expand=False))
+        console.print()
+        console.print(Rule(title, align="left"))
+        console.print(rich_renderable(fm))
     except Exception:  # noqa: BLE001 -- the summary never fails a finished run
         logging.getLogger(__name__).warning("front matter not printed", exc_info=True)
         # Never scores without a verdict: the bare status at least.

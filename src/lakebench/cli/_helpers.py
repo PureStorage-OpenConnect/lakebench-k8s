@@ -282,7 +282,7 @@ def deprecated_short_f_force(new_spelling: str, force_given: bool) -> bool:
 
 def print_info(message: object) -> None:
     """Print an info message on stderr (text is printed verbatim)."""
-    _status_line("...", "blue", message)
+    _status_line("...", "cyan", message)
 
 
 def _journal_safe(fn, *args, **kwargs) -> None:

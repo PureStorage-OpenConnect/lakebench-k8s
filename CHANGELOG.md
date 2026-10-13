@@ -4,6 +4,12 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **The end-of-run summary and `lakebench report` print the front matter as a label and value table instead of a box.** Long values wrap under their column and nothing is drawn at a fixed width, so a narrow terminal no longer breaks the frame; the `...` progress prefix is cyan instead of blue.
+
 ## [1.7.3] - 2026-10-13
 
 ### Changed
