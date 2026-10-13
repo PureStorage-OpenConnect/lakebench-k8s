@@ -278,7 +278,7 @@ def test_print_front_matter_reads_back_the_saved_record(tmp_path):
     buf = StringIO()
     console = Console(file=buf, width=200)
     print_front_matter(object(), console, storage=storage, run_id=record["run_id"])
-    assert "Verdict: FAILED (stored FAILED; recomputed PASSED)" in buf.getvalue()
+    assert "FAILED (stored FAILED; recomputed PASSED)" in buf.getvalue()
 
     class _Broken:
         def load_run(self, run_id):
@@ -289,3 +289,18 @@ def test_print_front_matter_reads_back_the_saved_record(tmp_path):
     buf2 = StringIO()
     print_front_matter(load_metrics("5105a0"), Console(file=buf2), storage=_Broken(), run_id="x")
     assert buf2.getvalue().strip() == "Verdict: PASSED"
+
+
+def test_print_front_matter_wraps_values_inside_a_narrow_terminal():
+    from io import StringIO
+
+    from rich.console import Console
+
+    from lakebench.reports.front_matter import print_front_matter
+    from tests.fixtures.stored_records import load_metrics
+
+    buf = StringIO()
+    print_front_matter(load_metrics("5105a0"), Console(file=buf, width=60))
+    out = buf.getvalue()
+    assert all(len(line) <= 60 for line in out.splitlines())
+    assert "Verdict" in out and "│" not in out
