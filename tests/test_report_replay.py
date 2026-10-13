@@ -125,7 +125,7 @@ def test_no_io_means_no_storage_lane() -> None:
 
 @pytest.mark.parametrize(
     ("mode", "schema"),
-    [("continuous", "customer360"), ("sustained", "financial"), ("batch", "unknown")],
+    [("continuous", "customer360"), ("sustained", "customer360"), ("batch", "unknown")],
 )
 def test_no_profile_no_replay(mode: str, schema: str) -> None:
     assert build_replay(_record(mode, schema)) is None
@@ -155,6 +155,9 @@ def test_golden_replay_block_matches_its_record(run_id: str) -> None:
         assert build_replay(record) is None
         return
     data = json.loads(m.group(1))
+    if data["kind"] == "sustained":
+        assert data["stages"][1]["start"] is not None
+        return
     t0 = _ts(record["start_time"])
     stages = {s["stage_name"]: s for s in record["pipeline_benchmark"]["stages"]}
     for s in data["stages"]:
@@ -226,3 +229,67 @@ def test_a_series_starting_after_the_run_is_shifted_onto_its_clock() -> None:
     rec = _with_series(_record())
     rec["platform_metrics"]["series"]["start"] = "2026-01-01T00:00:30+00:00"
     assert build_replay(rec)["lanes"]["compute"]["shift"] == 30.0
+
+
+def _sustained_record() -> dict:
+    rec = _record("sustained", "financial")
+    rec["continuous"] = {
+        "window": {
+            "start": "2026-01-01T00:01:00Z",
+            "end": "2026-01-01T00:09:00Z",
+            "seconds": 480.0,
+        },
+        "streams": {
+            "bronze-ingest": {"running_at": "2026-01-01T00:00:50+00:00"},
+            "silver-stream": {"running_at": "2026-01-01T00:00:55+00:00"},
+            "gold-refresh": {"running_at": "2026-01-01T00:01:00+00:00"},
+        },
+        "ticks": [
+            {"cycle": 1, "completed_at": "2026-01-01T00:03:00Z"},
+            {"cycle": 2, "completed_at": "2026-01-01T00:06:00Z"},
+        ],
+        "time_travel": {
+            "ticks": [
+                {"cycle": 1, "table": "silver.transactions", "total_records": 100},
+                {"cycle": 2, "table": "silver.transactions", "total_records": 250},
+                {"cycle": 2, "table": "silver.accounts", "total_records": 9},
+            ]
+        },
+        "balance": {
+            "handoffs": {
+                "datagen->bronze": {"samples": [[30.0, 4.5], [60.0, 9.0]], "keeps_up": True},
+                "silver->gold": {"samples": [[30.0, 1.0]], "keeps_up": False},
+            }
+        },
+    }
+    rec["pipeline_benchmark"]["scores"] = {"released_rows": 300, "time_to_detect_alerts": 7}
+    return rec
+
+
+def test_sustained_replay_reads_the_window_ticks_and_lags() -> None:
+    data = build_replay(_sustained_record())
+    assert data is not None and data["kind"] == "sustained"
+    gold = data["stages"][3]
+    # Payments screened per cycle: the pinned transactions snapshot, at the
+    # cycle's recorded completion, not the other tables.
+    assert gold["steps"] == [[180.0, 100.0], [360.0, 250.0]] and gold["value"] == 250.0
+    assert gold["start"] == 60.0 and gold["end"] == 540.0
+    assert data["stages"][0]["value"] == 300 and data["stages"][4]["value"] == 7
+    assert [h["label"] for h in data["handoffs"]] == ["Generate → Ingest", "Prepare → Monitor"]
+    assert data["lag"]["shift"] == 60.0 and len(data["lag"]["series"]) == 2
+    assert 'data-lane="lag"' in render_replay(data)
+
+
+def test_sustained_pace_is_payments_screened_over_the_window() -> None:
+    from lakebench.reports.tiles import build_tiles
+
+    tile = next(
+        t
+        for t in build_tiles(_sustained_record(), mode="sustained", gates=None)
+        if t.label == "Pace"
+    )
+    assert "250 payments screened in 480 s" in tile.sub and "payments/s" in tile.value
+    rec = _sustained_record()
+    rec["continuous"]["time_travel"] = {}
+    nr = next(t for t in build_tiles(rec, mode="sustained", gates=None) if t.label == "Pace")
+    assert nr.evidence == "nr"

@@ -21,7 +21,7 @@ from html import escape
 from typing import Any
 
 from lakebench.metrics.io import bucket_series
-from lakebench.reports.tiles import UNIT_CSS, unit_switch
+from lakebench.reports.tiles import UNIT_CSS, screened_by_cycle, unit_switch
 
 REPLAY_VERSION = 1
 
@@ -40,6 +40,7 @@ _IMPL = (
 
 _PROFILES: dict[tuple[str, str], dict[str, Any]] = {
     ("customer360", "batch"): {
+        "kind": "batch",
         "title": "C360 / Batch",
         "subtitle": "Customer 360",
         "phases": _PHASES,
@@ -53,6 +54,7 @@ _PROFILES: dict[tuple[str, str], dict[str, Any]] = {
         ),
     },
     ("financial", "batch"): {
+        "kind": "batch",
         "title": "AML / Batch",
         "subtitle": "Financial · Transaction monitoring",
         "phases": ("Generate", "Ingest", "Prepare", "Monitor", "Output"),
@@ -69,7 +71,33 @@ _PROFILES: dict[tuple[str, str], dict[str, Any]] = {
         # it screened.
         "fields": {"gold": "input_rows"},
     },
+    ("financial", "sustained"): {
+        "kind": "sustained",
+        "title": "AML / Continuous",
+        "subtitle": "Financial · Transaction monitoring",
+        "phases": ("Generate", "Ingest", "Prepare", "Monitor", "Detect"),
+        "names": ("Payments", "Ingest", "Process", "AML rules", "Alerts"),
+        "impl": (
+            "Datagen → S3",
+            "Spark · Bronze stream",
+            "Spark · Silver stream",
+            "Spark · Gold refresh",
+            "Alerts raised",
+        ),
+        "labels": (
+            "Payments released",
+            "Rows ingested",
+            "Rows prepared",
+            "Payments screened",
+            "Alerts detected",
+        ),
+    },
 }
+
+# The sustained streams, upstream first: the record's stream name, and the
+# handoff (as the balance block names it) that feeds the stage after it.
+_STREAMS = ("bronze-ingest", "silver-stream", "gold-refresh")
+_HANDOFFS = ("datagen->bronze", "bronze->silver", "silver->gold")
 
 _MAX_BUCKETS = 240
 
@@ -138,6 +166,116 @@ def _lanes(record: Mapping[str, Any], t0: float) -> dict[str, Any]:
     return lanes
 
 
+def _sustained(
+    record: Mapping[str, Any], profile: Mapping[str, Any], t0: float
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
+    """Stages, streams (as jobs), handoff lags and the lag chart of a
+    sustained record. The windows are the recorded ones: each stream from the
+    moment it was running to the end of the measured window; the evaluation
+    cycles are the recorded completion times of the gold ticks."""
+    cont = record.get("continuous") or {}
+    pb = record.get("pipeline_benchmark") or {}
+    scores = pb.get("scores") or {}
+    by_name = {s.get("stage_name"): s for s in pb.get("stages") or [] if isinstance(s, Mapping)}
+    win = cont.get("window") or {}
+    w0, w1 = _offset(win.get("start"), t0), _offset(win.get("end"), t0)
+    streams = cont.get("streams") or {}
+    running = {n: _offset((streams.get(n) or {}).get("running_at"), t0) for n in _STREAMS}
+    screened = screened_by_cycle(record)
+    steps = [
+        [o, screened[c]]
+        for c, o in (
+            (tk.get("cycle"), _offset(tk.get("completed_at"), t0))
+            for tk in cont.get("ticks") or []
+            if isinstance(tk, Mapping)
+        )
+        if o is not None and c in screened
+    ]
+    steps.sort()
+    spec = [  # start, value, path, counts rows
+        (w0, scores.get("released_rows"), "pipeline_benchmark.scores.released_rows", True),
+        (
+            running["bronze-ingest"],
+            (by_name.get("bronze") or {}).get("output_rows"),
+            "pipeline_benchmark.stages[bronze].output_rows",
+            True,
+        ),
+        (
+            running["silver-stream"],
+            (by_name.get("silver") or {}).get("input_rows"),
+            "pipeline_benchmark.stages[silver].input_rows",
+            True,
+        ),
+        (
+            running["gold-refresh"],
+            steps[-1][1] if steps else None,
+            "continuous.time_travel.ticks[*].total_records",
+            True,
+        ),
+        (
+            w0,
+            scores.get("time_to_detect_alerts"),
+            "pipeline_benchmark.scores.time_to_detect_alerts",
+            False,
+        ),
+    ]
+    stages = []
+    for idx, (start, value, path, rows) in enumerate(spec):
+        placed = start is not None and w1 is not None
+        stages.append(
+            {
+                "key": _STAGE_KEYS[idx],
+                "phase": profile["phases"][idx],
+                "name": profile["names"][idx],
+                "impl": profile["impl"][idx],
+                "label": profile["labels"][idx],
+                "start": start if placed else None,
+                "end": w1 if placed else None,
+                "value": value,
+                "path": path if value is not None else None,
+                "window": "recorded" if placed else None,
+                "ends": None,
+                "steps": steps if idx == 3 and steps else None,
+                "rows": rows,
+            }
+        )
+    jobs = [
+        {
+            "name": f"lakebench-{n}",
+            "type": n,
+            "start": running[n],
+            "end": w1,
+            "elapsed": None,
+            "success": None,
+        }
+        for n in _STREAMS
+    ]
+    handoffs = []
+    lag_series = []
+    balance_h = (cont.get("balance") or {}).get("handoffs") or {}
+    for i, name in enumerate(_HANDOFFS):
+        h = balance_h.get(name)
+        samples = [
+            [float(a), float(b)]
+            for a, b in (h or {}).get("samples") or []
+            if isinstance(a, (int, float)) and isinstance(b, (int, float))
+        ]
+        if not samples or w0 is None:
+            continue
+        handoffs.append(
+            {
+                "index": i,
+                "label": f"{profile['phases'][i]} → {profile['phases'][i + 1]}",
+                "samples": samples,
+                "keeps_up": (h or {}).get("keeps_up"),
+                "path": f"continuous.balance.handoffs.{name}.samples",
+            }
+        )
+        lag_series.append({"name": name, "samples": samples})
+    lag = {"shift": w0, "series": lag_series} if lag_series else None
+    return stages, jobs, handoffs, lag
+
+
 def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
     """The replay data block for *record*, or None when this record has no
     replay (a mode or workload without a profile, or no recorded timeline)."""
@@ -170,7 +308,10 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
     ]
 
     stages: list[dict[str, Any]] = []
-    for idx, key in enumerate(_STAGE_KEYS):
+    handoffs: list[dict[str, Any]] = []
+    lag = None
+    sustained = profile.get("kind") == "sustained"
+    for idx, key in enumerate(() if sustained else _STAGE_KEYS):
         rec = by_name.get(key)
         start = end = value = None
         path = None
@@ -195,7 +336,7 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
                 "key": key,
                 "phase": profile["phases"][idx],
                 "name": profile["names"][idx],
-                "impl": _IMPL[idx],
+                "impl": (profile.get("impl") or _IMPL)[idx],
                 "label": profile["labels"][idx],
                 "start": start,
                 "end": end,
@@ -208,18 +349,21 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
             }
         )
 
-    jobs = [
-        {
-            "name": j.get("job_name"),
-            "type": j.get("job_type"),
-            "start": _offset(j.get("start_time"), t0),
-            "end": _offset(j.get("end_time"), t0),
-            "elapsed": j.get("elapsed_seconds"),
-            "success": j.get("success"),
-        }
-        for j in record.get("jobs") or []
-        if isinstance(j, Mapping)
-    ]
+    if sustained:
+        stages, jobs, handoffs, lag = _sustained(record, profile, t0)
+    else:
+        jobs = [
+            {
+                "name": j.get("job_name"),
+                "type": j.get("job_type"),
+                "start": _offset(j.get("start_time"), t0),
+                "end": _offset(j.get("end_time"), t0),
+                "elapsed": j.get("elapsed_seconds"),
+                "success": j.get("success"),
+            }
+            for j in record.get("jobs") or []
+            if isinstance(j, Mapping)
+        ]
 
     duration = t1 - t0
     step = float(max(1, -(-int(duration) // _MAX_BUCKETS)))
@@ -252,6 +396,9 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
         "title": profile["title"],
         "subtitle": profile["subtitle"],
         "mode": (record.get("pipeline_benchmark") or {}).get("pipeline_mode"),
+        "kind": profile["kind"],
+        "handoffs": handoffs,
+        "lag": lag,
         "run_id": record.get("run_id"),
         "duration": duration,
         "stages": stages,
@@ -355,7 +502,7 @@ _JS = r"""
 (function(){
 var el=document.getElementById('lb-replay-data');if(!el)return;
 var D=JSON.parse(el.textContent),root=document.getElementById('lb-replay');
-var S=D.stages,J=D.jobs,T=D.duration,t=0,playing=false,speed=1,last=0,sel=null,lane=D.storage?'storage':(D.lanes.compute?'compute':(D.lanes.network?'network':(D.lanes.k8s?'k8s':'storage')));
+var S=D.stages,J=D.jobs,T=D.duration,t=0,playing=false,speed=1,last=0,sel=null,lane=D.lag?'lag':D.storage?'storage':(D.lanes.compute?'compute':(D.lanes.network?'network':(D.lanes.k8s?'k8s':'storage')));
 function $(s){return root.querySelector(s)}
 function svg(s){return '<svg viewBox="0 0 200 95" aria-hidden="true">'+s+'</svg>'}
 var ART=[
@@ -370,10 +517,11 @@ function num(n){return Math.round(n).toLocaleString('en-US')}
 function frac(s){if(s.start==null||s.end==null)return null;if(t<=s.start)return 0;if(t>=s.end)return 1;return (t-s.start)/Math.max(1e-9,s.end-s.start)}
 function stageValue(s){
  if(s.value==null)return null;
+ if(s.steps){var v=0;for(var i=0;i<s.steps.length;i++)if(s.steps[i][0]<=t)v=s.steps[i][1];return v}
  if(s.ends){var n=0;for(var i=0;i<s.ends.length;i++)if(s.ends[i]<=t)n++;return n}
  var f=frac(s);return f===null?s.value:s.value*f}
 function state(s){var f=frac(s);return f===null?null:f===0?'waiting':f===1?'done':'running'}
-function rate(x){var r=0;S.forEach(function(s){if(s.key!=='query'&&s.value!=null&&s.start!=null&&s.end>s.start&&x>=s.start&&x<s.end)r+=s.value/(s.end-s.start)});return r}
+function rate(x){var r=0;S.forEach(function(s){if(s.key!=='query'&&s.rows!==false&&!s.steps&&s.value!=null&&s.start!=null&&s.end>s.start&&x>=s.start&&x<s.end)r+=s.value/(s.end-s.start)});return r}
 var RATE=[],N=240;for(var i=0;i<N;i++)RATE.push(rate((i+.5)/N*T));
 var RMAX=Math.max.apply(null,RATE.concat([1]));
 function plot(id,series,mx){
@@ -384,6 +532,17 @@ function plot(id,series,mx){
   o+='<path d="'+d+'" fill="none" stroke="'+sr.c+'" stroke-width="2.5" stroke-linejoin="round"/>'});
  var cx=5+590*t/T;o+='<line x1="'+cx+'" x2="'+cx+'" y1="2" y2="78" stroke="#277353" stroke-width="2" stroke-dasharray="3 3"/>';
  $(id).innerHTML=o}
+function lagAt(h){var v=null;for(var i=0;i<h.samples.length;i++){if(D.lag.shift+h.samples[i][0]<=t)v=h.samples[i][1]}return v}
+var LMAX=1;if(D.lag)D.lag.series.forEach(function(sr){sr.samples.forEach(function(p){if(p[1]>LMAX)LMAX=p[1]})});
+function fmtLag(x){return x<120?Math.round(x)+' s':Math.round(x/60)+' min'}
+function lagBars(){D.handoffs.forEach(function(h,i){var v=lagAt(h);
+ $('[data-f="'+i+'"]').style.width=(v===null?0:Math.min(100,v/LMAX*100))+'%';
+ $('[data-h="'+i+'"]').textContent=v===null?'Waiting':fmtLag(v)+' behind';
+ $('[data-s="'+i+'"]').textContent=h.keeps_up===false?'falls behind the arrival rate':h.keeps_up?'keeps up':''})}
+function plotLag(){var o='<rect width="600" height="80" fill="#f4f8f4"/>',cols=['#4b9d78','#be904a','#538da9'];
+ D.lag.series.forEach(function(sr,k){var d='';sr.samples.forEach(function(p,i){var x=5+590*(D.lag.shift+p[0])/T,y=73-p[1]/LMAX*61;d+=(i?'L':'M')+x.toFixed(1)+','+y.toFixed(1)});
+  o+='<path d="'+d+'" fill="none" stroke="'+cols[k%3]+'" stroke-width="2.5" stroke-linejoin="round"/>'});
+ var cx=5+590*t/T;o+='<line x1="'+cx+'" x2="'+cx+'" y1="2" y2="78" stroke="#277353" stroke-width="2" stroke-dasharray="3 3"/>';$('#rp-lplot').innerHTML=o}
 var st=D.storage,SMAX=st?Math.max(1,Math.max.apply(null,st.read.concat(st.write))):1;
 function draw(){
  var cur=null,doneAll=t>=T;
@@ -402,12 +561,16 @@ function draw(){
   c.classList.toggle('on',js==='running');
   c.querySelector('strong').textContent=js==='done'&&j.elapsed!=null?j.elapsed.toFixed(1)+' s':js==='running'?'running':'-';
   c.querySelector('span').textContent=js==='done'&&j.success===false?'failed':js||''});
- for(var i=0;i<4;i++){var b=S[i+1],fb=frac(b);
+ if(D.kind==='sustained')lagBars();else for(var i=0;i<4;i++){var b=S[i+1],fb=frac(b);
   $('[data-f="'+i+'"]').style.width=(fb===null?0:fb*100)+'%';
   $('[data-h="'+i+'"]').textContent=fb===null?'NR':fb===0?'Waiting':fb===1?'Complete':'Processing';
   $('[data-s="'+i+'"]').textContent=fb===null?'no window recorded':fb===0?'Awaiting upstream':fb===1?'Output available':Math.round(fb*100)+'% of '+b.name}
  var k=st?Math.min(st.read.length-1,Math.floor(t/st.step)):0;
- if(lane==='storage'){
+ if(lane==='lag'){
+  $('#rp-lname').textContent='Lag behind upstream';
+  $('#rp-lval').textContent=D.handoffs.map(function(h){var v=lagAt(h);return v===null?'-':fmtLag(v)}).join(' · ');
+  plotLag()}
+ else if(lane==='storage'){
   $('#rp-lname').textContent='Storage / S3';
   var spark=S.some(function(s){return s.key!=='datagen'&&s.key!=='query'&&s.start!=null&&t>=s.start&&t<s.end});
   $('#rp-lval').textContent=!st||spark?'NR':st.read[k].toFixed(1)+' MB/s read · '+st.write[k].toFixed(1)+' MB/s written';
@@ -471,13 +634,30 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         f'<div class="sub" data-s="{i}"></div></div>'
         for i in range(4)
     )
+    if data.get("kind") == "sustained":
+        pipe = "".join(
+            f'<div class="handoff"><div class="handoff-head"><b>{e(h["label"])}</b>'
+            f'<strong data-h="{i}">Waiting</strong></div>'
+            f'<div class="track"><div class="fill" data-f="{i}"></div></div>'
+            f'<div class="sub" data-s="{i}"></div></div>'
+            for i, h in enumerate(data["handoffs"])
+        )
     lanes = list(data["not_measured"])
     if not data["storage"]:
         lanes.insert(0, "Storage")
     have = data.get("lanes") or {}
-    first = "storage" if data["storage"] else next((k for k, _ in _LANE_LABELS if k in have), "")
+    first = (
+        "lag"
+        if data.get("lag")
+        else "storage"
+        if data["storage"]
+        else next((k for k, _ in _LANE_LABELS if k in have), "")
+    )
     on = lambda k: ' class="on"' if k == first else ""  # noqa: E731
     nav = (
+        f'<button type="button" data-lane="lag"{on("lag")}>Lag</button>' if data.get("lag") else ""
+    )
+    nav += (
         f'<button type="button" data-lane="storage"{on("storage")}>Storage</button>'
         if data["storage"]
         else ""
@@ -519,7 +699,7 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         "<span>run length</span></div></div></div>"
         '<div class="canvas"><div class="layer-head">Workload</div>'
         f'<div class="runsteps">{steps}</div>'
-        '<div class="phasepanel"><div class="phasename"><small>Batch execution</small>'
+        f'<div class="phasepanel"><div class="phasename"><small>{"Continuous" if data.get("kind") == "sustained" else "Batch"} execution</small>'
         '<strong id="rp-phase">-</strong><span id="rp-phasenote"></span></div>'
         f'<div class="jobs">{jobs}</div></div>'
         '<div class="pipe-head">Pipeline</div>'

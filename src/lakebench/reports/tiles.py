@@ -154,7 +154,7 @@ def _support_tile(record: Mapping[str, Any]) -> Tile:
 # took in). The bytes view reads that same stage's recorded input size.
 _PACE = {
     "customer360": ("silver", "output_rows", "interactions cleaned", "interactions"),
-    "financial": ("gold", "input_rows", "transactions screened", "transactions"),
+    "financial": ("gold", "input_rows", "payments screened", "payments"),
 }
 
 
@@ -198,7 +198,22 @@ def _pace_batch(record: Mapping[str, Any]) -> Tile:
     )
 
 
-def _pace_continuous(record: Mapping[str, Any]) -> Tile:
+def screened_by_cycle(record: Mapping[str, Any]) -> dict[Any, float]:
+    """Payments each gold evaluation cycle screened: the rows in the
+    transactions table at the snapshot the cycle pinned, from the run's
+    time-travel verification. Only cycles that were verified appear."""
+    out: dict[Any, float] = {}
+    for tk in ((record.get("continuous") or {}).get("time_travel") or {}).get("ticks") or []:
+        if (
+            isinstance(tk, Mapping)
+            and tk.get("table") == "silver.transactions"
+            and isinstance(tk.get("total_records"), (int, float))
+        ):
+            out[tk.get("cycle")] = float(tk["total_records"])
+    return out
+
+
+def _pace_offered(record: Mapping[str, Any]) -> Tile:
     """Rows entering bronze per second over the window, and whether the
     pipeline kept pace with them."""
     path = "pipeline_benchmark.scores.sustained_throughput_rps"
@@ -210,18 +225,63 @@ def _pace_continuous(record: Mapping[str, Any]) -> Tile:
     saturated = ((record.get("pipeline_benchmark") or {}).get("scores") or {}).get(
         "pipeline_saturated"
     )
-    if saturated is True:
-        kept = "offered load; the pipeline fell behind it"
-    elif saturated is False:
-        kept = "offered load; the pipeline kept pace"
-    else:
-        kept = "offered load"
+    kept = (
+        "offered load"
+        if saturated is None
+        else "offered load; the pipeline fell behind it"
+        if saturated
+        else "offered load; the pipeline kept pace"
+    )
     return Tile(
         "Pace",
         dv.total(rps, paths=path, fmt=",.0f", suffix=f" {noun}/s"),
         kept,
         EVIDENCE_RECORDED,
         path,
+    )
+
+
+def _pace_continuous(record: Mapping[str, Any]) -> Tile:
+    """Payments screened per second over the measured window: the rows in the
+    transactions table at the last verified evaluation cycle, over the window.
+    Absent when no cycle was verified, because the load's own rate counts
+    rows landed, not rows screened."""
+    window = (record.get("continuous") or {}).get("window") or {}
+    secs = window.get("seconds")
+    path = "continuous.time_travel.ticks[*].total_records / continuous.window.seconds"
+    screened = screened_by_cycle(record)
+    schema = str((record.get("config_snapshot") or {}).get("workload_schema") or "customer360")
+    if schema != "financial":
+        return _pace_offered(record)
+    if not screened or not isinstance(secs, (int, float)) or secs <= 0:
+        return _nr("Pace", "no verified evaluation cycle in the run record", path)
+    schema = str((record.get("config_snapshot") or {}).get("workload_schema") or "customer360")
+    noun = _PACE[schema][3]
+    count = max(screened.values())
+    saturated = ((record.get("pipeline_benchmark") or {}).get("scores") or {}).get(
+        "pipeline_saturated"
+    )
+    kept = (
+        ""
+        if saturated is None
+        else "; the pipeline fell behind the load"
+        if saturated
+        else "; the pipeline kept pace"
+    )
+    return Tile(
+        "Pace",
+        dv.ratio(
+            count,
+            secs,
+            a_path="continuous.time_travel.ticks[*].total_records",
+            b_path="continuous.window.seconds",
+            fmt=",.0f",
+            suffix=f" {noun}/s",
+        ),
+        f"{count:,.0f} {noun} screened in {secs:,.0f} s{kept}",
+        EVIDENCE_DERIVED,
+        path,
+        unit_label=noun.capitalize(),
     )
 
 

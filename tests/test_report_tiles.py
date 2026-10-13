@@ -151,8 +151,8 @@ def test_aml_pace_counts_transactions_screened_by_gold() -> None:
     rec = _record()
     rec["config_snapshot"] = {"workload_schema": "financial"}
     t = _by_label(build_tiles(rec, mode="batch", gates={"a": "PASS"}))["Pace"]
-    assert "15,964 transactions/s" in t.value
-    assert "transactions screened" in t.sub
+    assert "15,964 payments/s" in t.value
+    assert "payments screened" in t.sub
     assert t.source.startswith("pipeline_benchmark.stages[2].input_rows")
     assert "gold input bytes" in t.alt_sub
 
