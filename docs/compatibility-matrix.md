@@ -116,7 +116,7 @@ The table below is generated from the code.
 | `polaris-iceberg-spark-duckdb` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
 | `polaris-iceberg-spark-none` | unverified [1] | unverified [1] | unverified [1] | unverified [1] |
 | `polaris-iceberg-spark-thrift` | unverified [2] | unverified [1] | unverified [1] | unverified [1] |
-| `polaris-iceberg-spark-trino` | unverified [2] | unverified [1] | unverified [2] | unverified [2] |
+| `polaris-iceberg-spark-trino` | unverified [2] | unverified [1] | unverified [2] | supported (Spark 4.1, Iceberg 1.11.0) |
 
 - [1] unverified: not in this release's validation matrix.
 - [2] unverified: in this release's validation matrix; no validation run is listed yet.
@@ -162,7 +162,7 @@ Defaults come from `src/lakebench/config/schema.py` and
 | Hadoop AWS | 3.3.4 on Spark 3.5, 3.4.1 on 4.0, 3.4.2 on 4.1 | Fixed by Spark minor | Not configurable |
 | Hive Metastore | 3.1.3 | 3.1.3 only (Hive 4 breaks Iceberg and Trino ANALYZE) | Fixed; the Stackable HiveCluster `productVersion` |
 | Stackable operators (commons, secret, listener, hive) | SDP 25.7.0, from `oci://oci.stackable.tech/sdp-charts` | An installed SDP keeps its version | `architecture.catalog.hive.operator.version` (fresh install only) |
-| Apache Polaris | `apache/polaris:1.6.0`, `apache/polaris-admin-tool:1.6.0` | 1.3.0-incubating or later | `images.polaris`, `images.polaris_admin_tool` |
+| Apache Polaris | `apache/polaris:1.8.0`, `apache/polaris-admin-tool:1.8.0` | 1.6.0, 1.7.0 and 1.8.0 are validated; see [Polaris](component-polaris.md#version-and-image) | `images.polaris`, `images.polaris_admin_tool` |
 | Trino | `trinodb/trino:483` | 454 or later with Polaris | `images.trino` |
 | DuckDB | 1.5.5, pip-installed on `python:3.11-slim` (wheel resolved by `lb-deps`) | Iceberg only | `architecture.query_engine.duckdb.version`, `images.duckdb` |
 | PostgreSQL | `postgres:17` | Tested with 16, 17, 18 | `images.postgres` |
@@ -191,7 +191,7 @@ config, within these limits:
 images:
   spark: apache/spark:4.1.1-python3
   postgres: postgres:17
-  polaris: apache/polaris:1.6.0
+  polaris: apache/polaris:1.8.0
   trino: trinodb/trino:483
   duckdb: python:3.11-slim
 

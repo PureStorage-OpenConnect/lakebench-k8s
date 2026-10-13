@@ -19,9 +19,20 @@ Reference: configure the Apache Polaris REST catalog: config keys, version limit
 
 | Component | Minimum | Default | Why the minimum |
 |---|---|---|---|
-| Apache Polaris | 1.3.0-incubating | 1.6.0 | 1.1.0 and 1.2.0 attempt STS even when told not to. |
+| Apache Polaris | 1.3.0-incubating | 1.8.0 | 1.1.0 and 1.2.0 attempt STS even when told not to. |
 | Trino | 454 | 483 | 454 added `iceberg.rest-catalog.oauth2.scope`. |
 
+Validated Polaris releases (AML continuous at scale 10 on Spark 4.1.1, Iceberg 1.11.0 and Trino 483, run on a clean tree; bronze, silver and gold committed throughout and every Trino round passed):
+
+| Polaris | Result |
+|---|---|
+| 1.8.0 | Default. Run 20261012-172841-2ff886 passed. |
+| 1.7.0 | Run 20261012-172848-2c0ad2 passed. |
+| 1.6.0 | The previous default. Run 20261012-184125-8d6f66 passed. |
+
+Other releases from 1.3.0 are not tested. 1.1.0 and 1.2.0 are not supported.
+
+- **Polaris 1.8 and the schema.** 1.8.0 stopped creating its JDBC schema during `bootstrap`. `deploy` creates `polaris_schema` (`CREATE SCHEMA IF NOT EXISTS`, owned by the `polaris` role) before it bootstraps, which is also safe on 1.6.0 and 1.7.0. A JDBC URL that sets `currentSchema` would point Polaris at a different schema from 1.8 on; Lakebench's URL does not.
 - **Polaris 1.3.0.** In 1.1.0 and 1.2.0, `TaskFileIOSupplier` tries STS credential subscoping even when told not to ([apache/polaris#379](https://github.com/apache/polaris/issues/379)). Server-side S3 operations then fail on non-AWS storage. 1.3.0 and later contain the fix ([PR #400](https://github.com/apache/polaris/pull/400)).
 - **Tag suffix:** only 1.3.0 carries `-incubating` (`apache/polaris:1.3.0` does not exist). 1.4.0 and later have no suffix.
 - **Trino 454** added `oauth2.scope` ([PR #22961](https://github.com/trinodb/trino/pull/22961)). Without it, Trino sends `scope=catalog`, which Polaris rejects as `invalid_scope`. The default, 483, also has the native S3 file system that current Trino releases need.

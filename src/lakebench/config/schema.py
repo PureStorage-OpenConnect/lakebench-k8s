@@ -432,9 +432,9 @@ class ImagesConfig(ConfigModel):
     """
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     """PostgreSQL image (metadata backend)."""
-    polaris: str = "apache/polaris:1.6.0"
+    polaris: str = "apache/polaris:1.8.0"
     """Apache Polaris REST catalog image."""
-    polaris_admin_tool: str = "apache/polaris-admin-tool:1.6.0"
+    polaris_admin_tool: str = "apache/polaris-admin-tool:1.8.0"
     """Polaris admin tool image; bootstraps the Polaris metastore on a Polaris recipe."""
     unity: str = (
         "unitycatalog/unitycatalog:main"  # OSS Unity has no version tags; :main tracks 0.4.x

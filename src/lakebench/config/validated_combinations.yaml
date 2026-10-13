@@ -24,3 +24,4 @@ validated:
   - {workload: customer360, recipe: hive-delta-spark-trino, mode: continuous, spark: "4.1", table_format_version: 4.1.0, runs: [20261009-140505-fc3a03]}
   - {workload: financial, recipe: hive-iceberg-spark-trino, mode: continuous, spark: "4.1", table_format_version: 1.11.0, runs: [20261009-154320-884bd7]}
   - {workload: financial, recipe: hive-iceberg-spark-trino, mode: batch, spark: "4.1", table_format_version: 1.11.0, runs: [20261009-144045-2e5108, 20261009-231931-fa32b1]}
+  - {workload: financial, recipe: polaris-iceberg-spark-trino, mode: continuous, spark: "4.1", table_format_version: 1.11.0, runs: [20261012-172841-2ff886, 20261012-172848-2c0ad2, 20261012-184125-8d6f66]}

@@ -527,8 +527,8 @@ Container images for every deployed component. Override for air-gapped registrie
 | `images.datagen` | string | `docker.io/sillidata/lb-datagen:latest` | advanced | Data generator image. Tag-pinned; override with a digest for byte-for-byte reproducibility. In continuous mode it generates until the run window ends: AML as successive 24-month periods of the same bank, Customer360 as successive time slices. |
 | `images.spark` | string | `apache/spark:4.1.1-python3` | advanced | Spark runtime image. Unset: the image of the config's recipe (or of the recipe its components name): `4.1.1-python3` on every recipe; `4.0.2-python3` instead when the config writes a table format version Spark 4.1 cannot run (Delta 4.0.0). |
 | `images.postgres` | string | `postgres:17` | advanced | PostgreSQL image (metadata backend). |
-| `images.polaris` | string | `apache/polaris:1.6.0` | advanced | Apache Polaris REST catalog image. |
-| `images.polaris_admin_tool` | string | `apache/polaris-admin-tool:1.6.0` | advanced | Polaris admin tool image; bootstraps the Polaris metastore on a Polaris recipe. |
+| `images.polaris` | string | `apache/polaris:1.8.0` | advanced | Apache Polaris REST catalog image. |
+| `images.polaris_admin_tool` | string | `apache/polaris-admin-tool:1.8.0` | advanced | Polaris admin tool image; bootstraps the Polaris metastore on a Polaris recipe. |
 | `images.unity` | string | `unitycatalog/unitycatalog:main` | advanced | Unity Catalog server image (Unity catalog only; no recipe uses it). |
 | `images.trino` | string | `trinodb/trino:483` | advanced | Trino query engine image. |
 | `images.duckdb` | string | `python:3.11-slim` | advanced | Python image the DuckDB query engine pod runs in; DuckDB itself is pinned by `architecture.query_engine.duckdb.version`. |
