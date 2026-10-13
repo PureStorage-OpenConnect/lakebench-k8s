@@ -4,6 +4,13 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **The Polaris bootstrap grants `TABLE_READ_DATA` and `TABLE_WRITE_DATA` to the catalog's `catalog_admin` role.** Polaris authorizes the Iceberg client's scan-metrics report (`REPORT_READ_METRICS`) with `TABLE_READ_DATA`, and `catalog_admin` held only `CATALOG_MANAGE_ACCESS` and `CATALOG_MANAGE_METADATA`, so every Spark and Trino scan logged `Failed to report metrics ... 403 Forbidden`. The reports run on a background thread and a refusal never stopped a run; the cost was log noise. A redeploy applies the grants to an existing catalog.
+- **The README links to the docs by absolute URL.** PyPI shows the README as the project page and does not resolve relative links, so each `docs/...` link on the 1.7.2 page opened `pypi.org/project/lakebench-k8s/1.7.2/docs/...`, which does not exist. `tests/test_readme_links.py` fails on a relative link or a link to a missing file or heading.
+
 ## [1.7.2] - 2026-10-13
 
 ### Breaking
