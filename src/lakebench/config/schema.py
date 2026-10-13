@@ -1416,15 +1416,15 @@ class SustainedConfig(ConfigModel):
         ),
     )
     silver_write_mode: SilverWriteMode = Field(
-        default=SilverWriteMode.COPY_ON_WRITE,
+        default=SilverWriteMode.MERGE_ON_READ,
         description=(
             "Iceberg write mode for the update-heavy silver tables (entities, accounts, "
-            "account_statements, entity_profiles) in continuous AML. `copy_on_write` (default) "
-            "rewrites touched data files on every MERGE, so a batch's write cost tracks table "
-            "size. `merge_on_read` writes position-delete files instead, so the write cost tracks "
-            "the rows the batch changes; readers merge the deletes and maintenance compacts them. "
-            "Append-only silver tables (transactions, edges, pairs) are unaffected. "
-            "`merge_on_read` moves recorded continuous AML results."
+            "account_statements, entity_profiles) in continuous AML. `merge_on_read` (default) "
+            "writes position-delete files on every MERGE, so a batch's write cost tracks the rows "
+            "it changes rather than the table size, and added silver executors scale throughput; "
+            "readers merge the deletes and maintenance compacts them. `copy_on_write` rewrites the "
+            "touched data files instead, so the write cost tracks table size. Append-only silver "
+            "tables (transactions, edges, pairs) are unaffected."
         ),
     )
     bronze_target_file_size_mb: int = Field(

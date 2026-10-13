@@ -159,7 +159,7 @@ SILVER_MAX_ROWS = int(env("LB_FINANCIAL_SILVER_MAX_ROWS", "0"))
 # Iceberg write mode for the update-heavy silver tables (copy_on_write |
 # merge_on_read). Applied at bootstrap by apply_silver_write_mode; the DDL
 # default is copy-on-write, so an unset value leaves tables as created.
-SILVER_WRITE_MODE = env("LB_FINANCIAL_SILVER_WRITE_MODE", "copy_on_write")
+SILVER_WRITE_MODE = env("LB_FINANCIAL_SILVER_WRITE_MODE", "merge_on_read")
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")

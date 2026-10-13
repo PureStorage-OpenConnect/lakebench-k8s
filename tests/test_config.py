@@ -33,11 +33,11 @@ class TestComponentValidation:
 class TestSilverWriteMode:
     """Tests for silver_write_mode on SustainedConfig."""
 
-    def test_default_is_copy_on_write(self):
-        """The default leaves recorded results unchanged."""
+    def test_default_is_merge_on_read(self):
+        """Silver's per-batch write tracks the batch, not the table, by default."""
         config = LakebenchConfig(name="test", architecture={"processing": {"sustained": {}}})
         sustained = config.architecture.pipeline.sustained
-        assert sustained.silver_write_mode.value == "copy_on_write"
+        assert sustained.silver_write_mode.value == "merge_on_read"
 
     @pytest.mark.parametrize("mode", ["copy_on_write", "merge_on_read"])
     def test_accepts_both_modes(self, mode):
