@@ -27,8 +27,10 @@ _GIB = 1024**3
 def _record() -> dict:
     return {
         "pipeline_benchmark": {
+            "stages": [{"stage_name": "bronze", "output_rows": 2478560}],
             "scores": {
                 "time_to_value_seconds": 152.13,
+                "pipeline_saturated": False,
                 "pipeline_throughput_gb_per_second": 0.1946,
                 "composite_qph": 936.2,
                 "benchmark_samples_per_query": 3,
@@ -37,7 +39,7 @@ def _record() -> dict:
                 "sustained_throughput_rps": 1032.7,
                 "data_freshness_seconds": 101.0,
                 "in_stream_composite_qph": 260.0,
-            }
+            },
         },
         "experiment": {"support": {"state": "unverified"}},
         "io": {
@@ -55,8 +57,8 @@ def _by_label(tiles):
 def test_batch_tiles_cite_the_records_fields() -> None:
     t = _by_label(build_tiles(_record(), mode="batch", gates={"a": "PASS", "b": "PASS"}))
     assert list(t) == [
+        "Pace",
         "Time to value",
-        "Throughput",
         "Query rate",
         "Compute",
         "Efficiency",
@@ -65,6 +67,8 @@ def test_batch_tiles_cite_the_records_fields() -> None:
         "Support",
     ]
     assert "152 s" in t["Time to value"].value
+    assert "16,292 rows/s" in t["Pace"].value and t["Pace"].evidence == EVIDENCE_DERIVED
+    assert "2,478,560 rows" in t["Pace"].sub
     assert t["Time to value"].source == "pipeline_benchmark.scores.time_to_value_seconds"
     assert "936.2" in t["Query rate"].value and "3 samples per query" in t["Query rate"].sub
     assert t["Time to value"].evidence == EVIDENCE_RECORDED
@@ -75,8 +79,8 @@ def test_batch_tiles_cite_the_records_fields() -> None:
 
 def test_continuous_tiles_swap_the_lead_and_the_query_rate_field() -> None:
     t = _by_label(build_tiles(_record(), mode="continuous", gates={"a": "PASS"}))
-    assert list(t)[:3] == ["Throughput", "Freshness", "Query rate"]
-    assert "1,033 rows/s" in t["Throughput"].value
+    assert list(t)[:3] == ["Pace", "Freshness", "Query rate"]
+    assert "1,033 rows/s" in t["Pace"].value and "kept pace" in t["Pace"].sub
     assert "260.0" in t["Query rate"].value
     assert t["Query rate"].source.endswith("in_stream_composite_qph")
 

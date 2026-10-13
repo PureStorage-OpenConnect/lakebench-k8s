@@ -145,6 +145,59 @@ def _support_tile(record: Mapping[str, Any]) -> Tile:
     )
 
 
+def _pace_batch(record: Mapping[str, Any]) -> Tile:
+    """Rows through the pipeline per second: the rows bronze took in over the
+    time to value (first stage start to last stage end)."""
+    stages = [
+        s
+        for s in (record.get("pipeline_benchmark") or {}).get("stages") or []
+        if isinstance(s, Mapping)
+    ]
+    idx = next((i for i, s in enumerate(stages) if s.get("stage_name") == "bronze"), None)
+    rows = _num(stages[idx], "output_rows") if idx is not None else None
+    ttv = _num(record, "pipeline_benchmark", "scores", "time_to_value_seconds")
+    rows_path = dv.path("pipeline_benchmark", "stages", idx or 0, "output_rows")
+    ttv_path = "pipeline_benchmark.scores.time_to_value_seconds"
+    paths = f"{rows_path} / {ttv_path}"
+    if rows is None or not ttv:
+        return _nr("Pace", "no bronze rows or time to value in the run record", paths)
+    return Tile(
+        "Pace",
+        dv.ratio(
+            rows,
+            ttv,
+            a_path=rows_path,
+            b_path=ttv_path,
+            fmt=",.0f",
+            suffix=" rows/s",
+        ),
+        f"{rows:,.0f} rows through the pipeline in {ttv:,.0f} s",
+        EVIDENCE_DERIVED,
+        paths,
+    )
+
+
+def _pace_continuous(record: Mapping[str, Any]) -> Tile:
+    """Rows entering bronze per second over the window, and whether the
+    pipeline kept pace with them."""
+    path = "pipeline_benchmark.scores.sustained_throughput_rps"
+    rps = _num(record, "pipeline_benchmark", "scores", "sustained_throughput_rps")
+    if rps is None:
+        return _nr("Pace", "not in the run record", path)
+    saturated = (record.get("pipeline_benchmark") or {}).get("scores", {}).get("pipeline_saturated")
+    kept = {
+        True: "offered load; the pipeline fell behind it",
+        False: "offered load; the pipeline kept pace",
+    }.get(saturated, "offered load")
+    return Tile(
+        "Pace",
+        dv.total(rps, paths=path, fmt=",.0f", suffix=" rows/s"),
+        kept,
+        EVIDENCE_RECORDED,
+        path,
+    )
+
+
 def build_tiles(
     record: Mapping[str, Any],
     *,
@@ -154,7 +207,8 @@ def build_tiles(
 ) -> list[Tile]:
     """The eight tiles of a run record. *gates* is the verdict's gate
     outcomes (recomputed, as the page's verdict is). *metrics* is the loaded
-    run, for the scores it stored."""
+    run, for the scores it stored. Pace leads: rows through the pipeline per
+    second, the one rate both modes share."""
     stored = getattr(metrics, "stored_scores", None) if metrics is not None else None
     if isinstance(stored, Mapping):
         # The stored scores, not the recomputed ones: a tile cites the record.
@@ -167,34 +221,20 @@ def build_tiles(
     qph_sub = "QpH" + (f" - {int(samples)} samples per query" if samples else "")
     if mode == "batch":
         lead = [
+            _pace_batch(record),
             _scalar(
                 record,
                 "Time to value",
                 (*sc, "time_to_value_seconds"),
                 fmt=",.0f",
                 suffix=" s",
-                sub="wall-clock to queryable gold",
-            ),
-            _scalar(
-                record,
-                "Throughput",
-                (*sc, "pipeline_throughput_gb_per_second"),
-                fmt=".3f",
-                suffix=" GiB/s",
-                sub="stage inputs processed per second",
+                sub="first stage start to last stage end",
             ),
         ]
         qph_key = "composite_qph"
     else:
         lead = [
-            _scalar(
-                record,
-                "Throughput",
-                (*sc, "sustained_throughput_rps"),
-                fmt=",.0f",
-                suffix=" rows/s",
-                sub="sustained offered load",
-            ),
+            _pace_continuous(record),
             _scalar(
                 record,
                 "Freshness",

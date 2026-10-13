@@ -44,8 +44,8 @@ The Scorecard tab opens on eight tiles, then the front matter and the sections b
 
 | Tile | Batch | Continuous |
 |---|---|---|
-| 1 | Time to value (`scores.time_to_value_seconds`) | Throughput, rows/s (`scores.sustained_throughput_rps`) |
-| 2 | Throughput, GiB/s (`scores.pipeline_throughput_gb_per_second`) | Freshness (`scores.data_freshness_seconds`) |
+| 1 | Pace, rows/s: bronze `stages[].output_rows` over `scores.time_to_value_seconds` (derived) | Pace, rows/s (`scores.sustained_throughput_rps`), and whether the pipeline kept pace (`scores.pipeline_saturated`) |
+| 2 | Time to value (`scores.time_to_value_seconds`) | Freshness (`scores.data_freshness_seconds`) |
 | 3 | Query rate (`scores.composite_qph`) | Query rate (`scores.in_stream_composite_qph`) |
 | 4 | Compute, core-hours (`scores.total_core_hours`) | same |
 | 5 | Efficiency (`scores.compute_efficiency_gb_per_core_hour`) | same |
