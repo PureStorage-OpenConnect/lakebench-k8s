@@ -323,3 +323,10 @@ def test_sustained_customer360_counts_cleaned_interactions_and_queries() -> None
 
     pace = next(t for t in build_tiles(rec, mode="sustained", gates=None) if t.label == "Pace")
     assert "interactions/s" in pace.value and "480 interactions cleaned in 480 s" in pace.sub
+
+
+def test_replay_cards_show_compact_counts_with_the_exact_count_on_hover() -> None:
+    html = render_replay(build_replay(_record()))
+    assert "function compact(" in html
+    assert "big.textContent=v==null?'NR':compact(v)" in html
+    assert "big.title=v==null?'':num(v)" in html

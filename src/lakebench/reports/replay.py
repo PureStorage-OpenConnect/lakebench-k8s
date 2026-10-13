@@ -632,6 +632,13 @@ var ART=[
 root.querySelectorAll('.art').forEach(function(a,i){a.innerHTML=ART[i]});
 function fmtT(x){x=Math.max(0,Math.round(x));var m=Math.floor(x/60),s=x%60;return (m<10?'0':'')+m+':'+(s<10?'0':'')+s}
 function num(n){return Math.round(n).toLocaleString('en-US')}
+function compact(n){n=Math.round(n);
+ var u=[[1e9,'B'],[1e6,'M'],[1e3,'K']];
+ for(var i=0;i<u.length;i++){if(n>=u[i][0]){var x=n/u[i][0];
+  // 999.95K rounds up to 1000.0K: step to the next unit instead.
+  if(x.toFixed(1)==='1000.0'&&i>0)return '1.0'+u[i-1][1];
+  return x.toFixed(1)+u[i][1]}}
+ return String(n)}
 function frac(s){if(s.start==null||s.end==null)return null;if(t<=s.start)return 0;if(t>=s.end)return 1;return (t-s.start)/Math.max(1e-9,s.end-s.start)}
 function stageValue(s){
  if(s.value==null)return null;
@@ -683,7 +690,9 @@ function draw(){
   (s.events||[]).forEach(function(e){if(e<=t&&e>=evAt){evAt=e;lastEv=i}});
   var c=root.querySelector('[data-step="'+i+'"]'),v=stageValue(s),stt=state(s);
   if(stt==='running')cur=i;
-  c.querySelector('.value strong').textContent=v==null?'NR':num(v);
+  var big=c.querySelector('.value strong');
+  big.textContent=v==null?'NR':compact(v);
+  big.title=v==null?'':num(v);
   c.classList.toggle('done',stt==='done')});
  var auto=D.kind==='sustained'?(lastEv>=0?lastEv:0):(lastStarted!==null?lastStarted:0);
  var focus=sel!==null?sel:auto;

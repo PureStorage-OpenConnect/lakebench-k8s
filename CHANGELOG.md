@@ -4,6 +4,12 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Changed
+
+- **The report's workload cards show compact counts.** `250,411,875` reads `250.4M` and `6,100,143` reads `6.1M`; the exact count is the hover title on the number and stays in the run record.
+
 ## [1.7.4] - 2026-10-13
 
 ### Changed
