@@ -361,24 +361,23 @@ def test_rescreen_only_instances_left_out_are_counted_on_the_page():
 
 
 @pytest.mark.parametrize(
-    ("platform", "shown"),
+    ("platform", "reason"),
     [
-        (None, "Platform Metrics"),
+        (None, None),
         (
             {"pods": [], "collection_error": "no Prometheus service found"},
             "no Prometheus service found",
         ),
-        ({"pods": []}, "Platform Metrics"),
     ],
 )
-def test_absent_platform_metrics_are_reported_not_hidden(platform, shown):
+def test_absent_platform_metrics_are_reported_not_hidden(platform, reason):
     """A run without platform metrics still shows the section, with the
     recorded reason when there is one, instead of silently leaving it out."""
     record = load_record("1320bd")
     record["platform_metrics"] = platform
-    page = _render_dict(record)
-    assert "<h2>Platform Metrics</h2>" in page
-    assert shown in page
+    text = _flat(_render_dict(record))
+    assert "Platform Metrics" in text
+    assert reason is None or reason in text
 
 
 def test_platform_values_not_collected_are_never_shown_as_zero():

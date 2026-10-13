@@ -287,6 +287,30 @@ def test_continuous_rule_skipped_on_the_scored_tick_fails() -> None:
     assert v.status == "FAILED" and v.gates["aml_rules"] == "FAIL"
 
 
+def test_unscored_rules_gate_skips_later_uncommitted_ticks() -> None:
+    """Unscored, the rules gate reads the last tick that both completed and
+    committed: a later cycle missing either field is not the scored tick, so
+    its rule status cannot fail the run."""
+    from lakebench.benchmark.aml_queries import RULE_TARGETS
+    from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
+
+    rec = sr.load_record(AML_CONT)
+    rec["financial_scoring"] = {"status": "not_scored"}
+    ran = {r: "ran" for r in RULE_TARGETS if r not in AML_CONTINUOUS_SKIPPED_RULES}
+    errored = dict.fromkeys(ran, "error")
+    rec.setdefault("continuous", {})["ticks"] = [
+        {"cycle": 7, "completed_at": "t", "committed_alerts": 1, "rule_status": ran},
+        # Completed, alerts not committed.
+        {"cycle": 8, "completed_at": "t", "committed_alerts": None, "rule_status": errored},
+        # Committed, cut off before it completed.
+        {"cycle": 9, "completed_at": None, "committed_alerts": 1, "rule_status": errored},
+        # Cut off mid-cycle.
+        {"cycle": 10, "rule_status": errored},
+    ]
+    v = V.verdict_from_record(rec)
+    assert v.status == "PASSED" and v.gates["aml_rules"] == "PASS", v.reasons
+
+
 def test_continuous_rule_with_no_alerts_is_not_a_fail() -> None:
     """Continuous knows a rule ran only from its time-to-detect lines, which
     a rule with no alerts does not write."""

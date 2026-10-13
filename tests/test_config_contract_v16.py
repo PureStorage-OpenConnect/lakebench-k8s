@@ -10,7 +10,6 @@ successful, and bucket names were fixed and global.
 
 from __future__ import annotations
 
-import ast
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,8 +25,6 @@ from lakebench.config.schema import (
     is_continuous_mode,
 )
 from tests.conftest import make_config
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def _write(tmp_path, data) -> Path:
@@ -204,24 +201,46 @@ def test_buckets_derive_from_the_deployment_name_unless_explicit(buckets, expect
 # -- #7: a benchmark exception fails the run ----------------------------------
 
 
-def _benchmark_except_handler() -> ast.ExceptHandler:
-    src = (ROOT / "src/lakebench/cli/_run.py").read_text()
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ExceptHandler) and "Benchmark did not complete" in ast.unparse(
-            node
-        ):
-            return node
-    raise AssertionError("benchmark exception handler not found")
+def test_benchmark_exception_fails_the_run_and_withholds_qph(tmp_path, monkeypatch):
+    """The real batch ``run`` through the run harness, its one timed
+    benchmark raising: the run fails, no QpH is recorded and the journal
+    says why."""
+    import dataclasses
+    import json
 
+    from tests.harness import run_harness
 
-def test_benchmark_exception_fails_the_run_and_withholds_qph():
-    body = ast.unparse(_benchmark_except_handler())
-    assert "pipeline_success = False" in body
-    assert "benchmark_qph = None" in body
-    assert "collector.current_run.benchmark = None" in body
-    assert "benchmark_error" in body
-    assert "success=False" in body  # journal event
+    def broken(self, *args, **kwargs):
+        self._rec.add("Benchmark", "run_power", "raised")
+        raise RuntimeError("trino down")
+
+    monkeypatch.setattr(run_harness.FakeBenchmark, "run_power", broken)
+    base = run_harness.SCENARIOS["batch_c360"]
+    # No maintenance, so no pre-compaction round: the timed benchmark is
+    # the only run_power call.
+    scenario = dataclasses.replace(base, argv=[*base.argv, "--skip-maintenance"])
+    trace, rec = run_harness.run_scenario_full(scenario, tmp_path, monkeypatch)
+    record = run_harness.saved_record(tmp_path)
+
+    assert trace["unscripted"] == []
+    assert ["Benchmark", "run_power", "raised"] in rec.calls
+    assert trace["exit_code"] != 0
+    assert record["success"] is False
+    assert record.get("benchmark") is None
+    assert record["benchmark_error"] == "RuntimeError: trino down"
+    assert record["verdict"]["status"] != "PASSED"
+    assert any("Benchmark did not complete" in r for r in record["verdict"]["reasons"])
+    assert record["pipeline_benchmark"]["scores"].get("composite_qph") is None
+
+    events = [
+        json.loads(line)
+        for f in (tmp_path / "lakebench-output" / "journal").glob("*.jsonl")
+        for line in f.read_text().splitlines()
+    ]
+    done = [e for e in events if e["event_type"] == "benchmark.complete"]
+    assert len(done) == 1
+    assert done[0]["success"] is False
+    assert done[0]["details"]["qph"] is None
 
 
 def test_benchmark_error_round_trips_and_reaches_the_report(tmp_path):

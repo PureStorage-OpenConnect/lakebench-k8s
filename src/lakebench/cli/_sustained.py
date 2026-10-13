@@ -3235,6 +3235,48 @@ def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
     return max(counts) if counts else None
 
 
+def _aml_alert_gate_applies(schema_type: str) -> bool:
+    """Whether the continuous zero-alert gate runs for this workload schema.
+
+    Only financial detects alerts; Customer360 sustained runs emit none by
+    design and are exempt.
+    """
+    return schema_type == "financial"
+
+
+def _aml_alert_gate_failure(
+    gold_logs: str | None, alert_count: int | None
+) -> tuple[str, str] | None:
+    """The continuous zero-alert gate verdict: None on a pass, otherwise the
+    error message and the recorded failure reason.
+
+    Missing gold-refresh logs and logs with no detection line both fail, as
+    does a run that detected 0 alerts.
+    """
+    if gold_logs is None:
+        return (
+            "AML continuous gate: no gold-refresh driver logs captured; "
+            "cannot confirm detection ran. Marking FAILURE.",
+            "AML continuous gate: no gold-refresh driver log",
+        )
+    if alert_count is None:
+        return (
+            "AML continuous gate: gold-refresh logs show no detection "
+            "activity (no '[detection] cumulative gold.alerts rows:' line). "
+            "Detection did not run. Marking FAILURE.",
+            "AML continuous gate: detection did not run",
+        )
+    if alert_count == 0:
+        return (
+            "AML continuous gate: detection ran but produced 0 alerts over "
+            "the whole run. Either silver stayed empty, or every detection "
+            "rule errored. Marking FAILURE (a real continuous run must "
+            "detect something).",
+            "AML continuous gate: detection produced 0 alerts",
+        )
+    return None
+
+
 def _aml_gate_logs(window_logs: str | None) -> tuple[str | None, dict, dict]:
     """The gold log the AML gate reads, with its TM invariants and statuses
     by cycle."""
@@ -4519,32 +4561,13 @@ def _run_sustained(
         # (absence of proof is not proof of success); the trade-off is a
         # possible false-fail if driver-log capture times out on a very long
         # run, which is preferred over silently passing an unverifiable run.
-        if cfg.architecture.workload.schema_type.value == "financial":
+        if _aml_alert_gate_applies(cfg.architecture.workload.schema_type.value):
             gold_logs, _inv, _tm_status = _aml_gate_logs(driver_logs.get("gold-refresh"))
             alert_count = _aml_cumulative_alerts(gold_logs)
-            if gold_logs is None:
-                print_error(
-                    "AML continuous gate: no gold-refresh driver logs captured; "
-                    "cannot confirm detection ran. Marking FAILURE."
-                )
-                _record_failure(collector, "AML continuous gate: no gold-refresh driver log")
-                pipeline_success = False
-            elif alert_count is None:
-                print_error(
-                    "AML continuous gate: gold-refresh logs show no detection "
-                    "activity (no '[detection] cumulative gold.alerts rows:' line). "
-                    "Detection did not run. Marking FAILURE."
-                )
-                _record_failure(collector, "AML continuous gate: detection did not run")
-                pipeline_success = False
-            elif alert_count == 0:
-                print_error(
-                    "AML continuous gate: detection ran but produced 0 alerts over "
-                    "the whole run. Either silver stayed empty, or every detection "
-                    "rule errored. Marking FAILURE (a real continuous run must "
-                    "detect something)."
-                )
-                _record_failure(collector, "AML continuous gate: detection produced 0 alerts")
+            _gate_failure = _aml_alert_gate_failure(gold_logs, alert_count)
+            if _gate_failure is not None:
+                print_error(_gate_failure[0])
+                _record_failure(collector, _gate_failure[1])
                 pipeline_success = False
             else:
                 print_success(

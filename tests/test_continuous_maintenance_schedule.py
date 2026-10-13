@@ -4,6 +4,7 @@ an explicit interval that cannot fire is refused at start."""
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,61 +14,84 @@ from lakebench.config.schema import SustainedConfig
 from tests.conftest import make_config
 
 
-def _simulate_continuous_loop(run, ri, ci, bench_s, warmup=300, bench_interval=300):
-    """(maintenance rounds, compaction rounds) the _run_sustained loop fires.
-
-    Worst case: every maintenance and compaction round uses its whole budget
-    plus the statement grace,
-    every maintenance round ends on a timeout (so compaction is held one
-    statement timeout), and each in-stream benchmark round takes bench_s and
-    wins the loop pass (it `continue`s). Mirrors the order in _run_sustained.
-    """
-    from lakebench.cli._sustained import _BUDGET_GRACE_SECONDS, continuous_round_bounds
-
-    t, next_round, next_maint, next_comp = 0.0, float(warmup), float(ri), float(ci)
-    last_round = hold = 0.0
-    maint = comp = 0
-    while t < run:
-        elapsed = t
-        if bench_s and elapsed >= next_round and run - elapsed >= max(60, last_round * 1.2):
-            t += bench_s
-            last_round = bench_s
-            next_round = t + bench_interval
-            continue
-        if elapsed >= next_maint:
-            b = continuous_round_bounds(ri, run - t)
-            if b:
-                # The last statement may overrun the budget by the grace.
-                t += b[1] + _BUDGET_GRACE_SECONDS
-                maint += 1
-                hold = t + b[0]
-            next_maint = t + ri
-        if elapsed >= next_comp:
-            if t < hold:
-                next_comp = hold
-            else:
-                b = continuous_round_bounds(ci, run - t)
-                if b:
-                    t += b[1] + _BUDGET_GRACE_SECONDS
-                    comp += 1
-                next_comp = t + ci
-        wake = min(elapsed + 30, next_round if bench_s else run, next_maint, next_comp, run)
-        t = max(t + 1.0, wake)  # real time moves on even when nothing sleeps
-    return maint, comp
-
-
 def _schedule(run_duration=1800, skip=False, **kw):
     return resolve_maintenance_schedule(SustainedConfig(**kw), run_duration, skip_maintenance=skip)
 
 
-def test_default_run_fires_maintenance_and_compaction():
-    for bench_s in range(0, 301, 30):
-        s = _schedule()
-        assert s["problem"] is None and s["warnings"] == []
-        maint, comp = _simulate_continuous_loop(
-            1800, s["retention_interval"], s["compaction_interval"], bench_s
+@pytest.mark.parametrize("bench_s", [0, 150, 300])
+def test_default_run_fires_maintenance_and_compaction(monkeypatch, tmp_path, bench_s):
+    """The real continuous loop on a fake clock over a default-length window.
+
+    Worst case: every maintenance and compaction round uses its whole budget
+    plus the statement grace, every maintenance round ends on a timeout (so
+    compaction is held one statement timeout), and each in-stream benchmark
+    round takes *bench_s*.
+    """
+    from tests.test_continuous_window import _drive
+
+    run = SustainedConfig().run_duration
+    s = _schedule(run)
+    assert s["problem"] is None and s["warnings"] == []
+    intervals = {"expire": s["retention_interval"], "compaction": s["compaction_interval"]}
+    start: list[float] = []
+    fired: dict[str, list[tuple[float, float]]] = {"expire": [], "compaction": []}
+
+    real_loop_sleep = sus.loop_sleep_seconds
+
+    def sleep_seconds(now, *events):
+        if not start:
+            start.append(sus.time.time() - now)
+        return real_loop_sleep(now, *events)
+
+    def round_(kind, timed_out):
+        def run_round(*a, timeout, budget, live_streams=False, **kw):
+            if not live_streams:
+                return None
+            elapsed = sus.time.time() - start[0]
+            bounds = sus.continuous_round_bounds(intervals[kind], run - elapsed)
+            assert bounds is not None and (timeout, budget.seconds) == bounds, (kind, elapsed)
+            sus.time.sleep(budget.seconds + sus._BUDGET_GRACE_SECONDS)
+            if timed_out:
+                budget.stopped = "a statement timed out"
+            fired[kind].append((elapsed, sus.time.time() - start[0]))
+            return None
+
+        return run_round
+
+    monkeypatch.setattr(sus, "loop_sleep_seconds", sleep_seconds)
+    monkeypatch.setattr(sus, "_run_iceberg_maintenance", round_("expire", True))
+    monkeypatch.setattr(sus, "_run_iceberg_compaction", round_("compaction", False))
+    bench_rounds: list[float] = []
+
+    def bench_round(**kw):
+        bench_rounds.append(sus.time.time() - start[0])
+        sus.time.sleep(bench_s)
+
+    monkeypatch.setattr(sus, "_run_benchmark_round", bench_round)
+    _drive(
+        monkeypatch,
+        tmp_path,
+        lambda job, end: "",
+        duration=run,
+        runner=MagicMock() if bench_s else None,
+    )
+
+    assert bool(bench_rounds) == bool(bench_s)
+    assert fired["expire"] and fired["compaction"], (bench_s, fired)
+    for kind, rounds in fired.items():
+        due = intervals[kind]
+        for began, ended in rounds:
+            assert due <= began < run, (kind, bench_s, rounds)
+            due = ended + intervals[kind]
+    if not bench_s:
+        assert fired["expire"][0][0] == intervals["expire"]
+        # The first maintenance round timed out: compaction waits one
+        # statement timeout after it.
+        hold = (
+            fired["expire"][0][1]
+            + sus.continuous_round_bounds(intervals["expire"], run - intervals["expire"])[0]
         )
-        assert maint >= 1 and comp >= 1, (bench_s, maint, comp)
+        assert fired["compaction"][0][0] == max(intervals["compaction"], hold)
 
 
 @pytest.mark.parametrize(

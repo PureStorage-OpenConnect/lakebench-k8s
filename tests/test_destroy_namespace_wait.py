@@ -594,28 +594,3 @@ class TestClient:
         core = MagicMock()
         core.read_namespace.side_effect = ApiException(status=404, reason="NotFound")
         assert self._client(core).get_namespace_termination_status("ns-a") == ("", [])
-
-
-class TestCliExitCode:
-    """The destroy CLI exits 0 when every step succeeded."""
-
-    def _invoke(self, results, monkeypatch, tmp_path):
-        from pathlib import Path
-
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        monkeypatch.chdir(tmp_path)
-        fixture = Path(__file__).parent / "fixtures" / "v14user.yaml"
-        engine = MagicMock()
-        engine.destroy_all.return_value = results
-        with patch("lakebench.deploy.DeploymentEngine", return_value=engine):
-            return CliRunner().invoke(app, ["destroy", str(fixture), "--force"])
-
-    def test_clean_destroy_exits_0(self, monkeypatch, tmp_path):
-        from lakebench.deploy.engine import DeploymentResult
-
-        results = [DeploymentResult("namespace", DeploymentStatus.SUCCESS, "Namespace x deleted")]
-        out = self._invoke(results, monkeypatch, tmp_path)
-        assert out.exit_code == 0, out.output

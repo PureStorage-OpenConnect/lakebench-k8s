@@ -1221,6 +1221,24 @@ def test_refusal_names_its_path_in_the_exit_path_file(name, monkeypatch, tmp_pat
     assert name in paths, (name, paths)
 
 
+def test_clean_destroy_exits_ok(monkeypatch, tmp_path):
+    """Every step removed and the namespace gone: exit 0 with no path named.
+    A clean destroy has no named path of its own, so it sits outside the
+    table."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
+    target = tmp_path / "exit-path"
+    monkeypatch.setenv(cli_exit.EXIT_PATH_FILE_ENV, str(target))
+    results = [
+        _result("postgres", "success", "removed"),
+        _result("namespace", "success", "Namespace v14user deleted"),
+    ]
+    result = _destroy_with(monkeypatch, results)
+    assert result.exit_code == ExitCode.OK, result.output
+    assert "Destroy Complete" in result.output
+    assert target.read_text().splitlines()[-1] == "0 -"
+
+
 # -- generated table -----------------------------------------------------------
 
 

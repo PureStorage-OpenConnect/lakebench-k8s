@@ -84,7 +84,8 @@ def test_c360_block_judges_the_ids_c360_correctness_judges(monkeypatch):
     monkeypatch.setattr(
         c360_correctness, "judged_gating_ids", lambda rec: real(rec) | {"probe_gate_id"}
     )
-    block = _block(_render_dict(load_record("5105a0")))
+    text = _plain(_block(_render_dict(load_record("5105a0"))))
     # The row, not only the chip's reason (gating_outcome names the id too).
-    assert "<code class='mono'>probe_gate_id</code> <small>(gating)</small>" in block
-    assert "<td>not evaluated</td>" in block
+    rows = text[text.index("Not passed") :]
+    assert "probe_gate_id (gating) a gating check absent from the record" in rows
+    assert "not evaluated" in rows[rows.index("probe_gate_id") :]

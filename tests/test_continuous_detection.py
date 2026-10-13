@@ -9,16 +9,7 @@ against the measured scale-10 cost.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
-
-_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _src(path: Path) -> str:
-    return path.read_text()
-
 
 # --- sustained honest-runner gate (3a) ---------------------------------------
 
@@ -45,15 +36,43 @@ def test_aml_cumulative_alerts(logs, alerts):
     assert _aml_cumulative_alerts(logs) == alerts
 
 
-def test_sustained_gate_is_financial_scoped_and_fails_on_zero():
-    """The gate must be gated to schema_type == 'financial' (C360 sustained
-    legitimately emits no alerts) and must set pipeline_success = False on a
-    zero/None alert outcome."""
-    src = _src(_ROOT / "src/lakebench/cli/_sustained.py")
-    assert "_aml_cumulative_alerts(gold_logs)" in src
-    assert "alert_count == 0" in src
-    assert "alert_count is None" in src
-    assert src.count("pipeline_success = False") >= 4
+def test_alert_gate_runs_for_financial_only():
+    """Customer360 sustained runs emit no alerts by design and are exempt."""
+    from lakebench.cli._sustained import _aml_alert_gate_applies
+    from lakebench.config.schema import WorkloadSchema
+
+    assert _aml_alert_gate_applies(WorkloadSchema.FINANCIAL.value) is True
+    assert _aml_alert_gate_applies(WorkloadSchema.CUSTOMER360.value) is False
+
+
+def test_alert_gate_fails_on_zero_alerts():
+    from lakebench.cli._sustained import _aml_alert_gate_failure
+
+    failure = _aml_alert_gate_failure("[detection] cumulative gold.alerts rows: 0", 0)
+    assert failure is not None
+    assert failure[1] == "AML continuous gate: detection produced 0 alerts"
+
+
+def test_alert_gate_fails_when_detection_did_not_run():
+    from lakebench.cli._sustained import _aml_alert_gate_failure
+
+    failure = _aml_alert_gate_failure("Refreshed dashboards", None)
+    assert failure is not None
+    assert failure[1] == "AML continuous gate: detection did not run"
+
+
+def test_alert_gate_fails_without_gold_logs():
+    from lakebench.cli._sustained import _aml_alert_gate_failure
+
+    failure = _aml_alert_gate_failure(None, None)
+    assert failure is not None
+    assert failure[1] == "AML continuous gate: no gold-refresh driver log"
+
+
+def test_alert_gate_passes_on_positive_alerts():
+    from lakebench.cli._sustained import _aml_alert_gate_failure
+
+    assert _aml_alert_gate_failure("[detection] cumulative gold.alerts rows: 40", 40) is None
 
 
 def test_aml_bronze_verify_timeout_budget_clears_measured_cost():
