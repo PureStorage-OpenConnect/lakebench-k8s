@@ -328,8 +328,8 @@ architecture:
       run_duration: 1800              # 30 minutes
       # max_files_per_trigger: unset   # no limit while datagen generates
       checkpoint_base: checkpoints
-      benchmark_interval: 300         # Seconds between in-stream rounds
-      benchmark_warmup: 300           # Seconds before first round
+      benchmark_interval: 300         # Seconds between in-stream rounds (60-3600)
+      benchmark_warmup: 300           # Seconds before first round (60-1800)
 ```
 
 Override the window on the command line:
@@ -350,10 +350,14 @@ Types, ranges and defaults: [Configuration](configuration.md#architecture----pip
   5 benchmark rounds:
   `benchmark_warmup + 4 * (benchmark_interval + round_time) + max(60, 1.2 * round_time)`.
   [Planning round counts](benchmarking/query-benchmark.md#planning-round-counts) has a planning table.
-- **`benchmark_warmup`**: raise it for a slow first gold refresh.
-- **`benchmark_interval`**: for more rounds, raise `run_duration` instead of
-  lowering the interval. With gold on a longer interval, both are raised to
-  it.
+- **`benchmark_warmup`**: 60 s and up. Set it past the first handoff (the run's
+  `lag:` lines): a round before gold holds data reads an empty gold layer. Raise
+  it for a slow first gold refresh.
+- **`benchmark_interval`**: 60 s and up, counted from a round's end, so rounds
+  never overlap each other or a maintenance round (one loop runs them in turn).
+  A lower interval buys more rounds in a short window, each against less
+  settled tables; for a long window keep the default. With gold on a longer
+  interval, both are raised to it.
 - **Target file sizes**: reduce `bronze_target_file_size_mb` and
   `silver_target_file_size_mb` to 128-256 MB below scale 10, where 512 MB
   files are never reached. `gold_target_file_size_mb` rarely needs changing.

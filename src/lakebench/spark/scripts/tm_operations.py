@@ -2235,6 +2235,31 @@ def tm_pass_due(now, clock, params, window_end_s=0):
     return False
 
 
+#: Seconds before a continuous run retries an operations pass that had nothing
+#: to monitor yet.
+TM_RETRY_NOT_READY_S = 30.0
+
+#: not_run reasons that mean "no data yet", not "this pass failed".
+_TM_NOT_READY = ("is empty; nothing to monitor", "no ground-truth manifest")
+
+
+def tm_pass_not_ready(result) -> bool:
+    """Whether *result* (run_tm_operations' return) is a pass that found
+    nothing to monitor yet: silver's sealed rows or the manifest were not
+    there. Such a pass did no work, so the continuous clock must not count it
+    as the interval's pass (the next would be 1800 s away, past a short
+    window). Errors are not 'not ready': they keep the interval."""
+    if not isinstance(result, list) or len(result) != 1:
+        return False
+    row = result[0]
+    return (
+        len(row) >= 3
+        and row[0] == "workflow"
+        and row[1] == "not_run"
+        and any(m in str(row[2]) for m in _TM_NOT_READY)
+    )
+
+
 def _status(status, cycle, reason):
     log(f"[tm-status] status={status} cycle={cycle} reason={one_line(reason, limit=400)}")
 

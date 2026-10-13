@@ -152,11 +152,13 @@ from pyspark.sql.functions import min as min_
 from pyspark.sql.functions import sum as spark_sum
 from pyspark.storagelevel import StorageLevel
 from tm_operations import (
+    TM_RETRY_NOT_READY_S,
     bootstrap_tm_tables,
     params_from_env,
     read_at_snapshot,
     run_tm_operations,
     tm_pass_due,
+    tm_pass_not_ready,
     window_start_marker,
 )
 
@@ -179,6 +181,9 @@ WINDOW_S = int(env("LB_CONTINUOUS_WINDOW_S", "0") or 0)
 GOLD_CHECKPOINT = env("CHECKPOINT_LOCATION", "")
 RUN_ID = env("LB_RUN_ID", str(uuid.uuid4()))
 MAX_CONSECUTIVE_FAILURES = int(env("LB_FINANCIAL_GOLD_MAX_FAILS", "5"))
+# Gold starts beside silver-stream, which creates the silver tables on its
+# first batch (late when executors are pending). Wait this long for them.
+SILVER_WAIT_S = int(env("LB_FINANCIAL_GOLD_SILVER_WAIT_S", "1200"))
 # Time-to-detect histogram resolution. Percentiles are reported at the bin's
 # upper edge, so they overstate by less than one bin.
 TTD_BIN_S = 10
@@ -594,8 +599,11 @@ def snapshot_record(spark, fq, sid):
     the summary's ``total-records``: the sum of the record counts of the data
     files live at ``sid``, deletes not subtracted, so it equals the live row
     count only when ``pos_deletes`` and ``eq_deletes`` (the summary's
-    deleted-row totals) are 0, as under the copy-on-write tables Lakebench
-    creates. ``count_source`` is ``summary`` when ``total_records`` is
+    deleted-row totals) are 0. This read is used only for silver.transactions,
+    which is append-only in the stream and copy-on-write, so its summary count
+    is exact; the update-heavy tables may be merge-on-read (non-zero deletes)
+    but no scored path reads their summaries. ``count_source`` is ``summary``
+    when ``total_records`` is
     present, else ``unavailable``; the fields the summary does carry are kept
     either way. A failed or empty lookup leaves every field None, and nothing
     is ever filled in from the current table."""
@@ -1176,10 +1184,25 @@ def run_tick(spark, state, cycle) -> dict:
     t = time.time()
     now = t
     tm_clock, window_end_s = state.tm_clock, state.window_end_s
-    if TM_PARAMS["enabled"] and tm_pass_due(now, tm_clock, TM_PARAMS, window_end_s):
+    if (
+        TM_PARAMS["enabled"]
+        and now - tm_clock.get("not_ready_at", 0.0) >= TM_RETRY_NOT_READY_S
+        and tm_pass_due(now, tm_clock, TM_PARAMS, window_end_s)
+    ):
         if silver_rows > 0 and state.manifest_ready:
             tm_clock["start"] = now
-            run_tm_operations(spark, txns, RUN_ID, cycle=cycle, continuous=True, params=TM_PARAMS)
+            tm_result = run_tm_operations(
+                spark, txns, RUN_ID, cycle=cycle, continuous=True, params=TM_PARAMS
+            )
+            if tm_pass_not_ready(tm_result):
+                # Nothing to monitor yet (silver's rows not sealed): the pass
+                # did no work, so it neither starts the interval nor counts
+                # as the last pass. Retry shortly.
+                tm_clock["not_ready_at"] = time.time()
+                phases["tm"] = time.time() - t
+                phases["total"] = time.time() - tick
+                log(tick_timing_line(cycle, silver_rows, phases))
+                return phases
             tm_clock["end"] = time.time()
             tm_clock["elapsed"] = tm_clock["end"] - now
             # Gold was not refreshed while the pass ran: its staleness now
@@ -1279,6 +1302,28 @@ def _idle_after_drain(spark, last_cycle, at_start=False, records=()) -> None:
             report()
 
 
+def _wait_for_silver(spark) -> None:
+    """Block until the silver tables the ticks read exist, the drain marker
+    appears, or SILVER_WAIT_S passes. With a 0s refresh interval a tick that
+    cannot find silver fails instantly, so the failure budget would be spent
+    in seconds on a silver stream that is only starting."""
+    needed = [SILVER_TXNS, SILVER_BATCH_VERSIONS, SILVER_ENTITIES, SILVER_ACCOUNTS]
+    start = time.time()
+    last_log = 0.0
+    while not _SHUTDOWN and not stop_requested(spark):
+        missing = [t for t in needed if not spark.catalog.tableExists(f"{CATALOG}.{t}")]
+        if not missing:
+            return
+        waited = time.time() - start
+        if waited >= SILVER_WAIT_S:
+            log(f"Silver tables still missing after {waited:.0f}s: {missing}; starting ticks")
+            return
+        if waited - last_log >= 30 or last_log == 0.0:
+            log(f"Waiting for silver tables {missing} ({waited:.0f}s)")
+            last_log = waited
+        time.sleep(5.0)
+
+
 def main() -> None:
     _install_signal_handlers()
     spark = SparkSession.builder.appName("lb-gold-refresh-financial").getOrCreate()
@@ -1300,6 +1345,7 @@ def main() -> None:
         return
 
     _bootstrap_gold_tables(spark)
+    _wait_for_silver(spark)
 
     # Earlier runs' alerts are cleared by run_detection_rules on each tick,
     # after the tick's 'pending' status is written.

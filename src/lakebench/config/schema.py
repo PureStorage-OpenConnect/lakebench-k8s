@@ -211,6 +211,27 @@ class PipelineEngineType(str, Enum):
     SPARK = "spark"
 
 
+class SilverWriteMode(str, Enum):
+    """Iceberg write mode for the update-heavy silver tables.
+
+    Sets ``write.merge.mode``, ``write.update.mode`` and
+    ``write.delete.mode`` on the silver tables that a continuous AML run
+    updates in place (entities, accounts, account_statements,
+    entity_profiles). The append-only tables (transactions, edges, pairs)
+    are unaffected and stay copy-on-write.
+
+    ``copy_on_write`` (default) rewrites each touched data file on every
+    MERGE, so a batch's write cost tracks table size. ``merge_on_read``
+    writes position-delete files instead, so the write cost tracks the
+    rows the batch changes; readers merge the deletes, and the deletes are
+    compacted away by maintenance. Changing this moves recorded continuous
+    AML results.
+    """
+
+    COPY_ON_WRITE = "copy_on_write"
+    MERGE_ON_READ = "merge_on_read"
+
+
 class BenchmarkMode(str, Enum):
     """Benchmark execution mode.
 
@@ -1383,6 +1404,29 @@ class SustainedConfig(ConfigModel):
             "would offer the corpus before the window ends is refused at run start."
         ),
     )
+    silver_max_rows_per_trigger: int | None = Field(
+        default=20_000_000,
+        ge=1,
+        description=(
+            "Soft cap on bronze rows silver reads per trigger (Iceberg "
+            "`streaming-max-rows-per-micro-batch`), so one micro-batch cannot swallow the "
+            "whole backlog and run past the window. A batch always takes the next whole data "
+            "file, then stops once the cap would be exceeded. `null` lifts the cap (each "
+            "trigger takes every unprocessed bronze snapshot)."
+        ),
+    )
+    silver_write_mode: SilverWriteMode = Field(
+        default=SilverWriteMode.COPY_ON_WRITE,
+        description=(
+            "Iceberg write mode for the update-heavy silver tables (entities, accounts, "
+            "account_statements, entity_profiles) in continuous AML. `copy_on_write` (default) "
+            "rewrites touched data files on every MERGE, so a batch's write cost tracks table "
+            "size. `merge_on_read` writes position-delete files instead, so the write cost tracks "
+            "the rows the batch changes; readers merge the deletes and maintenance compacts them. "
+            "Append-only silver tables (transactions, edges, pairs) are unaffected. "
+            "`merge_on_read` moves recorded continuous AML results."
+        ),
+    )
     bronze_target_file_size_mb: int = Field(
         default=512,
         ge=32,
@@ -1500,20 +1544,23 @@ class SustainedConfig(ConfigModel):
     # every round lands in a clean window after gold has refreshed.
     benchmark_interval: int = Field(
         default=300,
-        ge=300,
+        ge=60,
         le=3600,
         description=(
-            "Seconds between in-stream benchmark rounds, 300--3600. With gold on a longer "
-            "interval, raised to that interval so rounds do not overlap gold rewrites."
+            "Seconds between in-stream benchmark rounds, 60--3600, counted from a round's end. "
+            "With gold on a longer interval, raised to that interval so rounds do not overlap "
+            "gold rewrites."
         ),
     )
     benchmark_warmup: int = Field(
         default=300,
-        ge=300,
+        ge=60,
         le=1800,
         description=(
-            "Seconds before the first in-stream benchmark round, 300--1800. With gold on a "
-            "longer interval, raised to that interval so gold refreshes once first."
+            "Seconds before the first in-stream benchmark round, 60--1800. A round that fires "
+            "before the streams have handed data to gold reads an empty gold layer: set this past "
+            "the first handoff (the run's `lag:` lines). With gold on a longer interval, raised "
+            "to that interval so gold refreshes once first."
         ),
     )
 
@@ -1528,7 +1575,7 @@ class SustainedConfig(ConfigModel):
         as rounds overlap with gold rewrites.
 
         Both fields are clamped up to gold_refresh_interval (default
-        300s).  Users who want more rounds must run the pipeline longer.
+        0s, so no clamp).  Users who want more rounds must run the pipeline longer.
         """
         parts = self.gold_refresh_interval.strip().lower().split()
         gold_s = 300  # fallback

@@ -50,6 +50,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`admin doctor` observability check** reads whether the kubelet-metrics ClusterRole is present; a fresh cluster surfaces the admin step without failing deploys.
 - **`destroy` no longer prints auto-sizing warnings.** It sized the config on the way in and logged "cannot balance" for a teardown that applies no sizing. The "cannot balance" text now says the run "will report it as not balanced", matching the advisory check.
 - **"cannot balance" is shown by `plan` and `config recommend` only.** `deploy`, `run` and `generate` no longer print it in their auto-sizing and capacity lines; the run's balance result is still recorded and reported at the end.
+- **`benchmark_warmup` and `benchmark_interval` accept 60 s and up** (the floor was 300 s). A gold refresh interval longer than either still raises it.
+- **The AML operations pass retries when it found nothing to monitor yet.** A first pass over empty sealed silver or a missing manifest no longer counts as the interval's pass, so cases appear within a short window instead of 1800 s later.
+- **Gold-refresh waits for the silver tables before its first tick** (up to `LB_FINANCIAL_GOLD_SILVER_WAIT_S`, 1200 s). It used to spend its five-failure budget in seconds when it started beside a slow silver-stream.
+- **A table with no snapshot reports 0 data files in the table health probe** instead of a failed query warning.
+- **`silver_max_rows_per_trigger` bounds silver's bronze read** (default 20,000,000; Iceberg `streaming-max-rows-per-micro-batch`), so one micro-batch cannot take the whole backlog and run past the window; `null` lifts the cap.
+- **`silver_write_mode` sets the Iceberg write mode for the update-heavy silver tables** (entities, accounts, account_statements, entity_profiles) in continuous AML: `copy_on_write` (default, unchanged results) or `merge_on_read`, which bounds each per-batch MERGE's write to the rows it changes. Append-only silver tables keep copy-on-write. **Breaking under `merge_on_read`:** freshness, pace, throughput and object counts for continuous AML move, because silver keeps pace further into a capacity run.
 
 ## [1.7.1] - 2026-10-10
 

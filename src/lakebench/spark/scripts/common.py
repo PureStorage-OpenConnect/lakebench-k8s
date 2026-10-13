@@ -726,6 +726,54 @@ def ensure_partition_transform(spark, fq_table, old, new):
     return True
 
 
+# The three Iceberg row-operation write modes. copy-on-write rewrites each
+# touched data file; merge-on-read writes position-delete files instead, so a
+# MERGE's write cost tracks the rows it changes rather than the table it
+# changes them in. Applied by ``apply_silver_write_mode`` to the update-heavy
+# silver tables only; the append-only tables keep the DDL default (copy-on-
+# write), which keeps their snapshot-summary row counts exact.
+_WRITE_MODE_PROPS = (
+    "write.merge.mode",
+    "write.update.mode",
+    "write.delete.mode",
+)
+# Valid Iceberg property values, keyed by the schema enum value.
+_WRITE_MODE_VALUES = {
+    "copy_on_write": "copy-on-write",
+    "merge_on_read": "merge-on-read",
+}
+
+
+def apply_silver_write_mode(spark, fq_table, mode):
+    """Set the row-operation write mode on a silver table, idempotently.
+
+    ``mode`` is a schema ``SilverWriteMode`` value (``copy_on_write`` or
+    ``merge_on_read``), read from the ``LB_FINANCIAL_SILVER_WRITE_MODE`` env.
+    Applies ``write.merge.mode``, ``write.update.mode`` and
+    ``write.delete.mode`` via ``ALTER TABLE SET TBLPROPERTIES``, which is a
+    no-op when the table already carries the value, so it is safe on every
+    stream restart and on a reused catalog. The DDL default is copy-on-write,
+    so an unset or unknown ``mode`` leaves the table as created.
+
+    merge-on-read makes a MERGE write position-delete files instead of
+    rewriting touched data files, bounding the per-batch write to the rows
+    the batch changes. The deletes are compacted by maintenance; see the
+    continuous maintenance path. Returns True when a property was set, False
+    when the mode was unknown or the ALTER failed (logged, never raised: a
+    failed property change must not stop a stream startup)."""
+    value = _WRITE_MODE_VALUES.get(str(mode))
+    if value is None:
+        return False
+    try:
+        props = ", ".join(f"'{k}' = '{value}'" for k in _WRITE_MODE_PROPS)
+        spark.sql(f"ALTER TABLE {fq_table} SET TBLPROPERTIES ({props})")
+    except Exception as e:  # noqa: BLE001
+        log(f"[startup] could not set write mode {value} on {fq_table}: {one_line(e)}")
+        return False
+    log(f"[startup] {fq_table}: write mode -> {value}")
+    return True
+
+
 def _path_size_gb_impl(spark, uri):
     """Total bytes under a Hadoop-FS path or glob, in GiB.
 

@@ -3515,6 +3515,14 @@ class SparkJobManager:
                         "value": str(sustained.effective_silver_bronze_wait_seconds()),
                     }
                 )
+                # Soft row cap on silver's bronze read so one micro-batch
+                # cannot take the whole backlog; 0 lifts it (None in config).
+                env.append(
+                    {
+                        "name": "SILVER_MAX_ROWS_PER_TRIGGER",
+                        "value": str(sustained.silver_max_rows_per_trigger or 0),
+                    }
+                )
             # AML sustained scripts read a different set of env
             # var names than the schema-agnostic C360 scripts do.
             # Rather than rename either side (both have callers), set
@@ -3557,6 +3565,17 @@ class SparkJobManager:
                             {
                                 "name": "LB_FINANCIAL_SILVER_TRIGGER_S",
                                 "value": str(_spark_interval_to_seconds(trigger_interval)),
+                            },
+                            {
+                                "name": "LB_FINANCIAL_SILVER_MAX_ROWS",
+                                "value": str(sustained.silver_max_rows_per_trigger or 0),
+                            },
+                            # Iceberg write mode for the update-heavy silver
+                            # tables; merge_on_read bounds the per-batch write
+                            # to the rows it changes. The bootstrap applies it.
+                            {
+                                "name": "LB_FINANCIAL_SILVER_WRITE_MODE",
+                                "value": sustained.silver_write_mode.value,
                             },
                         ]
                     )

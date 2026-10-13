@@ -30,8 +30,71 @@ class TestComponentValidation:
         assert [e["loc"] for e in exc.value.errors()] == [loc]
 
 
+class TestSilverWriteMode:
+    """Tests for silver_write_mode on SustainedConfig."""
+
+    def test_default_is_copy_on_write(self):
+        """The default leaves recorded results unchanged."""
+        config = LakebenchConfig(name="test", architecture={"processing": {"sustained": {}}})
+        sustained = config.architecture.pipeline.sustained
+        assert sustained.silver_write_mode.value == "copy_on_write"
+
+    @pytest.mark.parametrize("mode", ["copy_on_write", "merge_on_read"])
+    def test_accepts_both_modes(self, mode):
+        config = LakebenchConfig(
+            name="test",
+            architecture={"processing": {"sustained": {"silver_write_mode": mode}}},
+        )
+        assert config.architecture.pipeline.sustained.silver_write_mode.value == mode
+
+    def test_rejects_unknown_mode(self):
+        with pytest.raises(ValidationError):
+            LakebenchConfig(
+                name="test",
+                architecture={"processing": {"sustained": {"silver_write_mode": "mor"}}},
+            )
+
+
 class TestSustainedBenchmarkConfig:
     """Tests for benchmark_interval and benchmark_warmup on SustainedConfig."""
+
+    @pytest.mark.parametrize(("warmup", "interval"), [(60, 60), (120, 120), (240, 120)])
+    def test_short_warmup_and_interval_accepted(self, warmup, interval):
+        """Short rounds are an override, not a refusal, while gold runs back to back."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "processing": {
+                    "sustained": {"benchmark_warmup": warmup, "benchmark_interval": interval}
+                }
+            },
+        )
+        sustained = config.architecture.pipeline.sustained
+        assert (sustained.benchmark_warmup, sustained.benchmark_interval) == (warmup, interval)
+
+    @pytest.mark.parametrize("field", ["benchmark_warmup", "benchmark_interval"])
+    def test_below_sixty_seconds_refused(self, field):
+        with pytest.raises(ValidationError):
+            LakebenchConfig(
+                name="test",
+                architecture={"processing": {"sustained": {field: 59}}},
+            )
+
+    def test_gold_interval_still_raises_short_values(self):
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "processing": {
+                    "sustained": {
+                        "gold_refresh_interval": "5 minutes",
+                        "benchmark_warmup": 120,
+                        "benchmark_interval": 120,
+                    }
+                }
+            },
+        )
+        sustained = config.architecture.pipeline.sustained
+        assert (sustained.benchmark_warmup, sustained.benchmark_interval) == (300, 300)
 
     @pytest.mark.parametrize(
         ("gold_refresh", "settings", "field", "expected"),

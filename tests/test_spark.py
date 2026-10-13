@@ -96,8 +96,23 @@ class TestStreamingThroughputEnvVars:
             ),
             (
                 JobType.SILVER_STREAM,
-                {"silver_trigger_interval": "45 seconds"},
-                {"LB_FINANCIAL_SILVER_TRIGGER_S": "45"},
+                {"silver_trigger_interval": "45 seconds", "silver_max_rows_per_trigger": 5_000_000},
+                {
+                    "LB_FINANCIAL_SILVER_TRIGGER_S": "45",
+                    "LB_FINANCIAL_SILVER_MAX_ROWS": "5000000",
+                    "SILVER_MAX_ROWS_PER_TRIGGER": "5000000",
+                    "LB_FINANCIAL_SILVER_WRITE_MODE": "copy_on_write",
+                },
+                "LB_FINANCIAL_SILVER_CHECKPOINT",
+            ),
+            (
+                JobType.SILVER_STREAM,
+                {"silver_max_rows_per_trigger": None, "silver_write_mode": "merge_on_read"},
+                {
+                    "LB_FINANCIAL_SILVER_MAX_ROWS": "0",
+                    "SILVER_MAX_ROWS_PER_TRIGGER": "0",
+                    "LB_FINANCIAL_SILVER_WRITE_MODE": "merge_on_read",
+                },
                 "LB_FINANCIAL_SILVER_CHECKPOINT",
             ),
             (

@@ -1792,6 +1792,10 @@ def _wait_for_query_engine_ready(cfg, k8s, console, timeout: int = 180) -> None:
     )
 
 
+# Trino's message when a metadata table is read before the first commit.
+_NO_SNAPSHOT_MARKER = 'TableScan.snapshot()" is null'
+
+
 def _probe_table_health(cfg, k8s) -> dict[str, int]:
     """Query table metadata for file/snapshot counts on silver and gold.
 
@@ -1891,6 +1895,15 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
                         metric_name,
                     )
             except Exception as e:  # noqa: BLE001 -- a failed probe is absent, never -1
+                if metric_name.endswith("_data_file_count") and _NO_SNAPSHOT_MARKER in str(e):
+                    # Trino's $files NPEs on a table that has no snapshot yet
+                    # (gold before its first commit). Such a table holds no
+                    # data files, so 0 is the measured answer.
+                    health[f"{label}_{metric_name}"] = 0
+                    logger.info(
+                        "table health %s_%s: table has no snapshot yet; 0", label, metric_name
+                    )
+                    continue
                 logger.warning("table health %s_%s failed: %s", label, metric_name, e)
 
     return health

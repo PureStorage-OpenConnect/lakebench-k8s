@@ -374,9 +374,11 @@ architecture:
       gold_refresh_interval: "0 seconds"     # back to back (default)
       run_duration: 1800              # Seconds (30 min default)
       # max_files_per_trigger: unset = no limit (datagen generates for the whole window)
+      silver_max_rows_per_trigger: 20000000   # soft cap on bronze rows silver reads per trigger; null lifts it
+      silver_write_mode: copy_on_write         # copy_on_write (default) | merge_on_read; merge_on_read moves AML results
       checkpoint_base: checkpoints
-      benchmark_interval: 300         # 300-3600; raised to a longer gold interval
-      benchmark_warmup: 300           # 300-1800; raised to a longer gold interval
+      benchmark_interval: 300         # 60-3600; raised to a longer gold interval
+      benchmark_warmup: 300           # 60-1800; raised to a longer gold interval
 
   benchmark:
     mode: power                       # power | standard | extended; throughput and composite
@@ -677,6 +679,8 @@ The legacy name `processing` is still accepted with a deprecation warning.
 | `architecture.pipeline.continuous.run_duration` | integer | `1800` | advanced | Measurement window in seconds. The schema accepts 60 and up; with gold on an interval a continuous run refuses less than 3 x `gold_refresh_interval`. Use 900 s or more, UAT included. |
 | `architecture.pipeline.continuous.checkpoint_base` | string | `checkpoints` | advanced | S3 prefix for streaming checkpoints. |
 | `architecture.pipeline.continuous.max_files_per_trigger` | integer or null | none | advanced | Max Parquet files bronze reads per trigger, a Lakebench cap on intake. Unset: no limit when the run starts its own datagen, which generates for the whole window. With --skip-generate (a finite corpus) unset is derived per run so data keeps arriving for about 1.2 x `run_duration`, capped at 50, and an explicit value that would offer the corpus before the window ends is refused at run start. |
+| `architecture.pipeline.continuous.silver_max_rows_per_trigger` | integer or null | `20000000` | advanced | Soft cap on bronze rows silver reads per trigger (Iceberg `streaming-max-rows-per-micro-batch`), so one micro-batch cannot swallow the whole backlog and run past the window. A batch always takes the next whole data file, then stops once the cap would be exceeded. `null` lifts the cap (each trigger takes every unprocessed bronze snapshot). |
+| `architecture.pipeline.continuous.silver_write_mode` | one of `copy_on_write`, `merge_on_read` | `copy_on_write` | advanced | Iceberg write mode for the update-heavy silver tables (entities, accounts, account_statements, entity_profiles) in continuous AML. `copy_on_write` (default) rewrites touched data files on every MERGE, so a batch's write cost tracks table size. `merge_on_read` writes position-delete files instead, so the write cost tracks the rows the batch changes; readers merge the deletes and maintenance compacts them. Append-only silver tables (transactions, edges, pairs) are unaffected. `merge_on_read` moves recorded continuous AML results. |
 | `architecture.pipeline.continuous.bronze_target_file_size_mb` | integer | `512` | advanced | Target Iceberg file size for bronze writes (MB) |
 | `architecture.pipeline.continuous.silver_target_file_size_mb` | integer | `512` | advanced | Target Iceberg file size for silver writes (MB) |
 | `architecture.pipeline.continuous.silver_bronze_wait_seconds` | integer or null | `null` | advanced | Customer360 only: seconds silver-stream waits for the bronze table to appear before it stops the run. Unset (auto): the run's window (`--duration` or run_duration) / 4, floored at 600 s. The wait runs before the window opens: datagen starts once the streams run, and bronze creates its table with its first batch. |
@@ -685,8 +689,8 @@ The legacy name `processing` is still accepted with a deprecation warning.
 | `architecture.pipeline.continuous.retention_threshold` | string | `30m` | advanced | Iceberg snapshot retention threshold. Snapshots older than this are expired. A whole number and one unit, `s`, `m`, `h` or `d` (e.g., `30m`, `1h`, `7d`); anything else is rejected at load. While streams are live, Iceberg expiry is floored at `1h`, and a continuous Iceberg config on Trino or Spark Thrift that sets a lower value prints a warning when it loads. The `30m` default does not warn: every continuous maintenance round runs beside live streams, so it expires at `1h`, and the run records the applied values in `continuous.retention` of `metrics.json`. Delta has no effective table maintenance in continuous mode (v1.6). Orphan-file removal never uses less than 24 h 10 min, on any engine. |
 | `architecture.pipeline.continuous.compaction_enabled` | boolean | `true` | advanced | Run periodic Iceberg compaction (`rewrite_data_files` / `optimize`) during continuous runs. |
 | `architecture.pipeline.continuous.compaction_interval` | integer | `0` | advanced | Seconds between compaction rounds. `0` = 2x the effective `retention_interval` (1200 s for the default window). An explicit value that cannot run inside the window is refused at run start unless `compaction_enabled` is false or `--skip-maintenance` is given. Minimum 0; no upper bound in the schema. |
-| `architecture.pipeline.continuous.benchmark_interval` | integer | `300` | advanced | Seconds between in-stream benchmark rounds, 300--3600. With gold on a longer interval, raised to that interval so rounds do not overlap gold rewrites. |
-| `architecture.pipeline.continuous.benchmark_warmup` | integer | `300` | advanced | Seconds before the first in-stream benchmark round, 300--1800. With gold on a longer interval, raised to that interval so gold refreshes once first. |
+| `architecture.pipeline.continuous.benchmark_interval` | integer | `300` | advanced | Seconds between in-stream benchmark rounds, 60--3600, counted from a round's end. With gold on a longer interval, raised to that interval so rounds do not overlap gold rewrites. |
+| `architecture.pipeline.continuous.benchmark_warmup` | integer | `300` | advanced | Seconds before the first in-stream benchmark round, 60--1800. A round that fires before the streams have handed data to gold reads an empty gold layer: set this past the first handoff (the run's `lag:` lines). With gold on a longer interval, raised to that interval so gold refreshes once first. |
 
 ### Workload & Datagen
 

@@ -139,8 +139,11 @@ def fingerprint_at(spark, fq: str, sid: int | None) -> dict:
 
 def count_comparable(record: dict) -> bool:
     """Whether the tick's recorded ``total_records`` is the snapshot's live
-    row count: it came from the snapshot summary, and the snapshot carries
-    no delete files (copy-on-write, as Lakebench creates its tables)."""
+    row count: it came from the snapshot summary, and the snapshot carries no
+    delete files. The delete-count guard below holds under either write mode:
+    a copy-on-write snapshot has zero deletes, and a merge-on-read snapshot
+    with position deletes is correctly rejected (its summary count overstates
+    the live rows)."""
     return (
         record.get("count_source") == "summary"
         and is_snapshot(record.get("total_records"))
