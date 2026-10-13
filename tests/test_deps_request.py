@@ -68,6 +68,16 @@ SPARK35 = "apache/spark:3.5.4-python3"
             None,
             ["io.delta:delta-spark_4.1_2.13:4.1.0", "org.apache.hadoop:hadoop-aws:3.4.2"],
         ),
+        (
+            SPARK41,
+            "iceberg",
+            "1.12.0",
+            [
+                "org.apache.iceberg:iceberg-spark-runtime-4.1_2.13:1.12.0",
+                "org.apache.iceberg:iceberg-aws-bundle:1.12.0",
+                "org.apache.hadoop:hadoop-aws:3.4.2",
+            ],
+        ),
     ],
 )
 def test_jar_coordinates(image, fmt, version, expected):
@@ -121,7 +131,7 @@ def test_every_request_field_enters_the_hash():
     for field, value in [
         ("py_reference", ("numpy==2.2.7",)),
         ("pypi_index", "http://pypi.mirror/simple/"),
-        ("duckdb_version", "1.5.6"),
+        ("duckdb_version", "1.5.7"),
         ("duckdb_extensions", ("httpfs", "iceberg")),
         ("duckdb_image", "python:3.12-slim"),
         ("duckdb_extension_repository", "http://ext.mirror"),

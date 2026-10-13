@@ -425,12 +425,12 @@ class ImagesConfig(ConfigModel):
     AML as successive 24-month periods of the same bank, Customer360 as successive
     time slices.
     """
-    spark: str = "apache/spark:4.1.1-python3"
+    spark: str = "apache/spark:4.1.3-python3"
     """Spark runtime image. Unset: the image of the config's recipe (or of the recipe its
-    components name): `4.1.1-python3` on every recipe; `4.0.2-python3` instead when the
+    components name): `4.1.3-python3` on every recipe; `4.0.2-python3` instead when the
     config writes a table format version Spark 4.1 cannot run (Delta 4.0.0).
     """
-    postgres: str = "postgres:17"  # Tested with 16, 17, 18
+    postgres: str = "postgres:18"  # Tested with 17 and 18
     """PostgreSQL image (metadata backend)."""
     polaris: str = "apache/polaris:1.8.0"
     """Apache Polaris REST catalog image."""
@@ -1120,7 +1120,7 @@ class IcebergConfig(ConfigModel):
     # a native Spark 4.1 runtime. Spark 3.5 images must use a java17 tag with
     # this version; validate_iceberg_java_runtime() refuses the combination
     # rather than letting it fail inside the driver.
-    version: str = "1.11.0"
+    version: str = "1.12.0"
     """Apache Iceberg runtime JAR version."""
 
     _removed_keys: ClassVar[dict[str, str]] = {
@@ -1278,7 +1278,7 @@ class DuckDBConfig(ConfigModel):
     # compare different query engines while reporting the difference as a
     # result. Measured local run-to-run spread is 0.9%, well below what an
     # engine change would move, so the drift was invisible to the noise floor.
-    version: str = "1.5.5"
+    version: str = "1.5.6"
     """DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes
     whatever is current, so two runs weeks apart can query with different engines and the
     difference would read as a result.
@@ -2815,16 +2815,16 @@ class ObservabilityConfig(ConfigModel):
     """Prometheus data retention."""
     storage: str = "10Gi"
     """Prometheus PVC size."""
-    prometheus_image: str = "quay.io/prometheus/prometheus:v3.5.0"
+    prometheus_image: str = "quay.io/prometheus/prometheus:v3.15.0"
     """Prometheus image. Tag-pinned; override with a digest for reproducibility."""
-    grafana_image: str = "docker.io/grafana/grafana:12.1.1"
+    grafana_image: str = "docker.io/grafana/grafana:13.2.3"
     """Grafana image. Tag-pinned; override with a digest for reproducibility."""
     prometheus_storage_class: str = ""
     """StorageClass of the Prometheus PVC; empty uses the cluster default."""
     pushgateway_enabled: bool = True
     """Deploy a Prometheus Pushgateway for Spark job metrics. A live view
     only; ``metrics.json`` stays the record."""
-    pushgateway_image: str = "prom/pushgateway:v1.11.1"
+    pushgateway_image: str = "prom/pushgateway:v1.11.4"
     """Pushgateway image."""
     pushgateway_storage: str = "1Gi"
     """Pushgateway persistent volume size."""

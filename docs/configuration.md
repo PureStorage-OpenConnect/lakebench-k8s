@@ -525,8 +525,8 @@ Container images for every deployed component. Override for air-gapped registrie
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
 | `images.datagen` | string | `docker.io/sillidata/lb-datagen:latest` | advanced | Data generator image. Tag-pinned; override with a digest for byte-for-byte reproducibility. In continuous mode it generates until the run window ends: AML as successive 24-month periods of the same bank, Customer360 as successive time slices. |
-| `images.spark` | string | `apache/spark:4.1.1-python3` | advanced | Spark runtime image. Unset: the image of the config's recipe (or of the recipe its components name): `4.1.1-python3` on every recipe; `4.0.2-python3` instead when the config writes a table format version Spark 4.1 cannot run (Delta 4.0.0). |
-| `images.postgres` | string | `postgres:17` | advanced | PostgreSQL image (metadata backend). |
+| `images.spark` | string | `apache/spark:4.1.3-python3` | advanced | Spark runtime image. Unset: the image of the config's recipe (or of the recipe its components name): `4.1.3-python3` on every recipe; `4.0.2-python3` instead when the config writes a table format version Spark 4.1 cannot run (Delta 4.0.0). |
+| `images.postgres` | string | `postgres:18` | advanced | PostgreSQL image (metadata backend). |
 | `images.polaris` | string | `apache/polaris:1.8.0` | advanced | Apache Polaris REST catalog image. |
 | `images.polaris_admin_tool` | string | `apache/polaris-admin-tool:1.8.0` | advanced | Polaris admin tool image; bootstraps the Polaris metastore on a Polaris recipe. |
 | `images.unity` | string | `unitycatalog/unitycatalog:main` | advanced | Unity Catalog server image (Unity catalog only; no recipe uses it). |
@@ -629,7 +629,7 @@ What `lb-deps` is and when it resolves again: see [Dependency server](#dependenc
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
 | `architecture.table_format.type` | one of `iceberg`, `delta` | `iceberg` | advanced | Table format: `iceberg` or `delta`. Delta runs with the `hive` catalog and `trino`, `spark-thrift` or `none` query engines (the `hive-delta-*` recipes). The `financial` (AML) workload refuses Delta. |
-| `architecture.table_format.iceberg.version` | string | `1.11.0` | advanced | Apache Iceberg runtime JAR version. |
+| `architecture.table_format.iceberg.version` | string | `1.12.0` | advanced | Apache Iceberg runtime JAR version. |
 | `architecture.table_format.delta.version` | string | `auto` | advanced | Delta Lake version. `auto` resolves a version that matches the Spark image. |
 
 ### Architecture -- Pipeline engine
@@ -659,7 +659,7 @@ What `lb-deps` is and when it resolves again: see [Dependency server](#dependenc
 | `architecture.query_engine.duckdb.cores` | integer | `2` | advanced | DuckDB CPU cores. |
 | `architecture.query_engine.duckdb.memory` | string | `4g` | advanced | DuckDB pod memory. Auto-sized to `16g` on the financial schema when unset (less on a node with under 24 GiB allocatable). |
 | `architecture.query_engine.duckdb.catalog_name` | string | `lakehouse` | advanced | Iceberg catalog name for DuckDB. |
-| `architecture.query_engine.duckdb.version` | string | `1.5.5` | advanced | DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes whatever is current, so two runs weeks apart can query with different engines and the difference would read as a result. |
+| `architecture.query_engine.duckdb.version` | string | `1.5.6` | advanced | DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes whatever is current, so two runs weeks apart can query with different engines and the difference would read as a result. |
 
 ### Architecture -- Pipeline
 
@@ -781,11 +781,11 @@ Fully-qualified table names (`namespace.table`). The catalog prefix is added at 
 | `observability.grafana_route` | boolean | `true` | advanced | OpenShift only: create a TLS Route to Grafana so it has a URL without a port-forward. Grafana is behind its login; Prometheus and the Pushgateway are never exposed. Ignored on other clusters. Removed with the namespace. |
 | `observability.retention` | string | `7d` | advanced | Prometheus data retention. |
 | `observability.storage` | string | `10Gi` | advanced | Prometheus PVC size. |
-| `observability.prometheus_image` | string | `quay.io/prometheus/prometheus:v3.5.0` | advanced | Prometheus image. Tag-pinned; override with a digest for reproducibility. |
-| `observability.grafana_image` | string | `docker.io/grafana/grafana:12.1.1` | advanced | Grafana image. Tag-pinned; override with a digest for reproducibility. |
+| `observability.prometheus_image` | string | `quay.io/prometheus/prometheus:v3.15.0` | advanced | Prometheus image. Tag-pinned; override with a digest for reproducibility. |
+| `observability.grafana_image` | string | `docker.io/grafana/grafana:13.2.3` | advanced | Grafana image. Tag-pinned; override with a digest for reproducibility. |
 | `observability.prometheus_storage_class` | string | `""` | advanced | StorageClass of the Prometheus PVC; empty uses the cluster default. |
 | `observability.pushgateway_enabled` | boolean | `true` | advanced | Deploy a Prometheus Pushgateway for Spark job metrics. A live view only; ``metrics.json`` stays the record. |
-| `observability.pushgateway_image` | string | `prom/pushgateway:v1.11.1` | advanced | Pushgateway image. |
+| `observability.pushgateway_image` | string | `prom/pushgateway:v1.11.4` | advanced | Pushgateway image. |
 | `observability.pushgateway_storage` | string | `1Gi` | advanced | Pushgateway persistent volume size. |
 | `observability.pushgateway_storage_class` | string | `px-csi-scratch` | advanced | StorageClass of the Pushgateway volume. |
 

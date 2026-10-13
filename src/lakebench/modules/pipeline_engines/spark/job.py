@@ -1416,24 +1416,24 @@ _SUPPORTED_SPARK_VERSIONS: dict[tuple[int, int], str] = {
 
 _FORMAT_VERSION_COMPAT: dict[tuple[int, int], dict[str, list[str]]] = {
     (3, 5): {
-        "iceberg": ["1.5.2", "1.6.1", "1.7.1", "1.8.1", "1.9.1", "1.10.1", "1.11.0"],
+        "iceberg": ["1.5.2", "1.6.1", "1.7.1", "1.8.1", "1.9.1", "1.10.1", "1.11.0", "1.12.0"],
         "delta": [],  # Delta 4.x requires Spark 4.x
     },
     (4, 0): {
-        "iceberg": ["1.10.0", "1.10.1", "1.11.0"],
+        "iceberg": ["1.10.0", "1.10.1", "1.11.0", "1.12.0"],
         "delta": ["4.0.0"],
     },
     (4, 1): {
-        "iceberg": ["1.10.0", "1.10.1", "1.11.0"],
+        "iceberg": ["1.10.0", "1.10.1", "1.11.0", "1.12.0"],
         "delta": ["4.1.0"],
     },
 }
 
 # Default format version per Spark version (auto-selected when user doesn't override).
 _FORMAT_VERSION_DEFAULTS: dict[tuple[int, int], dict[str, str]] = {
-    (3, 5): {"iceberg": "1.11.0", "delta": ""},
-    (4, 0): {"iceberg": "1.11.0", "delta": "4.0.0"},
-    (4, 1): {"iceberg": "1.11.0", "delta": "4.1.0"},
+    (3, 5): {"iceberg": "1.12.0", "delta": ""},
+    (4, 0): {"iceberg": "1.12.0", "delta": "4.0.0"},
+    (4, 1): {"iceberg": "1.12.0", "delta": "4.1.0"},
 }
 
 # Iceberg 1.11.0 is the first release compiled for Java 17 -- its jars carry

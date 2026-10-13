@@ -22,7 +22,7 @@ Reference: configure the Apache Polaris REST catalog: config keys, version limit
 | Apache Polaris | 1.3.0-incubating | 1.8.0 | 1.1.0 and 1.2.0 attempt STS even when told not to. |
 | Trino | 454 | 483 | 454 added `iceberg.rest-catalog.oauth2.scope`. |
 
-Validated Polaris releases (AML continuous at scale 10 on Spark 4.1.1, Iceberg 1.11.0 and Trino 483, run on a clean tree; bronze, silver and gold committed throughout and every Trino round passed):
+Validated Polaris releases (AML continuous at scale 10 on Spark 4.1.1, Iceberg 1.11.0 and Trino 483, before the move to Spark 4.1.3 and Iceberg 1.12.0, run on a clean tree; bronze, silver and gold committed throughout and every Trino round passed):
 
 | Polaris | Result |
 |---|---|

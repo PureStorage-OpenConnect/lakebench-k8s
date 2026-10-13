@@ -183,7 +183,7 @@ class TestStamping:
         rec.write_text(
             "validated:\n"
             "  - {workload: customer360, recipe: hive-iceberg-spark-trino, mode: batch,\n"
-            "     spark: '4.1', table_format_version: 1.11.0,\n"
+            "     spark: '4.1', table_format_version: 1.12.0,\n"
             "     runs: [run-1]}\n"
         )
         with (

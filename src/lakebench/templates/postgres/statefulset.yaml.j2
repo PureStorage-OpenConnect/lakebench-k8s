@@ -34,7 +34,7 @@ spec:
       {% endif %}
       containers:
         - name: postgres
-          image: {{ postgres_image | default('postgres:17') }}
+          image: {{ postgres_image | default('postgres:18') }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           env:
             - name: POSTGRES_USER

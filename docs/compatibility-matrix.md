@@ -64,7 +64,7 @@ not per recipe.
     of the same recipe supported.
   - A supported cell names the version pairs its runs used.
   - The Spark minor is read only from an `apache/spark` image (any registry
-    prefix) with a release tag such as `4.1.1-python3`. A run on any other
+    prefix) with a release tag such as `4.1.3-python3`. A run on any other
     Spark image is never stamped supported.
   - The record is generated from the release-matrix run records, never
     edited by hand. Lakebench refuses to load an entry that is not a
@@ -155,20 +155,20 @@ Defaults come from `src/lakebench/config/schema.py` and
 
 | Component | Default | Accepted | Set by |
 |---|---|---|---|
-| Apache Spark | `apache/spark:4.1.1-python3` on every recipe | Any 3.5.x, 4.0.x or 4.1.x image with a `-python3` tag. Delta needs 4.x. 4.2 and other minors are refused at load. | `images.spark` |
+| Apache Spark | `apache/spark:4.1.3-python3` on every recipe | Any 3.5.x, 4.0.x or 4.1.x image with a `-python3` tag. Delta needs 4.x. 4.2 and other minors are refused at load. | `images.spark` |
 | Kubeflow Spark Operator | 2.5.1 (Helm chart `spark-operator/spark-operator`, namespace `spark-operator`) | v2.x. v1.x is not supported. | `platform.compute.spark.operator.version` (fresh install only) |
-| Apache Iceberg | 1.11.0; 1.10.1 on a Java 11 Spark 3.5 image; 1.10.1 in local mode | See [Spark + Table Format Version Matrix](#spark--table-format-version-matrix) | `architecture.table_format.iceberg.version` |
+| Apache Iceberg | 1.12.0; 1.10.1 on a Java 11 Spark 3.5 image; 1.10.1 in local mode | See [Spark + Table Format Version Matrix](#spark--table-format-version-matrix) | `architecture.table_format.iceberg.version` |
 | Delta Lake | `auto`: 4.0.0 on Spark 4.0, 4.1.0 on Spark 4.1 | Only the version matching the Spark minor | `architecture.table_format.delta.version` |
 | Hadoop AWS | 3.3.4 on Spark 3.5, 3.4.1 on 4.0, 3.4.2 on 4.1 | Fixed by Spark minor | Not configurable |
 | Hive Metastore | 3.1.3 | 3.1.3 only (Hive 4 breaks Iceberg and Trino ANALYZE) | Fixed; the Stackable HiveCluster `productVersion` |
 | Stackable operators (commons, secret, listener, hive) | SDP 25.7.0, from `oci://oci.stackable.tech/sdp-charts` | An installed SDP keeps its version | `architecture.catalog.hive.operator.version` (fresh install only) |
 | Apache Polaris | `apache/polaris:1.8.0`, `apache/polaris-admin-tool:1.8.0` | 1.6.0, 1.7.0 and 1.8.0 are validated; see [Polaris](component-polaris.md#version-and-image) | `images.polaris`, `images.polaris_admin_tool` |
 | Trino | `trinodb/trino:483` | 454 or later with Polaris | `images.trino` |
-| DuckDB | 1.5.5, pip-installed on `python:3.11-slim` (wheel resolved by `lb-deps`) | Iceberg only | `architecture.query_engine.duckdb.version`, `images.duckdb` |
-| PostgreSQL | `postgres:17` | Tested with 16, 17, 18 | `images.postgres` |
-| Prometheus | `quay.io/prometheus/prometheus:v3.5.0` | Per deployment, in its namespace | `observability.prometheus_image` |
-| Grafana | `docker.io/grafana/grafana:12.1.1` | Per deployment, in its namespace | `observability.grafana_image` |
-| Pushgateway | `prom/pushgateway:v1.11.1` | Per deployment, in its namespace | `observability.pushgateway_image` |
+| DuckDB | 1.5.6, pip-installed on `python:3.11-slim` (wheel resolved by `lb-deps`) | Iceberg only | `architecture.query_engine.duckdb.version`, `images.duckdb` |
+| PostgreSQL | `postgres:18` | Tested with 17 and 18 | `images.postgres` |
+| Prometheus | `quay.io/prometheus/prometheus:v3.15.0` | Per deployment, in its namespace | `observability.prometheus_image` |
+| Grafana | `docker.io/grafana/grafana:13.2.3` | Per deployment, in its namespace | `observability.grafana_image` |
+| Pushgateway | `prom/pushgateway:v1.11.4` | Per deployment, in its namespace | `observability.pushgateway_image` |
 
 The deployment's dependency server (`lb-deps`) resolves the Iceberg or Delta
 runtime, Hadoop AWS and DuckDB jars once at deploy.
@@ -189,8 +189,8 @@ config, within these limits:
 
 ```yaml
 images:
-  spark: apache/spark:4.1.1-python3
-  postgres: postgres:17
+  spark: apache/spark:4.1.3-python3
+  postgres: postgres:18
   polaris: apache/polaris:1.8.0
   trino: trinodb/trino:483
   duckdb: python:3.11-slim
@@ -198,7 +198,7 @@ images:
 architecture:
   table_format:
     iceberg:
-      version: "1.11.0"
+      version: "1.12.0"
 ```
 
 Image pulls:
@@ -219,11 +219,11 @@ Format versions are **auto-selected** from the Spark image version. An
 explicit version overrides it. An incompatible combination is rejected at
 config load.
 
-| Spark | Delta 4.0.0 | Delta 4.1.0 | Iceberg 1.11.0 | Iceberg 1.10.1 | Iceberg 1.10.0 | Iceberg 1.5.2-1.9.1 |
-|-------|-------------|-------------|----------------|----------------|----------------|------|
-| 3.5.x | -- | -- | **Default** (java17 image) | OK (default on a Java 11 image) | -- | OK |
-| 4.0.x | **Default** | -- | **Default** | OK | OK | -- |
-| 4.1.x | -- | **Default** | **Default** | OK | OK | -- |
+| Spark | Delta 4.0.0 | Delta 4.1.0 | Iceberg 1.12.0 | Iceberg 1.11.0 | Iceberg 1.10.1 | Iceberg 1.10.0 | Iceberg 1.5.2-1.9.1 |
+|-------|-------------|-------------|----------------|----------------|----------------|----------------|------|
+| 3.5.x | -- | -- | **Default** (java17 image) | OK (java17 image) | OK (default on a Java 11 image) | -- | OK |
+| 4.0.x | **Default** | -- | **Default** | OK | OK | OK | -- |
+| 4.1.x | -- | **Default** | **Default** | OK | OK | OK | -- |
 
 **Default** = auto-selected. **OK** = accepted as an override. **--** = rejected.
 Spark 3.5 accepts Iceberg 1.5.2, 1.6.1, 1.7.1, 1.8.1 and 1.9.1. Spark 4.0 and
@@ -258,20 +258,20 @@ architecture:
 
 ### Which runtime jar gets requested
 
-| Spark | Iceberg 1.10.x | Iceberg 1.11.0 | Delta |
+| Spark | Iceberg 1.10.x | Iceberg 1.11.0 and later | Delta |
 |-------|----------------|----------------|-------|
 | 3.5.x | `iceberg-spark-runtime-3.5_2.12` | `3.5_2.12` | -- |
 | 4.0.x | `4.0_2.13` | `4.0_2.13` | `io.delta:delta-spark_2.13` |
 | 4.1.x | `4.0_2.13` (borrowed) | `4.1_2.13` (native) | `delta-spark_4.1_2.13` |
 
 - Spark 4.1 borrows the 4.0 runtime on Iceberg 1.10.x, which has no 4.1
-  artifact. 1.11.0 publishes one.
+  artifact. 1.11.0 and 1.12.0 publish one.
 - The Spark jobs and the Spark Thrift server choose the runtime the same
   way, so both load one runtime jar.
 
 ```yaml
 images:
-  spark: apache/spark:4.1.1-python3    # the Hive recipes' default
+  spark: apache/spark:4.1.3-python3    # the recipes' default
 architecture:
   table_format:
     type: delta

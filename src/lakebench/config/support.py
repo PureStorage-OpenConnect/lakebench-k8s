@@ -56,7 +56,7 @@ RELEASE_MATRIX: tuple[tuple[str, str, str, float], ...] = (
 #: The release matrix's Spark minor and table format version per row, by
 #: (workload, mode, recipe). The support record is keyed by them
 #: (config/support.py), so a row's runs must use these versions.
-_ICEBERG, _SPARK41 = "1.11.0", "4.1"
+_ICEBERG, _SPARK41 = "1.12.0", "4.1"
 RELEASE_MATRIX_VERSIONS: dict[tuple[str, str, str], tuple[str, str]] = {
     ("customer360", "batch", "hive-iceberg-spark-trino"): (_SPARK41, _ICEBERG),
     ("customer360", "batch", "polaris-iceberg-spark-trino"): (_SPARK41, _ICEBERG),
