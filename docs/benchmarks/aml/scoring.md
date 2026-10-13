@@ -78,10 +78,12 @@ AML batch records, never a bucket or cluster, and writes
 - A row with `evidence_capped_alerts` above 0 is an upper bound; a ratio with
   either side cut is marked `bounded_by_evidence_cap`.
 
-**Continuous (covered mode).** After the [drain](../../glossary.md#drain)
-([4.5](pipeline.md#45-continuous-drain-and-tick-records)) the scorer runs over
-the snapshots the last completed tick read; `financial_scoring.mode` is
-`covered`.
+**Continuous (covered mode).** After the window closes and the streams
+stop, the scorer runs over the snapshots the last tick that completed and
+committed inside the window read ([4.5](pipeline.md#45-continuous-tick-records));
+`financial_scoring.mode` is `covered`. Each table is read at the snapshot
+the tick pinned (`VERSION AS OF`), so a later tick rewriting `gold.alerts`
+does not reach the score.
 
 - `financial_scoring.covered.typologies[].recall_covered` is the
   designated-hit rate over covered instances only: every participant payment
@@ -90,9 +92,6 @@ the snapshots the last completed tick read; `financial_scoring.mode` is
   entity in `silver.entities` at that snapshot. `covered_instances`,
   `corpus_instances`, `coverage` and `no_participant_txns` say how much of
   the manifest that was. No key named `recall` is written.
-- The scored tick can begin after the window closed, since the drain waits for
-  the tick in progress and the window's bucket listing runs first;
-  `tick.pinned_after_window_end_s` gives the gap.
 - False positives and precision count every planted payment in the full
   manifest, so an alert on a planted payment the tick had not yet covered is
   not a false positive. The chance floor uses the covered `random` instances.
@@ -100,9 +99,9 @@ the snapshots the last completed tick read; `financial_scoring.mode` is
   `covered.excluded_typologies`. The per-code keys,
   `nonplanted_alerts_by_rule` and `customer_count` are batch only.
 - `financial_scoring.status` is `not_scored`, with a `reason`, when:
-  - the drain did not complete, or the run failed a gate;
-  - the last tick's record is missing or names a snapshot as `unknown` or
-    `none`;
+  - the run failed a gate;
+  - no tick completed and committed inside the window, or the last one
+    names a snapshot as `unknown` or `none`;
   - the tick still had a pending rule;
   - a recorded snapshot expired before scoring;
   - the score job failed or was interrupted.
@@ -143,7 +142,7 @@ A different alert set is a different result: two runs where any rule's count or
 - A rule that ran and raised no alert is absent from `by_rule`, like a rule
   that did not run; `experiment.rules` records which rules ran.
 - Continuous runs never fingerprint inside a tick, since a full scan would fall
-  inside time to detect. The alert set is taken once after the drain
+  inside time to detect. The alert set is taken once after the window closes
   (`results.alert_set_continuous`) and is diagnostic only.
 
 ## 8.8 Band-leakage report and reference detector

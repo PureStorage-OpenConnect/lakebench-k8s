@@ -1134,7 +1134,7 @@ def stop(
     guard_nameless(cfg, config_file, allow_absent=False)
     namespace = cfg.get_namespace()
     try:
-        k8s = get_k8s_client(
+        get_k8s_client(
             context=cfg.platform.kubernetes.context,
             namespace=namespace,
         )
@@ -1178,10 +1178,6 @@ def stop(
     j.begin_command(CommandName.STOP, {})
 
     if out.found:
-        try:
-            ops.pre_stop(cfg, k8s)
-        except Exception as e:  # noqa: BLE001 -- a failed drain must not block the stop
-            print_warning(f"Pre-stop step failed, stopping anyway: {e}")
         ops.stop_delete(custom, batch, namespace, out)
 
     for ref in out.deleted:

@@ -160,7 +160,7 @@ class FakeCustom:
 
 
 class FakeK8s:
-    """The pinned client the commands build; `pre_stop` receives it."""
+    """The pinned client the commands build."""
 
     def namespace_exists(self, name):
         raise AssertionError("the commands read the namespace through CoreV1Api")

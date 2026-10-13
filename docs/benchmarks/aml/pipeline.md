@@ -187,21 +187,20 @@ in bronze.
    - orphan removal never uses less than 24 h 10 min.
 
    The applied retention is in `continuous.retention`.
-7. **[Drain](../../glossary.md#drain) and score** ([4.5](#45-continuous-drain-and-tick-records)).
+7. **Tick records and score** ([4.5](#45-continuous-tick-records)).
    - If the run passed every gate, `score-financial` runs in covered mode over
-     exactly the snapshots the last completed tick read
+     exactly the snapshots the last completed tick inside the window read
      ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)).
    - On the same condition `time-travel-financial` then re-reads every
      `silver.transactions` snapshot the ticks recorded
      ([8.2](continuous-metrics.md#82-continuous)). It runs with the streams
      stopped, outside every measured interval, and never fails the run.
-8. **Gates**: the continuous window gate, the drain check, the AML continuous
-   gate, the TM verdict and the record gates ([5](correctness.md#5-correctness-contract)).
+8. **Gates**: the continuous window gate, the AML continuous gate, the TM
+   verdict and the record gates ([5](correctness.md#5-correctness-contract)).
    The continuous balance check is advisory: an unbalanced stage is recorded
    in `continuous.balance` and reported, and does not fail the run.
 
-No published record carries a covered score yet; the published continuous
-record predates the drain.
+No published record carries a covered score yet.
 
 ## 4.4 Out-of-run AML commands
 
@@ -222,26 +221,9 @@ runs the reference detector, the band-leakage report and the fidelity gate
 - Its features come from silver read without the sealed-batch filter
   ([12](limitations.md#12-known-limitations)).
 
-## 4.5 Continuous drain and tick records
+## 4.5 Continuous tick records
 
-**The drain.** A continuous run ends its window by draining gold-refresh, not
-by deleting it mid-tick (`cli/_aml_post.py`).
-
-- The CLI writes `<checkpoint_base>/gold-refresh/_lb_stop` in the gold
-  bucket, body the run id.
-- The driver finishes its tick, logs `Drain complete: last completed cycle
-  N`, frees its executors and waits until the streams stop. The CLI waits up
-  to 1,800 s for that line (a Lakebench cap).
-- The run fails when the drain times out (`gold drain timed out; last tick
-  interrupted`), when gold-refresh is deleted before it drains, or when the
-  driver restarted and found the marker before its first tick. In each case
-  `gold.alerts` may be half rewritten.
-- A marker that cannot be written does not fail the run; its recall reads
-  `not_scored`.
-- `lakebench stop` drains the same way with a 300 s budget. It stops the jobs
-  whether or not the drain is confirmed, Ctrl-C included.
-
-**Tick records.** Every tick logs the snapshots it read and wrote:
+Every tick logs the snapshots it read and wrote:
 
 - `silver.transactions`, `silver.entities`, `silver.accounts` and
   `silver_batch_versions` when it pinned silver;
@@ -249,21 +231,18 @@ by deleting it mid-tick (`cli/_aml_post.py`).
 
 Detection filters the pinned transactions through the versions table at the
 logged snapshot, so the scorer sees exactly the sealed batches detection saw.
+Each table is read at the snapshot the tick pinned (`VERSION AS OF`), so a
+later tick rewriting `gold.alerts` does not reach the score.
 
-- The record keeps them as `continuous.ticks[]`, with `continuous.drain` and
+- The record keeps the ticks as `continuous.ticks[]`, with
   `continuous.ticks_unpinned` (ticks whose transactions or versions snapshot
   was not pinned; detection then read the current versions table).
+- The scored tick is the highest cycle in the latest driver start whose
+  record is both completed and committed and has every pin an int.
 - `continuous.ticks[].rule_status` holds each rule's status (`ran`,
   `skipped:<reason>` or `error`). When scoring does not run, the rules gate
-  judges the rule status of the last tick completed at the drain.
-- Records come from the current gold-refresh driver pod's log, so a restarted
-  driver leaves its earlier pod's ticks out (`continuous.drain.ticks_scope`).
-- Lakebench keeps each stream driver's log from the moment its pod runs
-  (`<run_dir>/drivers/`) and reads that copy, continued by the pod log, so
-  kubelet log rotation does not trim a long window.
-- `continuous.drain.log_from_driver_start` is false when the log still does
-  not reach the driver's first tick. The run then fails with "driver log
-  incomplete".
-- The drained driver repeats its last tick's records with each drain line,
-  so a log rotated during that tick still yields the snapshots the scorer
-  reads.
+  judges the rule status of the scored tick.
+- Records come from the gold-refresh driver pod's log, kept from the moment
+  its pod runs (`<run_dir>/drivers/`), so kubelet log rotation does not trim
+  a long window. A log that does not reach the driver's first tick fails
+  the run with "driver log incomplete".

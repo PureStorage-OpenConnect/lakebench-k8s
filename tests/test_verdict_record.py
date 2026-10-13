@@ -170,7 +170,7 @@ def test_c360_gated_failure_fails() -> None:
     assert v.status == "FAILED" and v.gates["c360"] == "FAIL"
 
 
-def test_w1_giant_component_skip_passes() -> None:
+def test_w1_timeout_skip_fails() -> None:
     rec = sr.load_record(AML_BATCH)
     assert V.verdict_from_record(rec).gates["aml_rules"] == "PASS"
     _job(rec, "gold-finalize")["rules_skipped"]["W1_connected_components"] = "timeout"
@@ -237,7 +237,7 @@ def test_continuous_mode_excluded_rule_ran_fails() -> None:
     ],
 )
 def test_a_record_without_rule_status_keeps_its_rule_set(ttd_rules, excluded_screening) -> None:
-    """With no scored or drain-tick status, the rules that alerted say
+    """With no scored or tick rule status, the rules that alerted say
     whether W5 and W6 were in the run: never "outside the expected set" for
     a run that ran them, never expected of a run from before."""
     rec = sr.load_record(AML_CONT)
@@ -273,12 +273,14 @@ def test_continuous_rule_skipped_on_the_scored_tick_fails() -> None:
     v = V.verdict_from_record(rec)
     assert v.status == "FAILED" and v.gates["aml_rules"] == "FAIL"
 
-    # Not scored: the drain tick's logged status stands in (live, Polaris
-    # AML s1: W4 failed on the drain tick and the run passed unscored).
+    # Not scored: the last completed and committed tick's logged status
+    # stands in (live, Polaris AML s1: W4 failed on the scored tick and the
+    # run passed unscored).
     rec["financial_scoring"] = {"status": "not_scored"}
     logged = {s["rule_id"]: "ran" for s in status if s["reason"] != "mode-excluded"}
-    rec.setdefault("continuous", {})["drain"] = {"last_completed_cycle": 7}
-    rec["continuous"]["ticks"] = [{"cycle": 7, "rule_status": logged}]
+    rec.setdefault("continuous", {})["ticks"] = [
+        {"cycle": 7, "completed_at": "t", "committed_alerts": 1, "rule_status": logged}
+    ]
     assert V.verdict_from_record(rec).status == "PASSED"
     logged["W4_risk_propagation"] = "error"
     v = V.verdict_from_record(rec)
@@ -465,18 +467,6 @@ def test_passed_recomputes_a_stored_pass() -> None:
     assert V.passed(rec) is False
 
 
-def test_summary_row_is_judged_on_what_it_stored() -> None:
-    """A list_runs row has no jobs list: nothing to recompute from."""
-    assert V.passed({"run_id": "r", "success": True, "verdict_status": "PASSED"}) is True
-    assert V.passed({"run_id": "r", "success": False}) is False
-
-
-def test_unreadable_record_reads_not_passed() -> None:
-    rec = sr.load_record(C360_BATCH)
-    rec["start_time"] = "not a time"
-    assert V.passed(rec) is False
-
-
 def test_fresh_record_reads_back_its_saved_verdict() -> None:
     """The verdict a save writes is the one a reader recomputes."""
     m = sr.load_metrics(C360_BATCH)
@@ -525,11 +515,6 @@ def test_save_gate_fails_closed_when_the_record_cannot_be_judged(monkeypatch) ->
     said: list[str] = []
     assert V.apply_save_gate(m, True, said.append) is False
     assert any("could not be computed" in s for s in said)
-
-
-# ---------------------------------------------------------------------------
-# The release gate reads the real verdict (ER-16's fail-closed inputs)
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -853,11 +838,6 @@ def test_report_labels_the_gold_stage_bounded_by_a_rule_cap() -> None:
 
 
 # ---------------------------------------------------------------------------
-# lakebench benchmark records (record_kind benchmark) are never a run
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # verdict_of: one rule for the headline (r3 review)
 # ---------------------------------------------------------------------------
 
@@ -897,11 +877,17 @@ def test_verdict_of_an_unreadable_record_is_failed() -> None:
     rec = sr.load_record(C360_BATCH)
     rec["jobs"][0]["start_time"] = "not a time"
     assert V.verdict_of(rec) == {"stored": "PASSED", "recomputed": None, "status": "FAILED"}
+    rec = sr.load_record(C360_BATCH)
+    rec["start_time"] = "not a time"
+    assert V.passed(rec) is False
 
 
 def test_verdict_of_a_summary_row_is_what_it_stored() -> None:
+    """A list_runs row has no jobs list: nothing to recompute from."""
     row = {"run_id": "r", "success": True, "verdict": {"status": "PASSED"}}
     assert V.verdict_of(row) == {"stored": "PASSED", "recomputed": None, "status": "PASSED"}
+    assert V.passed({"run_id": "r", "success": True, "verdict_status": "PASSED"}) is True
+    assert V.passed({"run_id": "r", "success": False}) is False
 
 
 def test_text_report_heads_with_the_strictest_verdict(monkeypatch, tmp_path: Path) -> None:

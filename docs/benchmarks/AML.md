@@ -19,7 +19,7 @@ Figures labelled "recorded" come from three 1.6 run records
 1. [Purpose and scope](#1-purpose-and-scope)
 2. [Data model](aml/data-model.md)
 3. Data generation: [generator, scale, delivery, content](aml/generation.md) (3.1, 3.2, 3.4, 3.5, 3.7); [seed policy](aml/seed-policy.md) (3.3); [typologies and planting](aml/typologies.md) (3.6, 3.8, 3.9)
-4. Pipeline: [batch, continuous, drain, out-of-run commands](aml/pipeline.md) (4.1, 4.3, 4.4, 4.5); [detection rules](aml/rules.md) (4.2)
+4. Pipeline: [batch, continuous, out-of-run commands, tick records](aml/pipeline.md) (4.1, 4.3, 4.4, 4.5); [detection rules](aml/rules.md) (4.2)
 5. [Correctness contract](aml/correctness.md)
 6. [Query set](aml/queries.md)
 7. [Execution rules](aml/execution-rules.md)

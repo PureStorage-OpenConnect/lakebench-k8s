@@ -2782,34 +2782,20 @@ def _settle_financial_scoring(cfg, collector, pipeline_success: bool, abort) -> 
         run.financial_scoring = not_scored("the run failed its gates")
 
 
-def drain_gold_refresh(
-    cfg, k8s, run_id, collector, *, window_end=None, before_write=None, kept_log=None
-):
-    """Drain gold-refresh at window end and record it.
+def record_gold_tick_records(run_id, collector, *, kept_log):
+    """Parse the gold-refresh driver log kept over the window and record its
+    ticks.
 
-    Returns ``(drain, tick, tick_reason, problem)``: the DrainResult, the
-    last completed tick to score (None with ``tick_reason`` when there is
-    none), and the gate problem the drain is, else "". A drain that timed
-    out, a gold-refresh deleted before it drained, and a driver that had
-    restarted and drained before any tick are problems: in each, the last
-    tick may have been cut off and gold.alerts half rewritten. A marker
-    that could not be written is not (nothing was asked; scoring reads
-    not_scored).
+    Returns ``(tick, tick_reason, problem)``: the last completed tick to
+    score (None with ``tick_reason`` when there is none), and the gate
+    problem the kept log is, else "". A log that does not reach the
+    driver's first tick is a problem: its figures only cover part of the
+    run.
 
-    Records ``continuous.drain``, ``continuous.ticks``,
-    ``continuous.ticks_unpinned`` and ``continuous.time_travel.ticks`` (each
-    tick's transactions snapshot and its metadata counts) from the drain's
-    full log. Only the drain
-    log is parsed: the window's log stops before the last tick. That log is
-    the current driver pod's, so an earlier pod's ticks are not in it
-    (``drain.ticks_scope``), and ``drain.log_from_driver_start`` is False
-    when its first tick is not cycle 1 (the log was trimmed). *window_end* (naive UTC on the cluster
-    clock, as the window record) gives the scored tick's
-    ``pinned_after_window_end_s``. *kept_log* returns the log kept since the
-    driver started (the capture), which the drain's pod log continues; a log
-    that still does not reach the first tick is a problem.
+    Records ``continuous.ticks``, ``continuous.ticks_unpinned`` and
+    ``continuous.time_travel.ticks`` (each tick's transactions snapshot and
+    its metadata counts) from the kept log.
     """
-    from lakebench.cli._aml_post import DRAIN_BUDGET_S, request_drain
     from lakebench.metrics.tick_records import (
         parse_tick_records,
         scored_tick,
@@ -2818,66 +2804,28 @@ def drain_gold_refresh(
         time_travel_ticks,
     )
 
-    print_info(f"Draining gold-refresh: finishing its current tick (up to {DRAIN_BUDGET_S}s)...")
-    drain = request_drain(cfg, k8s, DRAIN_BUDGET_S, run_id=run_id, before_write=before_write)
+    logs = kept_log() if kept_log is not None else None
+    parsed = parse_tick_records(logs, run_id)
+    tick, reason = scored_tick(parsed)
+    ticks = tick_list(parsed["ticks"])
+    tt_ticks = time_travel_ticks(parsed["ticks"])
     problem = ""
-    tick = None
-    reason = ""
-    record = drain.record()
-    ticks = None
-    tt_ticks = None
-    if drain.state == "drained":
-        if kept_log is not None:
-            from lakebench.cli._driver_log_capture import merge_logs
-
-            drain.logs = merge_logs(kept_log(), drain.logs)
-        parsed = parse_tick_records(drain.logs, run_id)
-        tick, reason = scored_tick(parsed)
-        ticks = tick_list(parsed["ticks"])
-        tt_ticks = time_travel_ticks(parsed["ticks"])
-        # The log is the current driver pod's: an earlier pod's ticks are not
-        # in it. True when it still runs from its driver's first tick (not
-        # trimmed by log rotation); it does not say no restart happened.
-        record["ticks_scope"] = "current driver pod log"
-        record["log_from_driver_start"] = bool(ticks) and ticks[0]["cycle"] == 1
-        if ticks and not record["log_from_driver_start"] and drain.last_cycle:
-            problem = (
-                "driver log incomplete: the gold-refresh log does not reach its first "
-                f"tick (starts at cycle {ticks[0]['cycle']}), so its figures cover part "
-                "of the run"
-            )
-        if drain.last_cycle == 0:
-            problem = (
-                "gold drain found a restarted gold-refresh driver; its last tick may have "
-                "been interrupted"
-            )
-        else:
-            print_success(
-                f"gold-refresh drained after {drain.waited_s:.0f}s "
-                f"(last completed cycle {drain.last_cycle})"
-            )
-        if tick is not None and window_end is not None and tick.get("pinned_at") is not None:
-            end_s = window_end.replace(tzinfo=timezone.utc).timestamp()
-            tick = dict(tick, pinned_after_window_end_s=round(tick["pinned_at"] - end_s, 1))
-    elif drain.state == "timeout":
-        problem = "gold drain timed out; last tick interrupted"
-    elif drain.state == "driver_gone":
-        problem = "gold-refresh was deleted before it drained; last tick may be interrupted"
-    else:
-        print_warning(f"gold-refresh drain {drain.state}: {drain.reason}")
+    if ticks and ticks[0]["cycle"] != 1:
+        problem = (
+            "driver log incomplete: the gold-refresh log does not reach its first "
+            f"tick (starts at cycle {ticks[0]['cycle']}), so its figures cover part "
+            "of the run"
+        )
     if collector.current_run is not None:
         cont = collector.current_run.continuous
         if cont is None:
             cont = collector.current_run.continuous = {}
-        cont["drain"] = record
-        if ticks is not None:
-            cont["ticks"] = ticks
-            cont["ticks_unpinned"] = ticks_unpinned(ticks)
-        if tt_ticks is not None:
-            cont.setdefault("time_travel", {})["ticks"] = tt_ticks
+        cont["ticks"] = ticks
+        cont["ticks_unpinned"] = ticks_unpinned(ticks)
+        cont.setdefault("time_travel", {})["ticks"] = tt_ticks
         if problem:
             cont.setdefault("gate_problems", []).append(problem)
-    return drain, tick, reason, problem
+    return tick, reason, problem
 
 
 def _stop_streams(k8s, namespace: str, submitted: list) -> list:
@@ -3287,20 +3235,12 @@ def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
     return max(counts) if counts else None
 
 
-def _aml_gate_logs(window_logs: str | None, drain: Any) -> tuple[str | None, dict, dict]:
+def _aml_gate_logs(window_logs: str | None) -> tuple[str | None, dict, dict]:
     """The gold log the AML gate reads, with its TM invariants and statuses
-    by cycle. The drain's log runs past the window's capture to the scored
-    tick, so a drained run reads it; the cycles are the window capture's,
-    then the drain's (the same driver pod: a restart already fails the
-    window)."""
+    by cycle."""
     from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_status
 
-    logs = window_logs
-    if drain is not None and drain.state == "drained" and drain.logs:
-        logs = drain.logs
-    inv = {**parse_tm_invariants(window_logs), **parse_tm_invariants(logs)}
-    status = {**parse_tm_status(window_logs), **parse_tm_status(logs)}
-    return logs, inv, status
+    return window_logs, parse_tm_invariants(window_logs), parse_tm_status(window_logs)
 
 
 @restores_handlers
@@ -3474,9 +3414,6 @@ def _run_sustained(
     # count every bucket is not repeated after the streams stop, whose last
     # micro-batches would then be counted as the window's.
     _sizes_listed = False
-    # The gold-refresh drain at window end (financial only); None
-    # until it has run.
-    _drain = None
     streaming_jobs = [
         (JobType.BRONZE_INGEST, "bronze-ingest"),
         (JobType.SILVER_STREAM, "silver-stream"),
@@ -4511,31 +4448,27 @@ def _run_sustained(
         _total_s3_objects = _measure_bucket_sizes(cfg, collector)
         _sizes_listed = True
 
-        # Ask gold-refresh to finish its tick before the streams stop,
-        # so gold.alerts is whole and the last tick's record names what it
-        # read. After the window's maintenance; nothing maintains after this.
+        # Record the gold-refresh tick trail kept over the window: the
+        # covered scorer and the AML gate read it after the streams stop.
         _scored_tick: dict | None = None
         _tick_reason = ""
         if cfg.architecture.workload.schema_type.value == "financial" and any(
             n == "gold-refresh" for _, n in submitted
         ):
-            _stage = "drain"
-            _drain, _scored_tick, _tick_reason, _drain_problem = drain_gold_refresh(
-                cfg,
-                k8s,
+            _stage = "gold-ticks"
+            _ns_watch.check(time.time() - start)
+            _scored_tick, _tick_reason, _tick_problem = record_gold_tick_records(
                 run_id,
                 collector,
-                window_end=window_end,
-                before_write=lambda: _ns_watch.check(time.time() - start),
                 kept_log=(
                     (lambda: _driver_log_capturer.text("lakebench-gold-refresh"))
                     if _driver_log_capturer is not None
                     else None
                 ),
             )
-            if _drain_problem:
-                print_error(_drain_problem)
-                _record_failure(collector, _drain_problem)
+            if _tick_problem:
+                print_error(_tick_problem)
+                _record_failure(collector, _tick_problem)
                 pipeline_success = False
 
         # Stop streaming jobs. By name: so first make sure the namespace is
@@ -4587,7 +4520,7 @@ def _run_sustained(
         # possible false-fail if driver-log capture times out on a very long
         # run, which is preferred over silently passing an unverifiable run.
         if cfg.architecture.workload.schema_type.value == "financial":
-            gold_logs, _inv, _tm_status = _aml_gate_logs(driver_logs.get("gold-refresh"), _drain)
+            gold_logs, _inv, _tm_status = _aml_gate_logs(driver_logs.get("gold-refresh"))
             alert_count = _aml_cumulative_alerts(gold_logs)
             if gold_logs is None:
                 print_error(
@@ -4761,9 +4694,9 @@ def _run_sustained(
                     _record_failure(collector, problem)
                     pipeline_success = False
 
-        # Recall over what the drained run's last tick saw, with the
-        # streams stopped and every gate decided, so a run that failed one
-        # reads not_scored. Best effort: never fails the run.
+        # Recall over what the last completed tick inside the window saw,
+        # with the streams stopped and every gate decided, so a run that
+        # failed one reads not_scored. Best effort: never fails the run.
         if cfg.architecture.workload.schema_type.value == "financial":
             from lakebench.cli._aml_post import continuous_scoring
 
@@ -4772,7 +4705,6 @@ def _run_sustained(
             _fs = continuous_scoring(
                 cfg,
                 run_id,
-                _drain,
                 _scored_tick,
                 _tick_reason,
                 job_manager,
@@ -4799,7 +4731,6 @@ def _run_sustained(
                     cfg,
                     run_id,
                     collector.current_run.continuous,
-                    _drain,
                     job_manager,
                     monitor,
                     timeout,
@@ -4906,12 +4837,12 @@ def _run_sustained(
             from lakebench.cli._aml_post import not_scored
 
             collector.current_run.financial_scoring = not_scored(
-                "interrupted during the drain"
-                if _stage == "drain"
+                "interrupted while recording the gold-refresh tick trail"
+                if _stage == "gold-ticks"
                 else (
-                    "interrupted before the drain"
-                    if _drain is None
-                    else "interrupted after the drain, before scoring completed"
+                    "interrupted before scoring completed"
+                    if _stage in {"score-financial", "time-travel"}
+                    else "interrupted before scoring"
                 )
             )
         _interrupt.stop_owned(_interrupted, console)

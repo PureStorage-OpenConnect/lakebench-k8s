@@ -143,7 +143,7 @@ Bytes the engines reported reading from and writing to storage, from the record'
 
 ## Storage multiple
 
-Physical bytes over logical bytes, per table, per layer and in total, measured once at run end: after the post-maintenance round (batch), or after the streams stop (continuous; AML after the gold-refresh [drain](../glossary.md#drain), stream stop and score job). It is a condition of the maintenance policy stated with it, not a system score; `storage_multiple_total` is diagnostic.
+Physical bytes over logical bytes, per table, per layer and in total, measured once at run end: after the post-maintenance round (batch), or after the streams stop (continuous; AML after the stream stop and the score job). It is a condition of the maintenance policy stated with it, not a system score; `storage_multiple_total` is diagnostic.
 
 - **Physical**: object bytes under each table's location, one listing per bucket. **Logical**: current snapshot data files (Iceberg `$files`, Delta `DESCRIBE DETAIL`).
 - Physical splits into current data, retained-snapshot data, metadata and other. When orphan removal ran, the unreferenced share is labelled as bounded by its 24 h 10 min floor.

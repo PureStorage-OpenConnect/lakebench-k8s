@@ -415,13 +415,7 @@ def _cfg():
     )
 
 
-def _drained():
-    from lakebench.cli._aml_post import DrainResult
-
-    return DrainResult("drained", last_cycle=3)
-
-
-def _step(cont, s3, *, drain=None, submit_state=None, success=True, run_failed=False):
+def _step(cont, s3, *, submit_state=None, success=True, run_failed=False):
     from lakebench.cli import _aml_post
     from lakebench.spark.job import JobState
 
@@ -436,7 +430,6 @@ def _step(cont, s3, *, drain=None, submit_state=None, success=True, run_failed=F
             _cfg(),
             "run-1",
             cont,
-            drain or _drained(),
             jm,
             mon,
             1200,
@@ -487,7 +480,7 @@ def test_step_deadline_follows_the_cluster_clock():
 
 def test_a_wait_that_ends_first_deletes_the_job():
     out, jm, _mon = _step(_continuous([_rec(2, T2)], []), _S3(), success=False)
-    assert out["verdict"] == "not_run"
+    assert out["verdict"] == "not_run" and "did not complete" in out["reason"]
     jm._delete_job.assert_called_once_with("lakebench-time-travel-financial")
 
 
@@ -503,24 +496,11 @@ def test_step_refuses_a_result_of_another_submission():
     assert out["verdict"] == "not_run" and "not this submission's" in out["reason"]
 
 
-@pytest.mark.parametrize(
-    ("kw", "verdict", "needle"),
-    [
-        ({"drain": "timeout"}, "not_run", "drain timeout"),
-        ({"success": False}, "not_run", "did not complete"),
-        ({"submit_state": "FAILED"}, "not_run", "not submitted"),
-    ],
-)
-def test_step_not_run(kw, verdict, needle):
-    from lakebench.cli._aml_post import DrainResult
+def test_step_not_run():
     from lakebench.spark.job import JobState
 
-    if "drain" in kw:
-        kw["drain"] = DrainResult(kw["drain"], reason="x")
-    if "submit_state" in kw:
-        kw["submit_state"] = JobState.FAILED
-    out, _jm, _mon = _step(_continuous([_rec(2, T2)], []), _S3(), **kw)
-    assert out["verdict"] == verdict and needle in out["reason"]
+    out, _jm, _mon = _step(_continuous([_rec(2, T2)], []), _S3(), submit_state=JobState.FAILED)
+    assert out["verdict"] == "not_run" and "not submitted" in out["reason"]
     assert out["policy"]["configured"] == "30m"
 
 
@@ -692,7 +672,7 @@ def test_a_wait_that_raises_deletes_the_job():
     mon.wait_for_completion.side_effect = RuntimeError("status read 500")
     with patch.object(_aml_post, "_s3_client", return_value=_S3()):
         out = _aml_post.run_time_travel(
-            _cfg(), "run-1", _continuous([_rec(2, T2)], []), _drained(), jm, mon, 1200
+            _cfg(), "run-1", _continuous([_rec(2, T2)], []), jm, mon, 1200
         )
     assert out["verdict"] == "not_run" and "status read 500" in out["reason"]
     jm._delete_job.assert_called_once_with("lakebench-time-travel-financial")
@@ -702,6 +682,7 @@ def test_a_wait_that_raises_deletes_the_job():
 
 
 def test_the_job_hashes_business_columns_only(job):
+    # The run sets the job's excluded columns from its input.
     _run(job, [_rec(2, T2)])
     cols = ["txn_id", "_batch_id", "txn_amount", "_stream_id", "ingest_ts"]
     assert job.mod.business_columns(cols) == ["txn_id", "txn_amount"]
@@ -733,9 +714,10 @@ def test_the_record_says_which_columns_were_hashed():
 # --- order of the post-window steps ---
 
 
-def test_the_reads_follow_the_drain_the_stop_and_the_scorer(monkeypatch, tmp_path):
-    """The reads compare against the tables the scorer saw: drain, stop the
-    streams, score, then read, and the run outcome goes to the reads."""
+def test_the_reads_follow_the_tick_record_the_stop_and_the_scorer(monkeypatch, tmp_path):
+    """The reads compare against the tables the scorer saw: record the
+    tick trail, stop the streams, score, then read, and the run outcome
+    goes to the reads."""
     import time as real_time
 
     from lakebench.cli import _aml_post, _sustained
@@ -790,9 +772,9 @@ def test_the_reads_follow_the_drain_the_stop_and_the_scorer(monkeypatch, tmp_pat
         ),
     )
 
-    def drain(*a, **kw):
-        order.append("drain")
-        return _drained(), None, "", None
+    def record_ticks(*a, **kw):
+        order.append("record-ticks")
+        return None, "", ""
 
     def stop(k8s, ns, subs):
         order.append("stop")
@@ -813,13 +795,13 @@ def test_the_reads_follow_the_drain_the_stop_and_the_scorer(monkeypatch, tmp_pat
         return real_record(cfg, rounds=rounds)
 
     monkeypatch.setattr(_sustained, "continuous_retention_record", record)
-    monkeypatch.setattr(_sustained, "drain_gold_refresh", drain)
+    monkeypatch.setattr(_sustained, "record_gold_tick_records", record_ticks)
     monkeypatch.setattr(_sustained, "_stop_streams", stop)
     monkeypatch.setattr(_aml_post, "continuous_scoring", score)
     monkeypatch.setattr(_aml_post, "run_time_travel", reads)
     monkeypatch.setattr(_aml_post, "settle_time_travel", lambda *a, **kw: None)
     with pytest.raises(BaseException) as ei:  # noqa: B017, PT011 -- the exit is not asserted
         _sustained._run_sustained(cfg, tmp_path / "cfg.yaml", 60, True, 60, skip_generate=True)
-    assert order == ["drain", "stop", "score", "reads"], repr(ei.value)
+    assert order == ["record-ticks", "stop", "score", "reads"], repr(ei.value)
     assert "run_failed" in seen
     assert seen["rounds"] == []

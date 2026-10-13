@@ -783,7 +783,7 @@ def scored_rule_status(metrics: Any) -> tuple[set[str], dict[str, str], dict[str
     covered = scoring.get("covered") if isinstance(scoring, Mapping) else None
     rows = covered.get("rules") if isinstance(covered, Mapping) else None
     if not isinstance(rows, list):
-        rows = _drain_tick_rule_rows(metrics)
+        rows = _scored_tick_rule_rows(metrics)
     if rows is None:
         return None
     ran: set[str] = set()
@@ -820,7 +820,7 @@ def continuous_excluded_rules(metrics: Any) -> frozenset[str]:
     covered = scoring.get("covered") if isinstance(scoring, Mapping) else None
     rows = covered.get("rules") if isinstance(covered, Mapping) else None
     if not isinstance(rows, list):
-        rows = _drain_tick_rule_rows(metrics)
+        rows = _scored_tick_rule_rows(metrics)
     rows = [r for r in rows or [] if isinstance(r, Mapping) and r.get("rule_id")]
     out = set(AML_CONTINUOUS_SKIPPED_RULES)
     out |= {
@@ -842,18 +842,22 @@ def continuous_excluded_rules(metrics: Any) -> frozenset[str]:
     return frozenset(out)
 
 
-def _drain_tick_rule_rows(metrics: Any) -> list[dict[str, Any]] | None:
-    """The drain tick's rule status (``continuous.ticks[].rule_status`` of
-    the drain's last completed cycle) as covered-score rule rows, for a run
-    whose scoring did not run; None when not recorded."""
+def _scored_tick_rule_rows(metrics: Any) -> list[dict[str, Any]] | None:
+    """The last completed and committed tick's rule status
+    (``continuous.ticks[].rule_status``) as covered-score rule rows, for a
+    run whose scoring did not run; None when not recorded."""
     cont = getattr(metrics, "continuous", None)
     if not isinstance(cont, Mapping):
         return None
-    drain = cont.get("drain")
-    cycle = drain.get("last_completed_cycle") if isinstance(drain, Mapping) else None
     ticks = [t for t in cont.get("ticks") or [] if isinstance(t, Mapping)]
-    match = [t for t in ticks if cycle is not None and t.get("cycle") == cycle]
-    status = match[-1].get("rule_status") if match else None
+    scorable = [
+        t
+        for t in ticks
+        if t.get("completed_at") is not None and t.get("committed_alerts") is not None
+    ]
+    status = (
+        max(scorable, key=lambda t: t.get("cycle") or 0).get("rule_status") if scorable else None
+    )
     if not isinstance(status, Mapping):
         return None
     rows = []
@@ -879,7 +883,7 @@ def _aml_rules_gate(metrics: PipelineMetrics) -> _GateResult:
     (``scored_rule_status``) the same way, with no skip allowed: a rule that
     skipped or failed there fails, even if it alerted on earlier ticks. It
     also fails zero alerts unless a cycle could not count them. A continuous
-    record with no scored status and no logged drain-tick status takes the
+    record with no scored status and no logged tick rule status takes the
     rules from the per-rule time-to-detect lines (rules that alerted on some
     tick), with a warning that the scored rule set is not recorded.
     """

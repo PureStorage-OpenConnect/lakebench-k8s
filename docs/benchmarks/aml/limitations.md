@@ -127,7 +127,6 @@ Lakebench 1.6, not in the repository:
 | 1.6 continuous, scale 1 | hive-iceberg-spark-trino | PASSED |
 
 - They carry workload version `aml-1` and experiment schema `exp1`.
-- They predate the continuous [drain](../../glossary.md#drain), covered
-  scoring, reason codes and record gates.
+- They predate continuous covered scoring, reason codes and record gates.
 - Each is n=1 at its own development seed, on Spark 4.0.2.
 - They are not comparable with a 1.7 run ([10](comparability.md#10-comparability)).

@@ -7,7 +7,7 @@
 | Composition | Iceberg and one of the 8 Iceberg 4-tuples ([11](../AML.md#11-supported-compositions)); `custom` refused | config load |
 | Scale | above 800 refused; above 300 up to 800 runs as unverified, with a note ([3.2](generation.md#32-scale-factor)) | config load, run start (`config/support.py`) |
 | Support state | `unsupported` refused at run start (exit 2); `--local` refused for AML | `lakebench run` |
-| Stages | batch: bronze-verify, silver-build, gold-finalize, then scoring and the AML gates; continuous: bronze-ingest, silver-stream, gold-refresh, then the [drain](../../glossary.md#drain) and covered scoring | `run`; scoring and gates only on a full run (no `--stage`) whose stages succeeded |
+| Stages | batch: bronze-verify, silver-build, gold-finalize, then scoring and the AML gates; continuous: bronze-ingest, silver-stream, gold-refresh, then covered scoring over the last tick inside the window | `run`; scoring and gates only on a full run (no `--stage`) whose stages succeeded |
 | Corpus | batch datagen only with `--generate` (a multi-cycle run generates in its cycles and refuses the flag); continuous always generates unless `--skip-generate` | `run` |
 | Seed | per [3.3](seed-policy.md#33-seed-policy); leave `datagen.corpus_role` unset on a `run` config | config load (seed and role checks); the role on a `run` config is not refused ([12](limitations.md#12-known-limitations)) |
 | Benchmark iterations | `benchmark.iterations`, 1 to 100, default 3 (batch); continuous rounds take 1 sample | config load |
@@ -118,7 +118,6 @@ Also prohibited, not enforced:
 | TM `max_alerts_per_customer` | 50,000 | excess alerts dispositioned `over_capacity` | `limits.tm_alerts_over_capacity`, `limits.bound` |
 | Pre-benchmark maintenance budget | 1,800 s | remaining maintenance stopped | `limits.maintenance_stopped`, `limits.bound` |
 | Continuous [trickle](../../glossary.md#trickle) `max_files_per_trigger` | unset (no limit) with the run's own datagen; derived per run (1 to 50) under `--skip-generate` ([4.3](pipeline.md#43-continuous-mode)); or set in config | when set, it sets the offered load; `sustained_throughput_rps` and `corpus_ingest_ratio` then measure a Lakebench-set arrival rate | `continuous.trickle`, `limits.max_files_per_trigger`, `limits.trickle_bound` and a `trickle:` line in `limits.bound` (never in `bound_kinds`) |
-| Continuous drain budget | 1,800 s (300 s under `lakebench stop`) | a [tick](../../glossary.md#tick) that takes longer fails the run | drain problem in `verdict.reasons`; `financial_scoring.status: not_scored` |
 | Query timeout | 900 s | query fails, run fails | query error |
 
 `intake_limit` reads `trickle_rate` only when `ingest_ratio` is below 0.95, so
