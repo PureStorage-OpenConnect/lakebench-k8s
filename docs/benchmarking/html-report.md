@@ -14,7 +14,7 @@ Deployment name, run id and a status badge:
 
 A one-line banner shows pipeline mode, Customer 360 scale factor, the recipe (`catalog-format-engine-query_engine`) and wall-clock duration.
 
-**Read this first.** The panel under the header comes before any metric. In order:
+**Run record.** The panel at the bottom of the page, after every section. In order:
 
 - **Verdict** and **headline**. The verdict is the stricter of the stored one and one recomputed today; a record is never promoted. A difference is shown, for example "FAILED (stored PASSED; recomputed FAILED)". The headline is a failed run's first reason, the first warning, or for a clean pass the workload, mode, scale, rules run and n.
 - **Evidence class**: "development" for standard runs; registered evaluation runs show their role.
@@ -22,7 +22,7 @@ A one-line banner shows pipeline mode, Customer 360 scale factor, the recipe (`c
 - Qualifiers: rules skipped on a cap, layers without row counts, Customer 360 checks failed outside the gating set.
 - Limits: n=1, rules skipped or errored (and the rules continuous AML does not run), AML recall uncalibrated and in-sample, a dirty tree.
 
-`lakebench report` prints the same front matter before its scores; `run` prints it after saving (not for `--local`).
+`lakebench report` prints the same record before its scores; `run` prints it after saving (not for `--local`).
 
 The delivered `report.html` is written before any look can name the run, so it reads "development"; `lakebench report --render` afterwards reads the look.
 
@@ -40,7 +40,7 @@ The replay plays the recorded timeline back, with play and pause, 1x/2x/4x speed
 
 ## Scorecard tiles
 
-The Scorecard tab opens on eight tiles, then the front matter and the sections below. Each tile cites the record field it reads (hover it). A field the record does not hold shows NR with the reason, never zero.
+The Scorecard tab opens on eight tiles, then the sections below; the run record closes the page. Each tile cites the record field it reads (hover it). A field the record does not hold shows NR with the reason, never zero.
 
 | Tile | Batch | Continuous |
 |---|---|---|
