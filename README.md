@@ -77,7 +77,7 @@ lakebench destroy lakebench.yaml                        # remove what this deplo
 - `destroy` removes only what this deployment created. It asks for
   confirmation unless `--yes` is passed.
 
-The full walkthrough is [Getting Started](docs/getting-started.md).
+The full walkthrough is [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md).
 
 ## Results
 
@@ -114,20 +114,20 @@ Lakebench does not provision the Kubernetes cluster or the storage.
 
 - Room for the workload. Scale 1 batch needs about 41 cores and 544 GB;
   requirements grow with scale and differ by workload and mode.
-  `lakebench plan` checks the cluster and [Sizing](docs/sizing.md) lists
+  `lakebench plan` checks the cluster and [Sizing](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/sizing.md) lists
   every combination.
 
-[Prerequisites](docs/prerequisites.md) lists every check and its fix.
+[Prerequisites](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/prerequisites.md) lists every check and its fix.
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md): install, first run, teardown
-- [Documentation index](docs/README.md): full navigation
-- [Configuration](docs/configuration.md): every YAML field
-- [CLI Reference](docs/cli-reference.md): every command and flag
-- [Workloads](docs/README.md#workloads): Customer 360 and AML
-- [Recipes](docs/recipes.md): supported architectural compositions
-- [Results & Comparison](docs/README.md#results--comparison): measurements
+- [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md): install, first run, teardown
+- [Documentation index](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/README.md): full navigation
+- [Configuration](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/configuration.md): every YAML field
+- [CLI Reference](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/cli-reference.md): every command and flag
+- [Workloads](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/README.md#workloads): Customer 360 and AML
+- [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md): supported architectural compositions
+- [Results & Comparison](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/README.md#results--comparison): measurements
   and interpretation
 
 ## License
