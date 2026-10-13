@@ -63,11 +63,11 @@ _PROFILES: dict[tuple[str, str], dict[str, Any]] = {
             "Rows generated",
             "Rows ingested",
             "Rows prepared",
-            "Transactions screened",
+            "Payments screened",
             "Queries completed",
         ),
         # The count a stage shows when it is not its output_rows: the monitor
-        # stage's output is the alerts it raised, its work is the transactions
+        # stage's output is the alerts it raised, its work is the payments
         # it screened.
         "fields": {"gold": "input_rows"},
     },
@@ -483,6 +483,9 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
         "duration": duration,
         "stages": stages,
         "jobs": jobs,
+        "pair": [3, 4]
+        if sustained and profile.get("workload") == "financial"
+        else None,
         "storage": storage,
         "storage_unplaced": [i.get("source") for i in not_placed],
         "storage_gaps": gaps,
@@ -505,19 +508,23 @@ _CSS = """
 #lb-replay .canvas{background:#fff;border:1px solid #dce6dd;border-radius:12px;display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 #lb-replay .layer-head{flex-shrink:0;min-height:34px;padding:7px 13px;display:flex;align-items:center;justify-content:space-between;gap:8px;border-bottom:1px solid #e4ebe5;font-size:14px;font-weight:750}
 #lb-replay .layer-head small{font-size:12px;color:#75897a;font-weight:450}
-#lb-replay .runsteps{display:flex;gap:7px;padding:9px 12px 6px;flex:1;min-height:188px;align-items:stretch}
-#lb-replay .step{flex:1;min-width:0;padding:12px;background:#fbfcfa;border:1px solid #dce5de;border-radius:11px;display:flex;flex-direction:column;gap:6px;opacity:.82;transition:flex .3s,border .3s,background .3s;cursor:pointer}
-#lb-replay .step.current{flex:1.75;background:#fff;border:2px solid #6ba886;opacity:1;box-shadow:0 4px 15px #31644610}
+#lb-replay .runsteps{display:flex;gap:10px;padding:14px 16px 10px;flex:1;min-height:260px;align-items:stretch}
+#lb-replay .step{flex:1;min-width:0;padding:16px;background:#fbfcfa;border:1px solid #dce5de;border-radius:12px;display:flex;flex-direction:column;gap:8px;opacity:.8;transition:flex .4s,border .3s,background .3s,opacity .3s;cursor:pointer}
+#lb-replay .step.current{flex:1.9;background:#fff;border:2px solid #6ba886;opacity:1;box-shadow:0 6px 22px #3164461a}
 #lb-replay .step.done{opacity:.9}
 #lb-replay .step[data-id="4"].current{border-color:#9071b2}
 #lb-replay .step small{font-size:12px;text-transform:uppercase;letter-spacing:.7px;font-weight:850;color:#567b67}
-#lb-replay .step h2{font-size:23px;letter-spacing:-.8px;margin:0}
+#lb-replay .step h2{font-size:26px;letter-spacing:-.8px;margin:0}
 #lb-replay .step .implementation{font-size:13px;color:#778a7e}
-#lb-replay .art{height:80px;flex:1;min-height:60px;display:flex;align-items:center;justify-content:center;background:#f3f8f4;border-radius:8px;overflow:hidden}
+#lb-replay .art{height:100px;flex:1;min-height:70px;display:flex;align-items:center;justify-content:center;background:#f3f8f4;border-radius:8px;overflow:hidden}
 #lb-replay .step.current .art{background:#edf6ef}
-#lb-replay .art svg{width:100%;height:100%;max-height:115px}
-#lb-replay .value{border-top:1px solid #e7eee7;padding-top:7px;margin-top:auto}
-#lb-replay .value strong{font-size:26px;letter-spacing:-.7px;display:block;font-variant-numeric:tabular-nums}
+#lb-replay .step.current .art svg{animation:rp-pulse 2.4s ease-in-out infinite}
+@keyframes rp-pulse{0%,100%{opacity:.78;transform:scale(1)}50%{opacity:1;transform:scale(1.045)}}
+@media(prefers-reduced-motion:reduce){#lb-replay .step.current .art svg{animation:none}}
+#lb-replay .art svg{width:100%;height:100%;max-height:130px;transform-origin:center}
+#lb-replay .value{border-top:1px solid #e7eee7;padding-top:9px;margin-top:auto}
+#lb-replay .value strong{font-size:clamp(18px,2.4vw,27px);letter-spacing:-.7px;display:block;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:clip}
+#lb-replay .step.current .value strong{font-size:clamp(22px,2.9vw,34px)}
 #lb-replay .value label{font-size:12px;color:#778b7d}
 #lb-replay .phasepanel{margin:1px 12px 6px;border:1px solid #d9e7dd;background:#f7faf7;border-radius:9px;padding:8px 12px;min-height:78px;display:grid;grid-template-columns:1.2fr 2.3fr;gap:14px;align-items:center}
 #lb-replay .phasename small{font-size:12px;color:#518166;font-weight:750}
@@ -539,12 +546,12 @@ _CSS = """
 #lb-replay .track{height:6px;border-radius:10px;background:#e7f0e8;overflow:hidden;margin-top:8px}
 #lb-replay .fill{height:100%;width:0;background:#73ad8b;transition:width .2s}
 #lb-replay .handoff .sub{font-size:11px;color:#7f9184;margin-top:3px}
-#lb-replay .platform{margin:0 12px 6px;border:1px solid #dce6dd;background:#fafdfa;border-radius:8px;padding:8px 12px;flex:0 0 192px;min-height:0}
+#lb-replay .platform{margin:0 12px 6px;border:1px solid #dce6dd;background:#fafdfa;border-radius:8px;padding:10px 14px;flex:0 0 232px;min-height:0}
 #lb-replay .platformnav{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
 #lb-replay .platformnav button{border:1px solid #d7e5dc;border-radius:6px;background:#fff;color:#57715e;padding:5px 11px;font-size:12px}
 #lb-replay .platformnav button.on{background:#e3f3e9;border-color:#82b89b;color:#1d6548;font-weight:800}
 #lb-replay .platformnav button:last-of-type{margin-right:auto}
-#lb-replay .traces{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:7px;height:125px}
+#lb-replay .traces{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:7px;height:160px}
 #lb-replay .graph{border:1px solid #e0ebe2;border-radius:7px;padding:8px;display:flex;flex-direction:column;min-width:0}
 #lb-replay .graph .charttitle{display:flex;align-items:center;justify-content:space-between}
 #lb-replay .graph .charttitle b{font-size:13px}
@@ -555,7 +562,8 @@ _CSS = """
 #lb-replay .controls input{flex:1;min-width:0;accent-color:#6fbb89}
 #lb-replay .controls .time{font:12px ui-monospace,monospace;color:#e9f4ec;min-width:104px;text-align:right}
 #lb-replay .controls .mark{font-size:11px;color:#d6e5d8;white-space:nowrap}
-@media(min-width:1100px) and (min-height:760px){#lb-replay .runsteps{min-height:150px}#lb-replay .step{padding:10px}#lb-replay .art{min-height:45px}#lb-replay .phasepanel{min-height:70px}#lb-replay .platform{flex-basis:170px}#lb-replay .traces{height:105px}#lb-replay .headline h1{font-size:23px}#lb-replay .value strong{font-size:23px}#lb-replay .step h2{font-size:21px}}
+/* Short viewports: keep everything inside one frame without scroll. */
+@media(max-height:820px){#lb-replay .runsteps{min-height:170px;padding:9px 12px 6px}#lb-replay .step{padding:11px;gap:5px}#lb-replay .step h2{font-size:21px}#lb-replay .art{min-height:46px}#lb-replay .value strong{font-size:24px}#lb-replay .step.current .value strong{font-size:27px}#lb-replay .phasepanel{min-height:64px}#lb-replay .traces{height:108px}#lb-replay .platform{flex-basis:168px}}
 @media(max-width:900px){#lb-replay .runsteps{overflow-x:auto;min-height:310px}#lb-replay .step{flex:0 0 175px}#lb-replay .step.current{flex:0 0 245px}#lb-replay .pipe{grid-template-columns:repeat(2,1fr)}#lb-replay .phasepanel{grid-template-columns:1fr}#lb-replay .platform{flex:auto}#lb-replay .traces{height:170px}#lb-replay .controls{position:sticky;bottom:0}}
 
 #lb-replay{font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#1c332c;margin-bottom:1.5rem}
@@ -630,6 +638,16 @@ function plotLag(){var o='<rect width="600" height="80" fill="#f4f8f4"/>'+shade(
   o+='<path d="'+d+'" fill="none" stroke="'+cols[k%3]+'" stroke-width="2.5" stroke-linejoin="round"/>'});
  var cx=5+590*t/T;o+='<line x1="'+cx+'" x2="'+cx+'" y1="2" y2="78" stroke="#277353" stroke-width="2" stroke-dasharray="3 3"/>';$('#rp-lplot').innerHTML=o}
 var st=D.storage,SMAX=st?Math.max(1,Math.max.apply(null,st.read.concat(st.write))):1;
+function phaseNote(i,s,ff){
+ if(D.kind!=='sustained')return ff===null?'no window recorded':ff===0?'not started':ff===1?'complete':Math.round(ff*100)+'% of the stage window';
+ // All five cards share one measured window, so a per-stage percentage is
+ // meaningless. Count the recorded events of the focused stage instead.
+ var ev=(s.events||[]).filter(function(e){return e<=t});
+ if(ff===null)return 'no window recorded';
+ if(ev.length&&s.steps)return 'cycle '+ev.length+' of '+s.steps.length;
+ if(ev.length>1)return ev.length+' recorded events';
+ return 'streaming · '+fmtT(t)+' into the window';
+}
 function draw(){
  var cur=null,doneAll=t>=T,lastStarted=null,lastEv=-1,evAt=-1;
  S.forEach(function(s,i){
@@ -641,15 +659,19 @@ function draw(){
   c.classList.toggle('done',stt==='done')});
  var auto=D.kind==='sustained'?(lastEv>=0?lastEv:0):(lastStarted!==null?lastStarted:0);
  var focus=sel!==null?sel:auto;
- S.forEach(function(s,i){root.querySelector('[data-step="'+i+'"]').classList.toggle('current',i===focus)});
+ // Monitor and Detect move as a pair: the gold cycle that screens payments is
+ // the cycle whose alerts land, so when the focus reaches the scoring stage in
+ // an AML sustained run the alert card enlarges with it.
+ var pair=sel===null&&D.kind==='sustained'&&D.pair&&focus===D.pair[0]?D.pair[1]:-1;
+ S.forEach(function(s,i){var on=i===focus||i===pair;root.querySelector('[data-step="'+i+'"]').classList.toggle('current',on)});
  var f=S[focus],ff=frac(f);
  $('#rp-phase').textContent=f.phase+' · '+f.name;
- $('#rp-phasenote').textContent=ff===null?'no window recorded':ff===0?'not started':ff===1?'complete':Math.round(ff*100)+'% of the stage window';
+ $('#rp-phasenote').textContent=phaseNote(focus,f,ff);
  J.forEach(function(j,i){var c=root.querySelector('[data-job="'+i+'"]');
   var js=(j.start==null||j.end==null)?null:(t<j.start?'waiting':t>=j.end?'done':'running');
   c.classList.toggle('on',js==='running');
-  c.querySelector('strong').textContent=js==='done'&&j.elapsed!=null?j.elapsed.toFixed(1)+' s':js==='running'?'running':'-';
-  c.querySelector('span').textContent=js==='done'&&j.success===false?'failed':js||''});
+  c.querySelector('strong').textContent=js===null?'-':js;
+  c.querySelector('span').textContent=js==='done'?(j.success===false?'failed':j.elapsed!=null?j.elapsed.toFixed(1)+' s':''):js==='running'?'streaming':js==='waiting'?'not started':''});
  if(D.kind==='sustained')lagBars();else for(var i=0;i<4;i++){var b=S[i+1],fb=frac(b);
   $('[data-f="'+i+'"]').style.width=(fb===null?0:fb*100)+'%';
   $('[data-h="'+i+'"]').textContent=fb===null?'NR':fb===0?'Waiting':fb===1?'Complete':'Processing';
