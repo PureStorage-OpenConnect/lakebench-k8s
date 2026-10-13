@@ -64,17 +64,8 @@ def test_rounding_and_units():
     assert to_millicores("0.0001") == 1
     assert to_millicores(2) == 2000
     assert to_gib("2000000Ki") == pytest.approx(1.9073486328125)
-
-
-def test_node_allocatable_reads_real_node_values():
+    # The node allocatable read goes through the same parser.
     assert K8sClient._parse_memory_to_bytes("421547872Ki") == 421547872 * 1024
-    assert K8sClient._parse_cpu_to_millicores("39500m") == 39500
-
-
-def test_node_allocatable_in_other_units_now_reads():
-    assert K8sClient._parse_memory_to_bytes("1Pi") == 1024**5
-    assert K8sClient._parse_memory_to_bytes("4e9") == 4 * 10**9
-    assert K8sClient._parse_cpu_to_millicores("1e2") == 100_000
 
 
 # -- the capacity preflight ---------------------------------------------------

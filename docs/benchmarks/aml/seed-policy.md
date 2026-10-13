@@ -2,9 +2,9 @@
 
 ## 3.3 Seed policy
 
-A financial seed is mandatory: the generator exits 2 with no seed, and (default
-image, or any image built from this release's source) with both `--seed` and
-`LB_DATAGEN_SEED`. Resolution and refusals run at config load
+A financial seed is mandatory: the generator exits 2 with no seed and, on the
+default image or any image built from this release's source, with both `--seed`
+and `LB_DATAGEN_SEED`. Resolution and refusals run at config load
 (`config/datagen_seed.py`, called from the workload validator in
 `config/schema.py`); a refused config exits 2 before anything deploys.
 
@@ -25,7 +25,7 @@ calibration replicate with it. The reference scorer reads the perturbation
 from the manifest's stamp, not the config.
 
 **Held-out checks.** Five points hash the seed they see against the per-role
-hashes; no refusal message prints a held-out seed:
+hashes. No refusal message prints a held-out seed.
 
 1. config load;
 2. the look guard after it (below);
@@ -76,9 +76,8 @@ prefix at one where this host generated a registered corpus.
   runs that check alone first; a check that could not run (storage error)
   exits 1.
 - `scripts/aml_heldout_audit.py` lists this host's run records, journals,
-  ledgers and ledger buckets that touch a protected corpus. An AML record is
-  also known by its workload name, so one missing its corpus block is listed
-  as unidentified.
+  ledgers and ledger buckets that touch a protected corpus. An AML record with
+  no corpus block is listed as unidentified.
 - A run record, its datagen fleet record and its HTML report never show a
   protected seed (held out, spent or with a recorded look). It is recorded as
   its salted reference (`{"seed_ref": ..., "role": ...}`, the role set for a
@@ -90,23 +89,21 @@ prefix at one where this host generated a registered corpus.
 - `destroy` and the read-only commands skip the load-time seed check, so a
   deployment that generated a registered corpus can still be torn down.
 
-A protected corpus cannot be scored by accident from Lakebench, and the
-scorers' manifest checks catch a hand-made datagen Job. They read only the
-manifest, so transaction files from another generator run left in the same
-bronze prefix go undetected. Generate each corpus into its own prefix.
+The scorers' manifest checks also catch a hand-made datagen Job. They read
+only the manifest, so transaction files from another generator run left in the
+same bronze prefix go undetected. Generate each corpus into its own prefix.
 
 **Hash strength.** The salt in `heldout_hashes.json` is public, so a hash
 hides only a uniform 63-bit seed. The current 8-digit seeds are recovered in
-seconds; they are already public, so the hash records their role. A held-out
-seed added later must be a uniform 63-bit draw.
+seconds and are already public; their hash records the role. A held-out seed
+added later must be a uniform 63-bit draw.
 
 **Publishing and looks.**
 
-- Numbers published for comparison should cite the run's seed and, when it
-  is 43, say so.
+- Published numbers cite the run's seed and, when it is 43, say so.
 - The AML protocol grants each held-out seed exactly one registered look.
-- The look, its calibration and its predictions use one datagen image, named
-  by digest.
+- The look, its calibration and its predictions use one datagen image, named by
+  digest.
 - A change to generator output needs a new image and a `MODEL_VERSION` bump,
   and a look on that image needs its calibration re-run.
 - Datagen is never tuned to a rule's recall or false-positive rate on any

@@ -57,6 +57,7 @@ from common import (
     assert_progress,
     await_stream,
     check_bronze_fingerprint,
+    create_namespace,
     data_clock_date,
     emit_stream_scale_admission,
     ensure_column,
@@ -165,6 +166,9 @@ def main() -> None:
     checkpoint_location = env("CHECKPOINT_LOCATION")
     trigger_interval = env("TRIGGER_INTERVAL", "0 seconds")
     target_file_size_bytes = env("TARGET_FILE_SIZE_BYTES", "536870912")
+    # Soft cap on bronze rows read per trigger (Iceberg
+    # streaming-max-rows-per-micro-batch); 0 lifts it.
+    max_rows_per_trigger = int(env("SILVER_MAX_ROWS_PER_TRIGGER", "0"))
 
     bronze_tbl = f"{catalog}.{env('LB_BRONZE_TABLE', 'default.bronze_raw')}"
     silver_tbl = f"{catalog}.{env('LB_SILVER_TABLE', 'silver.customer_interactions_enriched')}"
@@ -188,7 +192,7 @@ def main() -> None:
     log("Creating Iceberg namespace...")
     try:
         silver_warehouse = silver_uri + "warehouse/silver.db/"
-        spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.silver LOCATION '{silver_warehouse}'")
+        create_namespace(spark, catalog, "silver", silver_warehouse)
         log(f"Created namespace {catalog}.silver")
     except Exception as e:
         log(f"Namespace creation note: {str(e)}")
@@ -245,7 +249,13 @@ def main() -> None:
             nonlocal rows_written_total
             rows_written_total += int(written or 0)
 
-    stream = spark.readStream.format("iceberg").load(bronze_tbl)
+    reader = spark.readStream.format("iceberg")
+    # A micro-batch takes the next whole data file, then stops adding files
+    # once max_rows_per_trigger would be exceeded, so a slow batch cannot make
+    # the next one unboundedly larger. 0 lifts the cap (take every snapshot).
+    if max_rows_per_trigger > 0:
+        reader = reader.option("streaming-max-rows-per-micro-batch", str(max_rows_per_trigger))
+    stream = reader.load(bronze_tbl)
     query = (
         stream.writeStream.foreachBatch(_foreach_batch)
         .option("checkpointLocation", checkpoint_location)

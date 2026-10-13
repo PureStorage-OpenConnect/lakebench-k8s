@@ -1,10 +1,8 @@
 # Troubleshooting
 
-Guide: find the cause and fix for a Lakebench failure, by symptom.
-
-Entries are grouped by area and cover OpenShift and vanilla Kubernetes. Most
-end with the code that implements the behaviour, so you can check it against
-the version you run. Why the code is the way it is: [Internals](development.md#why-it-is-built-this-way).
+Causes and fixes for Lakebench failures, by symptom, on OpenShift and vanilla
+Kubernetes. Most entries end with the code that implements the behaviour.
+Design background: [Internals](development.md#why-it-is-built-this-way).
 
 ---
 
@@ -17,18 +15,22 @@ the version you run. Why the code is the way it is: [Internals](development.md#w
 read-only commands still load it)`, or the same for `prometheus`, `grafana`
 or another key.
 
-**Cause:** the key once existed and no longer does anything. `images.hive`
-never chose the Hive that runs (the Stackable HiveCluster always runs Hive
-3.1.3); `images.prometheus` and `images.grafana` were never read, because
-Prometheus and Grafana come from the kube-prometheus-stack chart. A removed
-key still at its old default is dropped with a note; any other value is
-refused by the commands that change data, so a config that seems to choose
-something cannot run as if it did.
+**Cause:** the key no longer does anything. `images.hive` never chose the
+Hive that runs (the Stackable HiveCluster always runs Hive 3.1.3).
+`images.prometheus` and `images.grafana` became
+`observability.prometheus_image` and `observability.grafana_image` in 1.7.2.
+Other keys removed in 1.7.2 include `observability.chart_version`,
+`observability.storage_class` (now `observability.prometheus_storage_class`)
+and the per-mode executor keys `bronze_ingest_executors`,
+`silver_stream_executors` and `gold_refresh_executors` (now
+`bronze_executors`, `silver_executors` and `gold_executors`; the `*_cores`
+keys follow). A removed key still at its old default is dropped with a note;
+any other value is refused by commands that change data. The error names the
+replacement.
 
-**Fix:** delete the key. To pin Prometheus and Grafana, set
-`observability.chart_version`. `destroy`, `status` and the read-only
-commands still load the old config, so you can tear down or inspect a
-deployment made with it.
+**Fix:** delete the key or move the value to its replacement. `destroy`,
+`status` and the read-only commands still load the old config, so you can
+tear down or inspect a deployment made with it.
 
 Code: `src/lakebench/config/schema.py:ImagesConfig`,
 `src/lakebench/config/schema.py:STACKABLE_HIVE_VERSION`.
@@ -39,13 +41,12 @@ Code: `src/lakebench/config/schema.py:ImagesConfig`,
 catalog=..., table_format=..., engine=..., query_engine=...`, followed by a
 `Why:` line.
 
-**Cause:** the four components cannot produce correct results together, so
-Lakebench refuses them instead of running a comparison it cannot trust
+**Cause:** the four components cannot produce correct results together
 (DuckDB with Delta, Polaris with Delta, and every Unity combination among
-them). The `Why:` line, where there is one, gives the reason, and a
-`Closest supported:` line names the nearest combination that works. The
+them), so Lakebench refuses them. The `Why:` line gives the reason and a
+`Closest supported:` line names the nearest working combination. The
 [Compatibility Matrix](compatibility-matrix.md#excluded-combinations) lists
-every exclusion with its reason.
+every exclusion.
 
 **Fix:** pick a combination from [Recipes](recipes.md) or the
 compatibility matrix, or take the one the `Closest supported:` line names.
@@ -58,22 +59,21 @@ Code: `src/lakebench/config/schema.py:_SUPPORTED_COMBINATIONS`,
 **Symptom:** config load fails with `Unsupported Spark version 4.2 in image
 '...'. Tested versions: 3.5.x ..., 4.0.x ..., 4.1.x ...`.
 
-**Cause:** no Iceberg release (as of 2026-09) ships a Spark 4.2 runtime, and borrowing the
+**Cause:** no Iceberg release ships a Spark 4.2 runtime, and borrowing the
 4.1 runtime fails at the first table write with
-`IncompatibleClassChangeError`. Only the Spark minors in the list are
-accepted.
+`IncompatibleClassChangeError`. Only the listed Spark minors are accepted.
 
 **Fix:** use a Spark 4.1, 4.0 or 3.5 image.
 
 Code: `src/lakebench/modules/pipeline_engines/spark/job.py:_SUPPORTED_SPARK_VERSIONS`.
 
-### "Iceberg 1.11.0 requires Java 17"
+### "Iceberg 1.12.0 requires Java 17"
 
-**Symptom:** config load fails with `Iceberg 1.11.0 requires Java 17, but
+**Symptom:** config load fails with `Iceberg 1.12.0 requires Java 17, but
 the Spark image '...' ships Java 11`, or loading a Spark 3.5 config logs
 that it is using Iceberg 1.10.1 instead of the default.
 
-**Cause:** Iceberg 1.11 jars are built for Java 17, and the plain
+**Cause:** Iceberg 1.11 and later jars are built for Java 17, and the plain
 `apache/spark:3.5.x-python3` images ship Java 11. On such an image Lakebench
 picks Iceberg 1.10.1 when you did not choose a version, and refuses when you
 did (otherwise the job would fail inside the driver with
@@ -105,8 +105,7 @@ Code: `src/lakebench/modules/pipeline_engines/spark/job.py:_FORMAT_VERSION_COMPA
 **Symptom:** while choosing a version to pin, a Maven Central search returns
 nothing for an artifact Lakebench builds, such as `delta-spark_4.1_2.13`.
 
-**Cause:** the search index lags and misses some artifacts. The artifact is
-real if its POM downloads.
+**Cause:** the search index lags. The artifact exists if its POM downloads.
 
 **Fix:** fetch the POM and check the status code:
 
@@ -576,12 +575,11 @@ time`. (Older versions failed with `IllegalArgumentException: already been
 bootstrapped`.)
 
 **Cause:** the bootstrap Job could not finish: usually PostgreSQL or the
-Polaris server was not ready, or the Job failed three times. The message is
-the same for a failed Job and for a timeout. A realm that was bootstrapped
-before is not the cause: the Job's script treats `already been
-bootstrapped` as success and prints `Realm already bootstrapped (OK)`, and
-deploy deletes the old Job before creating a new one (Kubernetes Jobs are
-immutable).
+Polaris server was not ready, or the Job failed three times. A failed Job
+and a timeout give the same message. A realm bootstrapped before is not the
+cause: the script treats `already been bootstrapped` as success and prints
+`Realm already bootstrapped (OK)`. Deploy deletes the old Job before
+creating a new one.
 
 **Fix:** read the Job's log (`kubectl logs -n <namespace>
 job/lakebench-polaris-bootstrap`), fix what it reports, and re-run
@@ -604,21 +602,22 @@ when told not to (the upstream report is
 [apache/polaris#379](https://github.com/apache/polaris/issues/379)). With
 Lakebench's catalog settings, an older Polaris is the most likely cause.
 
-**Fix:** use the default Polaris (1.6.0) or any release from
-1.3.0-incubating on. The version that runs is the tag of `images.polaris`.
+**Fix:** use the default Polaris (1.8.0) or any release from
+1.3.0-incubating on. The running version is the tag of `images.polaris`.
 If you pinned an older one, update both images:
 
 ```yaml
 images:
-  polaris: "apache/polaris:1.6.0"
-  polaris_admin_tool: "apache/polaris-admin-tool:1.6.0"
+  polaris: "apache/polaris:1.8.0"
+  polaris_admin_tool: "apache/polaris-admin-tool:1.8.0"
 ```
 
-The STS skip is per catalog: the bootstrap Job creates the catalog with `stsUnavailable: true`
-and `pathStyleAccess: true`, and the server gets static S3 credentials in
-its ConfigMap. Do not add a server-wide credential-subscoping override: it
-drops the endpoint and path-style settings, and Polaris's server-side
-S3FileIO then falls back to `s3.amazonaws.com`.
+The STS skip is per catalog: the bootstrap Job creates the catalog with
+`stsUnavailable: true` and `pathStyleAccess: true`, and the server gets
+static S3 credentials in its ConfigMap. Do not add a server-wide
+credential-subscoping override: it drops the endpoint and path-style
+settings, and Polaris's S3FileIO then falls back to `s3.amazonaws.com`.
+See [Polaris](component-polaris.md#version-and-image).
 
 Code: `src/lakebench/templates/polaris/bootstrap-job.yaml.j2`,
 `src/lakebench/templates/polaris/configmap.yaml.j2`,
@@ -630,10 +629,10 @@ Code: `src/lakebench/templates/polaris/bootstrap-job.yaml.j2`,
 with `manifest unknown`.
 
 **Cause:** `apache/polaris:1.3.0` was never published. Polaris left the
-Apache incubator at 1.4.0, so 1.4.0 and later (the default 1.6.0 among them)
+Apache incubator at 1.4.0, so 1.4.0 and later (the default 1.8.0 among them)
 have no `-incubating` suffix, and 1.3.0 exists only with it.
 
-**Fix:** pin `apache/polaris:1.3.0-incubating`, or use the default 1.6.0.
+**Fix:** pin `apache/polaris:1.3.0-incubating`, or use the default 1.8.0.
 
 Code: `src/lakebench/config/schema.py:ImagesConfig`.
 
@@ -853,11 +852,12 @@ pipeline's tables are still valid.
 **Fix:** run `lakebench status <config>` to check the engine's health, then
 run the benchmark on its own with `lakebench benchmark <config>`.
 
-### A continuous run FAILED "not balanced"
+### A continuous run reports "not balanced"
 
-**Symptom:** the run ends `FAILED` with `balance gate: not balanced:
+**Symptom:** the run prints `balance (advisory): not balanced:
 <stage> fell behind <upstream>: its lag grew Ns across the window's second
-half ...` and the report's Balance card says "not balanced".
+half ...` and the report's Balance card says "not balanced". The run is not
+failed on this.
 
 **Cause:** that stage could not carry the scale's offered load. The lag of
 the commits waiting for it, sampled once per batch, rose by more than one
@@ -866,22 +866,22 @@ or, back to back, its median batch time in the window's first half. The line giv
 executors and the count the load needs.
 
 **Fix:** raise the setting the line names (for example
-`platform.compute.spark.silver_stream_executors`), run on a larger cluster
-(the README's continuous minimum carries each scale balanced), or lower the
-scale. A stage that already had its full need ran below the sizing default
-rate: raise it past the need.
+`platform.compute.spark.silver_executors`), run on a larger cluster (the
+continuous minimums in [Sizing](sizing.md) are balanced for each scale), or
+lower the scale. A stage that already had its full need ran below the sizing
+default rate: raise it past the need.
 
 ### "cannot balance" before a continuous run
 
-**Symptom:** `run` or `config recommend` warns `cannot balance: <stage>
+**Symptom:** `plan` or `config recommend` warns `cannot balance: <stage>
 needs ~N executors x C cores to carry the offered load; <limit> allows M`.
 
 **Cause:** the cluster's concurrent budget, the executor cap, or an
 executor count set in the config holds the stage below what the load needs.
-The run will start, its lag will grow, and it will fail the balance check.
+The run starts, its lag grows, and it reports "not balanced" (advisory).
 
-**Fix:** a cluster at least the README's continuous minimum for the scale,
-or a lower scale. AML continuous at scale 100 cannot balance at any size:
+**Fix:** a cluster at least the continuous minimum in [Sizing](sizing.md)
+for the scale, or a lower scale. AML continuous at scale 100 cannot balance at any size:
 silver-stream needs about 45 executors of 16 cores and the cap is 28.
 
 ### bronze-ingest fails with "object store clock probe failed"

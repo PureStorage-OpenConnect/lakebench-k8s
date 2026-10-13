@@ -41,6 +41,11 @@ class QueryResult:
     # score (elapsed_seconds) is their median. Empty means one untracked
     # sample, which is how older records (without a samples field) read.
     samples: list[float] = field(default_factory=list)
+    # The engine's per-sample query tags, in run order, for engines that can
+    # report storage I/O afterwards; ``engine_io`` is what that report said
+    # about them, summed over the samples (see ``_attach_engine_io``).
+    engine_sources: list[str] = field(default_factory=list)
+    engine_io: dict[str, Any] | None = None
 
     def sample_times(self) -> list[float]:
         """The timed samples, or [elapsed_seconds] for a single-sample result."""
@@ -50,7 +55,7 @@ class QueryResult:
         """Serialize to dict."""
         times = self.sample_times()
         lo, hi = min(times), max(times)
-        return {
+        out: dict[str, Any] = {
             "name": self.query.name,
             "display_name": self.query.display_name,
             "class": self.query.query_class,
@@ -67,6 +72,9 @@ class QueryResult:
                 round((hi - lo) / self.elapsed_seconds, 4) if self.elapsed_seconds > 0 else 0.0
             ),
         }
+        if self.engine_io is not None:
+            out["io"] = self.engine_io
+        return out
 
 
 def round_spread(queries: list[QueryResult]) -> dict[str, Any]:
@@ -546,7 +554,48 @@ class BenchmarkRunner:
                     samples=final.samples,
                 )
 
+        self._attach_engine_io(results)
         return results
+
+    def _attach_engine_io(self, results: list[QueryResult]) -> None:
+        """Fill ``engine_io`` on *results* from the engine's own storage report.
+
+        One lookup per stream, after its last query has finished, so nothing is
+        added to a timed query. Engines without ``query_io`` (everything but
+        Trino) leave ``engine_io`` unset, which reads as not measured. A
+        lookup that fails or no longer finds a query leaves that query's
+        ``captured`` short of its ``samples``.
+        """
+        lookup = getattr(self.executor, "query_io", None)
+        sources = [src for r in results for src in r.engine_sources]
+        if lookup is None or not sources:
+            return
+        try:
+            found = lookup(sources)
+        except Exception as e:  # noqa: BLE001 - a lookup must never fail the benchmark
+            logger.warning("engine I/O lookup failed: %s", e)
+            found = {}
+        for r in results:
+            if not r.engine_sources:
+                continue
+            hits = [found[src] for src in r.engine_sources if src in found]
+
+            def total(key: str, rows: list[dict[str, Any]] = hits) -> int | None:
+                vals = [h[key] for h in rows if h.get(key) is not None]
+                return int(sum(vals)) if vals else None
+
+            def edge(key: str, pick: Any, rows: list[dict[str, Any]] = hits) -> float | None:
+                vals = [h[key] for h in rows if h.get(key) is not None]
+                return round(pick(vals), 3) if vals else None
+
+            r.engine_io = {
+                "read_bytes": total("read_bytes"),
+                "write_bytes": total("write_bytes"),
+                "start_epoch": edge("start", min),
+                "end_epoch": edge("end", max),
+                "samples": len(r.engine_sources),
+                "captured": len(hits),
+            }
 
     def probe_query(self, name: str | None = None) -> BenchmarkQuery:
         """The query named *name*, or the first scan-class query.
@@ -588,11 +637,13 @@ class BenchmarkRunner:
         took the success flag of the last repeat only.
         """
         times: list[float] = []
+        sources: list[str] = []
         last: QueryResult | None = None
         for k in range(max(1, iterations)):
             if cache == "cold" and k > 0:
                 self.executor.flush_cache()
             last = self._execute_single_query(query, timeout=query_timeout)
+            sources.extend(last.engine_sources)
             if not last.success:
                 return QueryResult(
                     query=query,
@@ -601,6 +652,7 @@ class BenchmarkRunner:
                     success=False,
                     error_message=last.error_message,
                     samples=times + [last.elapsed_seconds],
+                    engine_sources=sources,
                 )
             times.append(last.elapsed_seconds)
         assert last is not None
@@ -611,6 +663,7 @@ class BenchmarkRunner:
             success=True,
             error_message="",
             samples=times,
+            engine_sources=sources,
         )
 
     def _render_sql(self, query: BenchmarkQuery) -> str:
@@ -650,4 +703,5 @@ class BenchmarkRunner:
             rows_returned=exec_result.rows_returned,
             success=exec_result.success,
             error_message=exec_result.error or "",
+            engine_sources=[exec_result.engine_source] if exec_result.engine_source else [],
         )

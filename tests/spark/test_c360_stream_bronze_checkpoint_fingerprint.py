@@ -69,39 +69,34 @@ def test_sidecar_missing_fails_open_and_writes_it(monkeypatch, source_format):
     assert written["bronze_table"] == _TBL
 
 
-@pytest.mark.parametrize("source_format", _FORMATS)
-def test_sidecar_matches_current_snapshot_returns_cleanly(monkeypatch, source_format):
+def test_sidecar_matches_current_snapshot_returns_cleanly(monkeypatch):
     fs = _FakeFS()
-    _seed_sidecar(fs, source_format, "222222")
+    _seed_sidecar(fs, "iceberg", "222222")
 
-    _guard(monkeypatch, fs, source_format, "222222")
+    _guard(monkeypatch, fs, "iceberg", "222222")
 
     assert fs.writes == 1  # only the seeded write
 
 
-@pytest.mark.parametrize("source_format", _FORMATS)
-def test_sidecar_mismatch_raises_silver_abort_carrying_both_fingerprints(
-    monkeypatch, source_format
-):
+def test_sidecar_mismatch_raises_silver_abort_carrying_both_fingerprints(monkeypatch):
     from common import SilverAbort
 
     fs = _FakeFS()
-    _seed_sidecar(fs, source_format, "222222")
+    _seed_sidecar(fs, "iceberg", "222222")
 
     with pytest.raises(SilverAbort) as excinfo:
-        _guard(monkeypatch, fs, source_format, "999999")
+        _guard(monkeypatch, fs, "iceberg", "999999")
 
     assert "222222" in str(excinfo.value)
     assert "999999" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("source_format", _FORMATS)
-def test_no_snapshot_available_fails_open_no_sidecar_written(monkeypatch, source_format):
+def test_no_snapshot_available_fails_open_no_sidecar_written(monkeypatch):
     """Bronze not created yet: a sidecar with an unknown value would poison
     the next start."""
     fs = _FakeFS()
 
-    _guard(monkeypatch, fs, source_format, None)
+    _guard(monkeypatch, fs, "iceberg", None)
 
     assert fs.writes == 0
 

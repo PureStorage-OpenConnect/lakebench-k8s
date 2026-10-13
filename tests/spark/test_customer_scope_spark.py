@@ -304,15 +304,17 @@ def test_noncustomer_alerts_declared_passes_on_all_rules(spark, alerts):
         ("SELECT 1L AS entity_id, false AS is_customer, 'US' AS country", "no-customers"),
     ],
 )
-@pytest.mark.parametrize("rule", CUSTOMER_ONLY)
-def test_no_customer_population_is_a_skip_not_zero(spark, rule, entities_sql, reason):
+def test_no_customer_population_is_a_skip_not_zero(spark, entities_sql, reason):
     """A silver with no customer flag (a pre-KYC corpus) or no customer must
-    read "not run": "ran, 0 alerts" scores as 0% recall."""
+    read "not run": "ran, 0 alerts" scores as 0% recall. Every customer-only
+    rule goes through the same _customer_ids check, so one rule covers the
+    reasons; test_missing_customer_master_is_a_skip covers each rule's
+    wiring."""
     from detection_rules import RuleSkipped
 
     txns, _ = _silver(spark)
     with pytest.raises(RuleSkipped) as exc:
-        _run(spark, rule, txns, spark.sql(entities_sql)).collect()
+        _run(spark, "W2_structuring", txns, spark.sql(entities_sql)).collect()
     assert exc.value.reason == reason
 
 

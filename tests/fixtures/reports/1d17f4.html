@@ -6,15 +6,15 @@
     <title>Lakebench Scorecard - pipe-c360-c1</title>
     <style>
         :root {
-            --primary: #2563eb;
-            --success: #16a34a;
+            --primary: #257553;
+            --success: #257553;
             --danger: #dc2626;
             --warning: #d97706;
-            --bg: #f8fafc;
+            --bg: #f2f3ef;
             --card-bg: #ffffff;
-            --text: #1e293b;
-            --text-muted: #64748b;
-            --border: #e2e8f0;
+            --text: #1c332c;
+            --text-muted: #6e8173;
+            --border: #dce5dd;
         }
 
         * {
@@ -24,7 +24,7 @@
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             background: var(--bg);
             color: var(--text);
             line-height: 1.6;
@@ -214,18 +214,257 @@
             
         </header>
 
-        
-        <section class="read-first front-matter" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid var(--success);">
-            <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.5rem;">
-                Read this first
-            </div>
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
-                <div class="fm-verdict"><span class="read-first-key" style="color: var(--text-muted);">Verdict:</span> <strong style='color: var(--success);'>PASSED</strong></div><div class="fm-headline"><span class="read-first-key" style="color: var(--text-muted);">Headline:</span> Customer 360 continuous, scale 1.0, n=1</div><div class="fm-evidence-class"><span class="read-first-key" style="color: var(--text-muted);">Evidence class:</span> development (no look record names this run)</div><div class="fm-corpus"><span class="read-first-key" style="color: var(--text-muted);">Corpus:</span> none (id 13eaa2a3ed5f, scale 1.0)</div><div class="fm-support-state"><span class="read-first-key" style="color: var(--text-muted);">Support state:</span> unverified (a valid combination that no release-matrix run has validated; valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</div><div class="fm-binding-caps"><span class="read-first-key" style="color: var(--text-muted);">Binding caps:</span> trickle: max_files_per_trigger 2 (auto), the pipeline kept pace</div><div class="fm-n"><span class="read-first-key" style="color: var(--text-muted);">n:</span> 1 run, 1 sample per query</div><div class="fm-provenance"><span class="read-first-key" style="color: var(--text-muted);">Provenance:</span> <code class="mono">lakebench 1.6.0.dev0, commit e6927ce, clean</code></div><div class="fm-digest"><span class="read-first-key" style="color: var(--text-muted);">Digest:</span> <code class="mono">bc38aaf2d7afce18</code></div>
-            </div>
-            
-            <div class="limits-interpretation" style="margin-top: 0.75rem; font-size: 0.8rem;"><strong>What limits interpretation:</strong><ul style="margin: 0.25rem 0 0 1.25rem;"><li>n=1: one run, so no figure here is a repeatability claim</li></ul></div>
-        </section>
-        
+        <nav class="lb-tabs" role="tablist"><button type="button" role="tab" data-view="replay">Workload replay</button><button type="button" role="tab" data-view="scorecard">Scorecard</button></nav><style>.lb-tabs{display:flex;gap:3px;margin:0 0 1.25rem;border-bottom:1px solid var(--border)}.lb-tabs button{font:inherit;font-weight:650;font-size:13px;padding:.7rem 1rem;border:0;border-bottom:3px solid transparent;background:transparent;cursor:pointer;color:#66776c}.lb-tabs button.on{color:#1f6449;border-bottom-color:#25835d;background:#f6faf7}</style>
+
+        <div id="lb-view-replay"><style>
+#lb-replay .headline{display:flex;align-items:end;justify-content:space-between;gap:12px;min-height:40px}
+#lb-replay .eyebrow{font-size:12px;letter-spacing:.2px;color:#5f8b73;font-weight:700}
+#lb-replay .headline h1{font-size:25px;margin:1px 0 0;letter-spacing:-1.1px}
+#lb-replay .headline-right{display:flex;gap:26px}
+#lb-replay .headline-right .mini{display:grid;gap:2px}
+#lb-replay .headline-right strong{font-size:22px;letter-spacing:-.5px}
+#lb-replay .headline-right span{font-size:11px;color:#7e8b80}
+#lb-replay .canvas{background:#fff;border:1px solid #dce6dd;border-radius:12px;display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+#lb-replay .layer-head{flex-shrink:0;min-height:34px;padding:7px 13px;display:flex;align-items:center;justify-content:space-between;gap:8px;border-bottom:1px solid #e4ebe5;font-size:14px;font-weight:750}
+#lb-replay .layer-head small{font-size:12px;color:#75897a;font-weight:450}
+#lb-replay .runsteps{display:flex;gap:10px;padding:14px 16px 10px;flex:1;min-height:260px;align-items:stretch}
+#lb-replay .step{flex:1;min-width:0;padding:16px;background:#fbfcfa;border:1px solid #dce5de;border-radius:12px;display:flex;flex-direction:column;gap:8px;opacity:.8;transition:flex .4s,border .3s,background .3s,opacity .3s;cursor:pointer}
+#lb-replay .step.current{flex:1.9;background:#fff;border:2px solid #6ba886;opacity:1;box-shadow:0 6px 22px #3164461a}
+#lb-replay .step.done{opacity:.9}
+#lb-replay .step[data-id="4"].current{border-color:#9071b2}
+#lb-replay .step small{font-size:13px;letter-spacing:.2px;font-weight:750;color:#567b67}
+#lb-replay .step h2{font-size:26px;letter-spacing:-.8px;margin:0}
+#lb-replay .step .implementation{font-size:13px;color:#778a7e}
+#lb-replay .art{height:100px;flex:1;min-height:70px;display:flex;align-items:center;justify-content:center;background:#f3f8f4;border-radius:8px;overflow:hidden}
+#lb-replay .step.current .art{background:#edf6ef}
+#lb-replay .step.current .art svg{animation:rp-pulse 2.4s ease-in-out infinite}
+@keyframes rp-pulse{0%,100%{opacity:.78;transform:scale(1)}50%{opacity:1;transform:scale(1.045)}}
+@media(prefers-reduced-motion:reduce){#lb-replay .step.current .art svg{animation:none}}
+#lb-replay .art svg{width:100%;height:100%;max-height:130px;transform-origin:center}
+#lb-replay .value{border-top:1px solid #e7eee7;padding-top:9px;margin-top:auto}
+#lb-replay .value strong{font-size:clamp(15px,1.55vw,22px);letter-spacing:-.6px;display:block;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:clip}
+#lb-replay .step.current .value strong{font-size:clamp(22px,2.7vw,34px)}
+#lb-replay .value label{font-size:12px;color:#778b7d}
+/* The Pipeline is its own white container, like Workload and Platform. One box
+   per handoff (sustained) or stage pair (batch), left-aligned and equal width;
+   a fixed height so an empty box holds its size instead of expanding. */
+#lb-replay .execstrip{display:grid;grid-template-columns:repeat(var(--xn,3),minmax(0,1fr));gap:10px;padding:10px 12px 12px}
+#lb-replay .xbox{min-width:0;min-height:96px;padding:11px 13px;background:#f7fbf8;border:1px solid #dae7dd;border-radius:9px;display:flex;flex-direction:column}
+#lb-replay .xbox b{font-size:13px;font-weight:700;color:#3f5a4c;display:block}
+#lb-replay .xbox .track{height:6px;border-radius:10px;background:#e7f0e8;overflow:hidden;margin:8px 0 6px}
+#lb-replay .xbox .fill{height:100%;width:0;background:#73ad8b;transition:width .25s}
+#lb-replay .xbox strong{font-size:15px;display:block;letter-spacing:-.2px;font-variant-numeric:tabular-nums;color:#277352}
+#lb-replay .xbox span{font-size:11px;color:#7f9184}
+#lb-replay .xbox.bottleneck{border-color:#d98a86;background:#fdf1f0;box-shadow:0 0 0 1px #d98a8655}
+#lb-replay .xbox.bottleneck b{color:#b4574f}
+#lb-replay .xbox.bottleneck strong{color:#a8463e}
+#lb-replay .xbox.bottleneck .fill{background:#d98a86}
+#lb-replay .platform-head{display:flex;align-items:center;justify-content:space-between;padding:4px 14px 2px;font-weight:750;font-size:14px}
+#lb-replay .platform-head small{font-size:11px;font-weight:450;color:#859187}
+#lb-replay .platform{margin:0 12px 6px;border:1px solid #dce6dd;background:#fafdfa;border-radius:8px;padding:10px 14px;flex:0 0 232px;min-height:0}
+#lb-replay .platformnav{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
+#lb-replay .platformnav button{border:1px solid #d7e5dc;border-radius:6px;background:#fff;color:#57715e;padding:5px 11px;font-size:12px}
+#lb-replay .platformnav button.on{background:#e3f3e9;border-color:#82b89b;color:#1d6548;font-weight:800}
+#lb-replay .platformnav button:last-of-type{margin-right:auto}
+#lb-replay .traces{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:7px;height:160px}
+#lb-replay .graph{border:1px solid #e0ebe2;border-radius:7px;padding:8px;display:flex;flex-direction:column;min-width:0}
+#lb-replay .graph .charttitle{display:flex;align-items:center;justify-content:space-between}
+#lb-replay .graph .charttitle b{font-size:13px}
+#lb-replay .graph .charttitle strong{font-size:17px;color:#246d50}
+#lb-replay .graph svg{width:100%;flex:1;min-height:0;background:#f4f8f4;border-radius:4px}
+#lb-replay .controls{height:44px;padding:5px 13px;display:flex;align-items:center;gap:8px;background:#203f33;color:#fff;flex-shrink:0}
+#lb-replay .controls button{border:0;border-radius:6px;background:#d4f4dd;color:#1d5439;padding:7px 11px;font-size:12px;font-weight:750}
+#lb-replay .controls input{flex:1;min-width:0;accent-color:#6fbb89}
+#lb-replay .controls .time{font:12px ui-monospace,monospace;color:#e9f4ec;min-width:104px;text-align:right}
+#lb-replay .controls .mark{font-size:11px;color:#d6e5d8;white-space:nowrap}
+/* Short viewports: keep everything inside one frame without scroll. */
+@media(max-height:820px){#lb-replay .runsteps{min-height:170px;padding:9px 12px 6px}#lb-replay .step{padding:11px;gap:5px}#lb-replay .step h2{font-size:21px}#lb-replay .art{min-height:46px}#lb-replay .value strong{font-size:24px}#lb-replay .step.current .value strong{font-size:27px}#lb-replay .traces{height:108px}#lb-replay .platform{flex-basis:168px}}
+@media(max-width:900px){#lb-replay .runsteps{overflow-x:auto;min-height:310px}#lb-replay .step{flex:0 0 175px}#lb-replay .step.current{flex:0 0 245px}#lb-replay .execstrip{grid-template-columns:repeat(2,1fr)}#lb-replay .execmark{display:none}#lb-replay .platform{flex:auto}#lb-replay .traces{height:170px}#lb-replay .controls{position:sticky;bottom:0}}
+
+#lb-replay{font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#1c332c;margin-bottom:1.5rem}
+#lb-replay *{box-sizing:border-box}
+#lb-replay h1,#lb-replay h2{border:0;padding:0;line-height:1.15}
+#lb-replay button,#lb-replay input{font:inherit}
+#lb-replay button{cursor:pointer}
+#lb-replay button:disabled{cursor:default;opacity:.55}
+#lb-replay .headline{margin-bottom:8px}
+#lb-replay .headline-right strong span{font-size:inherit;color:inherit}
+#lb-replay .canvas{display:block;background:#fff;border:1px solid #dce6dd;border-radius:12px;overflow:hidden}
+#lb-replay .runsteps{min-height:300px}
+#lb-replay .platform{flex:none;height:auto}
+#lb-replay .traces{height:140px}
+#lb-replay .platformnav button:disabled{text-decoration:line-through}
+#lb-replay .job span.fail{color:#b3261e}
+#lb-replay .controls .lb-unit button{background:transparent;color:#fff;border:1px solid #6fbb89;padding:6px 12px;font-size:14px}
+#lb-replay .controls .lb-unit button.on{background:#d4f4dd;border-color:#d4f4dd;color:#1d5439}
+#lb-replay .legend{display:flex;gap:12px;font-size:12px;color:#57715e;min-height:0}
+#lb-replay .legend:empty{display:none}
+#lb-replay .legend i{display:inline-block;width:10px;height:3px;margin-right:5px;vertical-align:middle;border-radius:2px}
+#lb-replay .note{padding:2px 14px 8px;font-size:11px;color:#859187}
+
+
+.lb-unit{display:inline-flex;gap:4px;align-items:center}
+.lb-unit button{border:1px solid #6fbb89;background:transparent;color:#fff;border-radius:6px;padding:6px 12px;font:inherit;font-size:14px;font-weight:650;cursor:pointer}
+.lb-unit button.on{background:#d4f4dd;border-color:#d4f4dd;color:#1d5439}
+</style><div id="lb-replay"><div class="headline"><div><div class="eyebrow">Customer 360</div><h1>C360 / Continuous</h1></div><div class="headline-right"><div class="mini"><strong><span data-lb-derived="ratio" data-lb-inputs="pipeline_benchmark.stages[1].output_rows;continuous.window.seconds" data-lb-fmt=",.0f" data-lb-suffix=" interactions/s">995 interactions/s</span></strong><span>interactions cleaned per second</span></div><div class="mini"><strong>52:56</strong><span>run length</span></div></div></div><div class="canvas"><div class="layer-head">Workload</div><div class="runsteps"><article class="step" data-step="0" tabindex="0" role="button"><small>Generate</small><h2>Customer data</h2><div class="implementation">Datagen → S3</div><div class="art"></div><div class="value"><strong>-</strong><label>Rows released</label></div></article><article class="step" data-step="1" tabindex="0" role="button"><small>Ingest</small><h2>Ingest</h2><div class="implementation">Spark · Bronze stream</div><div class="art"></div><div class="value"><strong>-</strong><label>Rows ingested</label></div></article><article class="step" data-step="2" tabindex="0" role="button"><small>Prepare</small><h2>Conform</h2><div class="implementation">Spark · Silver stream</div><div class="art"></div><div class="value"><strong>-</strong><label>Interactions cleaned</label></div></article><article class="step" data-step="3" tabindex="0" role="button"><small>Assemble</small><h2>Customer 360</h2><div class="implementation">Spark · Gold refresh</div><div class="art"></div><div class="value"><strong>-</strong><label>Refresh cycles</label></div></article><article class="step" data-step="4" tabindex="0" role="button"><small>Query</small><h2>Customer view</h2><div class="implementation">Benchmark rounds → Trino</div><div class="art"></div><div class="value"><strong>-</strong><label>Queries completed</label></div></article></div></div><div class="canvas"><div class="layer-head">Pipeline</div><div class="execstrip" style="--xn:0"></div></div><div class="platform-head">Platform</div><div class="platform"><div class="platformnav"><button type="button" disabled title="not in the run record">Storage</button><button type="button" disabled title="not in the run record">Compute</button><button type="button" disabled title="not in the run record">Network</button><button type="button" disabled title="not in the run record">Kubernetes</button></div><div class="traces"><div class="graph"><div class="charttitle"><b id="rp-lname">Storage / S3</b><strong id="rp-lval">-</strong></div><svg id="rp-lplot" viewBox="0 0 600 80" preserveAspectRatio="none"></svg><div class="legend" id="rp-legend"></div></div><div class="graph"><div class="charttitle"><b>Rows per second</b><strong id="rp-evalue">-</strong></div><svg id="rp-eplot" viewBox="0 0 600 80" preserveAspectRatio="none"></svg></div></div></div><div class="note">Storage read bytes omit bronze and gold and silver (Iceberg table reads expose no client byte counter). Not in the record: Storage, Compute, Network, Kubernetes.</div><div class="controls"><button type="button" data-act="play">▶ Play</button><button type="button" data-act="speed">1×</button><button type="button" data-act="restart">↺ Restart</button><input type="range" min="0" max="0" value="0" step="1" data-act="seek" aria-label="Run timeline"><span class="time" data-act="clock"></span></div></div></div><script type="application/json" id="lb-replay-data">{"version":1,"title":"C360 / Continuous","subtitle":"Customer 360","mode":"sustained","kind":"sustained","window":{"start":100.32227301597595,"end":1900.3641991615295},"handoffs":[],"lag":null,"run_id":"20260929-204941-1d17f4","duration":3176.101657152176,"stages":[{"key":"datagen","exec":{"tput":null,"elapsed":null,"bottleneck":false},"phase":"Generate","name":"Customer data","impl":"Datagen \u2192 S3","label":"Rows released","start":100.32227301597595,"end":1900.3641991615295,"value":1858920,"path":"pipeline_benchmark.scores.released_rows","window":"recorded","ends":null,"events":[100.32227301597595],"steps":null,"rows":true},{"key":"bronze","exec":{"tput":0.01,"elapsed":1800.0,"bottleneck":false},"phase":"Ingest","name":"Ingest","impl":"Spark \u00b7 Bronze stream","label":"Rows ingested","start":83.4186270236969,"end":1900.3641991615295,"value":1858920,"path":"pipeline_benchmark.stages[bronze].output_rows","window":"recorded","ends":null,"events":[],"steps":null,"rows":true},{"key":"silver","exec":{"tput":0.004,"elapsed":1800.0,"bottleneck":false},"phase":"Prepare","name":"Conform","impl":"Spark \u00b7 Silver stream","label":"Interactions cleaned","start":83.43064618110657,"end":1900.3641991615295,"value":1790912,"path":"pipeline_benchmark.stages[silver].output_rows","window":"recorded","ends":null,"events":[],"steps":null,"rows":true},{"key":"gold","exec":{"tput":0.004,"elapsed":1800.0,"bottleneck":false},"phase":"Assemble","name":"Customer 360","impl":"Spark \u00b7 Gold refresh","label":"Refresh cycles","start":83.44152808189392,"end":1900.3641991615295,"value":null,"path":null,"window":"recorded","ends":null,"events":[],"steps":null,"rows":false},{"key":"query","exec":{"tput":null,"elapsed":111.0,"bottleneck":false},"phase":"Query","name":"Customer view","impl":"Benchmark rounds \u2192 Trino","label":"Queries completed","start":100.32227301597595,"end":1900.3641991615295,"value":null,"path":null,"window":"recorded","ends":null,"events":[],"steps":null,"rows":false}],"jobs":[{"name":"lakebench-bronze-ingest","type":"bronze-ingest","start":83.4186270236969,"end":1900.3641991615295,"elapsed":null,"success":null},{"name":"lakebench-silver-stream","type":"silver-stream","start":83.43064618110657,"end":1900.3641991615295,"elapsed":null,"success":null},{"name":"lakebench-gold-refresh","type":"gold-refresh","start":83.44152808189392,"end":1900.3641991615295,"elapsed":null,"success":null}],"pair":null,"storage":null,"storage_read_gap":["bronze","gold","silver"],"storage_problems":[],"lanes":{},"not_measured":["Compute","Network","Kubernetes"]}</script><script>
+(function(){
+var el=document.getElementById('lb-replay-data');if(!el)return;
+var D=JSON.parse(el.textContent),root=document.getElementById('lb-replay');
+var S=D.stages,J=D.jobs,T=D.duration,t=0,playing=false,speed=1,last=0,sel=null,lane=D.lag?'lag':D.storage?'storage':(D.lanes.compute?'compute':(D.lanes.network?'network':(D.lanes.k8s?'k8s':'storage')));
+function $(s){return root.querySelector(s)}
+function svg(s){return '<svg viewBox="0 0 200 95" aria-hidden="true">'+s+'</svg>'}
+var ART=[
+ svg('<g fill="#97bbbf">'+[0,1,2,3,4].map(function(i){return '<rect x="'+(20+i*32)+'" y="'+(30+i%2*12)+'" width="23" height="34" rx="3" opacity="'+(1-i*.13)+'"/><path d="M'+(25+i*32)+' '+(37+i%2*12)+'h13m-13 5h13" stroke="white" stroke-width="1.6"/>'}).join('')+'</g>'),
+ svg('<g fill="#accddd">'+[0,1,2,3].map(function(i){return '<rect x="'+(16+i*25)+'" y="'+(22+i%2*9)+'" width="18" height="40" rx="3"/>'}).join('')+'</g><path d="M115 48h23" stroke="#5994b5" stroke-width="3"/><rect x="140" y="22" width="40" height="48" rx="6" fill="#d8edf4" stroke="#5994b5" stroke-width="2"/><path d="m148 46 10 9 15-19" fill="none" stroke="#5994b5" stroke-width="3"/>'),
+ svg('<g fill="#e2c895">'+[0,1,2,3,4,5,6,7,8].map(function(i){return '<rect x="'+(10+(i%3)*26)+'" y="'+(19+Math.floor(i/3)*19)+'" width="19" height="13" rx="2"/>'}).join('')+'</g><path d="M100 48h28m-7-7 8 7-8 7" stroke="#c1a574" stroke-width="2" fill="none"/><rect x="138" y="23" width="47" height="47" rx="5" fill="#f5ebda" stroke="#d2b485"/><g fill="#d0b68b"><rect x="147" y="32" width="7" height="28"/><rect x="160" y="39" width="7" height="21"/><rect x="173" y="29" width="7" height="31"/></g>'),
+ svg('<g fill="#83b598">'+[0,1,2,3].map(function(i){return '<rect x="'+(29+i*34)+'" y="'+(27+i%2*9)+'" width="28" height="12" rx="4" opacity="'+(.55+i*.1)+'"/>'}).join('')+'</g><g stroke="#739e82" stroke-width="2" fill="none"><path d="M42 42v25h95V50"/><path d="m129 57 8-7 8 7"/></g>'),
+ svg('<g fill="#ded0e9" stroke="#a986c4">'+[0,1,2,3].map(function(i){return '<rect x="'+(19+i*43)+'" y="'+(28+i%2*5)+'" width="32" height="45" rx="6"/>'}).join('')+'</g><g stroke="#a986c4" stroke-width="2">'+[0,1,2,3].map(function(i){return '<path d="M'+(25+i*43)+' '+(46+i%2*5)+'h18m-18 7h14"/>'}).join('')+'</g>')];
+root.querySelectorAll('.art').forEach(function(a,i){a.innerHTML=ART[i]});
+function fmtT(x){x=Math.max(0,Math.round(x));var m=Math.floor(x/60),s=x%60;return (m<10?'0':'')+m+':'+(s<10?'0':'')+s}
+function num(n){return Math.round(n).toLocaleString('en-US')}
+function frac(s){if(s.start==null||s.end==null)return null;if(t<=s.start)return 0;if(t>=s.end)return 1;return (t-s.start)/Math.max(1e-9,s.end-s.start)}
+function stageValue(s){
+ if(s.value==null)return null;
+ if(s.steps){var v=0;for(var i=0;i<s.steps.length;i++)if(s.steps[i][0]<=t)v=s.steps[i][1];return v}
+ if(s.ends){var n=0;for(var i=0;i<s.ends.length;i++)if(s.ends[i]<=t)n++;return n}
+ var f=frac(s);return f===null?s.value:s.value*f}
+function state(s){var f=frac(s);return f===null?null:f===0?'waiting':f===1?'done':'running'}
+function rate(x){var r=0;S.forEach(function(s){if(s.key!=='query'&&s.rows!==false&&!s.steps&&s.value!=null&&s.start!=null&&s.end>s.start&&x>=s.start&&x<s.end)r+=s.value/(s.end-s.start)});return r}
+var RATE=[],N=240;for(var i=0;i<N;i++)RATE.push(rate((i+.5)/N*T));
+var RMAX=Math.max.apply(null,RATE.concat([1]));
+function shade(){if(!D.window)return '';var a=5+590*D.window.start/T,b=5+590*D.window.end/T;return '<rect x="'+a.toFixed(1)+'" y="0" width="'+(b-a).toFixed(1)+'" height="80" fill="#e4f1e8"/>'}
+function plot(id,series,mx){
+ var o='<rect width="600" height="80" fill="#f4f8f4"/>'+shade();
+ S.forEach(function(s){if(s.start!=null&&s.key!=='datagen'&&s.start<=t){var x=5+590*s.start/T;o+='<line x1="'+x+'" x2="'+x+'" y1="4" y2="77" stroke="#a4b9a9" stroke-dasharray="3 4" opacity=".65"/>'}});
+ series.forEach(function(sr){if(!sr.v)return;var n=sr.v.length,d='',dt=sr.dt||T/n,sh=sr.shift||0;
+  for(var i=0;i<n&&sh+i*dt<=t;i++){var x=5+590*(sh+i*dt)/T,x2=5+590*Math.min(sh+(i+1)*dt,t)/T,y=73-(sr.v[i]/mx)*61;d+=(d?'L':'M')+x.toFixed(1)+','+y.toFixed(1)+'L'+x2.toFixed(1)+','+y.toFixed(1)}
+  if(!d)return;
+  o+='<path d="'+d+'" fill="none" stroke="'+sr.c+'" stroke-width="2.5" stroke-linejoin="round"/>'});
+ var cx=5+590*t/T;o+='<line x1="'+cx+'" x2="'+cx+'" y1="2" y2="78" stroke="#277353" stroke-width="2" stroke-dasharray="3 3"/>';
+ $(id).innerHTML=o}
+function lagAt(h){var v=null;for(var i=0;i<h.samples.length;i++){if(D.lag.shift+h.samples[i][0]<=t)v=h.samples[i][1]}return v}
+var LMAX=1;if(D.lag)D.lag.series.forEach(function(sr){sr.samples.forEach(function(p){if(p[1]>LMAX)LMAX=p[1]})});
+function fmtLag(x){return x<120?Math.round(x)+' s':Math.round(x/60)+' min'}
+function lagBars(){D.handoffs.forEach(function(h,i){var v=lagAt(h);
+ $('[data-f="'+i+'"]').style.width=(v===null?0:Math.min(100,v/LMAX*100))+'%';
+ $('[data-h="'+i+'"]').textContent=v===null?'Waiting':fmtLag(v)+' behind';
+ $('[data-s="'+i+'"]').textContent=h.keeps_up===false?'falls behind the arrival rate':h.keeps_up?'keeps up':''})}
+var LCOL=['#4b9d78','#be904a','#538da9'];
+function plotLag(){var o='<rect width="600" height="80" fill="#f4f8f4"/>'+shade(),cols=LCOL;
+ D.lag.series.forEach(function(sr,k){var d='';sr.samples.forEach(function(p){if(D.lag.shift+p[0]>t)return;var x=5+590*(D.lag.shift+p[0])/T,y=73-p[1]/LMAX*61;d+=(d?'L':'M')+x.toFixed(1)+','+y.toFixed(1)});if(!d)return;
+  o+='<path d="'+d+'" fill="none" stroke="'+cols[k%3]+'" stroke-width="2.5" stroke-linejoin="round"/>'});
+ var cx=5+590*t/T;o+='<line x1="'+cx+'" x2="'+cx+'" y1="2" y2="78" stroke="#277353" stroke-width="2" stroke-dasharray="3 3"/>';$('#rp-lplot').innerHTML=o}
+var st=D.storage,SMAX=st?Math.max(1,Math.max.apply(null,st.read.concat(st.write))):1;
+function phaseNote(i,s,ff){
+ if(D.kind!=='sustained')return ff===null?'no window recorded':ff===0?'not started':ff===1?'complete':Math.round(ff*100)+'% of the stage window';
+ // All five cards share one measured window, so a per-stage percentage is
+ // meaningless. Count the recorded events of the focused stage instead.
+ if(ff===null)return 'no window recorded';
+ if(s.steps){var c=0;for(var i=0;i<s.steps.length;i++)if(s.steps[i][0]<=t)c++;
+  return c?'cycle '+Math.min(c,s.steps.length)+' of '+s.steps.length:'streaming · '+fmtT(t)+' into the window'}
+ var ev=(s.events||[]).filter(function(e){return e<=t});
+ if(ev.length>1)return ev.length+' recorded events';
+ return 'streaming · '+fmtT(t)+' into the window';
+}
+function draw(){
+ var cur=null,doneAll=t>=T,lastStarted=null,lastEv=-1,evAt=-1;
+ S.forEach(function(s,i){
+  if(s.start!=null&&s.start<=t)lastStarted=i;
+  (s.events||[]).forEach(function(e){if(e<=t&&e>=evAt){evAt=e;lastEv=i}});
+  var c=root.querySelector('[data-step="'+i+'"]'),v=stageValue(s),stt=state(s);
+  if(stt==='running')cur=i;
+  c.querySelector('.value strong').textContent=v==null?'NR':num(v);
+  c.classList.toggle('done',stt==='done')});
+ var auto=D.kind==='sustained'?(lastEv>=0?lastEv:0):(lastStarted!==null?lastStarted:0);
+ var focus=sel!==null?sel:auto;
+ // Monitor and Detect move as a pair: the gold cycle that screens payments is
+ // the cycle whose alerts land, so when the focus reaches the scoring stage in
+ // an AML sustained run the alert card enlarges with it.
+ var pair=sel===null&&D.kind==='sustained'&&D.pair&&focus===D.pair[0]?D.pair[1]:-1;
+ S.forEach(function(s,i){var on=i===focus||i===pair;
+  root.querySelector('[data-step="'+i+'"]').classList.toggle('current',on)});
+ var f=S[focus],ff=frac(f);
+ // The pipeline row is the handoffs between stages. Sustained: each box is a
+ // recorded handoff, showing its lag, keeps-up, and the red bottleneck. Batch:
+ // each box is a stage pair, filling over the downstream stage's window.
+ if(D.kind==='sustained'){
+  D.handoffs.forEach(function(h,i){var bx=root.querySelector('[data-x="'+i+'"]');if(!bx)return;
+   var v=lagAt(h);
+   bx.querySelector('[data-xv="'+i+'"]').textContent=v===null?'not running':fmtLag(v)+' behind';
+   bx.querySelector('[data-xs="'+i+'"]').textContent=v===null?'no lag recorded yet':h.keeps_up===false?'falls behind the arrival rate':'keeps up';
+   bx.querySelector('[data-xf="'+i+'"]').style.width=(v===null?0:Math.min(100,v/LMAX*100))+'%';
+   bx.classList.toggle('bottleneck',h.keeps_up===false&&v!==null)});
+ }else for(var i=0;i<S.length-1;i++){var bx=root.querySelector('[data-x="'+i+'"]');if(!bx)continue;
+  var fb=frac(S[i+1]);
+  bx.querySelector('[data-xv="'+i+'"]').textContent=fb===null?'-':fb===0?'Waiting':fb===1?'Complete':Math.round(fb*100)+'%';
+  bx.querySelector('[data-xs="'+i+'"]').textContent=fb===null?'no window recorded':fb===0?'Awaiting upstream':fb===1?'Output available':'processing';
+  bx.querySelector('[data-xf="'+i+'"]').style.width=(fb===null?0:fb*100)+'%';}
+ var k=st?Math.max(0,Math.min(st.read.length-1,Math.floor(t/st.step))):0;
+ if(lane==='lag'){
+  $('#rp-lname').textContent='Lag behind upstream';
+  $('#rp-lval').textContent=D.handoffs.map(function(h){var v=lagAt(h);return v===null?'-':fmtLag(v)}).join(' · ');
+  plotLag();$('#rp-legend').innerHTML=D.handoffs.map(function(h,k){return '<span><i style="background:'+LCOL[k%3]+'"></i>'+h.label+'</span>'}).join('')}
+ else if(lane==='storage'){
+  $('#rp-legend').innerHTML='';
+  $('#rp-lname').textContent='Storage / S3';
+  // In a batch run the S3 lane excludes Spark bytes, so the number is NR
+  // while a Spark stage runs. A sustained run streams all window long, so
+  // that gate would blank it forever; the lane is the recorded series, show it.
+  var spark=D.kind!=='sustained'&&S.some(function(s){return s.key!=='datagen'&&s.key!=='query'&&s.start!=null&&t>=s.start&&t<s.end});
+  $('#rp-lval').textContent=!st||spark?'NR':st.read[k].toFixed(1)+' MB/s read · '+st.write[k].toFixed(1)+' MB/s written';
+  plot('#rp-lplot',st?[{v:st.read,c:'#37876d'},{v:st.write,c:'#be904a'}]:[],SMAX)}
+ else{
+  var L=D.lanes[lane],ix=function(a){return Math.max(0,Math.min(a.length-1,Math.floor((t-L.shift)/L.step)))};
+  if(lane==='compute'){
+   $('#rp-legend').innerHTML='';
+   $('#rp-lname').textContent='Compute · CPU & memory';
+   $('#rp-lval').textContent=L.cpu[ix(L.cpu)].toFixed(1)+' cores · '+(L.mem.length?L.mem[ix(L.mem)].toFixed(0)+' GiB':'NR');
+   plot('#rp-lplot',[{v:L.cpu,c:'#538da9',dt:L.step,shift:L.shift}],Math.max(1,Math.max.apply(null,L.cpu)))}
+  else if(lane==='network'){
+   $('#rp-legend').innerHTML='';
+   $('#rp-lname').textContent='Pod network (includes shuffle)';
+   $('#rp-lval').textContent=(L.rx.length?L.rx[ix(L.rx)].toFixed(1):'NR')+' MB/s in · '+(L.tx.length?L.tx[ix(L.tx)].toFixed(1):'NR')+' MB/s out';
+   plot('#rp-lplot',[{v:L.rx,c:'#37876d',dt:L.step,shift:L.shift},{v:L.tx,c:'#be904a',dt:L.step,shift:L.shift}],Math.max(1,Math.max.apply(null,L.rx.concat(L.tx))))}
+  else{
+   $('#rp-legend').innerHTML='';
+   $('#rp-lname').textContent='Pods running';
+   $('#rp-lval').textContent=L.pods[ix(L.pods)]+' pods';
+   plot('#rp-lplot',[{v:L.pods,c:'#899cad',dt:L.step,shift:L.shift}],Math.max(1,Math.max.apply(null,L.pods)))}}
+ var kr=Math.min(N-1,Math.floor(t/T*N));
+ $('#rp-evalue').textContent=num(RATE[kr])+' rows/s';
+ plot('#rp-eplot',[{v:RATE,c:'#4b9d78'}],RMAX);
+ $('[data-act=clock]').textContent=fmtT(t)+' / '+fmtT(T);
+ $('[data-act=seek]').value=t}
+function tick(now){if(playing){t=Math.max(0,Math.min(T,t+Math.max(0,now-last)/1000*speed*Math.max(1,T/60)));if(t>=T){playing=false;$('[data-act=play]').textContent='▶ Play'}draw()}last=now;requestAnimationFrame(tick)}
+root.querySelectorAll('.step').forEach(function(c){c.onclick=function(){sel=+c.dataset.step;draw()};c.onkeydown=function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();sel=+c.dataset.step;draw()}}});
+root.querySelectorAll('[data-lane]').forEach(function(b){b.onclick=function(){lane=b.dataset.lane;root.querySelectorAll('[data-lane]').forEach(function(x){x.classList.toggle('on',x===b)});draw()}});
+$('[data-act=play]').onclick=function(e){if(t>=T)t=0;playing=!playing;last=performance.now();e.currentTarget.textContent=playing?'Ⅱ Pause':'▶ Play'};
+$('[data-act=speed]').onclick=function(e){speed=speed===1?2:speed===2?4:1;e.currentTarget.textContent=speed+'×'};
+$('[data-act=restart]').onclick=function(){t=0;sel=null;playing=false;$('[data-act=play]').textContent='▶ Play';draw()};
+var sk=$('[data-act=seek]');sk.max=T;sk.oninput=function(e){t=+e.target.value;draw()};
+draw();requestAnimationFrame(tick);
+})();
+</script></div>
+
+        <div id="lb-view-scorecard">
+
+        <style>
+.lb-tiles{margin-bottom:1.5rem}
+.lb-tiles .lb-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.lb-tiles .lb-tile{background:var(--card-bg);border:1px solid var(--border);border-radius:10px;padding:18px;min-height:110px}
+.lb-tiles .lb-tile b{display:block;font-size:13px;font-weight:600;color:#5f7767}
+.lb-tiles .lb-tile strong{display:block;font-size:clamp(22px,2.3vw,32px);white-space:nowrap;letter-spacing:-1px;margin-top:7px;font-variant-numeric:tabular-nums}
+.lb-tiles .lb-tile small{display:block;font-size:12px;color:#7c8e81;margin-top:2px}
+.lb-tiles .lb-guard{font-size:12px;color:#6a7d70;margin-top:6px;line-height:1.4}
+.lb-tiles .lb-guard .qual{font-size:12px!important;margin:0 .5em 0 0!important;font-weight:700}
+.lb-tiles .lb-tile.nr strong{color:#9aa89d}
+@media(max-width:900px){.lb-tiles .lb-grid{grid-template-columns:repeat(2,1fr)}}
+
+.lb-unit{display:inline-flex;gap:4px;align-items:center}
+.lb-unit button{border:1px solid #6fbb89;background:transparent;color:#fff;border-radius:6px;padding:6px 12px;font:inherit;font-size:14px;font-weight:650;cursor:pointer}
+.lb-unit button.on{background:#d4f4dd;border-color:#d4f4dd;color:#1d5439}
+</style><div class="lb-tiles"><div class="lb-grid"><div class="lb-tile derived" title="pipeline_benchmark.stages[1].output_rows / continuous.window.seconds"><b>Pace</b><strong><span data-lb-derived="ratio" data-lb-inputs="pipeline_benchmark.stages[1].output_rows;continuous.window.seconds" data-lb-fmt=",.0f" data-lb-suffix=" interactions/s">995 interactions/s</span></strong><small>1,790,912 interactions cleaned in 1,800 s; the pipeline kept pace</small><div class="lb-guard"><span class="qual qual-bounded" title="trickle 2 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span><span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span><div>&#8593; higher is better | 3,717,720 rows/hr</div></div></div><div class="lb-tile recorded" title="pipeline_benchmark.scores.data_freshness_seconds"><b>Freshness</b><strong><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.data_freshness_seconds" data-lb-fmt=",.0f" data-lb-suffix=" s">101 s</span></strong><small>gold behind input</small><div class="lb-guard"><span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span><div>gold freshness at each refresh in the window (readers see up to one refresh interval more)</div><div>&#8595; lower is better | 1.7 min lag</div></div></div><div class="lb-tile recorded" title="pipeline_benchmark.scores.in_stream_composite_qph"><b>Query rate</b><strong><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.in_stream_composite_qph" data-lb-fmt=",.1f">260.0</span></strong><small>QpH</small><div class="lb-guard"><span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1 run, <span data-lb-derived="count" data-lb-inputs="positive(pipeline_benchmark.benchmark_rounds[*].qph)" data-lb-fmt=",d">4</span> rounds</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span><div>median of <span data-lb-derived="count" data-lb-inputs="positive(pipeline_benchmark.benchmark_rounds[*].qph)" data-lb-fmt=",d">4</span> rounds</div><div>&#8593; higher is better | ~4 queries/min</div></div></div><div class="lb-tile recorded" title="pipeline_benchmark.scores.total_core_hours"><b>Compute</b><strong><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.total_core_hours" data-lb-fmt=".2f">14.00</span></strong><small>core-hours requested</small><div class="lb-guard"><div>extrapolates to ~672/day</div></div></div><div class="lb-tile recorded" title="pipeline_benchmark.scores.compute_efficiency_gb_per_core_hour"><b>Efficiency</b><strong><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.compute_efficiency_gb_per_core_hour" data-lb-fmt=".2f">2.31</span></strong><small>stage-input GiB per core-hour</small><div class="lb-guard"><span class="qual qual-bounded" title="trickle 2 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span><div>&#8593; higher is better</div></div></div><div class="lb-tile nr" title="io.totals"><b>Storage</b><strong>NR</strong><small>not measured: no Trino storage I/O in the run record</small></div><div class="lb-tile derived" title="verdict.gates"><b>Gates</b><strong>4 / 4</strong><small>all passed</small></div><div class="lb-tile recorded" title="experiment.support.state"><b>Support</b><strong>Unverified</strong><small>passed does not establish support</small></div></div></div>
+
 
         
         <div style="margin-bottom: 1.5rem; color: var(--text-muted); font-size: 0.875rem;">
@@ -238,36 +477,6 @@
 
         
         <div class="cards">
-            <div class="card">
-                <div class="card-label">Data Freshness</div>
-                <div class="card-value">101.0s<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
-                <div class="card-hint">gold freshness at each refresh in the window (readers see up to one refresh interval more)</div>
-                <div class="card-hint2">&#8595; lower is better | 1.7 min lag</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Continuous Throughput</div>
-                <div class="card-value">1,033 rows/s<span class="qual qual-bounded" title="trickle 2 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span><span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
-                <div class="card-hint">rows entering bronze per second</div>
-                <div class="card-hint2">&#8593; higher is better | 3,717,720 rows/hr</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">2.31 GiB/core-hr<span class="qual qual-bounded" title="trickle 2 files per trigger; this is the offered load, not infrastructure capacity" style="color: var(--danger); font-size: 0.55em; margin-left: 0.4em;">BOUNDED BY: trickle (offered load, not capacity)</span></div>
-                <div class="card-hint">stage-input GiB per core-hour requested</div>
-                <div class="card-hint2">&#8593; higher is better</div>
-            </div>
-            <div class="card">
-                <div class="card-label">In-Stream QpH</div>
-                <div class="card-value">260.1<span class="qual qual-n" style="color: var(--text-muted); font-size: 0.55em; margin-left: 0.4em;">n=1 run, <span data-lb-derived="count" data-lb-inputs="positive(pipeline_benchmark.benchmark_rounds[*].qph)" data-lb-fmt=",d">4</span> rounds</span><span class="qual qual-support" style="color: var(--warning); font-size: 0.55em; margin-left: 0.4em;">unverified</span></div>
-                <div class="card-hint">median of <span data-lb-derived="count" data-lb-inputs="positive(pipeline_benchmark.benchmark_rounds[*].qph)" data-lb-fmt=",d">4</span> rounds</div>
-                <div class="card-hint2">&#8593; higher is better | ~4 queries/min</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Total CPU-hours</div>
-                <div class="card-value">14.0</div>
-                <div class="card-hint">total compute across all stages</div>
-                <div class="card-hint2">extrapolates to ~672/day</div>
-            </div>
         </div>
         <div style="display: flex; gap: 2rem; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1.5rem;">
             <span>Duration: 52m 56s</span>
@@ -685,6 +894,16 @@
 
         
         <section>
+            <h2>Storage I/O</h2>
+            <p style="font-size: 0.875rem;">Bytes the engines reported reading from and writing
+            to storage during the run. A figure that was not measured says so; it is never
+            shown as zero.</p>
+            
+            
+            <p style="color: var(--text-muted); font-size: 0.8125rem;">Not measured, Spark (bronze, gold, silver; read and write): executor storage I/O is not collected.</p><p style="color: var(--text-muted); font-size: 0.8125rem;">Not measured, Trino queries (benchmark, in-stream round 1, in-stream round 2, in-stream round 3, in-stream round 4): this record predates the storage I/O report.</p><p style="color: var(--text-muted); font-size: 0.8125rem;">Bytes are what the engines report reading from and writing to storage. Pod network traffic and storage-array telemetry are not included, and bytes from different sources are not added together.</p>
+        </section>
+        
+        <section>
             <h2>Resources as run</h2>
             <table>
                 <thead>
@@ -754,6 +973,19 @@
             </div>
         </section>
         <section><h2>Experiment</h2><p>Two runs can be compared when their workload, corpus, mode and query set match (and, for an AML batch run, their alert sets are equal). Lakebench does not compare query answers: read the row counts and numbers of both reports. The identity digest hashes the workload, corpus, mode, execution conditions and system; it does not include the recipe or its components, which are listed separately.</p><table><tbody><tr><td>Experiment identity digest</td><td><code class='mono'>bc38aaf2d7afce18</code></td></tr><tr><td>Workload</td><td><code class='mono'>customer360 c360-1</code></td></tr><tr><td>Generator model version</td><td><code class='mono'>none</code></td></tr><tr><td>Corpus id</td><td><code class='mono'>13eaa2a3ed5fcf74</code></td></tr><tr><td>Seed</td><td><code class='mono'>42</code></td></tr><tr><td>Corpus role</td><td><code class='mono'>none</code></td></tr><tr><td>Scale</td><td><code class='mono'>1.0</code></td></tr><tr><td>Mode</td><td><code class='mono'>continuous</code></td></tr><tr><td>Datagen image</td><td><code class='mono'>docker.io/sillidata/lb-datagen:034f998</code></td></tr><tr><td>Datagen digest</td><td><code class='mono'>unresolved: no datagen fleet record for this run (data generated elsewhere or earlier)</code></td></tr><tr><td>Recipe</td><td><code class='mono'>hive-iceberg-spark-trino</code></td></tr><tr><td>Catalog</td><td><code class='mono'>hive (oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0 (derived, not read from the pod))</code></td></tr><tr><td>Table format</td><td><code class='mono'>iceberg (1.11.0)</code></td></tr><tr><td>Pipeline engine</td><td><code class='mono'>spark (apache/spark:4.0.2-python3)</code></td></tr><tr><td>Query engine</td><td><code class='mono'>trino (trinodb/trino:483)</code></td></tr><tr><td>Query access path</td><td><code class='mono'>catalog</code></td></tr><tr><td>Support state</td><td><code class='mono'>unverified (valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml)</code></td></tr><tr><td>Maintenance policy (requested)</td><td><code class='mono'>m2-2026-09-26</code></td></tr><tr><td>Maintenance (effective, what ran)</td><td><code class='mono'>m2-2026-09-26:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran [m2-2026-09-26:expire_snapshots=on,remove_orphan_files=on,compaction=partial; recorded outcomes] -- compaction: 1 of 2 statements succeeded</code></td></tr><tr><td>Maintenance settings</td><td><code class='mono'>{&#x27;retention_threshold&#x27;: &#x27;30m&#x27;, &#x27;retention_interval&#x27;: 600, &#x27;compaction_interval&#x27;: 1200}</code></td></tr><tr><td>In-stream QpH rounds</td><td><code class='mono'>4</code></td></tr><tr><td>System</td><td><code class='mono'>cluster</code></td></tr><tr><td>Corpus observed</td><td><code class='mono'>declared by the config, not observed from the datagen pods</code></td></tr><tr><td>Corpus problems</td><td><code class='mono'>none</code></td></tr><tr><td>Repetitions</td><td><code class='mono'>runs n=1, benchmark samples per query 1, in-stream rounds 4</code></td></tr><tr><td>Stages executed</td><td><code class='mono'>bronze, silver, gold, query</code></td></tr><tr><td>Stages skipped or failed</td><td><code class='mono'>none</code></td></tr><tr><td>Executor caps hit (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Lakebench limits that bound the run</td><td><code class='mono'>trickle: max_files_per_trigger 2 (auto), the pipeline kept pace [trickle (offered load, not capacity)]</code></td></tr><tr><td>Auto-sizing cuts (Lakebench limit)</td><td><code class='mono'>none</code></td></tr><tr><td>Query set</td><td><code class='mono'>qs8-32043638dbc4</code></td></tr><tr><td>Trickle rate (files per trigger)</td><td><code class='mono'>2</code></td></tr></tbody></table></section>
+
+        
+        <section class="read-first front-matter" style="margin-bottom: 1rem; border-left: 3px solid var(--success);">
+            <h2>Run record</h2>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.5rem 1.5rem;">
+                <div class="fm-verdict"><span class="read-first-key" style="color: var(--text-muted);">Verdict:</span> <strong style='color: var(--success);'>PASSED</strong></div><div class="fm-headline"><span class="read-first-key" style="color: var(--text-muted);">Headline:</span> Customer 360 continuous, scale 1.0, n=1</div><div class="fm-evidence-class"><span class="read-first-key" style="color: var(--text-muted);">Evidence class:</span> development (no look record names this run)</div><div class="fm-corpus"><span class="read-first-key" style="color: var(--text-muted);">Corpus:</span> none (id 13eaa2a3ed5f, scale 1.0)</div><div class="fm-support-state" title="a valid combination that no release-matrix run has validated; valid for this workload and mode; no validation run is listed in lakebench/config/validated_combinations.yaml"><span class="read-first-key" style="color: var(--text-muted);">Support state:</span> unverified</div><div class="fm-binding-caps"><span class="read-first-key" style="color: var(--text-muted);">Binding caps:</span> trickle: max_files_per_trigger 2 (auto), the pipeline kept pace</div><div class="fm-n"><span class="read-first-key" style="color: var(--text-muted);">n:</span> 1 run, 1 sample per query</div><div class="fm-provenance"><span class="read-first-key" style="color: var(--text-muted);">Provenance:</span> <code class="mono">lakebench 1.6.0.dev0, commit e6927ce, clean</code></div><div class="fm-digest"><span class="read-first-key" style="color: var(--text-muted);">Digest:</span> <code class="mono">bc38aaf2d7afce18</code></div>
+            </div>
+            
+            <div class="limits-interpretation" style="margin-top: 1rem;"><strong>Limits</strong><ul style="margin: 0.25rem 0 0 1.25rem;"><li>n=1: one run, so no figure here is a repeatability claim</li></ul></div>
+        </section>
+        
+
+        </div><script>(function(){var v={replay:document.getElementById('lb-view-replay'),scorecard:document.getElementById('lb-view-scorecard')},b=document.querySelectorAll('.lb-tabs button');function show(n){for(var k in v)v[k].hidden=(k!==n);b.forEach(function(x){x.className=x.dataset.view===n?'on':''})}b.forEach(function(x){x.onclick=function(){show(x.dataset.view)}});show('replay')})();</script>
 
         <footer>
             Generated by Lakebench | (timestamp removed)

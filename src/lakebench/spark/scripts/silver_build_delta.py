@@ -32,6 +32,7 @@ from common import (
     env,
     files_added_by_last_commit,
     log,
+    log_driver_output_bytes,
     one_line,
     path_size_gb_strict,
     refuse_orphan_delta_log,
@@ -771,6 +772,7 @@ if silver_count is None:
 else:
     log(f"output_rows: {silver_count}")
 log(f"elapsed_seconds: {total_time:.1f}")
+log_driver_output_bytes()
 log("=" * 60)
 # A4 (silver-plan): see silver_build.py for the rationale.
 if silver_count is None:

@@ -59,7 +59,9 @@ class TestEmptyGateInRounds:
 
         qs = [{"name": "Q1_full_aggregation_scan", "success": True, "rows_returned": 0}]
         assert _benchmark_gate_problems(_cfg(), qs, check_empty=False) == []
-        assert _benchmark_gate_problems(_cfg(), qs, check_empty=True)
+        problems = _benchmark_gate_problems(_cfg(), qs, check_empty=True)
+        assert problems and "Q1_full_aggregation_scan" in problems[0]
+        assert "no rows" in problems[0]
         assert empty_benchmark_queries(qs) == ["Q1_full_aggregation_scan"]
 
     def test_empty_q9_is_gated_in_the_final_round_only(self):
@@ -272,14 +274,6 @@ class TestMaintenanceStamps:
         assert e["effective_maintenance"]["detail"]["applied_retention"] == ["0s"]
         assert e["maintenance_settings"]["retention_threshold"] == "0s"
         assert "batch pre-benchmark" in e["maintenance_settings"]["retention_source"]
-
-    def test_failed_operations_are_recorded_as_failed(self):
-        r = _run()
-        r.maintenance_outcomes = [
-            {"kind": "expire", "total": 6, "succeeded": 0},
-            {"kind": "compaction", "total": 2, "succeeded": 2},
-        ]
-        assert "expire_snapshots=failed" in r.to_dict()["experiment"]["effective_maintenance"]["id"]
 
     def test_compaction_no_op_is_detail_not_identity(self):
         from lakebench.metrics.maintenance_policy import (

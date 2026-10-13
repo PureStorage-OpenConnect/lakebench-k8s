@@ -490,7 +490,6 @@ def resolve_auto_sizing(
         if " capped " in c
         or c.startswith("datagen.parallelism raised")
         or "(set in config) kept" in c
-        or c.startswith("cannot balance")
     ]
     for cut in cuts:
         log.warning("Auto-sizing: %s", cut)

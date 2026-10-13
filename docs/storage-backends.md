@@ -1,16 +1,16 @@
 # S3 storage
 
-Reference: configure and check an S3 store: credentials, permissions, FlashBlade settings, which stores work, the conformance check and bucket tagging.
+Reference: S3 store setup: credentials, permissions, FlashBlade settings, supported stores, the conformance check and bucket tagging.
 
-S3-compatible object storage holds all pipeline data in three buckets: bronze (raw), silver (cleaned and enriched) and gold (aggregated tables). Every recipe uses it.
+S3-compatible object storage holds all pipeline data in three buckets: bronze (raw), silver (cleaned and enriched) and gold (aggregated). Every recipe uses it.
 
-- The CLI talks to S3 with [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html). The S3 client (`src/lakebench/s3/client.py`) tests connectivity, validates credentials, and creates, sizes and empties buckets.
+- The CLI uses [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html) (`src/lakebench/s3/client.py`) to test connectivity, validate credentials, and create, size and empty buckets.
 - Before any Spark job runs, deploy validates the endpoint, authenticates and, unless told not to, creates the three buckets.
-- S3 implementations differ in ways that stay hidden until something breaks. `lakebench config storage lakebench.yaml` checks a store before you deploy. **Backend supported** means the store will work. Otherwise the output names the missing operation and what breaks.
+- S3 implementations differ in ways that surface late. `lakebench config storage lakebench.yaml` checks a store before you deploy. **Backend supported** means the store works; otherwise the output names the missing operation and what breaks.
 
 ## Configuration keys
 
-All keys live under `platform.storage.s3`. Defaults from `S3Config` in `config/schema.py`.
+All keys live under `platform.storage.s3`.
 
 | Key | Default | Effect |
 |---|---|---|
@@ -29,7 +29,7 @@ All keys live under `platform.storage.s3`. Defaults from `S3Config` in `config/s
 - Lakebench reads S3 credentials only from `access_key` and `secret_key`. `deploy` renders the `lakebench-s3-credentials` Secret from them; the CLI's S3 client uses the same fields.
 - Keep keys out of the file with `${VAR}` substitution, e.g. `access_key: "${LAKEBENCH_S3_ACCESS_KEY}"`.
 - Without credentials the config loads, and `lakebench deploy` refuses to start.
-- `secret_ref` is removed ([UPGRADING-1.7.md](../UPGRADING-1.7.md#config-fields-nothing-read-are-removed)): nothing ever read an existing Secret.
+- `secret_ref` is removed (1.7.0 in the [changelog](../CHANGELOG.md#170---2026-10-06)): nothing ever read an existing Secret.
 
 ## Required permissions
 
@@ -49,7 +49,7 @@ These apply to every provider (AWS, FlashBlade, MinIO, Ceph).
 | `s3:AbortMultipartUpload` | CLI | Abort incomplete uploads in cleanup |
 | `s3:ListBucketMultipartUploads` | CLI | List incomplete uploads in a bucket |
 
-- Large files (Parquet, ORC) are written as multipart uploads. A Spark job that fails mid-write leaves incomplete uploads. Cleanup must remove them to avoid ghost objects (especially on FlashBlade).
+- Large files are written as multipart uploads. A Spark job that fails mid-write leaves incomplete uploads, which cleanup must remove to avoid ghost objects (especially on FlashBlade).
 - A backend without bucket tagging (FlashBlade returns `NotImplemented`) falls back to a name-and-record check ([below](#bucket-tagging)). On a backend with tagging, access denied on either tagging call is an error, not a fallback.
 
 Optional:
@@ -136,7 +136,7 @@ Works on AWS S3, MinIO and any store with AWS-style IAM policies:
 
 ## Spark S3A
 
-Spark reaches the buckets through the Hadoop S3A connector, with S3A tuning proven at 1TB+ on FlashBlade.
+Spark reaches the buckets through the Hadoop S3A connector, tuned at 1TB+ on FlashBlade.
 
 - Part size, upload blocks and retries are job defaults that `spark.conf` can override.
 - Connection pool, thread count and upload buffer are set by Lakebench and refused in `spark.conf`.
@@ -144,8 +144,7 @@ Spark reaches the buckets through the Hadoop S3A connector, with S3A tuning prov
 
 ## Validated backends
 
-"Validated" means the backend passed the conformance checks on the date shown.
-An unlisted store is checked at runtime, never refused.
+"Validated" means the backend passed the conformance checks on the date shown. An unlisted store is checked at runtime, never refused.
 
 | Backend | Status | Region strict | Bucket tagging | Notes |
 |---|---|---|---|---|
@@ -155,8 +154,7 @@ An unlisted store is checked at runtime, never refused.
 | **MinIO** | Not yet validated | -- | Yes | Community edition is maintenance-only since 2025. |
 | **SeaweedFS** | **Not supported** | No | -- | Bucket enumeration is broken. See below. |
 
-Ceph RGW, Dell ECS and other S3-compatible stores are expected to work but
-have not been checked. Run `lakebench config storage` to find out.
+Ceph RGW, Dell ECS and other S3-compatible stores are unchecked; run `lakebench config storage`.
 
 ### Why SeaweedFS is not supported
 
@@ -169,8 +167,7 @@ have not been checked. Run `lakebench config storage` to find out.
 
 ## What lakebench requires
 
-The checks are graded. A failure blocks only when it breaks a Lakebench code
-path.
+The checks are graded. A failure blocks only when it breaks a Lakebench code path.
 
 ### Required
 
@@ -234,8 +231,7 @@ exercises it and deletes it. This needs create-bucket permission.
 
 ### If you cannot create buckets
 
-Locked-down accounts often deny `CreateBucket`. That is a permissions limit,
-not a backend defect, and is not a failure.
+A denied `CreateBucket` is a permissions limit, not a backend defect, and is not a failure.
 
 - `--no-full` runs read-only checks against the configured bronze bucket.
 - Write and multipart checks are reported as **skipped**, not failed, and the
@@ -278,8 +274,7 @@ backend is checked and reported on, never refused.
 
 ## What the check does not cover
 
-A pass means Lakebench's code paths work against the store. It is not a
-performance, durability or suitability judgement:
+A pass means Lakebench's code paths work against the store. It is not a performance, durability or suitability judgement:
 
 - **Performance is not measured.** A backend can pass and be far too slow to
   benchmark against.

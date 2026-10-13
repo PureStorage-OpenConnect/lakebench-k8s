@@ -28,10 +28,9 @@ executor run time (`exec_s`), with status, task count, wall time, longest task
 - An empty list means the rule ran no stage. With no usable list (store
   unreadable, or no stage of the rule while a flag is set), the rule is in
   `stage_profile_unavailable` with the reason.
-- Detection is never affected. The wait adds at most 5 s per rule, nothing
-  when the listener keeps up. `stage_profile_cost_s` records each rule's read
-  time: Lakebench overhead inside the job's time, never in `rule_elapsed_s`.
-  The continuous gold [tick](../../glossary.md#tick) does not profile.
+- Detection is unaffected. The wait adds at most 5 s per rule.
+  `stage_profile_cost_s` records each rule's read time: Lakebench overhead
+  inside the job's time, never in `rule_elapsed_s`. The continuous gold [tick](../../glossary.md#tick) does not profile.
 
 **`tm_ops.phases`**: wall seconds per TM pass stage, in pass order `pin`,
 `reconcile`, `prior_state`, `plan` (alert-input, replay and disposition
@@ -50,9 +49,9 @@ per-customer replay), `write_dispositions`, `write_cases`, `coverage`,
 ([8.7](scoring.md#87-alert-set)). It runs last in the gold-finalize pod, after
 the TM pass.
 
-- It is Lakebench's work, not the pipeline's. So the CLI takes it off the
-  stage's `elapsed_seconds` and end time, and so off CPU-seconds, as for the
-  Customer 360 check.
+- It is Lakebench's work, not the pipeline's, so the CLI takes it off the
+  stage's `elapsed_seconds`, end time and CPU-seconds, as for the Customer 360
+  check.
 - The report prints it beside the stage time ("excludes 1.2s of Lakebench's
   alert-set fingerprint").
 - Time to value loses it in a single-cycle run. With `cycles` above 1 the

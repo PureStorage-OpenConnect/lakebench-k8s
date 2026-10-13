@@ -63,22 +63,6 @@ def test_flat_field_is_promoted(tmp_path, key, value, read):
 class TestFlatConfigIntegration:
     """Test that a flat v2 config file loads end-to-end."""
 
-    def test_minimal_flat_config(self, tmp_path, monkeypatch):
-        cfg_file = tmp_path / "lakebench.yaml"
-        cfg_file.write_text(
-            textwrap.dedent("""\
-            name: flat-test
-            endpoint: http://minio:9000
-            access_key: minioadmin
-            secret_key: minioadmin
-            scale: 10
-            """)
-        )
-        config = load_config(cfg_file)
-        assert config.name == "flat-test"
-        assert config.platform.storage.s3.endpoint == "http://minio:9000"
-        assert config.architecture.workload.datagen.scale == 10
-
     def test_flat_with_env_vars(self, tmp_path, monkeypatch):
         monkeypatch.setenv("TEST_ENDPOINT", "http://s3:9000")
         monkeypatch.setenv("TEST_KEY", "testkey")

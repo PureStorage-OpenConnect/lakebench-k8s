@@ -72,7 +72,7 @@
   subtracted ([8.1](metrics.md#81-batch)); `cycles` above 1 is a Corpus
   identity key.
 - **Stage timing** comes from pod and API-server clocks mapped to the host
-  clock; stages that fall back to the 5 s status poll are labelled
+  clock; stages that fall back to the 5 s status poll read
   `timing_source: poll`.
 - **Repeatability.** A single run is `n=1`; a repeatability claim needs `run
   --repeat` or repeated runs.

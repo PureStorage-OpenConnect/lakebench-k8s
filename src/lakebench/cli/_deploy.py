@@ -91,7 +91,10 @@ def _preflight_check(cfg) -> None:
                 console.print(f"  [dim]{esc(line)}[/dim]")
         print_info("Nothing was created.")
         raise typer.Exit(ExitCode.PREREQUISITE)
-    print_info(f"cluster-capacity: {esc(capacity.message)}")
+    if capacity.message.startswith("WARNING"):
+        print_warning(f"cluster-capacity: {capacity.message}")
+    else:
+        print_info(f"cluster-capacity: {esc(capacity.message)}")
 
     # 4. Check Stackable CRDs if catalog=hive
     if cfg.architecture.catalog.type.value == "hive":
@@ -121,25 +124,30 @@ def _preflight_check(cfg) -> None:
             )
             raise typer.Exit(ExitCode.PREREQUISITE)
 
-    # 4. The shared observability stack, when this deploy uses it: deploy
-    # never installs it, so stop before creating anything rather than at the
-    # last step. An unreadable answer is left to the observability step.
+    # 4. Observability runs per deployment, in this namespace: deploy
+    # applies it. Warn if the kubelet-metrics ClusterRole is missing (the
+    # one piece a cluster admin installs); the stack still deploys, but
+    # per-pod CPU and memory read "not collected" in the report.
     if cfg.observability.enabled:
-        release_ns: str | None = ""
         try:
-            from lakebench.deploy.observability import find_observability_release
+            from lakebench.deploy.observability import (
+                KUBELET_METRICS_CLUSTER_ROLE,
+                kubelet_cluster_role_exists,
+            )
 
-            release_ns = find_observability_release(cfg.platform.kubernetes.context or None)
+            present = kubelet_cluster_role_exists(
+                context=cfg.platform.kubernetes.context or None,
+            )
         except Exception:
             logger.debug("Preflight observability check skipped", exc_info=True)
-        if release_ns is None:
-            print_error("The shared observability stack (kube-prometheus-stack) is not installed")
-            print_info(
-                "A cluster admin installs it once:\n"
-                "  lakebench admin install --component observability <config>\n"
-                "Or set observability.enabled: false"
+            present = None
+        if present is False:
+            print_warning(
+                f"ClusterRole {KUBELET_METRICS_CLUSTER_ROLE} is not present; "
+                "platform CPU and memory will read 'not collected' in the report. "
+                "A cluster admin runs 'lakebench admin install --component observability' "
+                "to enable them."
             )
-            raise typer.Exit(ExitCode.PREREQUISITE)
 
 
 def _build_component_list(cfg) -> str:
@@ -501,16 +509,19 @@ def deploy(
             + "; it refuses anything that already exists",
             path="cli.bad_argument",
         )
-    _deploy_impl(
-        resolve_config_path(config_file, file_option),
-        dry_run=dry_run,
-        yes=yes,
-        timeout=timeout,
-        local=local,
-        workdir=workdir,
-        force_legacy=force_legacy,
-        require_new=require_new,
-    )
+    from lakebench.cli._helpers import defer_warnings
+
+    with defer_warnings():
+        _deploy_impl(
+            resolve_config_path(config_file, file_option),
+            dry_run=dry_run,
+            yes=yes,
+            timeout=timeout,
+            local=local,
+            workdir=workdir,
+            force_legacy=force_legacy,
+            require_new=require_new,
+        )
 
 
 def _deploy_impl(
@@ -720,16 +731,27 @@ def _deploy_impl(
             ),
             None,
         )
-        if obs_result and obs_result.details:
-            # The stack is shared and lives in its own namespace.
-            obs_ns = obs_result.details.get("release_namespace") or cfg.get_namespace()
+        if obs_result:
+            obs_ns = cfg.get_namespace()
+            from lakebench.deploy.observability import read_grafana_password
+
+            password = read_grafana_password(obs_ns, context=cfg.platform.kubernetes.context)
+            grafana_url = (obs_result.details or {}).get("grafana_url")
             success_msg += (
-                f"\n\n[bold]Monitoring (shared stack in namespace {obs_ns}):[/bold]"
-                f"\n  Services: [cyan]kubectl get svc -n {obs_ns} -l release=lakebench-observability[/cyan]"
-                f"\n  Grafana login: admin, password from [cyan]kubectl get secret -n {obs_ns} "
-                "lakebench-observability-grafana -o jsonpath='{.data.admin-password}' | base64 -d[/cyan]"
-                f"\n  Local access: [cyan]kubectl port-forward -n {obs_ns} svc/<grafana service> 3000:80[/cyan]"
+                f"\n\n[bold]Monitoring (per-deployment stack in namespace {obs_ns}):[/bold]"
             )
+            if grafana_url:
+                success_msg += f"\n  Grafana:    [cyan]{esc(grafana_url)}[/cyan]"
+            else:
+                success_msg += (
+                    "\n  Grafana:    [cyan]http://localhost:3000[/cyan] after "
+                    f"[cyan]kubectl port-forward -n {obs_ns} svc/lakebench-grafana 3000:3000[/cyan]"
+                )
+            if password:
+                success_msg += f"\n  Login:      admin / [cyan]{esc(password)}[/cyan]"
+            else:
+                success_msg += f"\n  Login:      admin, password in secret lakebench-grafana (namespace {obs_ns}), key admin-password"
+            success_msg += "\n  Queries:    Grafana, Explore, data source Prometheus"
 
         if next_steps:
             success_msg += _next_steps(cfg, config_file)

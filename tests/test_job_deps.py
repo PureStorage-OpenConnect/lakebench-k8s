@@ -62,21 +62,15 @@ def _job_types(cfg):
 
 
 @pytest.mark.parametrize("name,cfg", CONFIGS, ids=[n for n, _ in CONFIGS])
-def test_built_conf_has_no_packages(name, cfg):
-    """For every supported row and job type: nothing resolved at submit,
-    every jar from the config's own lb-deps set, in jar order, annotated."""
+def test_built_conf_takes_every_jar_from_the_set(name, cfg):
+    """For every supported row and job type: every jar from the config's own
+    lb-deps set, in jar order, annotated; no resolve volume or init container.
+    Package and Ivy keys are refused by test_no_runtime_fetch."""
     mgr = _manager(cfg)
     handle = mgr.deps
     for jt in _job_types(cfg):
         spec = mgr._build_manifest(jt)["spec"]
         conf = spec["sparkConf"]
-        for key in (
-            "spark.jars.packages",
-            "spark.jars.repositories",
-            "spark.jars.ivy",
-            "spark.jars.ivySettings",
-        ):
-            assert key not in conf, (jt, key)
         urls = conf["spark.jars"].split(",")
         assert all(u.startswith(handle.base_url + "/jars/") for u in urls), jt
         assert [unquote(u.rsplit("/", 1)[1]) for u in urls] == list(handle.manifest["jar_order"])
@@ -182,11 +176,7 @@ def test_thrift_fetches_the_set_and_resolves_nothing(recipe):
     )
     assert vols["lb-deps-manifest"]["configMap"]["name"] == m.MANIFEST_CONFIGMAP
     main = tpl["spec"]["containers"][0]["command"][-1]
-    assert (
-        "--packages" not in main and "spark.jars.ivy" not in main and "cp /extra-jars" not in main
-    )
-    text = yaml.safe_dump(dep)
-    assert "--packages" not in text and "download-jars" not in text
+    assert "spark.jars.ivy" not in main and "cp /extra-jars" not in main
 
 
 def test_duckdb_installs_from_the_set_with_hashes():

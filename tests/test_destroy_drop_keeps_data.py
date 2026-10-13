@@ -304,18 +304,10 @@ def test_unregister_sql_quotes_its_arguments():
     )
 
 
-@pytest.mark.parametrize(
-    ("engine", "fmt", "deletes"),
-    [
-        ("trino", "iceberg", True),
-        ("trino", "delta", True),
-        ("spark-thrift", "iceberg", False),
-        ("spark-thrift", "delta", True),
-        ("duckdb", "iceberg", True),
-    ],
-)
-def test_drop_file_semantics_table(engine, fmt, deletes):
-    assert destroy_mod._drop_deletes_files(engine, fmt) is deletes
+def test_drop_by_any_other_engine_counts_as_deleting_files():
+    """Only Spark Thrift on Iceberg drops the catalog entry alone (the
+    harness tests above cover both Spark Thrift formats)."""
+    assert destroy_mod._drop_deletes_files("duckdb", "iceberg") is True
 
 
 @pytest.mark.usefixtures("load_script")

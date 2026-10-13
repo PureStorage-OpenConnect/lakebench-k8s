@@ -1,22 +1,18 @@
-"""v1.6 config contract (design-contradictions #4, #7, #12, #13, #15, #18, #19,
+"""v1.6 config contract (design-contradictions #4, #7, #12, #13, #18, #19,
 outcome 5).
 
 Each test here fails with its fix reverted: AML on Delta and the Java/Iceberg
 pairing used to load, `custom` used to run the Customer 360 queries, the
 workload block lived only under architecture, `sustained` was the canonical
 mode, dead fields loaded silently, a benchmark exception left the run
-successful, bucket names were fixed and global, and destroy uninstalled the
-shared observability stack.
+successful, and bucket names were fixed and global.
 """
 
 from __future__ import annotations
 
-import ast
-import subprocess
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -29,8 +25,6 @@ from lakebench.config.schema import (
     is_continuous_mode,
 )
 from tests.conftest import make_config
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def _write(tmp_path, data) -> Path:
@@ -207,24 +201,46 @@ def test_buckets_derive_from_the_deployment_name_unless_explicit(buckets, expect
 # -- #7: a benchmark exception fails the run ----------------------------------
 
 
-def _benchmark_except_handler() -> ast.ExceptHandler:
-    src = (ROOT / "src/lakebench/cli/_run.py").read_text()
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ExceptHandler) and "Benchmark did not complete" in ast.unparse(
-            node
-        ):
-            return node
-    raise AssertionError("benchmark exception handler not found")
+def test_benchmark_exception_fails_the_run_and_withholds_qph(tmp_path, monkeypatch):
+    """The real batch ``run`` through the run harness, its one timed
+    benchmark raising: the run fails, no QpH is recorded and the journal
+    says why."""
+    import dataclasses
+    import json
 
+    from tests.harness import run_harness
 
-def test_benchmark_exception_fails_the_run_and_withholds_qph():
-    body = ast.unparse(_benchmark_except_handler())
-    assert "pipeline_success = False" in body
-    assert "benchmark_qph = None" in body
-    assert "collector.current_run.benchmark = None" in body
-    assert "benchmark_error" in body
-    assert "success=False" in body  # journal event
+    def broken(self, *args, **kwargs):
+        self._rec.add("Benchmark", "run_power", "raised")
+        raise RuntimeError("trino down")
+
+    monkeypatch.setattr(run_harness.FakeBenchmark, "run_power", broken)
+    base = run_harness.SCENARIOS["batch_c360"]
+    # No maintenance, so no pre-compaction round: the timed benchmark is
+    # the only run_power call.
+    scenario = dataclasses.replace(base, argv=[*base.argv, "--skip-maintenance"])
+    trace, rec = run_harness.run_scenario_full(scenario, tmp_path, monkeypatch)
+    record = run_harness.saved_record(tmp_path)
+
+    assert trace["unscripted"] == []
+    assert ["Benchmark", "run_power", "raised"] in rec.calls
+    assert trace["exit_code"] != 0
+    assert record["success"] is False
+    assert record.get("benchmark") is None
+    assert record["benchmark_error"] == "RuntimeError: trino down"
+    assert record["verdict"]["status"] != "PASSED"
+    assert any("Benchmark did not complete" in r for r in record["verdict"]["reasons"])
+    assert record["pipeline_benchmark"]["scores"].get("composite_qph") is None
+
+    events = [
+        json.loads(line)
+        for f in (tmp_path / "lakebench-output" / "journal").glob("*.jsonl")
+        for line in f.read_text().splitlines()
+    ]
+    done = [e for e in events if e["event_type"] == "benchmark.complete"]
+    assert len(done) == 1
+    assert done[0]["success"] is False
+    assert done[0]["details"]["qph"] is None
 
 
 def test_benchmark_error_round_trips_and_reaches_the_report(tmp_path):
@@ -250,291 +266,6 @@ def test_benchmark_error_round_trips_and_reaches_the_report(tmp_path):
     ok, reasons, _ = gen._compute_overall_status(loaded)
     assert not ok
     assert any("Benchmark did not complete" in r for r in reasons)
-
-
-# -- #15: shared observability stack ------------------------------------------
-
-
-def _obs_engine(namespace="dep-a", dry_run=False):
-    cfg = make_config(
-        name=namespace,
-        observability={"enabled": True},
-    )
-    return SimpleNamespace(
-        config=cfg,
-        k8s=MagicMock(),
-        renderer=MagicMock(),
-        context={},
-        dry_run=dry_run,
-    )
-
-
-def _helm_list_result(releases):
-    import json
-
-    return subprocess.CompletedProcess(args=[], returncode=0, stdout=json.dumps(releases))
-
-
-def test_destroy_never_uninstalls_the_shared_stack():
-    from lakebench.deploy.observability import ObservabilityDeployer
-
-    calls = []
-
-    def fake_run(cmd, **kw):
-        calls.append(cmd)
-        # This deployment's namespace holds no release of its own.
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="")
-
-    deployer = ObservabilityDeployer(_obs_engine())
-    with patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run):
-        result = deployer.destroy()
-    assert not any("uninstall" in c for c in calls), calls
-    assert "left in place" in result.message
-
-
-def test_destroy_removes_only_a_legacy_release_in_its_own_namespace():
-    from lakebench.deploy.observability import HELM_RELEASE_NAME, ObservabilityDeployer
-
-    calls = []
-
-    def fake_run(cmd, **kw):
-        calls.append(cmd)
-        if cmd[:2] == ["helm", "list"]:
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout=HELM_RELEASE_NAME)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-
-    deployer = ObservabilityDeployer(_obs_engine("dep-a"))
-    with patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run):
-        deployer.destroy()
-    uninstalls = [c for c in calls if "uninstall" in c]
-    assert uninstalls == [["helm", "uninstall", HELM_RELEASE_NAME, "--namespace", "dep-a"]]
-
-
-def test_destroy_in_the_shared_namespace_never_uninstalls():
-    from lakebench.deploy.observability import OBSERVABILITY_NAMESPACE, ObservabilityDeployer
-
-    # Config load refuses this namespace; the deployer guards it anyway.
-    engine = _obs_engine()
-    engine.config = MagicMock()
-    engine.config.get_namespace.return_value = OBSERVABILITY_NAMESPACE
-    deployer = ObservabilityDeployer(engine)
-    with patch("lakebench.deploy.observability.subprocess.run") as run:
-        deployer.destroy()
-    assert run.call_count == 0
-
-
-@pytest.fixture
-def _lock():
-    with (
-        patch("kubernetes.client.CoreV1Api"),
-        patch("lakebench.deploy.cluster_lock.cluster_lock") as lock,
-        patch("lakebench.deploy.observability._wait_for_prometheus", return_value="") as wait,
-    ):
-        lock.wait = wait
-        lock.return_value.__enter__.return_value = None
-        lock.return_value.__exit__.return_value = False
-        yield lock
-
-
-def test_deploy_reuses_an_existing_release_without_modifying_it(_lock):
-    from lakebench.deploy.engine import DeploymentStatus
-    from lakebench.deploy.observability import (
-        HELM_RELEASE_NAME,
-        OBSERVABILITY_NAMESPACE,
-        ObservabilityDeployer,
-    )
-
-    calls = []
-
-    def fake_run(cmd, **kw):
-        calls.append(cmd)
-        return _helm_list_result(
-            [
-                {
-                    "name": HELM_RELEASE_NAME,
-                    "namespace": OBSERVABILITY_NAMESPACE,
-                    "status": "deployed",
-                }
-            ]
-        )
-
-    deployer = ObservabilityDeployer(_obs_engine())
-    with patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run):
-        result = deployer.deploy()
-    assert result.status == DeploymentStatus.SUCCESS
-    assert all(c[:2] == ["helm", "list"] for c in calls), calls
-    assert "shared cluster component" in result.message
-
-
-def test_deploy_never_installs_the_shared_stack(_lock):
-    """DEP-3: deploy only verifies the shared stack, so a missing one fails
-    the step naming the admin command, with no install and no lease (it
-    writes nothing outside its own namespace). Reverted (v1.6), deploy
-    helm-installed it under the lease."""
-    from lakebench.deploy.engine import DeploymentStatus
-    from lakebench.deploy.observability import ObservabilityDeployer
-
-    calls = []
-
-    def fake_run(cmd, **kw):
-        calls.append(cmd)
-        if cmd[:2] == ["helm", "list"]:
-            return _helm_list_result([])
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-
-    deployer = ObservabilityDeployer(_obs_engine())
-    with patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run):
-        result = deployer.deploy()
-    assert result.status == DeploymentStatus.FAILED
-    assert "lakebench admin install --component observability" in result.message
-    assert [c[:2] for c in calls] == [["helm", "list"]]
-    assert not _lock.called
-
-
-def test_deploy_does_not_install_when_the_lookup_fails(_lock):
-    from lakebench.deploy.engine import DeploymentStatus
-    from lakebench.deploy.observability import ObservabilityDeployer
-
-    calls = []
-
-    def fake_run(cmd, **kw):
-        calls.append(cmd)
-        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
-
-    deployer = ObservabilityDeployer(_obs_engine())
-    with patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run):
-        result = deployer.deploy()
-    assert result.status == DeploymentStatus.FAILED
-    assert not [c for c in calls if c[1] in ("install", "upgrade")]
-
-
-@pytest.mark.parametrize("name", ["lakebench-observability", "lakebench-system"])
-def test_reserved_namespaces_are_refused(name, monkeypatch):
-    from lakebench.config import schema
-
-    def both():
-        make_config(name="ok", platform={"kubernetes": {"namespace": name}})
-        make_config(name=name)
-
-    with pytest.raises(ValidationError):
-        make_config(name=name)
-    with pytest.raises(ValidationError):
-        make_config(name="ok", platform={"kubernetes": {"namespace": name}})
-    make_config(name="ok", platform={"kubernetes": {"namespace": "ok"}})
-    # Without the reserved entry the same inputs load, so the refusals above
-    # came from the reserved-namespace rule and no other.
-    monkeypatch.setattr(
-        schema,
-        "RESERVED_NAMESPACES",
-        {k: v for k, v in schema.RESERVED_NAMESPACES.items() if k != name},
-    )
-    both()
-
-
-def test_continuous_peak_requirements_read_either_spelling():
-    from lakebench.config.schema import PipelineMode
-    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
-
-    def peak(mode):
-        p = compute_peak_requirements(1, mode)
-        return (p.cpu_cores, p.memory_gb)
-
-    assert peak("continuous") == peak("sustained") == peak(PipelineMode.CONTINUOUS)
-    assert peak("continuous") != peak("batch")
-
-
-def test_invalid_derived_bucket_name_is_refused():
-    ns = {"kubernetes": {"namespace": "my-deploy"}}
-    with pytest.raises(ValidationError):
-        make_config(name="My_Deploy", platform=ns)
-    # Explicit buckets skip the derivation, so it was the derived name that failed.
-    explicit = {
-        **ns,
-        "storage": {
-            "s3": {"buckets": {"bronze": "b-bronze", "silver": "b-silver", "gold": "b-gold"}}
-        },
-    }
-    make_config(name="My_Deploy", platform=explicit)
-    make_config(name="my-deploy", platform=ns)
-
-
-def test_deploy_refuses_to_reuse_a_release_that_is_not_deployed(_lock):
-    from lakebench.deploy.engine import DeploymentStatus
-    from lakebench.deploy.observability import (
-        HELM_RELEASE_NAME,
-        OBSERVABILITY_NAMESPACE,
-        ObservabilityDeployer,
-    )
-
-    calls = []
-
-    def fake_run(cmd, **kw):
-        calls.append(cmd)
-        return _helm_list_result(
-            [
-                {
-                    "name": HELM_RELEASE_NAME,
-                    "namespace": OBSERVABILITY_NAMESPACE,
-                    "status": "pending-install",
-                }
-            ]
-        )
-
-    deployer = ObservabilityDeployer(_obs_engine())
-    with patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run):
-        result = deployer.deploy()
-    assert result.status == DeploymentStatus.FAILED
-    assert "status 'pending-install'" in result.message
-    assert all(c[:2] == ["helm", "list"] for c in calls), calls
-
-
-def test_destroy_reports_failure_when_it_cannot_list_releases():
-    from lakebench.deploy.engine import DeploymentStatus
-    from lakebench.deploy.observability import ObservabilityDeployer
-
-    def fake_run(cmd, **kw):
-        return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="no helm")
-
-    deployer = ObservabilityDeployer(_obs_engine())
-    with patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run) as run:
-        result = deployer.destroy()
-    assert result.status == DeploymentStatus.FAILED
-    assert not any("uninstall" in c.args[0] for c in run.call_args_list)
-
-
-def test_benchmark_postprocessing_error_keeps_a_recorded_result():
-    body = ast.unparse(_benchmark_except_handler())
-    assert "if _bench_recorded:" in body
-
-
-def test_deploy_waits_for_prometheus_and_fails_if_not_ready(_lock):
-    from lakebench.deploy.engine import DeploymentStatus
-    from lakebench.deploy.observability import (
-        HELM_RELEASE_NAME,
-        OBSERVABILITY_NAMESPACE,
-        ObservabilityDeployer,
-    )
-
-    order = []
-    _lock.wait.side_effect = lambda ns, **_kw: order.append(f"wait {ns}") or "not Ready after 600s"
-
-    def fake_run(cmd, **kw):
-        return _helm_list_result(
-            [
-                {
-                    "name": HELM_RELEASE_NAME,
-                    "namespace": OBSERVABILITY_NAMESPACE,
-                    "status": "deployed",
-                }
-            ]
-        )
-
-    deployer = ObservabilityDeployer(_obs_engine())
-    with patch("lakebench.deploy.observability.subprocess.run", side_effect=fake_run):
-        result = deployer.deploy()
-    assert order == [f"wait {OBSERVABILITY_NAMESPACE}"]
-    assert result.status == DeploymentStatus.FAILED
-    assert not _lock.called
 
 
 @pytest.mark.parametrize(

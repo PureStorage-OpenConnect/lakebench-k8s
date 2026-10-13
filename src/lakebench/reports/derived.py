@@ -96,8 +96,25 @@ def expr(terms: str | Sequence[str]) -> str:
     return "|".join(terms)
 
 
+AUTO_GIB = "auto-gib"
+
+
+def _auto_gib(value: float, suffix: str) -> str:
+    """*value* is GiB; shown in the unit that keeps it readable (KiB to TiB),
+    so a rate steps up as it grows: ``"512 MiB/s"``, ``"1.25 GiB/s"``."""
+    for factor, unit in ((1024.0, "TiB"), (1.0, "GiB"), (1 / 1024, "MiB"), (1 / 1024**2, "KiB")):
+        if value >= factor or unit == "KiB":
+            n = value / factor
+            digits = ",.0f" if n >= 100 else ".1f" if n >= 10 else ".2f"
+            return f"{format(n, digits)} {unit}{suffix}"
+    return ""  # unreachable
+
+
 def _fmt(value: float, fmt: str, suffix: str) -> str:
-    """*value* in *fmt*; an integer spec (``",d"``) takes the value as an int."""
+    """*value* in *fmt*; an integer spec (``",d"``) takes the value as an int.
+    ``fmt="auto-gib"`` picks the byte unit from the size of *value* (GiB)."""
+    if fmt == AUTO_GIB:
+        return _auto_gib(value, suffix)
     if fmt.endswith("d"):
         return f"{format(int(round(value)), fmt)}{suffix}"
     return f"{format(value, fmt)}{suffix}"

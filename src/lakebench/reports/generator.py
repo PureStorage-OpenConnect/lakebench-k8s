@@ -20,6 +20,7 @@ backward compatibility and only shifts the default scratch directory.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import escape as _html_escape
 from pathlib import Path
@@ -56,6 +57,17 @@ def _format_duration_ms(ms: float | None) -> str:
 # Above this the batch corpus holds more data than the scale asks for; the
 # ratio shows amber, not "Complete".
 SCALE_RATIO_HIGH = 1.05
+
+
+@dataclass
+class _SummaryParts:
+    """What the scorecard's summary contributes: the run notes that have no
+    tile, the guards (qualifiers and direction hints) each score tile
+    carries, and the tiles that must read not-measured, with the reason."""
+
+    html: str
+    guards: dict[str, str] = field(default_factory=dict)
+    not_shown: dict[str, str] = field(default_factory=dict)
 
 
 def _scale_warning(ratio: float) -> str:
@@ -266,8 +278,8 @@ def _limits_interpretation_html(metrics) -> str:
         return ""
     lis = "".join(f"<li>{i}</li>" for i in items)
     return (
-        '<div class="limits-interpretation" style="margin-top: 0.75rem; font-size: 0.8rem;">'
-        f'<strong>What limits interpretation:</strong><ul style="margin: 0.25rem 0 0 1.25rem;">{lis}</ul></div>'
+        '<div class="limits-interpretation" style="margin-top: 1rem;">'
+        f'<strong>Limits</strong><ul style="margin: 0.25rem 0 0 1.25rem;">{lis}</ul></div>'
     )
 
 
@@ -385,6 +397,74 @@ def _qph_stop_warning(metrics) -> str:
         ' <span class="qph-stop-warning" style="color: var(--danger); font-size: 0.5em;" '
         f'title="{escape(caveat)}">'
         f"WARNING: {escape(caveat)}, so this is not a clean measurement</span>"
+    )
+
+
+def _rate_chart_svg(
+    read: list[float],
+    write: list[float],
+    step: float,
+    start: datetime,
+    end: datetime,
+    width: int = 700,
+    height: int = 150,
+) -> str:
+    """Read and written MB/s per time bucket as inline SVG (no scripts).
+
+    The bars are rates over the bucket: the bytes in it over its length. A
+    bucket is no finer than the intervals feeding it, so the chart shows
+    where bytes were moved, not how evenly.
+    """
+    n = len(read)
+    if n == 0 or not (any(read) or any(write)):
+        return ""
+    rates_r = [v / step / 1e6 for v in read]
+    rates_w = [v / step / 1e6 for v in write]
+    top = max(max(rates_r), max(rates_w)) or 1.0
+    ml, mr, mt, mb = 56, 12, 14, 30
+    pw, ph = width - ml - mr, height - mt - mb
+    slot = pw / n
+    bar = max(1.0, slot * 0.42)
+
+    def y(v: float) -> float:
+        return mt + ph - (v / top) * ph
+
+    bars = ""
+    for i in range(n):
+        x = ml + i * slot
+        for k, (v, color) in enumerate(((rates_r[i], "#2563eb"), (rates_w[i], "#d97706"))):
+            if v > 0:
+                bars += (
+                    f'<rect x="{x + k * bar:.1f}" y="{y(v):.1f}" width="{bar:.1f}" '
+                    f'height="{mt + ph - y(v):.1f}" fill="{color}"/>'
+                )
+    grid = ""
+    for frac in (0, 0.5, 1):
+        gy = mt + ph - frac * ph
+        grid += (
+            f'<line x1="{ml}" x2="{ml + pw}" y1="{gy:.1f}" y2="{gy:.1f}" stroke="#e2e8f0"/>'
+            f'<text x="{ml - 6}" y="{gy + 3:.1f}" text-anchor="end" fill="#64748b" '
+            f'font-size="10">{top * frac:,.1f}</text>'
+        )
+    axis = (
+        f'<text x="{ml}" y="{height - 14}" fill="#64748b" font-size="10">{start:%H:%M:%S} UTC</text>'
+        f'<text x="{ml + pw}" y="{height - 14}" text-anchor="end" fill="#64748b" '
+        f'font-size="10">{end:%H:%M:%S} UTC</text>'
+        f'<text x="{ml + pw / 2}" y="{height - 2}" text-anchor="middle" fill="#64748b" '
+        f'font-size="10">MB/s per {step:g} s</text>'
+    )
+    legend = (
+        f'<rect x="{ml}" y="2" width="9" height="9" fill="#2563eb"/>'
+        f'<text x="{ml + 13}" y="10" fill="#64748b" font-size="10">read</text>'
+        f'<rect x="{ml + 52}" y="2" width="9" height="9" fill="#d97706"/>'
+        f'<text x="{ml + 65}" y="10" fill="#64748b" font-size="10">written</text>'
+    )
+    return (
+        f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" role="img" '
+        f'aria-label="Storage read and write rate over time" '
+        f'style="width: 100%; max-width: {width}px; height: auto; margin-top: 0.75rem;">'
+        f"<title>Storage read and write rate over time</title>"
+        f"{grid}{bars}{axis}{legend}</svg>"
     )
 
 
@@ -585,8 +665,14 @@ class ReportGenerator:
         colour = {
             "PASSED": "var(--warning)" if fm.warnings else "var(--success)",
         }.get(fm.verdict, "var(--danger)")
+        short = {"Support state": fm.support_basis}
         rows = []
         for label, text in fm.lines():
+            # The support basis is a paragraph; the page shows the state and
+            # keeps the basis as hover text (the terminal report prints it
+            # in full).
+            if label == "Support state":
+                text = fm.support_state
             value = (
                 f"<strong style='color: {colour};'>{e(text)}</strong>"
                 if label == "Verdict"
@@ -594,8 +680,9 @@ class ReportGenerator:
             )
             if label in ("Digest", "Provenance"):
                 value = f'<code class="mono">{e(text)}</code>'
+            hover = f' title="{e(str(short[label]), quote=True)}"' if label in short else ""
             rows.append(
-                f'<div class="fm-{label.lower().replace(" ", "-")}">'
+                f'<div class="fm-{label.lower().replace(" ", "-")}"{hover}>'
                 f'<span class="read-first-key" style="color: var(--text-muted);">{e(label)}:</span> '
                 f"{value}</div>"
             )
@@ -606,15 +693,13 @@ class ReportGenerator:
         if notes:
             lis = "".join(f"<li>{e(q)}</li>" for q in notes)
             extra = (
-                '<div class="fm-qualifiers" style="margin-top: 0.75rem; font-size: 0.8rem;">'
-                f'<strong>Qualifiers and warnings:</strong><ul style="margin: 0.25rem 0 0 1.25rem;">{lis}</ul></div>'
+                '<div class="fm-qualifiers" style="margin-top: 1rem;">'
+                f'<strong>Notes</strong><ul style="margin: 0.25rem 0 0 1.25rem;">{lis}</ul></div>'
             )
         return f"""
-        <section class="read-first front-matter" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid {colour};">
-            <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.5rem;">
-                Read this first
-            </div>
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
+        <section class="read-first front-matter" style="margin-bottom: 1rem; border-left: 3px solid {colour};">
+            <h2>Run record</h2>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.5rem 1.5rem;">
                 {"".join(rows)}
             </div>
             {extra}
@@ -1727,9 +1812,10 @@ class ReportGenerator:
         benchmark_html = self._generate_benchmark_section(metrics)
         benchmark_rounds_html = self._generate_benchmark_rounds_section(metrics)
         pipeline_bench_html = self._generate_pipeline_benchmark_section(metrics)
-        summary_html = self._generate_summary(metrics)
+        summary_html = self._generate_summary(metrics).html
         config_html = (
-            self._generate_storage_multiple_section(metrics)
+            self._generate_storage_io_section(metrics)
+            + self._generate_storage_multiple_section(metrics)
             + self._generate_resources_section(metrics)
             + self._generate_config_section(metrics)
             + self._generate_experiment_section(metrics)
@@ -1779,6 +1865,8 @@ class ReportGenerator:
         _confidence_chip = confidence_chip_html(_n_runs, spread=None)
 
         _read_first_html = self._generate_read_first_panel(metrics, fm=fm)
+        _tabs_html, _replay_html, _score_open, _score_close = self._generate_view_shell(metrics)
+        _tiles_html = self._generate_tiles(metrics)
 
         html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1788,15 +1876,15 @@ class ReportGenerator:
     <title>Lakebench Scorecard - {_html_escape(str(metrics.deployment_name))}</title>
     <style>
         :root {{
-            --primary: #2563eb;
-            --success: #16a34a;
+            --primary: #257553;
+            --success: #257553;
             --danger: #dc2626;
             --warning: #d97706;
-            --bg: #f8fafc;
+            --bg: #f2f3ef;
             --card-bg: #ffffff;
-            --text: #1e293b;
-            --text-muted: #64748b;
-            --border: #e2e8f0;
+            --text: #1c332c;
+            --text-muted: #6e8173;
+            --border: #dce5dd;
         }}
 
         * {{
@@ -1806,7 +1894,7 @@ class ReportGenerator:
         }}
 
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             background: var(--bg);
             color: var(--text);
             line-height: 1.6;
@@ -1996,7 +2084,14 @@ class ReportGenerator:
             {"" if overall_passed and not warnings else '<div style="margin-top: 0.5rem; font-size: 0.8rem; color: ' + ("var(--danger)" if not overall_passed else "var(--warning)") + ';">' + _html_escape("; ".join(fail_reasons or warnings)) + "</div>"}
         </header>
 
-        {_read_first_html}
+        {_tabs_html}
+
+        {_replay_html}
+
+        {_score_open}
+
+        {_tiles_html}
+
 
         {run_context_html}
 
@@ -2029,6 +2124,10 @@ class ReportGenerator:
 
         {config_html}
 
+        {_read_first_html}
+
+        {_score_close}
+
         <footer>
             Generated by Lakebench | {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         </footer>
@@ -2038,10 +2137,96 @@ class ReportGenerator:
 
         return html
 
+    def _generate_tiles(self, metrics: PipelineMetrics) -> str:
+        """The scorecard's eight-tile grid (reports/tiles.py)."""
+        from lakebench.metrics.verdict import compute_verdict
+        from lakebench.reports.tiles import build_tiles, render_tiles
+
+        to_dict = getattr(metrics, "to_dict", None)
+        try:
+            record = to_dict() if callable(to_dict) else None
+            if not isinstance(record, dict):
+                return ""
+            try:
+                gates = dict(compute_verdict(metrics).gates)
+            except Exception:  # noqa: BLE001 - the gates tile then says NR
+                gates = None
+            mode = "continuous" if self._is_sustained(metrics) else "batch"
+            parts = self._generate_summary(metrics)
+            return render_tiles(
+                build_tiles(
+                    record,
+                    mode=mode,
+                    gates=gates,
+                    metrics=metrics,
+                    guards=parts.guards,
+                    not_shown=parts.not_shown,
+                )
+            )
+        except Exception:  # noqa: BLE001 - a tile grid must never break the page
+            return ""
+
+    def _pace_tile(self, metrics: PipelineMetrics) -> Any:
+        """The scorecard's Pace tile, for the replay headline."""
+        from lakebench.reports.tiles import build_tiles
+
+        try:
+            record = metrics.to_dict()
+            mode = "continuous" if self._is_sustained(metrics) else "batch"
+            parts = self._generate_summary(metrics)
+            tiles = build_tiles(
+                record, mode=mode, gates=None, metrics=metrics, not_shown=parts.not_shown
+            )
+            tile = next((t for t in tiles if t.label == "Pace"), None)
+            return None if tile is None or tile.evidence == "nr" else tile
+        except Exception:  # noqa: BLE001 - the headline is optional
+            return None
+
+    def _generate_view_shell(self, metrics: PipelineMetrics) -> tuple[str, str, str, str]:
+        """The Replay / Scorecard tab bar, the replay panel, and the opening
+        and closing tags of the Scorecard panel. A record with no replay
+        (reports/replay.py) gets none of it and the page is the scorecard
+        alone."""
+        from lakebench.reports.replay import build_replay, render_replay
+
+        to_dict = getattr(metrics, "to_dict", None)
+        try:
+            data = build_replay(to_dict()) if callable(to_dict) else None
+        except Exception:  # noqa: BLE001 - a tab must never break the page
+            data = None
+        if data is None:
+            return "", "", "", ""
+        pace = self._pace_tile(metrics)
+        tabs = (
+            '<nav class="lb-tabs" role="tablist">'
+            '<button type="button" role="tab" data-view="replay">Workload replay</button>'
+            '<button type="button" role="tab" data-view="scorecard">Scorecard</button>'
+            "</nav>"
+            "<style>.lb-tabs{display:flex;gap:3px;margin:0 0 1.25rem;border-bottom:1px solid var(--border)}"
+            ".lb-tabs button{font:inherit;font-weight:650;font-size:13px;padding:.7rem 1rem;border:0;"
+            "border-bottom:3px solid transparent;background:transparent;cursor:pointer;color:#66776c}"
+            ".lb-tabs button.on{color:#1f6449;border-bottom-color:#25835d;background:#f6faf7}"
+            "</style>"
+        )
+        script = (
+            "<script>(function(){var v={replay:document.getElementById('lb-view-replay'),"
+            "scorecard:document.getElementById('lb-view-scorecard')},b=document.querySelectorAll("
+            "'.lb-tabs button');function show(n){for(var k in v)v[k].hidden=(k!==n);"
+            "b.forEach(function(x){x.className=x.dataset.view===n?'on':''})}"
+            "b.forEach(function(x){x.onclick=function(){show(x.dataset.view)}});show('replay')})();"
+            "</script>"
+        )
+        return (
+            tabs,
+            f'<div id="lb-view-replay">{render_replay(data, pace)}</div>',
+            '<div id="lb-view-scorecard">',
+            "</div>" + script,
+        )
+
     def _generate_summary(
         self,
         metrics: PipelineMetrics,
-    ) -> str:
+    ) -> _SummaryParts:
         """Generate summary cards HTML.
 
         Sustained mode shows streaming-specific KPIs.
@@ -2056,24 +2241,14 @@ class ReportGenerator:
             return self._generate_sustained_summary(metrics)
         return self._generate_batch_summary(metrics)
 
-    _BATCH_CARDS = (
-        "Time to Value",
-        "Pipeline Throughput",
-        "Compute Efficiency",
-        "QpH",
-        "Scale Ratio",
-    )
-    _CONTINUOUS_CARDS = (
-        "Data Freshness",
-        "Continuous Throughput",
-        "Compute Efficiency",
-        "In-Stream QpH",
-        "Total CPU-hours",
-    )
+    # The score tiles of the grid (reports/tiles.py): a run that did not
+    # pass shows none of them.
+    _BATCH_CARDS = ("Pace", "Time to value", "Query rate", "Compute", "Efficiency")
+    _CONTINUOUS_CARDS = ("Pace", "Freshness", "Query rate", "Compute", "Efficiency")
 
     def _generate_failed_summary(
         self, metrics: PipelineMetrics, status: str, reasons: list[str]
-    ) -> str:
+    ) -> _SummaryParts:
         """The headline for a run that did not pass: the first verdict
         reason, each failed job's error, and the score cards with no
         number, so a failed run's partial figures are not read as results."""
@@ -2102,26 +2277,16 @@ class ReportGenerator:
             else ""
         )
         labels = self._CONTINUOUS_CARDS if self._is_sustained(metrics) else self._BATCH_CARDS
-        cards = "".join(
-            f"""
-            <div class="card">
-                <div class="card-label">{label}</div>
-                <div class="card-value">-</div>
-                <div class="card-hint">not shown: the run did not pass</div>
-            </div>"""
-            for label in labels
-        )
-        return f"""
+        html = f"""
         <section class="failed-headline" style="border-left: 3px solid var(--danger);">
             <h2 style="color: var(--danger);">Run {e(status)}: {e(first)}</h2>
             {errors_html}
             {others_html}
         </section>
-        <div class="cards">{cards}
-        </div>
         """
+        return _SummaryParts(html, {}, dict.fromkeys(labels, "the run did not pass"))
 
-    def _generate_sustained_summary(self, metrics: PipelineMetrics) -> str:
+    def _generate_sustained_summary(self, metrics: PipelineMetrics) -> _SummaryParts:
         """Generate summary cards for sustained/streaming mode.
 
         Five primary cards (the scores users compare across runs) plus a
@@ -2176,7 +2341,7 @@ class ReportGenerator:
         avg_throughput = pb.pipeline_throughput_gb_per_second if pb else 0.0
         duration_m = int(total_time // 60)
         duration_s = int(total_time % 60)
-        freshness_display = (
+        (
             format_measurement(
                 f"{freshness_val:.1f}s",
                 "",
@@ -2190,7 +2355,7 @@ class ReportGenerator:
         if freshness_val is None:
             freshness_hint = "insufficient gold cycles to measure"
         qph_raw = f"{qph:,.1f}" if qph is not None else "N/A"
-        qph_display = format_measurement(
+        format_measurement(
             qph_raw,
             "",
             caps_bound=caps_bound if qph is not None else None,
@@ -2222,7 +2387,7 @@ class ReportGenerator:
         # measured, never 0.
         bytes_unmeasured = pb is None or (data_gb == 0 and throughput > 0)
         _unmeasured = _no_pb if pb is None else "not measured (no datagen fleet record)"
-        efficiency_value = (
+        (
             _unmeasured
             if bytes_unmeasured
             else format_measurement(
@@ -2246,7 +2411,7 @@ class ReportGenerator:
                 caps_bound=intake_caps if avg_throughput > 0 else None,
             )
         )
-        throughput_display = format_measurement(
+        format_measurement(
             throughput_raw,
             "",
             caps_bound=intake_caps if throughput > 0 else None,
@@ -2324,38 +2489,52 @@ class ReportGenerator:
         )
         efficiency_hint2 = _direction_hint("compute_efficiency_gb_per_core_hour", _cont)
 
-        return f"""
-        <div class="cards">
-            <div class="card">
-                <div class="card-label">Data Freshness</div>
-                <div class="card-value">{freshness_display}</div>
-                <div class="card-hint">{freshness_hint}</div>
-                <div class="card-hint2">{freshness_hint2}</div>
-            </div>{balance_card}
-            <div class="card">
-                <div class="card-label">Continuous Throughput</div>
-                <div class="card-value">{throughput_display}</div>
-                <div class="card-hint">rows entering bronze per second</div>
-                <div class="card-hint2">{throughput_hint2}</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">{efficiency_value}</div>
-                <div class="card-hint">stage-input GiB per core-hour requested</div>
-                <div class="card-hint2">{efficiency_hint2}</div>
-            </div>
-            <div class="card">
-                <div class="card-label">In-Stream QpH</div>
-                <div class="card-value">{qph_display}</div>
-                <div class="card-hint">{qph_note or direction_hint("in_stream_composite_qph", "sustained")}</div>
-                <div class="card-hint2">{qph_hint2}</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Total CPU-hours</div>
-                <div class="card-value">{_no_pb if pb is None else f"{core_hours:.1f}"}</div>
-                <div class="card-hint">total compute across all stages</div>
-                <div class="card-hint2">{cpu_hint2}</div>
-            </div>
+        qual = lambda **kw: format_measurement("", "", **kw)  # noqa: E731
+        guards = {
+            "Pace": qual(
+                caps_bound=intake_caps if throughput > 0 else None,
+                n_runs=1 if throughput > 0 else None,
+                support_state=support_state if throughput > 0 else None,
+            )
+            + f"<div>{throughput_hint2}</div>",
+            "Freshness": qual(
+                caps_bound=caps_bound + trigger_caps_from(metrics),
+                n_runs=1,
+                support_state=support_state,
+            )
+            + f"<div>{freshness_hint}</div><div>{freshness_hint2}</div>"
+            if freshness_val is not None
+            else "",
+            "Query rate": (
+                qual(
+                    caps_bound=caps_bound,
+                    n_runs=_runs_of(metrics),
+                    samples=qph_samples,
+                    rounds=qph_rounds,
+                    rounds_html=qph_rounds_html,
+                    support_state=support_state,
+                )
+                + f"<div>{qph_note}</div><div>{qph_hint2}</div>"
+                if qph is not None
+                else ""
+            ),
+            "Compute": f"<div>{cpu_hint2}</div>",
+            "Efficiency": (
+                qual(caps_bound=intake_caps) if efficiency > 0 and not bytes_unmeasured else ""
+            )
+            + f"<div>{efficiency_hint2}</div>",
+        }
+        not_shown: dict[str, str] = {}
+        if pb is None:
+            not_shown = dict.fromkeys(("Pace", "Freshness", "Compute", "Efficiency"), _no_pb)
+        if freshness_val is None:
+            not_shown["Freshness"] = freshness_hint
+        if qph is None:
+            not_shown["Query rate"] = _no_qph
+        if bytes_unmeasured:
+            not_shown["Efficiency"] = _unmeasured
+        notes = f"""
+        <div class="cards">{balance_card}
         </div>
         <div style="display: flex; gap: 2rem; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1.5rem;">
             <span>Duration: {duration_m}m {duration_s}s</span>
@@ -2363,8 +2542,9 @@ class ReportGenerator:
             <span>Avg stage-input throughput: {avg_throughput_text}</span>
         </div>
         """
+        return _SummaryParts(notes, guards, not_shown)
 
-    def _generate_batch_summary(self, metrics: PipelineMetrics) -> str:
+    def _generate_batch_summary(self, metrics: PipelineMetrics) -> _SummaryParts:
         """Generate summary cards for batch mode.
 
         Five primary cards (the scores users compare across runs) plus a
@@ -2393,7 +2573,8 @@ class ReportGenerator:
             # Fallback for old metrics without pipeline_benchmark
             total_input = sum(j.input_size_gb for j in metrics.jobs)
             qph_card = self._generate_qph_card(metrics)
-            return f"""
+            return _SummaryParts(
+                f"""
             <div class="cards">
                 <div class="card">
                     <div class="card-label">Total Time</div>
@@ -2413,7 +2594,10 @@ class ReportGenerator:
                 </div>
                 {qph_card}
             </div>
-            """
+            """,
+                {},
+                {},
+            )
 
         # QpH from pipeline benchmark or standalone benchmark
         qph = pb.query_benchmark.qph if pb.query_benchmark else 0.0
@@ -2439,7 +2623,7 @@ class ReportGenerator:
         )
         throughput_hint2 = _direction_hint("pipeline_throughput_gb_per_second", "batch")
         efficiency_hint2 = _direction_hint("compute_efficiency_gb_per_core_hour", "batch")
-        qph_display = format_measurement(
+        format_measurement(
             f"{qph:,.1f}" if qph > 0 else "N/A",
             "",
             caps_bound=caps_bound if qph > 0 else None,
@@ -2455,14 +2639,32 @@ class ReportGenerator:
             support_state=support_state if pb.pipeline_throughput_gb_per_second > 0 else None,
         )
 
-        return f"""
+        qual = lambda **kw: format_measurement("", "", **kw)  # noqa: E731
+        has_bytes = pb.pipeline_throughput_gb_per_second > 0
+        guards = {
+            "Pace": qual(
+                caps_bound=caps_bound if has_bytes else None,
+                n_runs=1 if has_bytes else None,
+                support_state=support_state if has_bytes else None,
+            )
+            + f"<div>{throughput_hint2}</div>",
+            "Time to value": f"<div>{ttv_hint2}</div>",
+            "Query rate": (
+                qual(
+                    caps_bound=caps_bound,
+                    n_runs=_runs_of(metrics),
+                    samples=qph_samples,
+                    support_state=support_state,
+                )
+                + f"<div>{qph_hint2}</div>{_qph_stop_warning(metrics)}{qph_spread_html}"
+                if qph > 0
+                else ""
+            ),
+            "Efficiency": f"<div>{efficiency_hint2}</div>",
+        }
+        not_shown = {} if qph > 0 else {"Query rate": "no query benchmark in the run record"}
+        notes = f"""
         <div class="cards">
-            <div class="card">
-                <div class="card-label">Time to Value</div>
-                <div class="card-value">{ttv:.1f}s</div>
-                <div class="card-hint">wall-clock to queryable gold</div>
-                <div class="card-hint2">{ttv_hint2}</div>
-            </div>
             <div class="card">
                 <div class="card-label">Pipeline Throughput</div>
                 <div class="card-value">{pipeline_throughput_display}</div>
@@ -2470,20 +2672,6 @@ class ReportGenerator:
                     {_stage_inputs_note(metrics)}
                 </div>
                 <div class="card-hint">stage inputs processed per second (bronze, silver and gold reads)</div>
-                <div class="card-hint2">{throughput_hint2}</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">{pb.compute_efficiency_gb_per_core_hour:.2f} GiB/core-hr</div>
-                <div class="card-hint">stage-input GiB per core-hour requested</div>
-                <div class="card-hint2">{efficiency_hint2}</div>
-            </div>
-            <div class="card">
-                <div class="card-label">QpH</div>
-                <div class="card-value">{qph_display}{_qph_stop_warning(metrics)}</div>
-                <div class="card-hint">queries per hour -- {direction_hint("composite_qph", "batch")}</div>
-                <div class="card-hint2">{qph_hint2}</div>
-                {qph_spread_html}
             </div>
             <div class="card">
                 <div class="card-label">Scale Ratio</div>
@@ -2497,6 +2685,7 @@ class ReportGenerator:
             <span>Jobs: {jobs_passed_html}</span>
         </div>
         """
+        return _SummaryParts(notes, guards, not_shown)
 
     def _generate_jobs_table(
         self,
@@ -3353,6 +3542,186 @@ class ReportGenerator:
             </table>
             {detail_cards}
             {domain_detail}
+        </section>
+        """
+
+    def _generate_storage_io_section(self, metrics: PipelineMetrics) -> str:
+        """Storage I/O (metrics/io.py): the bytes the engines reported reading
+        from and writing to storage, per source and round, a rate over time,
+        and what was not measured. Pod network traffic and storage-array
+        telemetry are not part of it."""
+        from lakebench.metrics.io import bucket_series
+        from lakebench.reports import derived as dv
+
+        to_dict = getattr(metrics, "to_dict", None)
+        try:
+            io = to_dict().get("io") if callable(to_dict) else None
+        except Exception:  # noqa: BLE001 - a section must never break the page
+            io = None
+        if not isinstance(io, dict):
+            return ""
+        intervals = [i for i in io.get("intervals") or [] if isinstance(i, dict)]
+        not_measured = [n for n in io.get("not_measured") or [] if isinstance(n, dict)]
+        if not intervals and not not_measured:
+            return ""
+        e = _html_escape
+
+        def size(value, path: str | None, applicable: bool = True) -> str:
+            if not applicable:
+                return '<span title="this source does not do that">n/a</span>'
+            if value is None or not path:
+                return '<span title="not measured">not measured</span>'
+            if value >= 1024**3:
+                return dv.total(
+                    value / 1024**3, paths=dv.product(path, "/1073741824"), fmt=".2f", suffix=" GiB"
+                )
+            return dv.total(
+                value / 1024**2, paths=dv.product(path, "/1048576"), fmt=".2f", suffix=" MiB"
+            )
+
+        def clock(stamp: str | None) -> datetime | None:
+            try:
+                return datetime.fromisoformat(stamp.replace("Z", "+00:00")) if stamp else None
+            except ValueError:
+                return None
+
+        def round_name(label: str) -> str:
+            if label == "pre_compaction":
+                return "before maintenance"
+            if label.startswith("round_"):
+                return f"in-stream round {label.split('_', 1)[1]}"
+            return label
+
+        sources = {
+            "trino": "Trino queries",
+            "datagen": "Datagen",
+            "spark-thrift": "Spark Thrift queries",
+            "duckdb": "DuckDB queries",
+        }
+        groups: dict[tuple[str, str], list[dict]] = {}
+        for iv in intervals:
+            groups.setdefault((str(iv.get("source")), str(iv.get("label"))), []).append(iv)
+
+        rows = []
+        for (source, label), ivs in groups.items():
+            paths = ivs[0].get("paths") or {}
+            totals = {}
+            for direction in ("read", "write"):
+                vals = [
+                    i.get(f"{direction}_bytes")
+                    for i in ivs
+                    if i.get(f"{direction}_bytes") is not None
+                ]
+                totals[direction] = sum(vals) if vals else None
+            starts = [t for t in (clock(i.get("start")) for i in ivs) if t]
+            ends = [t for t in (clock(i.get("end")) for i in ivs) if t]
+            if starts and ends:
+                lo, hi = min(starts), max(ends)
+                window = (
+                    f"{lo:%H:%M:%S}\u2013{hi:%H:%M:%S} UTC "
+                    f"<small>({(hi - lo).total_seconds():,.0f} s)</small>"
+                )
+            else:
+                window = (
+                    '<span title="the run did not record when this ran">no window recorded</span>'
+                )
+            partial = (
+                ""
+                if all(i.get("complete") for i in ivs)
+                else (' <small title="some query samples had no storage report">(partial)</small>')
+            )
+            basis = sorted(
+                {b for i in ivs for b in (i.get("read_basis"), i.get("write_basis")) if b}
+            )
+            rows.append(
+                f"<tr><td>{e(sources.get(source, source))}</td>"
+                f"<td>{e(round_name(label) if source != 'datagen' else 'generate')}</td>"
+                f"<td>{size(totals['read'], paths.get('read'), bool(ivs[0].get('read_basis')))}</td>"
+                f"<td>{size(totals['write'], paths.get('write'), bool(ivs[0].get('write_basis')))}"
+                f"{partial}</td>"
+                f"<td>{window}</td>"
+                f"<td><small>{e(', '.join(b.replace('_', ' ') for b in basis))}</small></td></tr>"
+            )
+        table = (
+            "<table><thead><tr><th>Source</th><th>Round</th><th>Read</th><th>Written</th>"
+            "<th>Window</th><th>Basis</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table>"
+            if rows
+            else ""
+        )
+
+        # A rate over time from the intervals that have a window.
+        placed = [i for i in intervals if i.get("start") and i.get("end")]
+        chart = ""
+        stamps = [t for i in placed for t in (clock(i["start"]), clock(i["end"])) if t]
+        if stamps:
+            lo, hi = min(stamps), max(stamps)
+            span = (hi - lo).total_seconds()
+            if span >= 1:
+                step = next((s for s in (1, 2, 5, 10, 15, 30, 60, 120, 300) if span / s <= 80), 600)
+                series = bucket_series(
+                    placed, step_seconds=step, start=lo.isoformat(), end=hi.isoformat()
+                )
+                chart = _rate_chart_svg(series["read"], series["write"], step, lo, hi)
+        unplaced = [
+            i
+            for i in intervals
+            if not (i.get("start") and i.get("end"))
+            and (i.get("read_bytes") or i.get("write_bytes"))
+        ]
+        notes = []
+        if unplaced:
+            names = ", ".join(
+                sorted({sources.get(str(i.get("source")), str(i.get("source"))) for i in unplaced})
+            )
+            notes.append(f"Not on the chart (no time window recorded): {names}.")
+        reasons = {
+            "executor_io_not_collected": "executor storage I/O is not collected",
+            "engine_not_instrumented": "this query engine does not report storage I/O",
+            "io_not_recorded": "this record predates the storage I/O report",
+        }
+        by_reason: dict[tuple[str, str], list[dict]] = {}
+        for n in not_measured:
+            by_reason.setdefault((str(n.get("source")), str(n.get("reason"))), []).append(n)
+        for (source, reason), entries in sorted(by_reason.items()):
+            stages = {str(n.get("stage")) for n in entries}
+            if stages == {"query"}:
+                # A query engine: name the rounds that have no report.
+                rounds = sorted(round_name(str(n["label"])) for n in entries if n.get("label"))
+                subject = f"{sources.get(source, source)}"
+                detail = ", ".join(dict.fromkeys(rounds))
+            else:
+                subject = source.capitalize()
+                detail = ", ".join(sorted(stages))
+                directions = {n.get("direction") for n in entries}
+                if directions >= {"read", "write"}:
+                    detail += "; read and write"
+            notes.append(
+                f"Not measured, {e(subject)}{f' ({e(detail)})' if detail else ''}: "
+                f"{e(reasons.get(reason, reason))}."
+            )
+        for problem in io.get("problems") or []:
+            notes.append(str(problem))
+        notes.append(
+            "Bytes are what the engines report reading from and writing to storage. Pod network "
+            "traffic and storage-array telemetry are not included, and bytes from different "
+            "sources are not added together."
+        )
+        note_html = "".join(
+            f'<p style="color: var(--text-muted); font-size: 0.8125rem;">{n}</p>'
+            if n.startswith("Not measured")
+            else f'<p style="color: var(--text-muted); font-size: 0.8125rem;">{e(n)}</p>'
+            for n in notes
+        )
+        return f"""
+        <section>
+            <h2>Storage I/O</h2>
+            <p style="font-size: 0.875rem;">Bytes the engines reported reading from and writing
+            to storage during the run. A figure that was not measured says so; it is never
+            shown as zero.</p>
+            {table}
+            {chart}
+            {note_html}
         </section>
         """
 

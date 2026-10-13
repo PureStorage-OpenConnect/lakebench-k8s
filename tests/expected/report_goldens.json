@@ -40,6 +40,18 @@
     {
       "text": "SARs filed = 7,457 on alert cases + 442 continuing-activity SARs",
       "from": "tm_operations.ops.sars_filed 7899 = funnel.sars 7457 + reconciliation funnel.continuing_sars 442"
+    },
+    {
+      "text": "Not measured, Spark (bronze, gold, silver; read and write): executor storage I/O is not collected.",
+      "from": "pipeline_benchmark.stages: bronze, silver and gold present; no executor I/O is recorded"
+    },
+    {
+      "text": "Datagen generate n/a 8.49 GiB",
+      "from": "datagen_fleet.total_bytes_written 9110964215 / 2^30"
+    },
+    {
+      "text": "Not measured, Trino queries (before maintenance, benchmark): this record predates the storage I/O report.",
+      "from": "benchmark.queries[*].io absent: the record predates the storage I/O report; pipeline_benchmark.pre_compaction_benchmark present"
     }
   ],
   "be2b70": [
@@ -70,6 +82,10 @@
     {
       "text": "8 4 x 48G 7.2",
       "from": "stages silver CPU-hours: 8 executors x 4 cores x 811.7 s / 3600 = 7.21"
+    },
+    {
+      "text": "Not measured, Spark (bronze, gold, silver; read and write): executor storage I/O is not collected.",
+      "from": "pipeline_benchmark.stages: bronze, silver and gold present; no executor I/O is recorded"
     }
   ],
   "ebb26f": [
@@ -100,6 +116,14 @@
     {
       "text": "SARs filed = 258 on alert cases + 14 continuing-activity SARs",
       "from": "tm_operations.ops.sars_filed 272 = funnel.sars 258 + reconciliation funnel.continuing_sars 14"
+    },
+    {
+      "text": "Not measured, Spark (bronze, gold, silver; read and write): executor storage I/O is not collected.",
+      "from": "pipeline_benchmark.stages: bronze, silver and gold present; no executor I/O is recorded"
+    },
+    {
+      "text": "Not measured, Trino queries (benchmark, in-stream round 1, in-stream round 2, in-stream round 3, in-stream round 4): this record predates the storage I/O report.",
+      "from": "benchmark.queries[*].io absent: the record predates the storage I/O report; benchmark_rounds: 4"
     }
   ],
   "5105a0": [
@@ -126,6 +150,14 @@
     {
       "text": "34/34 checks passed; gate: 16 gating checks passed",
       "from": "c360_correctness.checks: 34 of 34 status pass; the 16 GATING_CHECKS ids all present and passed"
+    },
+    {
+      "text": "Not measured, Spark (bronze, gold, silver; read and write): executor storage I/O is not collected.",
+      "from": "pipeline_benchmark.stages: bronze, silver and gold present; no executor I/O is recorded"
+    },
+    {
+      "text": "Not measured, Trino queries (before maintenance, benchmark): this record predates the storage I/O report.",
+      "from": "benchmark.queries[*].io absent: the record predates the storage I/O report; pipeline_benchmark.pre_compaction_benchmark present"
     }
   ],
   "1d17f4": [
@@ -140,6 +172,14 @@
     {
       "text": "Continuous jobs: 3/3 passed",
       "from": "streaming[*].success"
+    },
+    {
+      "text": "Not measured, Spark (bronze, gold, silver; read and write): executor storage I/O is not collected.",
+      "from": "pipeline_benchmark.stages: bronze, silver and gold present; no executor I/O is recorded"
+    },
+    {
+      "text": "Not measured, Trino queries (benchmark, in-stream round 1, in-stream round 2, in-stream round 3, in-stream round 4): this record predates the storage I/O report.",
+      "from": "benchmark.queries[*].io absent: the record predates the storage I/O report; benchmark_rounds: 4"
     }
   ],
   "233b69": [
@@ -166,6 +206,18 @@
     {
       "text": "34/34 checks passed; gate: 16 gating checks passed",
       "from": "c360_correctness.checks: 34 of 34 status pass; the 16 GATING_CHECKS ids all present and passed"
+    },
+    {
+      "text": "Not measured, Spark (bronze, gold, silver; read and write): executor storage I/O is not collected.",
+      "from": "pipeline_benchmark.stages: bronze, silver and gold present; no executor I/O is recorded"
+    },
+    {
+      "text": "Datagen generate n/a 9.92 GiB",
+      "from": "datagen_fleet.total_bytes_written 10648731085 / 2^30"
+    },
+    {
+      "text": "Not measured, Spark Thrift queries (before maintenance, benchmark): this query engine does not report storage I/O.",
+      "from": "benchmark.engine spark-thrift; pre_compaction_benchmark present"
     }
   ]
 }

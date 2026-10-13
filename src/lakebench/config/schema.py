@@ -211,6 +211,27 @@ class PipelineEngineType(str, Enum):
     SPARK = "spark"
 
 
+class SilverWriteMode(str, Enum):
+    """Iceberg write mode for the update-heavy silver tables.
+
+    Sets ``write.merge.mode``, ``write.update.mode`` and
+    ``write.delete.mode`` on the silver tables that a continuous AML run
+    updates in place (entities, accounts, account_statements,
+    entity_profiles). The append-only tables (transactions, edges, pairs)
+    are unaffected and stay copy-on-write.
+
+    ``copy_on_write`` (default) rewrites each touched data file on every
+    MERGE, so a batch's write cost tracks table size. ``merge_on_read``
+    writes position-delete files instead, so the write cost tracks the
+    rows the batch changes; readers merge the deletes, and the deletes are
+    compacted away by maintenance. Changing this moves recorded continuous
+    AML results.
+    """
+
+    COPY_ON_WRITE = "copy_on_write"
+    MERGE_ON_READ = "merge_on_read"
+
+
 class BenchmarkMode(str, Enum):
     """Benchmark execution mode.
 
@@ -405,14 +426,8 @@ class ImagesConfig(ConfigModel):
             "(Hive 4 breaks Iceberg and Trino ANALYZE), whatever images.hive named, and run "
             f"provenance records {STACKABLE_HIVE_VERSION}."
         ),
-        "prometheus": (
-            "Prometheus deploys from the kube-prometheus-stack chart; pin it with "
-            "observability.chart_version."
-        ),
-        "grafana": (
-            "Grafana deploys from the kube-prometheus-stack chart; pin it with "
-            "observability.chart_version."
-        ),
+        "prometheus": ("set observability.prometheus_image to pin the per-namespace Prometheus."),
+        "grafana": ("set observability.grafana_image to pin the per-namespace Grafana."),
     }
     _removed_defaults: ClassVar[dict[str, Any]] = {
         # Any value naming the Hive that runs changed nothing.
@@ -421,100 +436,26 @@ class ImagesConfig(ConfigModel):
         "grafana": "grafana/grafana:10.2.0",
     }
 
-    # Immutable tag = the datagen_rs commit it was built from. Bump it with
-    # every datagen_rs change; :latest drifted from the code it claimed to be.
-    # b6f2905 is the datagen v1.6 sprint tip on integrate (2026-09-28) with
-    # the Python base bumped from the floating python:3.13-slim tag to
-    # python:3.14-slim, digest-pinned so a rebuild reproduces the same
-    # Python layer bytes. Rust source unchanged from 25f1aa8, so corpus
-    # bytes at a fixed seed are unchanged; MODEL_VERSION stays
-    # datagen-v2-rs-0.3. Datagen_rs freeze wiring carried forward from
-    # 25f1aa8: dirty-ratio semantics, screening rates in prereg
-    # 3.6.1, calibration-replicate seed refusal in perturbation_for_seed,
-    # multi-writer guard on --mode reference, S3Sink::put_multipart retry,
-    # --delivery-mode {batch|continuous} MpuWriter switch with continuous
-    # as the Rust binary default, and the #52 registered_looks_open freeze
-    # wiring.
-    # 30603b1 re-fits the datagen peak-RSS memory model: the autosizer
-    # under-sized financial node-0 at scale 100, OOMKilling it at the 17Gi
-    # default. Only datagen_rs/entrypoint.py (thread cap) and config/autosizer.py
-    # (pod memory request) change; the Rust generator is unchanged, so the corpus
-    # is byte-identical -- PROVEN on the pushed image (seed-43 --mode all
-    # byte-compare vs 9382420: 73/73 objects identical, and vs a thread-throttled
-    # run: identical; cargo output pins hold). MODEL_VERSION stays
-    # datagen-v2-rs-0.3, so it belongs to the same freeze under a new tag. This is
-    # the FUNCTIONAL default; it is DISQUALIFIED from generating any D8 / A6 /
-    # registered-look / calibration corpus -- those runs pass an explicit frozen
-    # digest via --generator-image (aml-protocol.md), never this default.
-    # e14d0fd: mimalloc allocator, typology payloads pruned to each
-    # pod's own files, world columns recomputed on demand, fixed 64 MB files,
-    # re-fit memory model with a 16Gi pod cap, delivery-mode forwarding.
-    # AML pod peak at scale 100 fell from 18.18 to 5.70 GiB. Output-neutral,
-    # PROVEN on the pushed image: seed-43 --mode all byte-compare against the
-    # frozen generator (rebuilt from 9382420 source) -- 73/73 objects at 128 MB,
-    # 141/141 at 64 MB, 141/141 with 4 pods, 141/141 thread-throttled. MODEL_VERSION
-    # stays datagen-v2-rs-0.3, same freeze. Functional default, disqualified from
-    # registered-look corpora as below.
-    # 034f998: same Rust source as e14d0fd; entrypoint.py thread-cap model gains
-    # the batch-delivery allowance. Byte-identical to e14d0fd at seed 43 on the
-    # pushed images (141/141 objects), so identical to the frozen generator.
-    # Pushed digest (034f998):
-    # sha256:0dc67b26e6130acebd796082137fde8c6dac57e8cd668039d585ae9d086d29dc
-    #   e14d0fd (sha256:ed57c1580d6babd4a504cda69a93811ab8c92d23f92978adfc4638ab691b0591)
-    # 034f998 and e14d0fd were deleted with the repository wipe of 2026-09-30.
-    # Prior tags (deleted from docker.io between 2026-09-29 22:30 and 23:29;
-    # rebuild from source to reproduce):
-    #   30603b1 (sha256:608425f46ed0f211f7eff1e63b0713a76835ad57e4cd1828252cc28fc776ea16) memory refit
-    #   9382420 (sha256:2faad1cc0252a165a56361a06f159a62ba7c4387c83adfb7c46fe260af23b8f2) live-metrics Pushgateway push
-    #   b6f2905 (sha256:312f9ecfa301b09f696cd04f9b6d44052656041fc293d9d76f0adddd01fbd4f6)
-    #   25f1aa8 (sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7)
-    #   0a83acd (sha256:acdf3925...)
-    #   7c24641 (sha256:c5a6bc80...)
-    # 1.6.0: the v1.6 release image, rebuilt from the same datagen_rs source as
-    # 034f998 (datagen_rs unchanged 034f998..release; base images digest-pinned,
-    # cargo --locked) after the docker.io repository was wiped. Release
-    # tags are the exception to the commit-tag rule above.
-    # Pushed digest (1.6.0): sha256:5fda9025fb9b455b390e1138d82e9f6ef16d214dfa9419815be0111d2f6fce0a
-    # 2a36ae21: the v1.7 release image and v1.7 look image
-    # (sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04);
-    # deleted from docker.io with the repository on 2026-10-06.
-    # 3f4729b6 (sha256:7fbb35f1a94f5aea11a135e93cadbb969a97a37d04c9ce2d227fd7db266083cb):
-    # adds continuous delivery (--deliver-until); batch output is
-    # byte-identical to 4274bb67 on the nine A/B cases. Never released.
-    # 3cb67f92: the 1.7.1 image, tagged by the git tree of datagen_rs/ it was
-    # built from (`git rev-parse <commit>:datagen_rs` starts with it; pushed
-    # 2026-10-07). Builds the AML world once per pod instead of every
-    # continuous epoch and checks for a stop before an epoch's manifest;
-    # its output is byte-identical to 3f4729b6 (AML continuous and batch
-    # locally, an AML scale-10 batch corpus on the cluster from an earlier
-    # push of this tag built from the same context). The default
-    # names the tag and the digest; the runtime pulls the digest, so a
-    # re-push of the tag cannot move it.
-    # 5d7ce61a (datagen_rs tree 5d7ce61aa0c4, pushed 2026-10-09):
-    # datagen-v2-rs-0.4. Surnames are synthetic at every scale and the surname
-    # and company-head pools grow in proportion to the population, so
-    # screening namesakes per watchlist entry stay flat across scale. Every
-    # AML corpus differs from 3cb67f92's, scale 1 included; the Customer 360
-    # generator is unchanged.
-    datagen: str = (
-        "docker.io/sillidata/lb-datagen:5d7ce61a"
-        "@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc"
-    )
-    """Data generator image, pinned by tag and digest (the digest is what is pulled).
-    In continuous mode it generates until the run window ends: AML as successive
-    24-month periods of the same bank, Customer360 as successive time slices.
+    # The default floats on :latest, the generator the maintainers last pushed.
+    # A run that must be reproduced byte for byte, or compared with an earlier
+    # corpus, should set images.datagen to a versioned tag (1.7.1 is pushed) or
+    # a '@sha256:...' digest: :latest can change the corpus between runs.
+    datagen: str = "docker.io/sillidata/lb-datagen:latest"
+    """Data generator image. Tag-pinned; override with a digest for byte-for-byte
+    reproducibility. In continuous mode it generates until the run window ends:
+    AML as successive 24-month periods of the same bank, Customer360 as successive
+    time slices.
     """
-    spark: str = "apache/spark:4.1.1-python3"
+    spark: str = "apache/spark:4.1.3-python3"
     """Spark runtime image. Unset: the image of the config's recipe (or of the recipe its
-    components name): `4.1.1-python3` on the Hive recipes, `4.0.2-python3` on the Polaris
-    recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none`; 4.0.2 also when the
+    components name): `4.1.3-python3` on every recipe; `4.0.2-python3` instead when the
     config writes a table format version Spark 4.1 cannot run (Delta 4.0.0).
     """
-    postgres: str = "postgres:17"  # Tested with 16, 17, 18
+    postgres: str = "postgres:18"  # Tested with 17 and 18
     """PostgreSQL image (metadata backend)."""
-    polaris: str = "apache/polaris:1.6.0"
+    polaris: str = "apache/polaris:1.8.0"
     """Apache Polaris REST catalog image."""
-    polaris_admin_tool: str = "apache/polaris-admin-tool:1.6.0"
+    polaris_admin_tool: str = "apache/polaris-admin-tool:1.8.0"
     """Polaris admin tool image; bootstraps the Polaris metastore on a Polaris recipe."""
     unity: str = (
         "unitycatalog/unitycatalog:main"  # OSS Unity has no version tags; :main tracks 0.4.x
@@ -526,14 +467,13 @@ class ImagesConfig(ConfigModel):
     """Python image the DuckDB query engine pod runs in; DuckDB itself is pinned by
     `architecture.query_engine.duckdb.version`.
     """
-    # Bitnami publishes only `latest` for this image now (versioned tags
-    # moved to bitnamilegacy), so the default names it by digest: a re-push of
-    # `latest` cannot change what a deployment runs (checked 2026-10-09).
-    jmx_exporter: str = (
-        "bitnami/jmx-exporter:latest"
-        "@sha256:873527b34b55ca7b8f0b5f7efdf18c93e4337d06709da674ba7284fd3f6316de"
-    )
-    """JMX exporter image for the metrics sidecars, used when observability is enabled."""
+    # Bitnami moved versioned tags to the bitnamilegacy repo; `bitnami/jmx-exporter`
+    # itself now only publishes `:latest`. The default names a versioned tag from
+    # bitnamilegacy (verified pullable 2026-10-12) so a run is reproducible
+    # without baking a digest the registry may garbage-collect.
+    jmx_exporter: str = "bitnamilegacy/jmx-exporter:1.4.0"
+    """JMX exporter image for the metrics sidecars, used when observability is enabled.
+    Tag-pinned; override with a digest for byte-for-byte reproducibility."""
 
     pull_policy: ImagePullPolicy = ImagePullPolicy.ALWAYS
     """`Always`, `IfNotPresent`, or `Never`."""
@@ -793,78 +733,77 @@ class SparkComputeConfig(ConfigModel):
     _removed_keys: ClassVar[dict[str, str]] = {
         "driver": (
             "per-executor sizing is fixed in the job profiles; use "
-            "platform.compute.spark.<job>_executors for counts and "
+            "platform.compute.spark.<stage>_executors for counts and "
             "driver_memory/driver_cores for the driver."
         ),
         "executor": (
             "per-executor sizing is fixed in the job profiles; use "
-            "platform.compute.spark.<job>_executors for counts and "
+            "platform.compute.spark.<stage>_executors for counts and "
             "driver_memory/driver_cores for the driver."
         ),
+        # One key per medallion stage: it sizes the stage's job in the run's mode.
+        "bronze_ingest_executors": "use bronze_executors, which sizes bronze-ingest in continuous mode and bronze-verify in batch mode.",
+        "silver_stream_executors": "use silver_executors, which sizes silver-stream in continuous mode and silver-build in batch mode.",
+        "gold_refresh_executors": "use gold_executors, which sizes gold-refresh in continuous mode and gold-finalize in batch mode.",
+        "bronze_ingest_executor_cores": "use bronze_executor_cores.",
+        "silver_stream_executor_cores": "use silver_executor_cores.",
+        "gold_refresh_executor_cores": "use gold_executor_cores.",
     }
     # The v1.6 defaults, which v1.6 save_config wrote into every config.
     _removed_defaults: ClassVar[dict[str, Any]] = {
         "driver": {"cores": 4, "memory": "8g"},
         "executor": {"instances": 8, "cores": 4, "memory": "48g", "memory_overhead": "12g"},
+        # A null left in a saved config sizes nothing; any count is refused.
+        "bronze_ingest_executors": None,
+        "silver_stream_executors": None,
+        "gold_refresh_executors": None,
+        "bronze_ingest_executor_cores": None,
+        "silver_stream_executor_cores": None,
+        "gold_refresh_executor_cores": None,
     }
 
     operator: SparkOperatorConfig = Field(default_factory=SparkOperatorConfig)
     """The shared Kubeflow Spark Operator that runs the stage jobs."""
 
-    # Per-job executor count overrides (None = auto from scale).
-    # When set, these override the auto-scaled executor count for that job.
-    # Per-executor sizing (cores, memory, PVC) remains fixed from proven profiles.
+    # Per-stage executor overrides (None = auto). A stage key sizes the stage's
+    # job in the run's mode: bronze-verify or bronze-ingest, silver-build or
+    # silver-stream, gold-finalize or gold-refresh. Per-executor memory and
+    # scratch stay with the proven job profiles.
     bronze_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override bronze-verify executor count (1--28). Null = auto from scale.",
+        description="Override the bronze stage's executor count (1--28): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = auto (from scale in batch, from the offered load in continuous).",
     )
     silver_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override silver-build executor count (1--28). Null = auto from scale.",
+        description="Override the silver stage's executor count (1--28): silver-build in batch mode, silver-stream in continuous mode. Null = auto (from scale in batch, from the offered load in continuous).",
     )
     gold_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override gold-finalize executor count (1--28). Null = auto from scale.",
+        description="Override the gold stage's executor count (1--28): gold-finalize in batch mode, gold-refresh in continuous mode. Null = auto from scale.",
     )
-
-    # Streaming job executor count overrides (None = auto from scale).
-    bronze_ingest_executors: int | None = Field(
-        default=None,
-        ge=1,
-        description="Override bronze-ingest executor count (1--28). Null = auto from scale.",
-    )
-    silver_stream_executors: int | None = Field(
-        default=None,
-        ge=1,
-        description="Override silver-stream executor count (1--28). Null = auto from scale.",
-    )
-    gold_refresh_executors: int | None = Field(
-        default=None,
-        ge=1,
-        description="Override gold-refresh executor count (1--28). Null = auto from scale.",
-    )
-    # Streaming executor size overrides (None = the profile's, grown to 8 or 16
-    # cores when the offered load needs more cores than the executor cap).
-    bronze_ingest_executor_cores: int | None = Field(
+    # Continuous-mode executor size overrides (None = the profile's, grown to 8
+    # or 16 cores when the offered load needs more cores than the executor cap).
+    # Batch jobs keep their profile's cores.
+    bronze_executor_cores: int | None = Field(
         default=None,
         ge=1,
         le=16,
-        description="Override bronze-ingest cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_ingest_executors` is set.",
+        description="Continuous mode: override bronze-ingest cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_executors` is set.",
     )
-    silver_stream_executor_cores: int | None = Field(
+    silver_executor_cores: int | None = Field(
         default=None,
         ge=1,
         le=16,
-        description="Override silver-stream cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_stream_executors` is set.",
+        description="Continuous mode: override silver-stream cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_executors` is set.",
     )
-    gold_refresh_executor_cores: int | None = Field(
+    gold_executor_cores: int | None = Field(
         default=None,
         ge=1,
         le=16,
-        description="Override gold-refresh cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically.",
+        description="Continuous mode: override gold-refresh cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically.",
     )
 
     # Driver resource overrides (None = use profile defaults).
@@ -903,9 +842,6 @@ class SparkComputeConfig(ConfigModel):
         "bronze_executors",
         "silver_executors",
         "gold_executors",
-        "bronze_ingest_executors",
-        "silver_stream_executors",
-        "gold_refresh_executors",
         "driver_cores",
         mode="after",
     )
@@ -1205,7 +1141,7 @@ class IcebergConfig(ConfigModel):
     # a native Spark 4.1 runtime. Spark 3.5 images must use a java17 tag with
     # this version; validate_iceberg_java_runtime() refuses the combination
     # rather than letting it fail inside the driver.
-    version: str = "1.11.0"
+    version: str = "1.12.0"
     """Apache Iceberg runtime JAR version."""
 
     _removed_keys: ClassVar[dict[str, str]] = {
@@ -1363,7 +1299,7 @@ class DuckDBConfig(ConfigModel):
     # compare different query engines while reporting the difference as a
     # result. Measured local run-to-run spread is 0.9%, well below what an
     # engine change would move, so the drift was invisible to the noise floor.
-    version: str = "1.5.5"
+    version: str = "1.5.6"
     """DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes
     whatever is current, so two runs weeks apart can query with different engines and the
     difference would read as a result.
@@ -1466,6 +1402,29 @@ class SustainedConfig(ConfigModel):
             "With --skip-generate (a finite corpus) unset is derived per run so data keeps "
             "arriving for about 1.2 x `run_duration`, capped at 50, and an explicit value that "
             "would offer the corpus before the window ends is refused at run start."
+        ),
+    )
+    silver_max_rows_per_trigger: int | None = Field(
+        default=20_000_000,
+        ge=1,
+        description=(
+            "Soft cap on bronze rows silver reads per trigger (Iceberg "
+            "`streaming-max-rows-per-micro-batch`), so one micro-batch cannot swallow the "
+            "whole backlog and run past the window. A batch always takes the next whole data "
+            "file, then stops once the cap would be exceeded. `null` lifts the cap (each "
+            "trigger takes every unprocessed bronze snapshot)."
+        ),
+    )
+    silver_write_mode: SilverWriteMode = Field(
+        default=SilverWriteMode.MERGE_ON_READ,
+        description=(
+            "Iceberg write mode for the update-heavy silver tables (entities, accounts, "
+            "account_statements, entity_profiles) in continuous AML. `merge_on_read` (default) "
+            "writes position-delete files on every MERGE, so a batch's write cost tracks the rows "
+            "it changes rather than the table size, and added silver executors scale throughput; "
+            "readers merge the deletes and maintenance compacts them. `copy_on_write` rewrites the "
+            "touched data files instead, so the write cost tracks table size. Append-only silver "
+            "tables (transactions, edges, pairs) are unaffected."
         ),
     )
     bronze_target_file_size_mb: int = Field(
@@ -1585,20 +1544,23 @@ class SustainedConfig(ConfigModel):
     # every round lands in a clean window after gold has refreshed.
     benchmark_interval: int = Field(
         default=300,
-        ge=300,
+        ge=60,
         le=3600,
         description=(
-            "Seconds between in-stream benchmark rounds, 300--3600. With gold on a longer "
-            "interval, raised to that interval so rounds do not overlap gold rewrites."
+            "Seconds between in-stream benchmark rounds, 60--3600, counted from a round's end. "
+            "With gold on a longer interval, raised to that interval so rounds do not overlap "
+            "gold rewrites."
         ),
     )
     benchmark_warmup: int = Field(
         default=300,
-        ge=300,
+        ge=60,
         le=1800,
         description=(
-            "Seconds before the first in-stream benchmark round, 300--1800. With gold on a "
-            "longer interval, raised to that interval so gold refreshes once first."
+            "Seconds before the first in-stream benchmark round, 60--1800. A round that fires "
+            "before the streams have handed data to gold reads an empty gold layer: set this past "
+            "the first handoff (the run's `lag:` lines). With gold on a longer interval, raised "
+            "to that interval so gold refreshes once first."
         ),
     )
 
@@ -1613,7 +1575,7 @@ class SustainedConfig(ConfigModel):
         as rounds overlap with gold rewrites.
 
         Both fields are clamped up to gold_refresh_interval (default
-        300s).  Users who want more rounds must run the pipeline longer.
+        0s, so no clamp).  Users who want more rounds must run the pipeline longer.
         """
         parts = self.gold_refresh_interval.strip().lower().split()
         gold_s = 300  # fallback
@@ -2882,39 +2844,34 @@ class ArchitectureConfig(ConfigModel):
 class ObservabilityConfig(ConfigModel):
     """Layer 3: Observability configuration.
 
-    Flat model -- use top-level keys (enabled, dashboards_enabled, etc.).
-    Deeply nested YAML (metrics.prometheus.enabled) is rejected to prevent
-    silent data loss (see BUG-029).
+    One stack per deployment: Prometheus, Grafana and the Pushgateway live in
+    the deployment namespace, go with it on destroy, and never collide with
+    another deployment on the cluster. Flat model: nested YAML such as
+    ``metrics.prometheus.enabled`` is rejected (BUG-029).
     """
 
     enabled: bool = False
-    """Deploy the observability stack (Prometheus + Grafana)."""
+    """Deploy the per-namespace Prometheus and Grafana."""
     dashboards_enabled: bool = True
-    """Deploy Grafana dashboards."""
+    """Deploy the Grafana dashboard. Grafana itself still runs."""
+    grafana_route: bool = True
+    """OpenShift only: create a TLS Route to Grafana so it has a URL without a
+    port-forward. Grafana is behind its login; Prometheus and the Pushgateway are
+    never exposed. Ignored on other clusters. Removed with the namespace."""
     retention: str = "7d"
-    """Prometheus data retention period."""
+    """Prometheus data retention."""
     storage: str = "10Gi"
     """Prometheus PVC size."""
-    # kube-prometheus-stack chart version (bundles Prometheus + Grafana +
-    # node-exporter + kube-state-metrics as one unit). Pinned as of 2026-07-27
-    # -- the deploy previously carried no --version flag at all, so it
-    # silently tracked whatever the Helm repo served at install time. That
-    # currently resolves to Prometheus v3.13.1 + Grafana v13.1.x.
-    chart_version: str = "87.19.2"
-    """`kube-prometheus-stack` Helm chart version. Bundles Prometheus and Grafana as one unit
-    -- there is no separate Prometheus/Grafana version field. The version a fresh `lakebench
-    admin install --component observability` uses; an installed release keeps its version.
-    """
-    # Per-deployment Prometheus Pushgateway for live datagen + bronze->silver
-    # metrics (batch jobs Prometheus pull cannot catch). Deployed only when
-    # observability is enabled; a best-effort live view, never a published
-    # source (metrics.json stays authoritative). See
-    # docs/internal/observability-pushgateway.md.
+    prometheus_image: str = "quay.io/prometheus/prometheus:v3.15.0"
+    """Prometheus image. Tag-pinned; override with a digest for reproducibility."""
+    grafana_image: str = "docker.io/grafana/grafana:13.2.3"
+    """Grafana image. Tag-pinned; override with a digest for reproducibility."""
+    prometheus_storage_class: str = ""
+    """StorageClass of the Prometheus PVC; empty uses the cluster default."""
     pushgateway_enabled: bool = True
-    """Deploy a Prometheus Pushgateway for Spark job metrics when observability is
-    enabled. A live view only; `metrics.json` stays the record.
-    """
-    pushgateway_image: str = "prom/pushgateway:v1.11.1"
+    """Deploy a Prometheus Pushgateway for Spark job metrics. A live view
+    only; ``metrics.json`` stays the record."""
+    pushgateway_image: str = "prom/pushgateway:v1.11.4"
     """Pushgateway image."""
     pushgateway_storage: str = "1Gi"
     """Pushgateway persistent volume size."""
@@ -2928,14 +2885,19 @@ class ObservabilityConfig(ConfigModel):
             "lakebench-output/reports/ without overwriting."
         ),
         "storage_class": (
-            "the Prometheus volume claim is created without a storageClassName, so it "
-            "uses the cluster default StorageClass."
+            "set observability.prometheus_storage_class to pick a StorageClass for the "
+            "Prometheus PVC; empty uses the cluster default."
         ),
         "prometheus_stack_enabled": (
-            "observability.enabled always installs or reuses the full stack, Prometheus included."
+            "observability.enabled always deploys the full per-namespace stack."
         ),
         "s3_metrics_enabled": "PodMonitor deployment is not gated on it.",
         "spark_metrics_enabled": "PodMonitor deployment is not gated on it.",
+        "chart_version": (
+            "observability no longer deploys the kube-prometheus-stack Helm chart; "
+            "pin the images with observability.prometheus_image and "
+            "observability.grafana_image."
+        ),
     }
     _removed_defaults: ClassVar[dict[str, Any]] = {
         "reports": {
@@ -3156,7 +3118,6 @@ def resolve_workload_location(data: dict[str, Any]) -> dict[str, Any]:
 # Namespaces that hold state shared by every deployment. A deployment may not
 # use one: destroy deletes the deployment's namespace.
 RESERVED_NAMESPACES: dict[str, str] = {
-    "lakebench-observability": "the shared kube-prometheus-stack release",
     "lakebench-system": "the cluster lease",
 }
 

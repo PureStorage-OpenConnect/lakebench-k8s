@@ -5,8 +5,7 @@ See also: seeds in [3.3](seed-policy.md#33-seed-policy); typologies in [3.6](typ
 ## 3.1 Generator identity
 
 The Rust generator in `datagen_rs/` writes the corpus, entered via
-`datagen_rs/entrypoint.py` with `--schema financial` (the default). Its
-identity has two parts.
+`datagen_rs/entrypoint.py` with `--schema financial` (the default).
 
 **Model version.** `MODEL_VERSION = "datagen-v2-rs-0.4"`
 (`datagen_rs/src/model.rs`).
@@ -21,8 +20,9 @@ identity has two parts.
   corpus.
 
 **Image.** `images.datagen` defaults to
-`docker.io/sillidata/lb-datagen:5d7ce61a@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc`;
-the runtime pulls the digest.
+`docker.io/sillidata/lb-datagen:latest`, which floats: a push can change the
+corpus. Set a versioned tag such as `1.7.1` or a `@sha256:` digest to fix the
+generator.
 
 - 1.7.0 shipped `lb-datagen:2a36ae21` (`sha256:0502b700...`). Its five-case
   byte-compare against the 1.6 image `lb-datagen:1.6.0` is equal (financial
@@ -32,7 +32,7 @@ the runtime pulls the digest.
 - The generator lineage in the corpus identity is the observed image digest,
   mapped through `config/datagen_lineage.yaml`
   ([7.3](execution-rules.md#73-prohibited-changes-invalidate-a-result-or-are-refused)).
-  `5d7ce61a` has no row there, so its corpora get a corpus id of their own.
+  `latest` has no row there, so its corpora get a corpus id of their own.
 - The registered v1.7 [look](../../glossary.md#look) names `2a36ae21` by digest. A registered look
   never uses a tag: `scripts/aml_gate.py --registered` refuses to start
   without a digest-pinned `--generator-image`, and refuses one that differs
@@ -92,10 +92,10 @@ customers of the reporting institution.
   it (a continuous run is then refused at preflight) or it is under that
   floor.
 - Pod memory comes from a sizing model.
-- Neither pod count nor memory changes row content. The pod count is passed
-  as `--total-nodes`, which is part of the resolved arguments corpus id v2
-  hashes. Above scale 50, two clusters of different size therefore produce
-  different corpus ids unless `datagen.parallelism` is set to a value both
+- Pod count and memory do not change row content, but the pod count is
+  passed as `--total-nodes`, part of the resolved arguments corpus id v2
+  hashes. Above scale 50, clusters of different size produce different
+  corpus ids unless `datagen.parallelism` is set to a value both
   fit ([7.3](execution-rules.md#73-prohibited-changes-invalidate-a-result-or-are-refused)).
 
 **Size and limits.**
@@ -104,8 +104,7 @@ customers of the reporting institution.
   bytes per row grow between the two. [data-generation.md](../../data-generation.md)
   has the runs. Two scale-100 runs on other setups read within 2% of the
   scale-10 size per unit.
-- At 9.36 GB per unit, scale 10000 (a tier-1 universal bank's AML retention
-  target) is about 94 TB.
+- At 9.36 GB per unit, scale 10000 is about 94 TB.
 - The schema accepts up to scale 10000. AML datagen is banded: supported to
   300, unverified to 800, refused above 800, where a datagen pod would exceed
   the 16 GiB per-pod memory cap (a Lakebench cap).
@@ -156,7 +155,7 @@ data clock, which sets `silver.entity_profiles.profile_updated_ts`.
   recorded, then `timestamp_start`, then the run date.
 - Both published batch records show `data_clock_source: fallback_default`,
   so their `profile_updated_ts` is the run date.
-- No query or rule reads that column. It is still a business column of a
+- No query or rule reads that column, but it is a business column of a
   frozen silver table: two runs of one seed on different dates differ in it
   unless `timestamp_end` is set, which does not change the corpus.
 

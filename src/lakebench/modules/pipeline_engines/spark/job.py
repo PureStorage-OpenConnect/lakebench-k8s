@@ -567,9 +567,9 @@ def _executor_cores_override(job_type: str, config: Any | None) -> int | None:
         return None
     spark = config.platform.compute.spark
     value = {
-        "bronze-ingest": spark.bronze_ingest_executor_cores,
-        "silver-stream": spark.silver_stream_executor_cores,
-        "gold-refresh": spark.gold_refresh_executor_cores,
+        "bronze-ingest": spark.bronze_executor_cores,
+        "silver-stream": spark.silver_executor_cores,
+        "gold-refresh": spark.gold_executor_cores,
     }.get(job_type)
     return int(value) if value is not None else None
 
@@ -642,7 +642,7 @@ def stage_profile(
 
 def _cores_set(job_type: str, config: Any | None) -> bool:
     """Whether the config itself sets *job_type*'s ``*_executor_cores``."""
-    field = f"{job_type.replace('-', '_')}_executor_cores"
+    field = f"{job_type.split('-')[0]}_executor_cores"
     return config is not None and field in config.platform.compute.spark.model_fields_set
 
 
@@ -684,8 +684,8 @@ def fit_executor_cores(config: Any, node_cpu_m: int, node_mem_b: int) -> list[st
     config sets). Returns the autosizer change lines."""
     spark = config.platform.compute.spark
     fields = {
-        "bronze-ingest": "bronze_ingest_executor_cores",
-        "silver-stream": "silver_stream_executor_cores",
+        "bronze-ingest": "bronze_executor_cores",
+        "silver-stream": "silver_executor_cores",
     }
     out: list[str] = []
     for job_type, field in fields.items():
@@ -772,7 +772,7 @@ def unbalanced_stages(config: Any, budget: dict[JobType, int] | None = None) -> 
             out.append(
                 f"{job_type} needs ~{need} executors x {profile['executor_cores']} cores to "
                 f"carry the offered load; {why} allows {limit}, so its lag will grow and the run "
-                "will fail the balance check"
+                "will report it as not balanced"
             )
     return out
 
@@ -793,30 +793,48 @@ EXECUTOR_OVERRIDE_FIELDS: dict[str, tuple[str, str]] = {
     "bronze-verify": ("bronze_executors", "bronze"),
     "silver-build": ("silver_executors", "silver"),
     "gold-finalize": ("gold_executors", "gold"),
-    "bronze-ingest": ("bronze_ingest_executors", "bronze_ingest"),
-    "silver-stream": ("silver_stream_executors", "silver_stream"),
-    "gold-refresh": ("gold_refresh_executors", "gold_refresh"),
+    "bronze-ingest": ("bronze_executors", "bronze_ingest"),
+    "silver-stream": ("silver_executors", "silver_stream"),
+    "gold-refresh": ("gold_executors", "gold_refresh"),
 }
+
+_STREAMING_JOBS = frozenset({"bronze-ingest", "silver-stream", "gold-refresh"})
+
+
+def stage_key_applies(job_type: str, config: Any) -> bool:
+    """Whether the stage key sizes *job_type* in this config's mode.
+
+    False for a batch job in a continuous config: the bronze-verify preflight
+    (it registers the bronze table) keeps its profile and does not take the
+    ``bronze_executors`` count meant for bronze-ingest.
+    """
+    from lakebench.config.schema import is_continuous_mode
+
+    return not (
+        job_type not in _STREAMING_JOBS and is_continuous_mode(config.architecture.pipeline.mode)
+    )
 
 
 def executor_override(job_type: str, config: Any | None) -> int | None:
-    """The executor count *config* sets for *job_type*, or None (the scale
-    count applies). An explicit count wins over the scale count and the
-    continuous concurrent budget."""
-    if config is None:
+    """The executor count *config* sets for *job_type*, or None (the auto
+    count applies). An explicit count wins over the auto count and the
+    continuous concurrent budget.
+
+    A stage key sizes both of the stage's jobs (bronze-verify and
+    bronze-ingest take ``bronze_executors``); the run's mode decides which
+    of them runs. See ``stage_key_applies`` for the one job that runs in the
+    other mode.
+    """
+    if config is None or job_type not in EXECUTOR_OVERRIDE_FIELDS:
         return None
-    spark = config.platform.compute.spark
+    field = EXECUTOR_OVERRIDE_FIELDS[job_type][0]
     # Read by name (the schema walk proves each field has this reader); the
-    # names are the first column of EXECUTOR_OVERRIDE_FIELDS (a test holds
-    # the two equal).
+    # names are the first column of EXECUTOR_OVERRIDE_FIELDS.
     value = {
-        "bronze-verify": spark.bronze_executors,
-        "silver-build": spark.silver_executors,
-        "gold-finalize": spark.gold_executors,
-        "bronze-ingest": spark.bronze_ingest_executors,
-        "silver-stream": spark.silver_stream_executors,
-        "gold-refresh": spark.gold_refresh_executors,
-    }.get(job_type)
+        "bronze_executors": config.platform.compute.spark.bronze_executors,
+        "silver_executors": config.platform.compute.spark.silver_executors,
+        "gold_executors": config.platform.compute.spark.gold_executors,
+    }[field]
     return int(value) if value is not None else None
 
 
@@ -834,26 +852,10 @@ def bronze_ingest_checkpoint_uri(cfg) -> str:
 
 def gold_refresh_checkpoint_uri(cfg) -> str:
     """Checkpoint location of the continuous gold-refresh driver (its
-    CHECKPOINT_LOCATION). The drain marker lives under it."""
+    CHECKPOINT_LOCATION)."""
     s3 = cfg.platform.storage.s3
     base = cfg.architecture.pipeline.sustained.checkpoint_base
     return f"s3a://{s3.buckets.gold}/{base}/gold-refresh/"
-
-
-#: The drain marker's name under the gold-refresh checkpoint. Must equal
-#: ``gold_refresh_financial.STOP_MARKER`` (a unit test holds them together).
-GOLD_REFRESH_STOP_MARKER = "_lb_stop"
-
-
-def gold_refresh_stop_marker(cfg) -> tuple[str, str]:
-    """(bucket, key) of the drain marker: the object the driver reads as
-    ``<CHECKPOINT_LOCATION>/_lb_stop``. Built from the same config fields as
-    ``gold_refresh_checkpoint_uri``, with empty path segments dropped, as
-    Hadoop's ``Path`` normalises them."""
-    s3 = cfg.platform.storage.s3
-    base = cfg.architecture.pipeline.sustained.checkpoint_base
-    parts = f"{base}/gold-refresh/{GOLD_REFRESH_STOP_MARKER}".split("/")
-    return s3.buckets.gold, "/".join(p for p in parts if p)
 
 
 def get_job_profile(job_type: str, schema_type: str | None = None) -> dict[str, Any] | None:
@@ -1398,24 +1400,24 @@ _SUPPORTED_SPARK_VERSIONS: dict[tuple[int, int], str] = {
 
 _FORMAT_VERSION_COMPAT: dict[tuple[int, int], dict[str, list[str]]] = {
     (3, 5): {
-        "iceberg": ["1.5.2", "1.6.1", "1.7.1", "1.8.1", "1.9.1", "1.10.1", "1.11.0"],
+        "iceberg": ["1.5.2", "1.6.1", "1.7.1", "1.8.1", "1.9.1", "1.10.1", "1.11.0", "1.12.0"],
         "delta": [],  # Delta 4.x requires Spark 4.x
     },
     (4, 0): {
-        "iceberg": ["1.10.0", "1.10.1", "1.11.0"],
+        "iceberg": ["1.10.0", "1.10.1", "1.11.0", "1.12.0"],
         "delta": ["4.0.0"],
     },
     (4, 1): {
-        "iceberg": ["1.10.0", "1.10.1", "1.11.0"],
+        "iceberg": ["1.10.0", "1.10.1", "1.11.0", "1.12.0"],
         "delta": ["4.1.0"],
     },
 }
 
 # Default format version per Spark version (auto-selected when user doesn't override).
 _FORMAT_VERSION_DEFAULTS: dict[tuple[int, int], dict[str, str]] = {
-    (3, 5): {"iceberg": "1.11.0", "delta": ""},
-    (4, 0): {"iceberg": "1.11.0", "delta": "4.0.0"},
-    (4, 1): {"iceberg": "1.11.0", "delta": "4.1.0"},
+    (3, 5): {"iceberg": "1.12.0", "delta": ""},
+    (4, 0): {"iceberg": "1.12.0", "delta": "4.0.0"},
+    (4, 1): {"iceberg": "1.12.0", "delta": "4.1.0"},
 }
 
 # Iceberg 1.11.0 is the first release compiled for Java 17 -- its jars carry
@@ -2366,7 +2368,11 @@ class SparkJobManager:
                 executor_count = budget[job_type]
 
         # Per-job executor override (user escape hatch)
-        override = executor_override(job_type.value, cfg)
+        override = (
+            executor_override(job_type.value, cfg)
+            if stage_key_applies(job_type.value, cfg)
+            else None
+        )
         if job_type in _STREAMING_JOB_TYPES and override is None and capped_from != executor_count:
             # After the override check: an explicit count wins over the
             # budget, so there is nothing to warn about then.
@@ -2786,10 +2792,10 @@ class SparkJobManager:
         # OOM.  Combined with flush throttling and retained state caps,
         # this keeps the driver responsive at scale 100+.
         #
-        # Tradeoff: disables Spark UI and PrometheusServlet (they share
-        # the same Jetty server).  Prometheus scraping of Spark metrics
-        # is lost.  Observability layer still collects Trino/PodMonitor
-        # metrics.  Re-enable when SPARK-43523 is fixed upstream.
+        # Tradeoff: disables the Spark UI and its PrometheusServlet (they
+        # share one Jetty server), so nothing is scraped from the driver.
+        # The executors' storage counters reach Prometheus by the JMX
+        # exporter agent instead (spark/jmx_exporter.py).
         spark_conf.update(
             {
                 "spark.ui.enabled": "false",
@@ -2809,21 +2815,6 @@ class SparkJobManager:
             # the store must hold a whole rule's. Completed entities only: the
             # live-task flush above is unchanged.
             spark_conf.update({"spark.ui.retainedJobs": "1000", "spark.ui.retainedStages": "1000"})
-
-        # Prometheus metrics (for observability layer)
-        if cfg.observability.enabled:
-            spark_conf.update(
-                {
-                    "spark.ui.prometheus.enabled": "true",
-                    "spark.metrics.namespace": "lakebench",
-                    # PrometheusServlet sink -- exposes metrics at driver
-                    # and executor scrape endpoints for Prometheus collection
-                    "spark.metrics.conf.*.sink.prometheusServlet.class": "org.apache.spark.metrics.sink.PrometheusServlet",
-                    "spark.metrics.conf.*.sink.prometheusServlet.path": "/metrics/prometheus",
-                    "spark.metrics.conf.master.sink.prometheusServlet.path": "/metrics/master/prometheus",
-                    "spark.metrics.conf.applications.sink.prometheusServlet.path": "/metrics/applications/prometheus",
-                }
-            )
 
         # Add extra configuration
         if extra_conf:
@@ -2943,6 +2934,18 @@ class SparkJobManager:
             spark_conf["spark.executor.extraJavaOptions"] = (
                 spark_conf.get("spark.executor.extraJavaOptions", "") + _ts_opts
             ).strip()
+
+        # Storage-byte counters from the executors, scraped by the
+        # deployment's Prometheus (appended after the truststore options).
+        if cfg.observability.enabled:
+            from lakebench.modules.pipeline_engines.spark import jmx_exporter
+
+            jmx_exporter.wire(
+                spark_conf,
+                executor_pod_template,
+                image=cfg.images.jmx_exporter,
+                pull_policy=cfg.images.pull_policy.value,
+            )
 
         # The reference detector trains on the driver only; executors do not
         # need the packages. Driver-side only.
@@ -3496,6 +3499,14 @@ class SparkJobManager:
                         "value": str(sustained.effective_silver_bronze_wait_seconds()),
                     }
                 )
+                # Soft row cap on silver's bronze read so one micro-batch
+                # cannot take the whole backlog; 0 lifts it (None in config).
+                env.append(
+                    {
+                        "name": "SILVER_MAX_ROWS_PER_TRIGGER",
+                        "value": str(sustained.silver_max_rows_per_trigger or 0),
+                    }
+                )
             # AML sustained scripts read a different set of env
             # var names than the schema-agnostic C360 scripts do.
             # Rather than rename either side (both have callers), set
@@ -3538,6 +3549,17 @@ class SparkJobManager:
                             {
                                 "name": "LB_FINANCIAL_SILVER_TRIGGER_S",
                                 "value": str(_spark_interval_to_seconds(trigger_interval)),
+                            },
+                            {
+                                "name": "LB_FINANCIAL_SILVER_MAX_ROWS",
+                                "value": str(sustained.silver_max_rows_per_trigger or 0),
+                            },
+                            # Iceberg write mode for the update-heavy silver
+                            # tables; merge_on_read bounds the per-batch write
+                            # to the rows it changes. The bootstrap applies it.
+                            {
+                                "name": "LB_FINANCIAL_SILVER_WRITE_MODE",
+                                "value": sustained.silver_write_mode.value,
                             },
                         ]
                     )

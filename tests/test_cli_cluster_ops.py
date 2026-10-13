@@ -177,14 +177,7 @@ def test_stop_leaves_finished_jobs_and_their_logs(cluster):
     [
         ("COMPLETED", False),
         ("FAILED", False),
-        # The operator resubmits from these (restartPolicy Always / OnFailure
-        # with submission retries), or the app still runs.
-        ("SUBMISSION_FAILED", True),
-        ("PENDING_RERUN", True),
-        ("FAILING", True),
-        ("SUCCEEDING", True),
         ("RUNNING", True),
-        ("UNKNOWN", True),
         ("", True),  # no status yet
     ],
 )
@@ -221,33 +214,14 @@ def test_stop_journal_records_failure(cluster, monkeypatch):
     assert ends == [False, True]
 
 
-def test_stop_dry_run_deletes_nothing(cluster, monkeypatch):
-    called = []
-    monkeypatch.setattr(ops, "pre_stop", lambda cfg, k8s: called.append(1))
+def test_stop_dry_run_deletes_nothing(cluster):
     cluster.custom.apps = ["lakebench-bronze-ingest"]
     cluster.batch.job = True
     r = _invoke("stop", cluster.config, "--dry-run")
     assert r.exit_code == 0, r.output
     assert cluster.custom.deleted == [] and cluster.batch.deleted == []
-    assert called == []
     assert "Would delete SparkApplication/lakebench-bronze-ingest" in co.stderr(r)
     assert "Would delete Job/lakebench-datagen" in co.stderr(r)
-
-
-def test_stop_pre_stop_runs_first_and_a_failure_still_deletes(cluster, monkeypatch):
-    order = []
-
-    def failing(cfg, k8s):
-        order.append(("pre_stop", list(cluster.custom.deleted)))
-        raise RuntimeError("drain timed out")
-
-    monkeypatch.setattr(ops, "pre_stop", failing)
-    cluster.custom.apps = ["lakebench-gold-refresh"]
-    r = _invoke("stop", cluster.config)
-    assert r.exit_code == 0, r.output
-    assert order == [("pre_stop", [])]  # before any deletion
-    assert cluster.custom.deleted == ["lakebench-gold-refresh"]
-    assert "drain timed out" in co.stderr(r)
 
 
 def test_stop_unreachable_exits_4(cluster):

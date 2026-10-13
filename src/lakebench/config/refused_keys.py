@@ -6,15 +6,11 @@ The keys here still exist; only some values are refused, by a validator in
 that do not change data (``destroy``, ``status``, the read-only commands)
 still load the value, ignoring it with a note where the validator says so.
 
-Two readers use the table:
-
-* ``lakebench init --from`` drops a row whose ``init_from`` is ``"drop"``,
-  and one whose ``init_from`` is ``"drop-default"`` when it holds the
-  schema default (1.6 ``save_config`` wrote every field, so the key changed
-  nothing), printing the fix; it keeps the others and lists each one
-  ``run`` or ``deploy`` still refuses in the new file;
-* ``scripts/upgrading.py`` requires an entry in
-  ``docs/upgrading/breaking-1.7.yaml`` for every row, by ``subject``.
+``lakebench init --from`` reads the table: it drops a row whose ``init_from``
+is ``"drop"``, and one whose ``init_from`` is ``"drop-default"`` when it
+holds the schema default (1.6 ``save_config`` wrote every field, so the key
+changed nothing), printing the fix; it keeps the others and lists each one
+``run`` or ``deploy`` still refuses in the new file.
 
 ``tests/test_init_from.py`` loads ``example`` at ``key`` for each row and
 checks that the commands in ``refused_by`` refuse it with ``fix`` in the
@@ -122,9 +118,6 @@ REFUSED_KEYS: tuple[RefusedKey, ...] = (
             "bronze_executors",
             "silver_executors",
             "gold_executors",
-            "bronze_ingest_executors",
-            "silver_stream_executors",
-            "gold_refresh_executors",
             "driver_cores",
         )
     ),

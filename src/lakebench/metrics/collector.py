@@ -16,6 +16,7 @@ from typing import Any, ClassVar
 from lakebench._clock import utc_now
 from lakebench.metrics import provenance as _prov
 from lakebench.metrics.experiment import effective_trickle, experiment_inputs
+from lakebench.metrics.io import build_io
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 from lakebench.metrics.metric_registry import descriptions as _registry_descriptions
 from lakebench.metrics.provenance import run_provenance
@@ -566,6 +567,11 @@ class PipelineMetrics:
     # that show the strictest of stored and recomputed (reports/front_matter.py).
     # Never written: to_dict computes the verdict it saves. None on a fresh run.
     stored_verdict: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+    # The pipeline_benchmark.scores block as the loaded metrics.json stored it.
+    # to_dict recomputes scores from the run's measurements and can differ in
+    # the last digit, so a tile that cites a record field reads this instead
+    # (reports/tiles.py). Never written. None on a fresh run.
+    stored_scores: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
     # Physical over logical bytes per table, layer and in total, measured at
     # run end (metrics/storage_multiple.py). None when not measured.
@@ -673,6 +679,9 @@ class PipelineMetrics:
             d["c360_correctness"] = self.c360_correctness
         token = ((self.config_snapshot or {}).get("s3") or {}).get("endpoint") or "s3-endpoint"
         d = _scrub_address_urls(d, str(token))
+        io = build_io(d)
+        if io is not None:
+            d["io"] = io
         d["verdict"] = verdict_from_record(d).to_dict()
         return d
 
@@ -1252,9 +1261,11 @@ class PipelineBenchmark:
         # otherwise dropping it would silently understate wall-clock and
         # inflate pipeline_throughput_gb_per_second. Whole-pipeline failure
         # is reflected separately via `success = False`.
-        starts = [s.start_time for s in self.stages if s.start_time]
+        # Datagen's window places it on the timeline; it is not pipeline time.
+        timed = [s for s in self.stages if s.stage_name != "datagen"]
+        starts = [s.start_time for s in timed if s.start_time]
         latest_end = None
-        for s in self.stages:
+        for s in timed:
             candidate = s.end_time or s.start_time
             if candidate and (latest_end is None or candidate > latest_end):
                 latest_end = candidate
@@ -2216,6 +2227,8 @@ def build_pipeline_benchmark(
     datagen_output_rows: int = 0,
     datagen_output_files: int = 0,
     datagen_fleet: dict[str, Any] | None = None,
+    datagen_start: datetime | None = None,
+    datagen_end: datetime | None = None,
 ) -> PipelineBenchmark:
     """Build a PipelineBenchmark from a completed PipelineMetrics.
 
@@ -2257,6 +2270,9 @@ def build_pipeline_benchmark(
         datagen_elapsed: Datagen elapsed seconds (0 to omit datagen stage).
         datagen_output_gb: Datagen output size in GB.
         datagen_output_rows: Datagen output row count.
+        datagen_start, datagen_end: When this run's datagen ran, timezone
+            aware. They place the stage on the timeline (the report's replay
+            and storage lane); time to value does not count them.
 
     Returns:
         PipelineBenchmark with stages populated and aggregates computed.
@@ -2305,6 +2321,8 @@ def build_pipeline_benchmark(
             stage_name="datagen",
             stage_type="datagen",
             engine="datagen",
+            start_time=datagen_start,
+            end_time=datagen_end,
             elapsed_seconds=elapsed,
             output_size_gb=output_gb,
             output_rows=output_rows,
@@ -2799,11 +2817,8 @@ SNAPSHOT_SOURCE_FIELDS: frozenset[str] = frozenset(
         "images.trino",
         "name",
         "platform.compute.spark.bronze_executors",
-        "platform.compute.spark.bronze_ingest_executors",
         "platform.compute.spark.gold_executors",
-        "platform.compute.spark.gold_refresh_executors",
         "platform.compute.spark.silver_executors",
-        "platform.compute.spark.silver_stream_executors",
         "platform.storage.s3.buckets.bronze",
         "platform.storage.s3.buckets.gold",
         "platform.storage.s3.buckets.silver",
@@ -2841,9 +2856,12 @@ def build_config_snapshot(
         fingerprint_inputs,
         scratch_size_per_job,
     )
-    from lakebench.modules.pipeline_engines.spark.job import streaming_shape
+    from lakebench.modules.pipeline_engines.spark.job import (
+        EXECUTOR_OVERRIDE_FIELDS,
+        executor_override,
+        streaming_shape,
+    )
 
-    spark = cfg.platform.compute.spark
     datagen = cfg.architecture.workload.datagen
     pipeline = cfg.architecture.pipeline
     s3 = cfg.platform.storage.s3
@@ -2876,12 +2894,8 @@ def build_config_snapshot(
         },
         "spark": {
             "executor_overrides": {
-                "bronze": spark.bronze_executors,
-                "silver": spark.silver_executors,
-                "gold": spark.gold_executors,
-                "bronze_ingest": spark.bronze_ingest_executors,
-                "silver_stream": spark.silver_stream_executors,
-                "gold_refresh": spark.gold_refresh_executors,
+                key: executor_override(job_type, cfg)
+                for job_type, (_field, key) in EXECUTOR_OVERRIDE_FIELDS.items()
             },
             **({"streaming_shape": streaming_shape(cfg)} if _continuous else {}),
         },

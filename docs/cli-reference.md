@@ -58,7 +58,7 @@ line to stderr:
 
 ### init
 
-Write a starter configuration file.
+Write a configuration file: the lines a first run needs are live, and the keys a deployment usually tunes follow commented at their defaults.
 
 <!-- BEGIN GENERATED: cli init -->
 ```
@@ -87,7 +87,7 @@ lakebench init [OPTIONS]
 - `--credentials-env PREFIX`: the file references `${PREFIX_ACCESS_KEY}` and
   `${PREFIX_SECRET_KEY}`.
 - `--from OLD`: see
-  [Converting a 1.6 config](../UPGRADING-1.7.md#converting-a-16-config-with-init---from).
+  [Converting an older config](configuration.md#converting-an-older-config).
 
 What `init` writes:
 
@@ -333,7 +333,8 @@ one process is refused (exit 3).
 Online:
 
 - A failing prerequisite, a scratch StorageClass, Spark Operator or
-  Stackable that cannot be checked, or too little free capacity: exit 4.
+  Stackable that cannot be checked: exit 4. Too little free capacity is a
+  warning, not a refusal.
 - A missing shared component prints
   `Next: (cluster admin) lakebench admin install --component <component>`.
 - An unreachable cluster: exit 4, with "use --offline".

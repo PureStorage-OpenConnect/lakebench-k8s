@@ -42,8 +42,8 @@ Primary: `time_to_value_seconds`, lower is better.
 
 `compute_efficiency_gb_per_core_hour` divides by requested core-hours, not
 used ones: a pod requesting 8 cores and using 2 reads 4 x less efficient than
-one requesting and using 2, for identical work. Use it for regressions between
-releases on one config, not to compare stacks sized differently.
+one requesting and using 2 for identical work. Use it for regressions on one
+config, not to compare differently sized stacks.
 
 ## 8.3 Both modes
 

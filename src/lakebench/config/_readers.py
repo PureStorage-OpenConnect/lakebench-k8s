@@ -76,22 +76,13 @@ READERS: dict[str, str] = {
     "platform.compute.spark.gold_executors": (
         "lakebench.modules.pipeline_engines.spark.job:executor_override"
     ),
-    "platform.compute.spark.bronze_ingest_executors": (
-        "lakebench.modules.pipeline_engines.spark.job:executor_override"
-    ),
-    "platform.compute.spark.silver_stream_executors": (
-        "lakebench.modules.pipeline_engines.spark.job:executor_override"
-    ),
-    "platform.compute.spark.gold_refresh_executors": (
-        "lakebench.modules.pipeline_engines.spark.job:executor_override"
-    ),
-    "platform.compute.spark.bronze_ingest_executor_cores": (
+    "platform.compute.spark.bronze_executor_cores": (
         "lakebench.modules.pipeline_engines.spark.job:_executor_cores_override"
     ),
-    "platform.compute.spark.silver_stream_executor_cores": (
+    "platform.compute.spark.silver_executor_cores": (
         "lakebench.modules.pipeline_engines.spark.job:_executor_cores_override"
     ),
-    "platform.compute.spark.gold_refresh_executor_cores": (
+    "platform.compute.spark.gold_executor_cores": (
         "lakebench.modules.pipeline_engines.spark.job:_executor_cores_override"
     ),
     "platform.compute.spark.driver_memory": (
@@ -213,6 +204,12 @@ READERS: dict[str, str] = {
         "lakebench.modules.pipeline_engines.spark.job:bronze_ingest_checkpoint_uri"
     ),
     "architecture.pipeline.sustained.max_files_per_trigger": (
+        "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_env_vars"
+    ),
+    "architecture.pipeline.sustained.silver_max_rows_per_trigger": (
+        "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_env_vars"
+    ),
+    "architecture.pipeline.sustained.silver_write_mode": (
         "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_env_vars"
     ),
     "architecture.pipeline.sustained.bronze_target_file_size_mb": (
@@ -384,23 +381,34 @@ READERS: dict[str, str] = {
     "architecture.tables.gold_alert_dispositions": "lakebench.benchmark.executor:get_executor",
     "architecture.tables.gold_cases": "lakebench.benchmark.executor:get_executor",
     "observability.enabled": "lakebench.deploy.datagen:DatagenDeployer._build_datagen_context",
-    "observability.dashboards_enabled": ("lakebench.deploy.observability:build_helm_values"),
-    "observability.retention": "lakebench.deploy.observability:build_helm_values",
-    "observability.storage": "lakebench.deploy.observability:build_helm_values",
-    "observability.chart_version": (
-        "lakebench.deploy.shared_components:Observability.config_version"
+    "observability.dashboards_enabled": (
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
+    ),
+    "observability.grafana_route": (
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
+    ),
+    "observability.retention": "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack",
+    "observability.storage": "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack",
+    "observability.prometheus_image": (
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
+    ),
+    "observability.grafana_image": (
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
+    ),
+    "observability.prometheus_storage_class": (
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
     ),
     "observability.pushgateway_enabled": (
         "lakebench.deploy.datagen:DatagenDeployer._build_datagen_context"
     ),
     "observability.pushgateway_image": (
-        "lakebench.deploy.observability:ObservabilityDeployer._apply_podmonitor_templates"
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
     ),
     "observability.pushgateway_storage": (
-        "lakebench.deploy.observability:ObservabilityDeployer._apply_podmonitor_templates"
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
     ),
     "observability.pushgateway_storage_class": (
-        "lakebench.deploy.observability:ObservabilityDeployer._apply_podmonitor_templates"
+        "lakebench.deploy.observability:ObservabilityDeployer._deploy_stack"
     ),
     "spark.conf": "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_manifest",
 }

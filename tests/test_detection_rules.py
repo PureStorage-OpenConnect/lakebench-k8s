@@ -1,18 +1,12 @@
-"""Static and API-shape tests for detection_rules.py.
+"""Static tests for the AML detection rules and the files around them.
 
-Full end-to-end tests need a live Spark session (which the CI environment
-here doesn't provide -- `import pyspark` fails). These tests exercise
-what's testable without pyspark:
-
-1. Rule dispatcher shape: get_rule returns callables for the documented
-   rule ids; known_rules() lists them; unknown rule returns None.
-2. Structuring thresholds table covers the currencies the datagen emits
-   (see datagen_rs/src/amounts.rs::structuring_band).
-3. Rule constants are non-empty strings (regression guard against a
-   silent rename that would ship as unknown-rule from the dispatcher).
-
-Live-Spark integration tests belong in a separate `tests/spark/`
-directory once a mini-cluster fixture is available.
+The rules run inside Spark drivers, so most of these read the driver scripts
+as source or AST instead of importing them: the packaged AML reference data,
+the rule dispatch and typology maps against their orchestrator-side copies,
+which rules each gold script schedules, W7's deterministic dedup, the
+run-scoped alert projection and the gold.alerts column order. Also the
+scripts ConfigMaps shipping the reference JSON and the Spark Thrift memory
+the autosizer gives a financial workload.
 """
 
 from __future__ import annotations
@@ -25,30 +19,13 @@ import pytest
 DETECTION_RULES_PATH = Path(__file__).resolve().parents[1] / (
     "src/lakebench/spark/scripts/detection_rules.py"
 )
+GOLD_FINALIZE_PATH = Path(__file__).resolve().parents[1] / (
+    "src/lakebench/spark/scripts/gold_finalize_financial.py"
+)
 
 
 def _module_ast():
     return ast.parse(DETECTION_RULES_PATH.read_text())
-
-
-def test_aml_reference_files_exist_and_parse():
-    """The packaged AML reference JSON files must exist, be valid JSON,
-    and carry the entries array the rules expect."""
-    import json
-
-    ref_dir = Path(__file__).resolve().parents[1] / "src/lakebench/spark/data/aml"
-    for filename in (
-        "high_risk_jurisdictions.json",
-        "synthetic_corridors.json",
-    ):
-        p = ref_dir / filename
-        assert p.exists(), f"missing AML reference {p}"
-        payload = json.loads(p.read_text())
-        assert "entries" in payload
-        assert isinstance(payload["entries"], list)
-        assert len(payload["entries"]) > 0
-        assert "source" in payload
-        assert "license" in payload
 
 
 def test_aml_reference_shapes():
@@ -56,12 +33,14 @@ def test_aml_reference_shapes():
     import json
 
     ref_dir = Path(__file__).resolve().parents[1] / "src/lakebench/spark/data/aml"
-    hrj = json.loads((ref_dir / "high_risk_jurisdictions.json").read_text())["entries"]
-    for row in hrj:
+    hrj = json.loads((ref_dir / "high_risk_jurisdictions.json").read_text())
+    corr = json.loads((ref_dir / "synthetic_corridors.json").read_text())
+    for doc in (hrj, corr):
+        assert doc["entries"] and "license" in doc
+    for row in hrj["entries"]:
         assert "country_code" in row and len(row["country_code"]) == 2
         assert row["risk_tier"] in ("grey", "black")
 
-    corr = json.loads((ref_dir / "synthetic_corridors.json").read_text())
     assert corr["source"].startswith("SYNTHETIC")
     for row in corr["entries"]:
         assert row["risk_tier"] == "synthetic_corridor"
@@ -236,8 +215,7 @@ def test_gold_finalize_detection_rules_subset_of_dispatcher():
 
 
 def test_w7_country_dedup_is_deterministic():
-    """Adversarial-review finding C: ``dropDuplicates(['entity_id'])``
-    is shuffle-order-dependent when an entity has multiple country
+    """``dropDuplicates(['entity_id'])`` is shuffle-order-dependent when an entity has multiple country
     values. Re-runs of gold_finalize against the same silver produce
     different alert counts, breaking the "reproducible per rule"
     contract. Fix must use a deterministic aggregation.
@@ -261,15 +239,6 @@ def test_w7_country_dedup_is_deterministic():
         "w7 must collapse silver.entities to one country per entity_id via "
         "a deterministic aggregation"
     )
-
-
-# ---------------------------------------------------------------------------
-# W1 vertex-cap skip is a distinct third outcome, not a zero.
-# ---------------------------------------------------------------------------
-
-GOLD_FINALIZE_PATH = Path(__file__).resolve().parents[1] / (
-    "src/lakebench/spark/scripts/gold_finalize_financial.py"
-)
 
 
 # ---------------------------------------------------------------------------
@@ -327,30 +296,12 @@ def test_score_financial_scopes_alerts_by_run_id():
     assert 'col("run_id") == lit(current_run_id)' in body
 
 
-def test_detected_ts_in_empty_schema_and_all_ddls():
-    """detected_ts must be present in ALERT_COLUMNS after evidence
-    (the empty-alerts schema and gold_finalize's DDL are built from it), in
-    the other gold.alerts DDL sites, with the reused-catalog ALTER guard, or
-    a positional INSERT ... SELECT * misaligns."""
-    root = Path(__file__).resolve().parents[1]
+def test_detected_ts_follows_evidence_in_alert_columns():
+    """detected_ts must come after evidence in ALERT_COLUMNS: the gold.alerts
+    DDL and the empty-alerts schema are built from it, and gold.alerts is
+    written positionally (INSERT ... SELECT *)."""
     names = [c[0] for c in _alert_columns()]
     assert names.index("evidence") < names.index("detected_ts")
-    det = (root / "src/lakebench/spark/scripts/detection_rules.py").read_text()
-    assert "for name, ddl_type, nullable in ALERT_COLUMNS" in det  # _empty_alerts_df
-
-    ddl = (root / "src/lakebench/deploy/financial_ddl.py").read_text()
-    assert "detected_ts" in ddl
-
-    # Reused-catalog upgrade: one helper adds missing trailing columns
-    # (through ensure_column_with_retry's live-schema check, not the invalid
-    # `ADD COLUMN IF NOT EXISTS`) and refuses a table out of order.
-    for script in (
-        "gold_finalize_financial.py",
-        "gold_refresh_financial.py",
-    ):
-        text = (root / "src/lakebench/spark/scripts" / script).read_text()
-        assert "ensure_alert_columns(spark," in text, script
-        assert "ALERT_COLUMNS)" in text, script
 
 
 def _alert_columns():

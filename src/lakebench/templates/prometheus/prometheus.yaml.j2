@@ -1,0 +1,260 @@
+{# Per-deployment Prometheus (ownership category 1).                            #}
+{# Lives in the deployment namespace alongside the Pushgateway it scrapes.      #}
+{# A deploy's own serviceaccount lists pods, services and endpoints only here;  #}
+{# the one cluster-scoped grant is for kubelet cAdvisor, applied by the         #}
+{# ``lakebench admin install --component observability`` step when the admin    #}
+{# chooses to enable it. Without it, per-pod CPU and memory read               #}
+{# ``not collected``; the stack is still useful for Pushgateway stage series,  #}
+{# Trino, and the dashboard.                                                   #}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lakebench-prometheus
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lakebench-prometheus
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus
+rules:
+- apiGroups: [""]
+  resources: [pods, services, endpoints]
+  verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: lakebench-prometheus
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lakebench-prometheus
+subjects:
+- kind: ServiceAccount
+  name: lakebench-prometheus
+  namespace: {{ namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lakebench-prometheus-config
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ['localhost:9090']
+
+      # Pushgateway: datagen and Spark stages push here (job=lakebench-*,
+      # run_id=..., stage=...). honor_labels: true keeps those labels
+      # instead of renaming to exported_*.
+      - job_name: pushgateway
+        honor_labels: true
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces: {names: ['{{ namespace }}']}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+            action: keep
+            regex: pushgateway
+          - source_labels: [__meta_kubernetes_pod_ip]
+            target_label: __address__
+            replacement: '${1}:9091'
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+
+      # Trino coordinator and workers: JMX exporter on 9090.
+      - job_name: trino
+        scrape_interval: 30s
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces: {names: ['{{ namespace }}']}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
+            action: keep
+            regex: trino-(coordinator|worker)
+          - source_labels: [__meta_kubernetes_pod_ip]
+            target_label: __address__
+            replacement: '${1}:9090'
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+
+      # Spark executors: the JMX exporter agent on 9404 (task output bytes and
+      # S3A read bytes). Executors are deleted when their job ends and the
+      # task output counter moves only when a task finishes, so the last
+      # increments can be lost; the record says how much (io coverage).
+      - job_name: spark-executors
+        scrape_interval: 5s
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces: {names: ['{{ namespace }}']}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_spark_role]
+            action: keep
+            regex: executor
+          - source_labels: [__meta_kubernetes_pod_ip]
+            target_label: __address__
+            replacement: '${1}:9404'
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            action: keep
+            regex: 'metrics_lakebench_.+_executor_(byteswritten_count|recordswritten_count|filesystem_s3a?_(read|write)_bytes_value)'
+
+      # Kubelet cAdvisor: per-pod CPU and memory. Only reachable with the
+      # ClusterRole below bound; without it this target reads up=0 and
+      # platform CPU and memory in the report read ``not collected``.
+      - job_name: kubelet-cadvisor
+        scheme: https
+        metrics_path: /metrics/cadvisor
+        authorization:
+          credentials_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        tls_config:
+          insecure_skip_verify: true
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_node_address_InternalIP]
+            target_label: __address__
+            replacement: '${1}:10250'
+          - source_labels: [__meta_kubernetes_node_name]
+            target_label: node
+        metric_relabel_configs:
+          - source_labels: [namespace]
+            action: keep
+            regex: '{{ namespace }}'
+          - source_labels: [__name__]
+            action: keep
+            regex: 'container_(cpu_usage_seconds_total|memory_working_set_bytes|network_(receive|transmit)_bytes_total|fs_(reads|writes)_bytes_total)'
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lakebench-prometheus
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus
+spec:
+  accessModes: [ReadWriteOnce]
+  {% if prometheus_storage_class %}
+  storageClassName: {{ prometheus_storage_class }}
+  {% endif %}
+  resources:
+    requests:
+      storage: {{ prometheus_storage | default('10Gi') }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lakebench-prometheus
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus
+spec:
+  replicas: 1
+  # Recreate: the PVC is RWO, so a second pod cannot mount it on rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lakebench
+      app.kubernetes.io/component: prometheus
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lakebench
+        app.kubernetes.io/component: prometheus
+    spec:
+      serviceAccountName: lakebench-prometheus
+      {% if not openshift_mode | default(false) %}
+      # Vanilla k8s has no automatic fsGroup: make the RWO volume group-
+      # writable by nobody (65534). On OpenShift the restricted-v2 SCC
+      # assigns fsGroup + arbitrary UID (same path as the Pushgateway).
+      securityContext:
+        fsGroup: 65534
+        runAsNonRoot: true
+      {% endif %}
+      containers:
+        - name: prometheus
+          image: {{ prometheus_image }}
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time={{ prometheus_retention | default('7d') }}
+            - --web.enable-lifecycle
+          ports:
+            - name: http
+              containerPort: 9090
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          readinessProbe:
+            httpGet: {path: /-/ready, port: 9090}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /-/healthy, port: 9090}
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: lakebench-prometheus-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: lakebench-prometheus
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lakebench-prometheus
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus
+spec:
+  selector:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090

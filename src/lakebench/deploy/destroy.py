@@ -3303,14 +3303,14 @@ def destroy_all(
         report("namespace", status, msg)
         return results
 
-    # Step 5: Observability. The kube-prometheus-stack release is shared by
-    # every deployment and is never uninstalled here (invariant 6); only a
-    # pre-v1.6 release inside this deployment's own namespace is removed.
+    # Step 5: Observability. Prometheus, Grafana and the Pushgateway live
+    # in this deployment's namespace (ownership category 1) and go with it.
+    # Here we only clear the cluster-scoped kubelet ClusterRoleBinding.
     if engine.config.observability.enabled:
         report(
             "observability",
             DeploymentStatus.IN_PROGRESS,
-            "Checking observability (the shared stack is left in place)...",
+            "Removing the kubelet-metrics ClusterRoleBinding...",
         )
         try:
             from .observability import ObservabilityDeployer

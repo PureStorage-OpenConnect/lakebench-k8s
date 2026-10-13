@@ -371,6 +371,7 @@ class DeploymentEngine:
         dry_run: bool = False,
         deploy_nonce: str | None = None,
         require_new: bool = False,
+        quiet_sizing: bool = False,
     ):
         """Initialize deployment engine.
 
@@ -421,7 +422,14 @@ class DeploymentEngine:
                 cluster_cap = self.k8s.get_cluster_capacity()
             except Exception as e:
                 logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
-        resolve_auto_sizing(config, cluster_cap)
+        if quiet_sizing:
+            # Teardown sizes nothing it applies; the cuts are noise there.
+            from lakebench.config.sizing import _quiet_autosizer
+
+            with _quiet_autosizer():
+                resolve_auto_sizing(config, cluster_cap)
+        else:
+            resolve_auto_sizing(config, cluster_cap)
 
         self.context = self._build_context()
 

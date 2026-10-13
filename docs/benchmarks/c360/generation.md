@@ -14,9 +14,8 @@ generator image.
   `src/lakebench/config/datagen_lineage.yaml` (`declared:<tag>` when no digest
   was observed). A re-pin with byte-compare evidence keeps the id; any other
   image change moves it (`metrics/corpus_identity.py`).
-- Default image: `docker.io/sillidata/lb-datagen:5d7ce61a`
-  (sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc).
-  It has no lineage row, so its corpora get a corpus id of their own.
+- Default image: `docker.io/sillidata/lb-datagen:latest`. It has no
+  lineage row, so its corpora get a corpus id of their own.
 
 **Seed policy.** `datagen.seed` when set, else 42. Any non-negative seed is
 accepted; the AML spent-seed and [registered-look](../../glossary.md#look) guards do not apply, and
@@ -40,8 +39,7 @@ loyalty lookup (`Rng::new(seed)`) and one RNG per file
 - The payload size is fixed at 2 KiB; the file size at 64 MB
   (`datagen.file_size` refuses any other value).
 - Each pod of the Kubernetes Indexed Job gets a `JOB_COMPLETION_INDEX`. File
-  `N` goes to pod `N % total_nodes`, so files spread evenly whatever the pod
-  count.
+  `N` goes to pod `N % total_nodes`.
 - A file's content depends only on the seed, file id, rows per file, customer
   id space, dirty ratio and timestamp window, so pod count does not change
   the corpus.

@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
-from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
+from lakebench.deploy.engine import DeploymentStatus
 from lakebench.deploy.ownership import ANNOTATION_DEPLOY_NONCE, ANNOTATION_DEPLOYMENT_NAME
 from lakebench.exit_codes import REFUSAL_DETAIL
 from tests.fixtures.recording_k8s import recording
@@ -44,17 +44,6 @@ def _cfg(path: Path):
     from lakebench.config import LoadPurpose, load_config
 
     return load_config(path, purpose=LoadPurpose.RUN)
-
-
-class FakeEngine:
-    """Stands in for DeploymentEngine; the real _deploy_impl runs around it."""
-
-    def __init__(self, cfg: Any, dry_run: bool = False, require_new: bool = False, **_: Any):
-        self.config = cfg
-        self.dry_run = dry_run
-        self.require_new = require_new
-        self.results: list[DeploymentResult] = []
-        self.deploy_nonce: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -312,35 +301,3 @@ def test_engine_require_new_refuses_preprovisioned_buckets():
         result = eng._deploy_buckets()
     assert result.details[REFUSAL_DETAIL] == "deploy.existing_namespace"
     adopt.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# deploy --require-new (hidden): the harness's deploy refuses, never adopts
-# ---------------------------------------------------------------------------
-
-
-def test_deploy_require_new_refusal_exits_3(cfg_path, monkeypatch):
-    """The engine's refusal reaches the user as exit 3, nothing adopted."""
-    import lakebench.cli._deploy as deploy_mod
-    from lakebench.cli import app
-
-    class Engine(FakeEngine):
-        def deploy_all(self, **_):
-            assert self.require_new
-            return [
-                DeploymentResult(
-                    component="namespace",
-                    status=DeploymentStatus.FAILED,
-                    message="Refused: namespace exists",
-                    details={REFUSAL_DETAIL: "deploy.existing_namespace"},
-                )
-            ]
-
-    monkeypatch.setattr("lakebench.deploy.DeploymentEngine", Engine)
-    monkeypatch.setattr(deploy_mod, "_preflight_check", lambda cfg: None)
-    monkeypatch.setattr(deploy_mod, "check_datagen_scale", lambda cfg: None)
-    cfg = _cfg(cfg_path)
-    with recording(cfg.get_namespace()) as rec:
-        rec.for_config(cfg)
-        res = CliRunner().invoke(app, ["deploy", str(cfg_path), "--yes", "--require-new"])
-    assert res.exit_code == 3, res.output

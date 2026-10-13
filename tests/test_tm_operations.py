@@ -771,3 +771,21 @@ def test_small_prior_is_not_taken_by_an_alert_sharing_one_payment():
         out = {r["alert_id"]: r for r in tm.match_alerts([b], [a], prev, prev, 2)}
         assert out["B"]["alert_key"] != "a-0", n
         assert out["A"]["in_current_detection"] is False
+
+
+def test_empty_silver_pass_is_not_the_intervals_pass():
+    """A first pass that finds no sealed rows (not_run) did no work: it must not
+    stamp the interval clock, or the next pass is 1800 s away, past a short window."""
+    empty = [("workflow", "not_run", "lakehouse.silver.transactions is empty; nothing to monitor")]
+    no_manifest = [("workflow", "not_run", "no ground-truth manifest (bronze.manifest); x")]
+    assert tm.tm_pass_not_ready(empty)
+    assert tm.tm_pass_not_ready(no_manifest)
+
+
+def test_failed_or_completed_pass_keeps_the_interval():
+    assert not tm.tm_pass_not_ready([("workflow", "not_run", "error: boom")])
+    assert not tm.tm_pass_not_ready([("workflow", "pass", "")])
+    assert not tm.tm_pass_not_ready(
+        [("workflow", "not_run", "is empty; nothing to monitor"), ("x", "pass", "")]
+    )
+    assert not tm.tm_pass_not_ready(None)

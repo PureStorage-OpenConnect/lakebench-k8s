@@ -26,7 +26,7 @@ def _entry(
     mode="batch",
     runs="[run-1]",
     spark='"4.1"',
-    version="1.11.0",
+    version="1.12.0",
 ):
     return (
         f"validated:\n  - workload: {workload}\n    recipe: {recipe}\n    mode: {mode}\n"
@@ -35,7 +35,7 @@ def _entry(
     )
 
 
-ICEBERG_41 = {"spark": "4.1", "table_format_version": "1.11.0"}
+ICEBERG_41 = {"spark": "4.1", "table_format_version": "1.12.0"}
 
 
 # -- declarations -----------------------------------------------------------
@@ -107,7 +107,7 @@ def test_record_refuses_entries_that_would_stamp_supported_wrongly(tmp_path):
         (_entry() + _entry().replace("validated:\n", ""), "listed twice"),
         (_entry().replace("    runs:", "    tree: 3d304d1\n    runs:"), "unknown keys"),
         (_entry().replace('    spark: "4.1"\n', ""), "rows need spark and table_format_version"),
-        (_entry().replace("    table_format_version: 1.11.0\n", ""), "since 1.7"),
+        (_entry().replace("    table_format_version: 1.12.0\n", ""), "since 1.7"),
         (_entry(spark="4.1.1"), "Spark minor such as"),
         (_entry(spark='"4.0"', version="1.9.1"), "not compatible with Spark 4.0"),
         (_entry(recipe="hive-delta-spark-trino", spark='"3.5"', version="4.0.0"), "Delta"),
@@ -196,10 +196,10 @@ def test_support_key_versions(tmp_path):
     # run whose versions are unknown.
     rec = support.load_validation_record(_record(tmp_path, _entry()))
     args = ("customer360", "hive", "iceberg", "spark", "trino", "batch")
-    on_40 = support.support_state(*args, record=rec, spark="4.0", table_format_version="1.11.0")
+    on_40 = support.support_state(*args, record=rec, spark="4.0", table_format_version="1.12.0")
     assert on_40["state"] == support.UNVERIFIED
-    assert "validated on Spark 4.1, Iceberg 1.11.0 only" in on_40["basis"]
-    assert "Spark 4.0, Iceberg 1.11.0" in on_40["basis"]
+    assert "validated on Spark 4.1, Iceberg 1.12.0 only" in on_40["basis"]
+    assert "Spark 4.0, Iceberg 1.12.0" in on_40["basis"]
     other_format = support.support_state(
         *args, record=rec, spark="4.1", table_format_version="1.10.1"
     )
@@ -219,8 +219,8 @@ def _cfg(spark_image: str, recipe: str = "hive-iceberg-spark-trino", **arch):
 @pytest.mark.parametrize(
     "image, recipe, arch, want",
     [
-        ("apache/spark:4.1.1-python3", "hive-iceberg-spark-trino", {}, ("4.1", "1.11.0")),
-        ("apache/spark:4.0.2-python3", "polaris-iceberg-spark-trino", {}, ("4.0", "1.11.0")),
+        ("apache/spark:4.1.1-python3", "hive-iceberg-spark-trino", {}, ("4.1", "1.12.0")),
+        ("apache/spark:4.0.2-python3", "polaris-iceberg-spark-trino", {}, ("4.0", "1.12.0")),
         ("apache/spark:4.0.2-python3", "hive-delta-spark-trino", {}, ("4.0", "4.0.0")),
         ("apache/spark:4.1.1-python3", "hive-delta-spark-trino", {}, ("4.1", "4.1.0")),
         (
@@ -269,6 +269,6 @@ def test_a_custom_spark_image_is_never_supported(tmp_path):
         "batch",
         record=rec,
         spark=support.config_versions(cfg)[0],
-        table_format_version="1.11.0",
+        table_format_version="1.12.0",
     )
     assert s["state"] == support.UNVERIFIED and "not known" in s["basis"]

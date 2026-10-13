@@ -72,39 +72,34 @@ def test_floor_matches_rust():
         assert found == tuple(ds._HELDOUT_FLOOR["roles"][role]), role
 
 
-def test_floor_checked_under_its_own_salt(monkeypatch):
+def test_floor_checked_under_its_own_salt(tmp_path, monkeypatch):
     # A seed known only to the floor (made under another salt) still reads
-    # as its role with a fixture file that does not list it.
+    # as its role: with a fixture file that does not list it, with a file
+    # stripped of every hash, and with a re-salted file.
     other_salt = "ab" * 32
-    floor = {"salt": other_salt, "roles": {"evaluation": (ds.seed_hash(other_salt, 12345),)}}
-    floor["roles"]["robustness"] = (ds.seed_hash(other_salt, 67890),)
+    floor = {
+        "salt": other_salt,
+        "roles": {
+            r: (ds.seed_hash(other_salt, s),)
+            for r, s in (("evaluation", 12345), ("robustness", 67890))
+        },
+    }
     monkeypatch.setattr(ds, "_HELDOUT_FLOOR", floor)
     h = ts.load()
     assert ds.heldout_role(12345, h) == "evaluation"
     assert ds.heldout_role(67890, h) == "robustness"
     assert ds.heldout_role(EV, h) == "evaluation"  # the file still counts too
     assert ds.heldout_role(43, h) is None
-
-
-def test_floor_survives_stripped_file(tmp_path, monkeypatch):
-    other_salt = "cd" * 32
-    floor = {
-        "salt": other_salt,
-        "roles": {
-            r: (ds.seed_hash(other_salt, s),) for r, s in (("evaluation", EV), ("robustness", RB))
-        },
-    }
-    monkeypatch.setattr(ds, "_HELDOUT_FLOOR", floor)
     doc = json.loads(PROD.read_text())
     doc["roles"] = {"evaluation": [], "robustness": []}
     p = tmp_path / "stripped.json"
     p.write_text(json.dumps(doc))
     h = ds.load_heldout(p)
-    assert ds.heldout_role(EV, h) == "evaluation" and ds.heldout_role(RB, h) == "robustness"
-    # Re-salted file: the floor is still checked under its own salt.
+    assert ds.heldout_role(12345, h) == "evaluation"
+    assert ds.heldout_role(67890, h) == "robustness"
     doc["salt"] = "ef" * 32
     p.write_text(json.dumps(doc))
-    assert ds.heldout_role(EV, ds.load_heldout(p)) == "evaluation"
+    assert ds.heldout_role(12345, ds.load_heldout(p)) == "evaluation"
 
 
 def test_uninitialised_floor_fails_closed(monkeypatch):
@@ -119,6 +114,8 @@ def test_uninitialised_floor_fails_closed(monkeypatch):
     "mutate",
     [
         lambda d: d.update(format=2),
+        lambda d: d.update(format=True),
+        lambda d: d.update(format=1.0),
         lambda d: d.update(algorithm="md5"),
         lambda d: d.update(salt="xyz"),
         lambda d: d["roles"]["evaluation"].append("not-a-hash"),

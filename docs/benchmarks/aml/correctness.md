@@ -24,7 +24,7 @@ at a fixed seed but not checked; check them from `metrics.json`
 | A skipped rule whose target typology is in the pre-registered behavioural subset | AML batch gate | no (warning, every run) |
 | Every layer has rows (a continuous layer with no row figure passes on its measured size) | record gate `layer_rows` | yes |
 | Batch: expected rules ran, none errored, detection alerted, every skip allowed (W1 `giant-component` or `vertex-cap`; W3 and W17 `path-cap`). A W3 or W17 `edge-cap` skip is not allowed | record gate `aml_rules` | yes; an allowed cap skip passes, labelled in `verdict.qualifiers.rule_caps` |
-| Continuous: no mode-excluded rule ran, gold-refresh counted alerts, every expected rule ran without skip (path-cap included) or error on the scored [tick](../../glossary.md#tick) (or the last tick completed at the [drain](../../glossary.md#drain) when scoring did not run). With neither status recorded, rules come from the time-to-detect lines, with a warning | record gate `aml_rules` | yes |
+| Continuous: no mode-excluded rule ran, gold-refresh counted alerts, every expected rule ran without skip (path-cap included) or error on the scored [tick](../../glossary.md#tick) (or the last tick that completed and committed inside the window when scoring did not run). With neither status recorded, rules come from the time-to-detect lines, with a warning | record gate `aml_rules` | yes |
 | Batch bronze reached 95% of the scale's expected volume | record gate `scale_ratio` | yes |
 | No benchmark query outside `allow_empty` returned zero rows | record gate `query_answers` | yes |
 | TM invariants ([8.5](tm-operations.md#85-tm-operations)) | TM verdict (`metrics/tm_ops.py`) | only on `fail`; `unknown` (an unchecked invariant, an interrupted pass, an unparsed cycle log), `not_run` and `disabled` warn |
@@ -33,10 +33,9 @@ at a fixed seed but not checked; check them from `metrics.json`
 | Subject-customer check (every planted subject is a customer) | score-financial | no (warning) |
 | Reference detector, band-leakage report, fidelity gate | `financial reference-score`, `scripts/aml_gate.py` | not part of `run` |
 | Continuous: data arrived in the window, silver committed and gold refreshed on new data at least twice inside it, gold freshness measured | continuous window gate | yes |
-| Continuous: gold-refresh drained ([4.5](pipeline.md#45-continuous-drain-and-tick-records)) | drain check | yes |
 | Continuous: gold-refresh logs present, a cumulative-alerts line, peak alerts > 0 | AML continuous gate | yes |
 | Continuous: ingest ratio at least 0.95, unless the [trickle](../../glossary.md#trickle) bounded intake and the pipeline kept pace, or a capacity run with bronze at capacity (then a warning) | record gates | yes |
-| Continuous: balanced; no handoff's lag rose by more than one cadence across the window's second half | balance gate | yes; peak gold freshness is reported beside it, never gated |
+| Continuous: balanced; no handoff's lag rose by more than one cadence across the window's second half | balance check | no (warning); recorded and shown in the report's Balance card, peak gold freshness beside it |
 
 No AML query has fixed expected results, and Lakebench does not compare
 query answers between runs: a reader compares row counts by eye

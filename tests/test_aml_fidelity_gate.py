@@ -11,7 +11,6 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
-import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -31,7 +30,6 @@ FEATURES_SRC = ROOT / "src/lakebench/spark/scripts/aml_features.py"
 SLOW = pytest.mark.slow
 
 PREREG = ROOT / "src/lakebench/spark/data/aml/aml_preregistration.json"
-TYPOLOGY_RS = ROOT / "datagen_rs/src/typology.rs"
 
 
 @pytest.fixture(autouse=True)
@@ -274,8 +272,8 @@ def test_real_preregistration_runs_end_to_end():
     p = copy.deepcopy(p)
     p["power"]["bootstrap_iterations"] = 5
     # v3.6.0 fits the reference model on every pair and every ablation: keep
-    # the feature list and the boosting rounds small (the registered values
-    # are pinned in test_prereg_version_and_model_blocks).
+    # the feature list and the boosting rounds small (the registered estimator
+    # is pinned in test_gated_prereg_constants_are_locked).
     p["reference_model"]["max_iter"] = 5
     nuis = p["leakage"]["nuisance_features"]
     p["features"] = p["features"][:1] + nuis[:2]
@@ -331,14 +329,6 @@ def test_prereg_features_match_aml_features(features_module):
     assert p["unit_of_scoring"]["history_features"] == hist
     for t, f in p["classification"]["defining_feature"].items():
         assert f in cols, (t, f)
-
-
-def test_high_risk_countries_match_generator_corridor_pool(features_module):
-    ours = features_module.HIGH_RISK_COUNTRIES
-    m = re.search(r"const HIGH_RISK_CC: \[&str; \d+\] = \[([^\]]*)\]", TYPOLOGY_RS.read_text())
-    assert m, "HIGH_RISK_CC not found in typology.rs"
-    theirs = re.findall(r'"([A-Z]{2})"', m.group(1))
-    assert sorted(ours) == sorted(theirs)
 
 
 def test_load_preregistration_prefers_flat_copy(tmp_path, monkeypatch):

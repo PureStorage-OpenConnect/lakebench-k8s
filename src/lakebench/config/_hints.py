@@ -19,7 +19,7 @@ from pydantic import BaseModel
 CUTOFF = 0.75
 # The whole-schema pass looks for a key written in the wrong section, so it
 # asks for a closer match: at 0.75, 'schema_version' would be pointed at
-# 'observability.chart_version'.
+# 'observability.pushgateway_storage_class'.
 ELSEWHERE_CUTOFF = 0.85
 
 # Keys load_config promotes from the top level (loader._FLAT_FIELD_MAP),

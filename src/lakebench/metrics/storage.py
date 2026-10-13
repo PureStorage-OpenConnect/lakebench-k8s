@@ -347,6 +347,11 @@ def _create_exclusive(tmp_path: str, filepath: Path) -> None:
     os.unlink(tmp_path)
 
 
+def _stored_scores(data: dict[str, Any]) -> dict[str, Any] | None:
+    scores = (data.get("pipeline_benchmark") or {}).get("scores")
+    return scores if isinstance(scores, dict) else None
+
+
 class MetricsStorage:
     """Stores metrics to local JSON files.
 
@@ -704,6 +709,7 @@ class MetricsStorage:
             # snapshot has no experiment inputs, so it never gets one.
             experiment=data.get("experiment"),
             stored_verdict=data.get("verdict") if isinstance(data.get("verdict"), dict) else None,
+            stored_scores=_stored_scores(data),
             storage_multiple=data.get("storage_multiple"),
         )
 

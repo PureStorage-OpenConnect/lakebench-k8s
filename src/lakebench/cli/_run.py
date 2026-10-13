@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -161,6 +161,12 @@ def _bump_silver_rebuild_epoch(cfg) -> None:
         f"could not bump {key} in {DeploymentEngine.SILVER_STATE_CONFIGMAP} "
         "after 5 concurrent-write retries"
     )
+
+
+def _utc(stamp: datetime | None) -> datetime | None:
+    """A naive local wall-clock time as a timezone-aware UTC one, as the
+    stage windows from the job manager are; None stays None."""
+    return None if stamp is None else stamp.astimezone(timezone.utc)
 
 
 def _load_latest_datagen_fleet(namespace: str | None = None) -> dict | None:
@@ -2324,6 +2330,7 @@ def _run_once(
     _pipeline_exit_code: int = ExitCode.FAILED
     _exception_in_flight = False
     _datagen_elapsed = 0.0
+    _datagen_window: tuple[datetime | None, datetime | None] = (None, None)
     # Set when this run generated its corpus (fleet read from its own pods).
     _generated_here = False
     _run_fleet: dict | None = None
@@ -2556,6 +2563,7 @@ def _run_once(
 
                 datagen_end = datetime.now()
                 _datagen_elapsed = (datagen_end - datagen_start).total_seconds()
+                _datagen_window = (datagen_start, datagen_end)
                 print_success(f"Datagen completed in {_datagen_elapsed:.0f}s")
                 # This run generated the corpus: its fleet record comes from
                 # its own pods, never from an older sidecar.
@@ -3895,6 +3903,8 @@ def _run_once(
                     datagen_output_gb=_datagen_output_gb,
                     datagen_output_rows=_datagen_output_rows,
                     datagen_fleet=fleet,
+                    datagen_start=_utc(_datagen_window[0] if _generated_here else None),
+                    datagen_end=_utc(_datagen_window[1] if _generated_here else None),
                 )
                 run_metrics.pipeline_benchmark = pb
 

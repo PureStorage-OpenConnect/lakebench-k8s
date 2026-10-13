@@ -23,7 +23,6 @@
 | The benchmark runner for rounds cannot be created: exit 1 before any stream starts | continuous | `cli/_sustained.py` |
 | With gold on an interval, `run_duration` under three gold refresh intervals refused (exit 2) | continuous | `cli/_sustained.py` |
 | Continuous window gate ([5.3](#53-continuous-window-gate)) | continuous | `metrics/continuous_window.py` |
-| Balance gate: a handoff's lag rose by more than one cadence over the second half | continuous | `metrics/continuous_window.py`, `cli/_sustained.py` |
 | A stream not RUNNING at window close, or restarted or resubmitted inside it | continuous | `cli/_sustained.py` |
 | bronze-ingest or silver-stream processed 0 rows, or has no parseable log | continuous | `cli/_sustained.py` |
 | A failing gate exits non-zero; metrics are still written with the failed verdict | both | `cli/_sustained.py`, `cli/_run.py` |
@@ -34,8 +33,8 @@ After gold-finalize the CLI evaluates 26 pipeline checks from the
 `[c360-bronze]` and `[c360-check]` facts, and after the benchmark 8 query
 row-count checks, into `metrics.json` `c360_correctness`. Its status is
 `fail` when any check failed, else `pass` when the five core checks ran and
-passed, else `unknown`. Continuous, `--local` and `--stage` runs do not
-evaluate them, so their verdict carries no `c360` gate.
+passed, else `unknown`. Continuous, `--local` and `--stage` runs evaluate
+none, so their verdict carries no `c360` gate.
 
 Sixteen checks gate the run (`GATING_CHECKS` in
 `metrics/c360_correctness.py`): every invariant and reconcile check and
@@ -44,16 +43,17 @@ Sixteen checks gate the run (`GATING_CHECKS` in
 - A gated check that fails, does not run or is absent fails the run. So does
   a record with no expected-result facts.
 - A failed run has a non-zero exit, `metrics.success` false and the
-  verdict's `c360` gate failed; the report shows the run as failed.
+  verdict's `c360` gate failed.
 - A failure among the other 18 (remaining statistical checks and the
   benchmark row counts) is listed under the verdict's
-  `c360_failed_not_gating` qualifier. It changes neither exit code nor
+  `c360_failed_not_gating` qualifier and changes neither exit code nor
   verdict.
 
 Kinds and tolerances:
 
 - invariant: exact, gated;
-- reconcile: exact, gated; "core" marks a core check;
+- reconcile: exact, gated;
+- "core" marks the five checks that must run and pass for status `pass`;
 - statistical: 6 standard errors (8 or 10 on the right tail of amounts);
   only `avg_transaction_value_overall` is gated;
 - shape: the benchmark row counts.
@@ -68,7 +68,7 @@ Kinds and tolerances:
 | `dates_in_window` | invariant | dates in [window start, window end - 1 day] |
 | `one_ticket_and_score_per_support` | invariant | ticket rows = support rows = satisfaction rows |
 | `gold_counts_non_negative` | invariant | gold counts never negative or NULL |
-| `gold_daily_identities` | invariant | per-day gold identities, listed below |
+| `gold_daily_identities` | invariant (core) | per-day gold identities, listed below |
 | `daily_active_within_customers` | invariant | max daily active customers <= id space |
 | `bronze_rows_match_datagen` | reconcile (core) | bronze rows = datagen sizing rows for some codec |
 | `bronze_to_silver_rows` | reconcile (core) | silver rows = bronze rows passing the filter |
@@ -110,16 +110,19 @@ A continuous run fails unless, inside the window:
   cycle tagged `(silver idle)`, reading no silver, or reading no more silver
   rows than the previous cycle does not count);
 - gold freshness was measured;
-- every stream's driver log has timestamped stage lines;
-- the pipeline was balanced: no handoff's lag rose by more than one cadence
-  across the window's second half (fails with "balance gate: ..." and a
-  bottleneck line; see [Benchmarking](../../benchmarking.md)).
+- every stream's driver log has timestamped stage lines.
+
+The balance check is advisory and does not fail the run. A handoff whose lag
+rose by more than one cadence across the window's second half prints
+`balance (advisory): ...` with a bottleneck line, is recorded in
+`continuous.balance`, and shows as "not balanced" in the report
+([Benchmarking](../../benchmarking.md)).
 
 ### 5.4 Run equivalence
 
-Lakebench records no per-query answer hash: the answer checks are the
-benchmark gate and the expected-result checks above. Two runs are
-not comparable when (`metrics/comparability.py`):
+Lakebench records no per-query answer hash; the answer checks are the
+benchmark gate and the expected-result checks above. Two runs are not
+comparable when (`metrics/comparability.py`):
 
 - they were recorded under different identity versions;
 - their corpus id differs (v2 on exp2 records; corpus id and generator image
@@ -127,5 +130,5 @@ not comparable when (`metrics/comparability.py`):
 - seed, scale or corpus role differ;
 - their generator image digests differ where both observed one.
 
-A tester therefore makes a fresh reference run on the same generator image and seed
-before comparing.
+Make a fresh reference run on the same generator image and seed before
+comparing.

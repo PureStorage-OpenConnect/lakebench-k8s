@@ -68,17 +68,24 @@ The removed keys, with what to do instead (generated from each model's
 | `architecture.table_format.iceberg.file_format` | Iceberg tables are always written as Parquet. |
 | `architecture.table_format.iceberg.properties` | no table property is applied from the config. |
 | `description` | nothing read it; keep notes in a YAML comment. |
-| `images.grafana` | Grafana deploys from the kube-prometheus-stack chart; pin it with observability.chart_version. |
+| `images.grafana` | set observability.grafana_image to pin the per-namespace Grafana. |
 | `images.hive` | the Stackable HiveCluster always runs Hive 3.1.3 (Hive 4 breaks Iceberg and Trino ANALYZE), whatever images.hive named, and run provenance records 3.1.3. |
-| `images.prometheus` | Prometheus deploys from the kube-prometheus-stack chart; pin it with observability.chart_version. |
+| `images.prometheus` | set observability.prometheus_image to pin the per-namespace Prometheus. |
 | `images.pull_secrets` | No deployer ever applied it; removed in v1.5. |
-| `observability.prometheus_stack_enabled` | observability.enabled always installs or reuses the full stack, Prometheus included. |
+| `observability.chart_version` | observability no longer deploys the kube-prometheus-stack Helm chart; pin the images with observability.prometheus_image and observability.grafana_image. |
+| `observability.prometheus_stack_enabled` | observability.enabled always deploys the full per-namespace stack. |
 | `observability.reports` | every run writes report.html into its run directory under lakebench-output/runs; 'lakebench report --render' writes a fresh copy to lakebench-output/reports/ without overwriting. |
 | `observability.s3_metrics_enabled` | PodMonitor deployment is not gated on it. |
 | `observability.spark_metrics_enabled` | PodMonitor deployment is not gated on it. |
-| `observability.storage_class` | the Prometheus volume claim is created without a storageClassName, so it uses the cluster default StorageClass. |
-| `platform.compute.spark.driver` | per-executor sizing is fixed in the job profiles; use platform.compute.spark.<job>_executors for counts and driver_memory/driver_cores for the driver. |
-| `platform.compute.spark.executor` | per-executor sizing is fixed in the job profiles; use platform.compute.spark.<job>_executors for counts and driver_memory/driver_cores for the driver. |
+| `observability.storage_class` | set observability.prometheus_storage_class to pick a StorageClass for the Prometheus PVC; empty uses the cluster default. |
+| `platform.compute.spark.bronze_ingest_executor_cores` | use bronze_executor_cores. |
+| `platform.compute.spark.bronze_ingest_executors` | use bronze_executors, which sizes bronze-ingest in continuous mode and bronze-verify in batch mode. |
+| `platform.compute.spark.driver` | per-executor sizing is fixed in the job profiles; use platform.compute.spark.<stage>_executors for counts and driver_memory/driver_cores for the driver. |
+| `platform.compute.spark.executor` | per-executor sizing is fixed in the job profiles; use platform.compute.spark.<stage>_executors for counts and driver_memory/driver_cores for the driver. |
+| `platform.compute.spark.gold_refresh_executor_cores` | use gold_executor_cores. |
+| `platform.compute.spark.gold_refresh_executors` | use gold_executors, which sizes gold-refresh in continuous mode and gold-finalize in batch mode. |
+| `platform.compute.spark.silver_stream_executor_cores` | use silver_executor_cores. |
+| `platform.compute.spark.silver_stream_executors` | use silver_executors, which sizes silver-stream in continuous mode and silver-build in batch mode. |
 | `platform.storage.s3.secret_ref` | lakebench never reads an existing Secret: deploy writes the S3 Secret from access_key and secret_key. Set those instead (use ${VAR} substitution, for example access_key: "${S3_ACCESS_KEY}", to keep the keys out of the file). |
 | `platform.storage.scratch.create_storage_class` | lakebench no longer creates StorageClasses; a cluster admin runs 'lakebench admin install --component scratch-storage-class' once. |
 | `platform.storage.scratch.size` | per-job scratch comes from the job profiles (silver-build: 60 GiB x scale / executors, 50-300Gi). |
@@ -185,9 +192,10 @@ workload:
 Every deploy records the nonce it stamps on the namespace in
 `.lakebench/<name>.json` beside the config. A nameless config can read or
 tear down only a deployment its directory proves is its own, and
-`--name NAME` names one. The rules, the v1.6 `.lakebench/state.json` and
-moving a deployment's directory are in
-[UPGRADING-1.7.md](../UPGRADING-1.7.md#nameless-configs-and-deploy-state).
+`--name NAME` names one. A copied directory, or one
+deployed from another host, is refused (exit 3). Use
+`python -m lakebench.config.deploy_state relocate CONFIG NEWDIR` to move a
+deployment's directory.
 
 ## Defaults for omitted sections
 
@@ -203,9 +211,10 @@ moving a deployment's directory are in
 What to tune first as you scale up:
 
 1. `datagen.scale` -- the data volume.
-2. `compute.spark.*_executors` -- per-job executor counts. Batch executor
-   size is fixed in the job profiles; continuous streams also take
-   `*_executor_cores`. See [Executor Override Guide](#executor-override-guide).
+2. `compute.spark.<stage>_executors` -- per-stage executor counts (one key each
+   for bronze, silver and gold, used by whichever job the mode runs). Batch
+   executor size is fixed in the job profiles; continuous streams also take
+   `<stage>_executor_cores`. See [Executor Override Guide](#executor-override-guide).
 3. `query_engine.trino.worker` -- match replicas and memory to the cluster.
 4. `scratch` and `postgres` storage classes -- match them to the storage
    provider.
@@ -235,8 +244,8 @@ name: my-lakehouse
 # Container images for every component. Override these for air-gapped
 # registries or custom builds.
 images:
-  datagen: docker.io/sillidata/lb-datagen:5d7ce61a@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc
-  spark: apache/spark:4.1.1-python3       # the recipe's default; 4.0.2 on Polaris recipes
+  datagen: docker.io/sillidata/lb-datagen:latest
+  spark: apache/spark:4.1.1-python3       # the recipe's default
   postgres: postgres:17
   polaris: apache/polaris:1.6.0
   trino: trinodb/trino:483
@@ -291,18 +300,19 @@ platform:
       # profile. The v1.6 driver and executor blocks are refused (they sized
       # nothing).
 
-      # Per-job executor count overrides (null = auto from scale factor).
-      # Batch per-executor sizing (cores, memory, PVC) is fixed from proven
-      # profiles. Continuous streams take bronze_ingest_executor_cores,
-      # silver_stream_executor_cores and gold_refresh_executor_cores.
+      # Per-stage executor counts (null = auto). One key per stage; the run's
+      # mode picks the job: bronze-verify or bronze-ingest, silver-build or
+      # silver-stream, gold-finalize or gold-refresh. Per-executor memory and
+      # PVC are fixed from proven profiles.
       bronze_executors: null
       silver_executors: null
       gold_executors: null
 
-      # Streaming job overrides (continuous mode).
-      bronze_ingest_executors: null
-      silver_stream_executors: null
-      gold_refresh_executors: null
+      # Continuous mode only: cores per executor for each stage's stream
+      # (1-16; memory and scratch follow the profile). Batch ignores them.
+      bronze_executor_cores: null
+      silver_executor_cores: null
+      gold_executor_cores: null
 
       # Global driver overrides (null = profile default).
       driver_memory: null
@@ -364,9 +374,11 @@ architecture:
       gold_refresh_interval: "0 seconds"     # back to back (default)
       run_duration: 1800              # Seconds (30 min default)
       # max_files_per_trigger: unset = no limit (datagen generates for the whole window)
+      silver_max_rows_per_trigger: 20000000   # soft cap on bronze rows silver reads per trigger; null lifts it
+      silver_write_mode: merge_on_read         # merge_on_read (default) | copy_on_write; copy_on_write rewrites whole tables
       checkpoint_base: checkpoints
-      benchmark_interval: 300         # 300-3600; raised to a longer gold interval
-      benchmark_warmup: 300           # 300-1800; raised to a longer gold interval
+      benchmark_interval: 300         # 60-3600; raised to a longer gold interval
+      benchmark_warmup: 300           # 60-1800; raised to a longer gold interval
 
   benchmark:
     mode: power                       # power | standard | extended; throughput and composite
@@ -411,8 +423,21 @@ spark:
 
 ### Executor Override Guide
 
-A per-job executor override (`silver_executors`, `gold_executors` and the
-rest) replaces the scaling formula for one job.
+A per-stage executor override (`bronze_executors`, `silver_executors`,
+`gold_executors`) replaces the scaling formula for the stage's job. The run's
+mode picks the job:
+
+| Key | Batch runs | Continuous runs |
+|---|---|---|
+| `bronze_executors` | bronze-verify | bronze-ingest |
+| `silver_executors` | silver-build | silver-stream |
+| `gold_executors` | gold-finalize | gold-refresh |
+
+The bronze-verify pass that a continuous run starts with (it registers the
+bronze table) keeps its profile and does not take `bronze_executors`. The v1.7
+keys `bronze_ingest_executors`, `silver_stream_executors` and
+`gold_refresh_executors` (and their `_executor_cores`) are removed: the
+commands that change data refuse them and name the new key.
 
 - Each takes 1 to 28, the Lakebench cap. A larger value is
   refused by the commands that change data; `destroy`, `status` and the
@@ -501,15 +526,15 @@ Container images for every deployed component. Override for air-gapped registrie
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
-| `images.datagen` | string | `docker.io/sillidata/lb-datagen:5d7ce61a@sha256:ed4057e097f09fdd3e37631bc37eb88e5fce561cb8ebe06cd6fa2fd7d23e4bfc` | advanced | Data generator image, pinned by tag and digest (the digest is what is pulled). In continuous mode it generates until the run window ends: AML as successive 24-month periods of the same bank, Customer360 as successive time slices. |
-| `images.spark` | string | `apache/spark:4.1.1-python3` | advanced | Spark runtime image. Unset: the image of the config's recipe (or of the recipe its components name): `4.1.1-python3` on the Hive recipes, `4.0.2-python3` on the Polaris recipes, `hive-delta-spark-thrift` and `hive-delta-spark-none`; 4.0.2 also when the config writes a table format version Spark 4.1 cannot run (Delta 4.0.0). |
-| `images.postgres` | string | `postgres:17` | advanced | PostgreSQL image (metadata backend). |
-| `images.polaris` | string | `apache/polaris:1.6.0` | advanced | Apache Polaris REST catalog image. |
-| `images.polaris_admin_tool` | string | `apache/polaris-admin-tool:1.6.0` | advanced | Polaris admin tool image; bootstraps the Polaris metastore on a Polaris recipe. |
+| `images.datagen` | string | `docker.io/sillidata/lb-datagen:latest` | advanced | Data generator image. Tag-pinned; override with a digest for byte-for-byte reproducibility. In continuous mode it generates until the run window ends: AML as successive 24-month periods of the same bank, Customer360 as successive time slices. |
+| `images.spark` | string | `apache/spark:4.1.3-python3` | advanced | Spark runtime image. Unset: the image of the config's recipe (or of the recipe its components name): `4.1.3-python3` on every recipe; `4.0.2-python3` instead when the config writes a table format version Spark 4.1 cannot run (Delta 4.0.0). |
+| `images.postgres` | string | `postgres:18` | advanced | PostgreSQL image (metadata backend). |
+| `images.polaris` | string | `apache/polaris:1.8.0` | advanced | Apache Polaris REST catalog image. |
+| `images.polaris_admin_tool` | string | `apache/polaris-admin-tool:1.8.0` | advanced | Polaris admin tool image; bootstraps the Polaris metastore on a Polaris recipe. |
 | `images.unity` | string | `unitycatalog/unitycatalog:main` | advanced | Unity Catalog server image (Unity catalog only; no recipe uses it). |
 | `images.trino` | string | `trinodb/trino:483` | advanced | Trino query engine image. |
 | `images.duckdb` | string | `python:3.11-slim` | advanced | Python image the DuckDB query engine pod runs in; DuckDB itself is pinned by `architecture.query_engine.duckdb.version`. |
-| `images.jmx_exporter` | string | `bitnami/jmx-exporter:latest@sha256:873527b34b55ca7b8f0b5f7efdf18c93e4337d06709da674ba7284fd3f6316de` | advanced | JMX exporter image for the metrics sidecars, used when observability is enabled. |
+| `images.jmx_exporter` | string | `bitnamilegacy/jmx-exporter:1.4.0` | advanced | JMX exporter image for the metrics sidecars, used when observability is enabled. Tag-pinned; override with a digest for byte-for-byte reproducibility. |
 | `images.pull_policy` | one of `Always`, `IfNotPresent`, `Never` | `Always` | advanced | `Always`, `IfNotPresent`, or `Never`. |
 
 ### Platform -- Kubernetes
@@ -554,15 +579,12 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `platform.compute.spark.operator.install` | boolean | `false` | advanced | Refused when `true`: deploy never installs the shared operator; a cluster admin runs `lakebench admin install --component spark-operator`. `false` loads as before. |
 | `platform.compute.spark.operator.namespace` | string | `spark-operator` | advanced | Namespace for the Spark Operator. |
 | `platform.compute.spark.operator.version` | string | `2.5.1` | advanced | Chart version a fresh `admin install` uses. v2.x required. An installed operator keeps its version. |
-| `platform.compute.spark.bronze_executors` | integer or null | `null` | advanced | Override bronze-verify executor count (1--28). Null = auto from scale. |
-| `platform.compute.spark.silver_executors` | integer or null | `null` | advanced | Override silver-build executor count (1--28). Null = auto from scale. |
-| `platform.compute.spark.gold_executors` | integer or null | `null` | advanced | Override gold-finalize executor count (1--28). Null = auto from scale. |
-| `platform.compute.spark.bronze_ingest_executors` | integer or null | `null` | advanced | Override bronze-ingest executor count (1--28). Null = auto from scale. |
-| `platform.compute.spark.silver_stream_executors` | integer or null | `null` | advanced | Override silver-stream executor count (1--28). Null = auto from scale. |
-| `platform.compute.spark.gold_refresh_executors` | integer or null | `null` | advanced | Override gold-refresh executor count (1--28). Null = auto from scale. |
-| `platform.compute.spark.bronze_ingest_executor_cores` | integer or null | `null` | advanced | Override bronze-ingest cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_ingest_executors` is set. |
-| `platform.compute.spark.silver_stream_executor_cores` | integer or null | `null` | advanced | Override silver-stream cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_stream_executors` is set. |
-| `platform.compute.spark.gold_refresh_executor_cores` | integer or null | `null` | advanced | Override gold-refresh cores per executor (1--16). Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically. |
+| `platform.compute.spark.bronze_executors` | integer or null | `null` | advanced | Override the bronze stage's executor count (1--28): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = auto (from scale in batch, from the offered load in continuous). |
+| `platform.compute.spark.silver_executors` | integer or null | `null` | advanced | Override the silver stage's executor count (1--28): silver-build in batch mode, silver-stream in continuous mode. Null = auto (from scale in batch, from the offered load in continuous). |
+| `platform.compute.spark.gold_executors` | integer or null | `null` | advanced | Override the gold stage's executor count (1--28): gold-finalize in batch mode, gold-refresh in continuous mode. Null = auto from scale. |
+| `platform.compute.spark.bronze_executor_cores` | integer or null | `null` | advanced | Continuous mode: override bronze-ingest cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_executors` is set. |
+| `platform.compute.spark.silver_executor_cores` | integer or null | `null` | advanced | Continuous mode: override silver-stream cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_executors` is set. |
+| `platform.compute.spark.gold_executor_cores` | integer or null | `null` | advanced | Continuous mode: override gold-refresh cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically. |
 | `platform.compute.spark.driver_memory` | string or null | `null` | advanced | Global driver memory override (e.g., `16g`). Null = profile default. |
 | `platform.compute.spark.driver_cores` | integer or null | `null` | advanced | Override driver cores (1--16). Null = profile default (typically 4). |
 
@@ -609,7 +631,7 @@ What `lb-deps` is and when it resolves again: see [Dependency server](#dependenc
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
 | `architecture.table_format.type` | one of `iceberg`, `delta` | `iceberg` | advanced | Table format: `iceberg` or `delta`. Delta runs with the `hive` catalog and `trino`, `spark-thrift` or `none` query engines (the `hive-delta-*` recipes). The `financial` (AML) workload refuses Delta. |
-| `architecture.table_format.iceberg.version` | string | `1.11.0` | advanced | Apache Iceberg runtime JAR version. |
+| `architecture.table_format.iceberg.version` | string | `1.12.0` | advanced | Apache Iceberg runtime JAR version. |
 | `architecture.table_format.delta.version` | string | `auto` | advanced | Delta Lake version. `auto` resolves a version that matches the Spark image. |
 
 ### Architecture -- Pipeline engine
@@ -639,7 +661,7 @@ What `lb-deps` is and when it resolves again: see [Dependency server](#dependenc
 | `architecture.query_engine.duckdb.cores` | integer | `2` | advanced | DuckDB CPU cores. |
 | `architecture.query_engine.duckdb.memory` | string | `4g` | advanced | DuckDB pod memory. Auto-sized to `16g` on the financial schema when unset (less on a node with under 24 GiB allocatable). |
 | `architecture.query_engine.duckdb.catalog_name` | string | `lakehouse` | advanced | Iceberg catalog name for DuckDB. |
-| `architecture.query_engine.duckdb.version` | string | `1.5.5` | advanced | DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes whatever is current, so two runs weeks apart can query with different engines and the difference would read as a result. |
+| `architecture.query_engine.duckdb.version` | string | `1.5.6` | advanced | DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes whatever is current, so two runs weeks apart can query with different engines and the difference would read as a result. |
 
 ### Architecture -- Pipeline
 
@@ -657,6 +679,8 @@ The legacy name `processing` is still accepted with a deprecation warning.
 | `architecture.pipeline.continuous.run_duration` | integer | `1800` | advanced | Measurement window in seconds. The schema accepts 60 and up; with gold on an interval a continuous run refuses less than 3 x `gold_refresh_interval`. Use 900 s or more, UAT included. |
 | `architecture.pipeline.continuous.checkpoint_base` | string | `checkpoints` | advanced | S3 prefix for streaming checkpoints. |
 | `architecture.pipeline.continuous.max_files_per_trigger` | integer or null | none | advanced | Max Parquet files bronze reads per trigger, a Lakebench cap on intake. Unset: no limit when the run starts its own datagen, which generates for the whole window. With --skip-generate (a finite corpus) unset is derived per run so data keeps arriving for about 1.2 x `run_duration`, capped at 50, and an explicit value that would offer the corpus before the window ends is refused at run start. |
+| `architecture.pipeline.continuous.silver_max_rows_per_trigger` | integer or null | `20000000` | advanced | Soft cap on bronze rows silver reads per trigger (Iceberg `streaming-max-rows-per-micro-batch`), so one micro-batch cannot swallow the whole backlog and run past the window. A batch always takes the next whole data file, then stops once the cap would be exceeded. `null` lifts the cap (each trigger takes every unprocessed bronze snapshot). |
+| `architecture.pipeline.continuous.silver_write_mode` | one of `copy_on_write`, `merge_on_read` | `merge_on_read` | advanced | Iceberg write mode for the update-heavy silver tables (entities, accounts, account_statements, entity_profiles) in continuous AML. `merge_on_read` (default) writes position-delete files on every MERGE, so a batch's write cost tracks the rows it changes rather than the table size, and added silver executors scale throughput; readers merge the deletes and maintenance compacts them. `copy_on_write` rewrites the touched data files instead, so the write cost tracks table size. Append-only silver tables (transactions, edges, pairs) are unaffected. |
 | `architecture.pipeline.continuous.bronze_target_file_size_mb` | integer | `512` | advanced | Target Iceberg file size for bronze writes (MB) |
 | `architecture.pipeline.continuous.silver_target_file_size_mb` | integer | `512` | advanced | Target Iceberg file size for silver writes (MB) |
 | `architecture.pipeline.continuous.silver_bronze_wait_seconds` | integer or null | `null` | advanced | Customer360 only: seconds silver-stream waits for the bronze table to appear before it stops the run. Unset (auto): the run's window (`--duration` or run_duration) / 4, floored at 600 s. The wait runs before the window opens: datagen starts once the streams run, and bronze creates its table with its first batch. |
@@ -665,8 +689,8 @@ The legacy name `processing` is still accepted with a deprecation warning.
 | `architecture.pipeline.continuous.retention_threshold` | string | `30m` | advanced | Iceberg snapshot retention threshold. Snapshots older than this are expired. A whole number and one unit, `s`, `m`, `h` or `d` (e.g., `30m`, `1h`, `7d`); anything else is rejected at load. While streams are live, Iceberg expiry is floored at `1h`, and a continuous Iceberg config on Trino or Spark Thrift that sets a lower value prints a warning when it loads. The `30m` default does not warn: every continuous maintenance round runs beside live streams, so it expires at `1h`, and the run records the applied values in `continuous.retention` of `metrics.json`. Delta has no effective table maintenance in continuous mode (v1.6). Orphan-file removal never uses less than 24 h 10 min, on any engine. |
 | `architecture.pipeline.continuous.compaction_enabled` | boolean | `true` | advanced | Run periodic Iceberg compaction (`rewrite_data_files` / `optimize`) during continuous runs. |
 | `architecture.pipeline.continuous.compaction_interval` | integer | `0` | advanced | Seconds between compaction rounds. `0` = 2x the effective `retention_interval` (1200 s for the default window). An explicit value that cannot run inside the window is refused at run start unless `compaction_enabled` is false or `--skip-maintenance` is given. Minimum 0; no upper bound in the schema. |
-| `architecture.pipeline.continuous.benchmark_interval` | integer | `300` | advanced | Seconds between in-stream benchmark rounds, 300--3600. With gold on a longer interval, raised to that interval so rounds do not overlap gold rewrites. |
-| `architecture.pipeline.continuous.benchmark_warmup` | integer | `300` | advanced | Seconds before the first in-stream benchmark round, 300--1800. With gold on a longer interval, raised to that interval so gold refreshes once first. |
+| `architecture.pipeline.continuous.benchmark_interval` | integer | `300` | advanced | Seconds between in-stream benchmark rounds, 60--3600, counted from a round's end. With gold on a longer interval, raised to that interval so rounds do not overlap gold rewrites. |
+| `architecture.pipeline.continuous.benchmark_warmup` | integer | `300` | advanced | Seconds before the first in-stream benchmark round, 60--1800. A round that fires before the streams have handed data to gold reads an empty gold layer: set this past the first handoff (the run's `lag:` lines). With gold on a longer interval, raised to that interval so gold refreshes once first. |
 
 ### Workload & Datagen
 
@@ -756,13 +780,16 @@ Fully-qualified table names (`namespace.table`). The catalog prefix is added at 
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
-| `observability.enabled` | boolean | `false` | advanced | Deploy the observability stack (Prometheus + Grafana). |
-| `observability.dashboards_enabled` | boolean | `true` | advanced | Deploy Grafana dashboards. |
-| `observability.retention` | string | `7d` | advanced | Prometheus data retention period. |
+| `observability.enabled` | boolean | `false` | advanced | Deploy the per-namespace Prometheus and Grafana. |
+| `observability.dashboards_enabled` | boolean | `true` | advanced | Deploy the Grafana dashboard. Grafana itself still runs. |
+| `observability.grafana_route` | boolean | `true` | advanced | OpenShift only: create a TLS Route to Grafana so it has a URL without a port-forward. Grafana is behind its login; Prometheus and the Pushgateway are never exposed. Ignored on other clusters. Removed with the namespace. |
+| `observability.retention` | string | `7d` | advanced | Prometheus data retention. |
 | `observability.storage` | string | `10Gi` | advanced | Prometheus PVC size. |
-| `observability.chart_version` | string | `87.19.2` | advanced | `kube-prometheus-stack` Helm chart version. Bundles Prometheus and Grafana as one unit -- there is no separate Prometheus/Grafana version field. The version a fresh `lakebench admin install --component observability` uses; an installed release keeps its version. |
-| `observability.pushgateway_enabled` | boolean | `true` | advanced | Deploy a Prometheus Pushgateway for Spark job metrics when observability is enabled. A live view only; `metrics.json` stays the record. |
-| `observability.pushgateway_image` | string | `prom/pushgateway:v1.11.1` | advanced | Pushgateway image. |
+| `observability.prometheus_image` | string | `quay.io/prometheus/prometheus:v3.15.0` | advanced | Prometheus image. Tag-pinned; override with a digest for reproducibility. |
+| `observability.grafana_image` | string | `docker.io/grafana/grafana:13.2.3` | advanced | Grafana image. Tag-pinned; override with a digest for reproducibility. |
+| `observability.prometheus_storage_class` | string | `""` | advanced | StorageClass of the Prometheus PVC; empty uses the cluster default. |
+| `observability.pushgateway_enabled` | boolean | `true` | advanced | Deploy a Prometheus Pushgateway for Spark job metrics. A live view only; ``metrics.json`` stays the record. |
+| `observability.pushgateway_image` | string | `prom/pushgateway:v1.11.4` | advanced | Pushgateway image. |
 | `observability.pushgateway_storage` | string | `1Gi` | advanced | Pushgateway persistent volume size. |
 | `observability.pushgateway_storage_class` | string | `px-csi-scratch` | advanced | StorageClass of the Pushgateway volume. |
 
@@ -807,7 +834,7 @@ Refused keys:
 - A `spark.conf` key Lakebench sets for the job is refused at load by the
   commands that change data, naming the setting that controls it instead.
   For example `spark.sql.shuffle.partitions` follows the executor count,
-  `platform.compute.spark.<job>_executors`. `destroy`, `status` and the
+  `platform.compute.spark.<stage>_executors`. `destroy`, `status` and the
   read-only commands drop it with a note.
 - `spark.driver.maxResultSize` is the one Lakebench-set key a user value
   replaces.
@@ -856,8 +883,10 @@ Job defaults (`SPARK_CONF_DEFAULTS`), which a `spark.conf` value replaces:
 | `spark.memory.fraction` | `0.8` | Fraction of heap for execution + storage. |
 | `spark.memory.storageFraction` | `0.3` | Fraction of `memory.fraction` for storage. |
 
-How 1.6 handled these defaults is in
-[UPGRADING-1.7.md](../UPGRADING-1.7.md#sparkconf-defaults-before-17).
+Before 1.7 these defaults were the schema default of `spark.conf`, so
+setting any key there dropped all of them. They now stay. A config that
+still carries the 1.6 default map loads with a note for the Lakebench-set
+keys in it.
 
 ## Scale Factors
 
@@ -957,7 +986,7 @@ Continuous streams ([Continuous sizing](sizing.md#continuous-sizing)):
 
 - A stage that needs more than the profile's cap grows its executors to 8,
   then 16 cores, within the largest node. Lakebench then sets its
-  `*_executor_cores` and says so.
+  `<stage>_executor_cores` and says so.
 - gold-refresh is never grown automatically.
 
 `lakebench info <config>` prints the resolved per-job counts. It is hidden
@@ -1080,10 +1109,15 @@ The limits on Spark, Iceberg, Delta, Hive and Polaris versions are in
 
 ## Generating a Starter Config
 
-`lakebench init` writes a starter config: see
+`lakebench init` writes a config with the keys a deployment tunes in it: see
 [Getting Started, step 1](getting-started.md#1-generate-a-configuration-file)
 for what it writes and [CLI Reference](cli-reference.md#init) for the flags.
-Every key it leaves out keeps its default and is described on this page.
+The lines a first run needs are live. The keys a deployment usually tunes
+follow in schema order, in sections opened by a banner, commented at their
+defaults, with a short note under each banner (lines starting `##` are
+guidance, lines starting `# ` are keys left at their defaults). Remove the leading `# ` from a
+key, and from the block lines above it, to set it. Every key it leaves out
+keeps its default and is described on this page.
 
 ### Converting an older config
 
@@ -1095,8 +1129,33 @@ current format:
 - It lists every moved or dropped key.
 - It writes nothing unless the new file loads to the same settings.
 
-The full rules are in
-[UPGRADING-1.7.md](../UPGRADING-1.7.md#converting-a-16-config-with-init---from).
+A 1.6 config before conversion:
+
+```yaml
+endpoint: http://10.0.1.50:80
+scale: 10
+architecture:
+  catalog: polaris
+  table_format: iceberg
+  pipeline: spark
+  query_engine: trino
+```
+
+After `init --from`:
+
+```yaml
+name: my-deployment
+recipe: polaris-iceberg-spark-trino
+workload:
+  schema: customer360
+  scale: 10
+platform:
+  storage:
+    s3:
+      endpoint: http://10.0.1.50:80
+      access_key: ${LAKEBENCH_S3_ACCESS_KEY}
+      secret_key: ${LAKEBENCH_S3_SECRET_KEY}
+```
 
 ### Recipes and components
 

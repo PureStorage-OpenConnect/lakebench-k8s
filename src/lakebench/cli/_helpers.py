@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import typer
@@ -121,8 +123,55 @@ def print_error(message: object) -> None:
     _status_line("ERROR", "red", message)
 
 
+#: The warnings held by the active ``defer_warnings`` block, or None.
+_held_warnings: list[str] | None = None
+
+
+class _HoldWarnings(logging.Handler):
+    def __init__(self, held: list[str]) -> None:
+        super().__init__(level=logging.WARNING)
+        self._held = held
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._held.append(record.getMessage())
+
+
+@contextmanager
+def defer_warnings() -> Iterator[None]:
+    """Hold every warning (``print_warning`` and ``lakebench`` logger warnings)
+    raised inside the block and print them together when it ends, after the
+    command's own summary, in the order raised and without repeats. A block
+    inside another one adds to the outer block's list."""
+    global _held_warnings
+    if _held_warnings is not None:
+        yield
+        return
+    held: list[str] = []
+    _held_warnings = held
+    handler = _HoldWarnings(held)
+    lb_logger = logging.getLogger("lakebench")
+    lb_logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        lb_logger.removeHandler(handler)
+        _held_warnings = None
+        unique = list(dict.fromkeys(held))
+        if unique:
+            err_console.print()
+            _status_line(
+                "WARN", "yellow", f"{len(unique)} warning{'s' if len(unique) != 1 else ''}:"
+            )
+            for message in unique:
+                _status_line("  -", "yellow", message)
+
+
 def print_warning(message: object) -> None:
-    """Print a warning message on stderr (text is printed verbatim)."""
+    """Print a warning message on stderr (text is printed verbatim), or hold it
+    until the end of the command inside a ``defer_warnings`` block."""
+    if _held_warnings is not None:
+        _held_warnings.append(str(message))
+        return
     _status_line("WARN", "yellow", message)
 
 

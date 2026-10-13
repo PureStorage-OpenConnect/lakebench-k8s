@@ -2,8 +2,7 @@
 
 Reference: the layers, pipeline, components and deploy order of a Lakebench deployment.
 
-Lakebench deploys a lakehouse stack on Kubernetes and runs reproducible
-benchmarks against it, in three layers.
+Lakebench deploys a lakehouse stack on Kubernetes in three layers and runs benchmarks against it.
 
 ## System Layers
 
@@ -26,9 +25,9 @@ benchmarks against it, in three layers.
 |---|---|
 | 1. Platform | Any Kubernetes distribution (vanilla, OpenShift, EKS, GKE); any S3-compatible store (AWS S3, MinIO, Pure Storage FlashBlade); PostgreSQL for catalog metadata |
 | 2. Data architecture | Catalog: Hive Metastore or Apache Polaris. Table format: Iceberg or Delta (Delta only with Hive). Spark runs the medallion pipeline. Query engine: Trino, Spark Thrift Server or DuckDB (DuckDB only with Iceberg) |
-| 3. Observability | Optional Prometheus and Grafana (see below). The CLI writes local JSON metrics per run, for offline analysis and HTML reports |
+| 3. Observability | Optional Prometheus and Grafana. The CLI writes local JSON metrics and an HTML report per run |
 
-With observability on, Prometheus scrapes Trino JMX, per-pod CPU and memory, and the Pushgateway that datagen and the Spark stages push to. Grafana renders dashboards. Spark engine metrics are not exported: the Spark UI, which serves them, is off.
+With `observability.enabled`, each deployment runs its own Prometheus, Grafana and Pushgateway in its namespace. Prometheus scrapes Trino JMX, per-pod CPU and memory from the kubelet, and the Pushgateway that datagen and the Spark stages push to. Spark engine metrics are not exported. See [Observability](component-observability.md).
 
 ## Medallion Pipeline
 
@@ -44,8 +43,7 @@ With observability on, Prometheus scrapes Trino JMX, per-pod CPU and memory, and
        (Spark batch)             (Spark batch)             (Spark batch)
 ```
 
-Batch stages for Customer 360 (AML tables:
-[AML spec, section 2](benchmarks/aml/data-model.md)):
+Batch stages for Customer 360 (AML tables: [AML data model](benchmarks/aml/data-model.md)):
 
 | Stage | Reads | Does | Writes |
 |---|---|---|---|
@@ -54,10 +52,7 @@ Batch stages for Customer 360 (AML tables:
 | `silver-build` | bronze | Normalizes email and phone, geo enrichment, customer segmentation, quality flags | `customer_interactions_enriched` |
 | `gold-finalize` | silver | Daily revenue, engagement, churn indicators | `customer_executive_dashboard` |
 
-After the pipeline, the active query engine runs the workload's benchmark
-queries against silver and gold and computes Queries per Hour (QpH): 8 queries
-for Customer 360, 12 for AML (8 analytical plus 4 investigator). See
-[Query Reference](benchmarks/c360/queries.md#6-query-set).
+After the pipeline, the query engine runs the workload's benchmark queries against silver and gold and computes Queries per Hour (QpH): 8 queries for Customer 360, 12 for AML (8 analytical plus 4 investigator). See [Query Reference](benchmarks/c360/queries.md#6-query-set).
 
 ### Multi-Cycle Batch
 
@@ -131,8 +126,7 @@ Namespace: lakebench
 
 ### Catalog Service (Hive Metastore or Polaris)
 
-`architecture.catalog.type` selects the catalog. Both register and serve
-tables the same way, so the pipeline does not change.
+`architecture.catalog.type` selects the catalog; the pipeline is the same with either.
 
 | | Hive Metastore (`hive`) | Apache Polaris (`polaris`) |
 |---|---|---|
@@ -182,12 +176,7 @@ architecture:
     type: hive     # or "polaris"
 ```
 
-Lakebench accepts only the recipes below; any other combination is refused at
-config load with the reason. A listed recipe is a valid composition, not a
-release-validated one: support is judged per workload x recipe x mode (see
-[Compatibility Matrix](compatibility-matrix.md#support-states)).
-
-See [Recipes](recipes.md) for the full component matrix.
+Lakebench accepts only the combinations listed in [Recipes](recipes.md); any other is refused at config load with the reason. A listed recipe is a valid composition, not a validated one: support is judged per workload x recipe x mode ([Compatibility Matrix](compatibility-matrix.md#support-states)).
 
 ## Storage
 

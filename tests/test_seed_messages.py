@@ -128,8 +128,11 @@ def test_experiment_seed_error_names_no_seed(held, tmp_path, seed):
 REFUSING = {"run", "generate"}
 
 
-@pytest.mark.parametrize("seed", PROTECTED, ids=["evaluation", "robustness", "spent"])
-@pytest.mark.parametrize("role", [None, "registered"], ids=["no-role", "registered-role"])
+@pytest.mark.parametrize(
+    ("seed", "declared"),
+    [(pc.EV, None), (pc.EV, "evaluation"), (pc.SPENT, None)],
+    ids=["evaluation-no-role", "evaluation-registered-role", "spent-no-role"],
+)
 @pytest.mark.parametrize(
     "argv",
     [
@@ -143,7 +146,9 @@ REFUSING = {"run", "generate"}
     ],
     ids=lambda a: " ".join(a[:2]),
 )
-def test_commands_print_no_protected_seed(held, tmp_path, monkeypatch, caplog, seed, role, argv):
+def test_commands_print_no_protected_seed(
+    held, tmp_path, monkeypatch, caplog, seed, declared, argv
+):
     import logging
 
     caplog.set_level(logging.DEBUG)
@@ -153,11 +158,8 @@ def test_commands_print_no_protected_seed(held, tmp_path, monkeypatch, caplog, s
     # The registered role of a held-out seed (looks are open in the fixture):
     # the config loads, so the per-verb guards and the planned experiment are
     # what run. A spent seed has no registered role and is refused at load.
-    declared = None
-    if role == "registered":
-        declared = {pc.EV: "evaluation", pc.RB: "robustness"}.get(seed)
-        if declared is None:
-            pytest.skip("a spent seed has no registered role")
+    # The robustness seed takes the same CLI paths as the evaluation one; its
+    # messages are checked by test_seed_checks_name_no_protected_seed.
     cfg = pc.financial_config(tmp_path / "c.yaml", seed=seed, role=declared)
     result = CliRunner().invoke(app, [a.replace("{cfg}", str(cfg)) for a in argv])
     _clean(result.output)

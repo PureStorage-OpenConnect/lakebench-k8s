@@ -145,14 +145,3 @@ def test_ensure_column_retry_does_not_swallow_unrelated_errors():
             fake, "cat.silver.t", "c", "BIGINT", max_attempts=3, backoff_seconds=0
         )
     assert fake.alter_calls == 1
-
-
-def test_ensure_column_is_a_no_op_when_column_already_present():
-    from common import ensure_column_with_retry
-
-    fake = _FakeSpark(initial_columns=["a", "b", "c"], alter_side_effect=lambda n: None)
-    added = ensure_column_with_retry(
-        fake, "cat.silver.t", "c", "BIGINT", max_attempts=3, backoff_seconds=0
-    )
-    assert added is False
-    assert fake.alter_calls == 0

@@ -152,11 +152,13 @@ from pyspark.sql.functions import min as min_
 from pyspark.sql.functions import sum as spark_sum
 from pyspark.storagelevel import StorageLevel
 from tm_operations import (
+    TM_RETRY_NOT_READY_S,
     bootstrap_tm_tables,
     params_from_env,
     read_at_snapshot,
     run_tm_operations,
     tm_pass_due,
+    tm_pass_not_ready,
     window_start_marker,
 )
 
@@ -179,6 +181,9 @@ WINDOW_S = int(env("LB_CONTINUOUS_WINDOW_S", "0") or 0)
 GOLD_CHECKPOINT = env("CHECKPOINT_LOCATION", "")
 RUN_ID = env("LB_RUN_ID", str(uuid.uuid4()))
 MAX_CONSECUTIVE_FAILURES = int(env("LB_FINANCIAL_GOLD_MAX_FAILS", "5"))
+# Gold starts beside silver-stream, which creates the silver tables on its
+# first batch (late when executors are pending). Wait this long for them.
+SILVER_WAIT_S = int(env("LB_FINANCIAL_GOLD_SILVER_WAIT_S", "1200"))
 # Time-to-detect histogram resolution. Percentiles are reported at the bin's
 # upper edge, so they overstate by less than one bin.
 TTD_BIN_S = 10
@@ -223,12 +228,6 @@ CONTINUOUS_SKIPPED_RULES = (
 )
 
 _SHUTDOWN = False
-# When stop_requested last logged a read error: it polls once a second, so a
-# lasting S3 error is logged once a minute, not every second.
-_MARKER_ERROR_LOGGED_AT = 0.0
-# Name of the drain marker the CLI writes under CHECKPOINT_LOCATION; its body
-# is the run id it is meant for (cli/_aml_post.py).
-STOP_MARKER = "_lb_stop"
 
 
 def _install_signal_handlers() -> None:
@@ -594,8 +593,11 @@ def snapshot_record(spark, fq, sid):
     the summary's ``total-records``: the sum of the record counts of the data
     files live at ``sid``, deletes not subtracted, so it equals the live row
     count only when ``pos_deletes`` and ``eq_deletes`` (the summary's
-    deleted-row totals) are 0, as under the copy-on-write tables Lakebench
-    creates. ``count_source`` is ``summary`` when ``total_records`` is
+    deleted-row totals) are 0. This read is used only for silver.transactions,
+    which is append-only in the stream and copy-on-write, so its summary count
+    is exact; the update-heavy tables may be merge-on-read (non-zero deletes)
+    but no scored path reads their summaries. ``count_source`` is ``summary``
+    when ``total_records`` is
     present, else ``unavailable``; the fields the summary does carry are kept
     either way. A failed or empty lookup leaves every field None, and nothing
     is ever filled in from the current table."""
@@ -814,9 +816,6 @@ class TickState:
         # Per-rule detection state between ticks (incremental_detection);
         # None runs every rule as a full recompute.
         self.incremental = incremental
-        # The last completed tick's record lines (pinned, tt-record,
-        # committed), repeated with the drain line.
-        self.tick_records = []
         # The earliest event time (epoch us) whose baseline days are not yet
         # rewritten (None: all are; FULL: rebuild every day).
         self.baseline_cut = None
@@ -1129,7 +1128,6 @@ def run_tick(spark, state, cycle) -> dict:
     log(f"Tick complete in {elapsed:.1f}s (gold.alerts rows: {total_alerts})")
     records.append(f"Cycle {cycle}: completed run={RUN_ID}")
     log(records[-1])
-    state.tick_records = records
     # Collector line formats. Freshness: how long ago the newest row
     # this tick's detection saw arrived (bronze ingest_ts), i.e. how stale the alerts are
     # against the input. Reported when silver moved on, and also whenever
@@ -1176,10 +1174,25 @@ def run_tick(spark, state, cycle) -> dict:
     t = time.time()
     now = t
     tm_clock, window_end_s = state.tm_clock, state.window_end_s
-    if TM_PARAMS["enabled"] and tm_pass_due(now, tm_clock, TM_PARAMS, window_end_s):
+    if (
+        TM_PARAMS["enabled"]
+        and now - tm_clock.get("not_ready_at", 0.0) >= TM_RETRY_NOT_READY_S
+        and tm_pass_due(now, tm_clock, TM_PARAMS, window_end_s)
+    ):
         if silver_rows > 0 and state.manifest_ready:
             tm_clock["start"] = now
-            run_tm_operations(spark, txns, RUN_ID, cycle=cycle, continuous=True, params=TM_PARAMS)
+            tm_result = run_tm_operations(
+                spark, txns, RUN_ID, cycle=cycle, continuous=True, params=TM_PARAMS
+            )
+            if tm_pass_not_ready(tm_result):
+                # Nothing to monitor yet (silver's rows not sealed): the pass
+                # did no work, so it neither starts the interval nor counts
+                # as the last pass. Retry shortly.
+                tm_clock["not_ready_at"] = time.time()
+                phases["tm"] = time.time() - t
+                phases["total"] = time.time() - tick
+                log(tick_timing_line(cycle, silver_rows, phases))
+                return phases
             tm_clock["end"] = time.time()
             tm_clock["elapsed"] = tm_clock["end"] - now
             # Gold was not refreshed while the pass ran: its staleness now
@@ -1215,68 +1228,26 @@ def run_tick(spark, state, cycle) -> dict:
     return phases
 
 
-def _stop_marker_path() -> str:
-    return GOLD_CHECKPOINT.rstrip("/") + "/" + STOP_MARKER
-
-
-def stop_requested(spark) -> bool:
-    """Whether the CLI asked this run to drain: the marker exists under the
-    checkpoint and its body is this run's id (a marker meant for another run
-    of the deployment is ignored). A read error counts as absent, logged:
-    stopping on a transient S3 error would end detection mid-window."""
-    if not GOLD_CHECKPOINT:
-        return False
-    try:
-        jvm = spark._jvm
-        path = jvm.org.apache.hadoop.fs.Path(_stop_marker_path())
-        fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
-        if not fs.exists(path):
-            return False
-        stream = fs.open(path)
-        try:
-            body = jvm.org.apache.commons.io.IOUtils.toString(stream, "UTF-8")
-        finally:
-            stream.close()
-        return str(body).strip() == RUN_ID
-    except Exception as e:  # noqa: BLE001 -- absent, and say so
-        global _MARKER_ERROR_LOGGED_AT
-        if time.time() - _MARKER_ERROR_LOGGED_AT >= 60:
-            _MARKER_ERROR_LOGGED_AT = time.time()
-            log(f"[drain] stop marker unreadable, treated as absent: {one_line(e)}")
-        return False
-
-
-def _idle_after_drain(spark, last_cycle, at_start=False, records=()) -> None:
-    """Report the drain, free the executors, and keep the pod (and its log)
-    until the CLI deletes the application. If this script exited the operator
-    would move the SparkApplication to COMPLETED and delete the pod before
-    the CLI reads the drain line (and would NOT auto-rerun it either:
-    streaming jobs use ``restartPolicy OnFailure`` with
-    ``onFailureRetries=0``). The drain line is logged again every minute so
-    it stays at the tail of the log the CLI polls whatever Spark logs while
-    it stops. ``records`` (the last completed tick's pinned, tt-record and
-    committed lines) go before each drain line: a driver log rotated during
-    that tick would otherwise lose the snapshots the scorer reads."""
-    where = "stop marker present at start; " if at_start else ""
-    line = f"Drain complete: {where}last completed cycle {last_cycle} run={RUN_ID}"
-
-    def report():
-        for rec in records:
-            log(rec)
-        log(line)
-
-    report()
-    try:
-        spark.stop()
-    except Exception as e:  # noqa: BLE001
-        log(f"[drain] spark.stop failed: {one_line(e)}")
-    report()
-    waited = 0
+def _wait_for_silver(spark) -> None:
+    """Block until the silver tables the ticks read exist, or SILVER_WAIT_S
+    passes. With a 0s refresh interval a tick that cannot find silver fails
+    instantly, so the failure budget would be spent in seconds on a silver
+    stream that is only starting."""
+    needed = [SILVER_TXNS, SILVER_BATCH_VERSIONS, SILVER_ENTITIES, SILVER_ACCOUNTS]
+    start = time.time()
+    last_log = 0.0
     while not _SHUTDOWN:
-        time.sleep(1.0)
-        waited += 1
-        if waited % 60 == 0:
-            report()
+        missing = [t for t in needed if not spark.catalog.tableExists(f"{CATALOG}.{t}")]
+        if not missing:
+            return
+        waited = time.time() - start
+        if waited >= SILVER_WAIT_S:
+            log(f"Silver tables still missing after {waited:.0f}s: {missing}; starting ticks")
+            return
+        if waited - last_log >= 30 or last_log == 0.0:
+            log(f"Waiting for silver tables {missing} ({waited:.0f}s)")
+            last_log = waited
+        time.sleep(5.0)
 
 
 def main() -> None:
@@ -1291,32 +1262,20 @@ def main() -> None:
     log(f"Max consecutive failures: {MAX_CONSECUTIVE_FAILURES}")
     log("=" * 60)
 
-    # If this process started on top of an already-drained run (stop marker
-    # present), do no further work. The streaming policy
-    # (OnFailure, onFailureRetries=0) will not restart this script after a
-    # drain; the check is kept for defence in depth.
-    if stop_requested(spark):
-        _idle_after_drain(spark, 0, at_start=True)
-        return
-
     _bootstrap_gold_tables(spark)
+    _wait_for_silver(spark)
 
     # Earlier runs' alerts are cleared by run_detection_rules on each tick,
     # after the tick's 'pending' status is written.
     consecutive_failures = 0
     state = TickState.start(spark)
     cycle = 0
-    last_completed = 0
-    draining = False
 
-    while not _SHUTDOWN and not draining:
-        if stop_requested(spark):
-            break
+    while not _SHUTDOWN:
         tick = time.time()
         cycle += 1
         try:
             run_tick(spark, state, cycle)
-            last_completed = cycle
             consecutive_failures = 0
         except Exception as e:  # noqa: BLE001
             consecutive_failures += 1
@@ -1330,28 +1289,15 @@ def main() -> None:
                 spark.stop()
                 sys.exit(1)
 
-        # Sleep in short steps to a deadline, so a signal or the drain
-        # marker is honoured within about a second and the marker read's own
-        # time does not stretch the refresh interval.
+        # Sleep in short steps to a deadline, so a signal is honoured within
+        # about a second.
         deadline = tick + REFRESH_S
         while not _SHUTDOWN:
             remaining = deadline - time.time()
             if remaining <= 0:
                 break
-            if stop_requested(spark):
-                draining = True
-                break
             time.sleep(min(1.0, remaining))
 
-    if not _SHUTDOWN:
-        # The drain marker: the current tick finished, and every rule ran on
-        # its one silver snapshot, so its alerts are the ones scored; report
-        # and wait.
-        if state.incremental is not None:
-            # No tick follows a drain; the alerts are in gold.alerts.
-            state.incremental.discard_all()
-        _idle_after_drain(spark, last_completed, records=state.tick_records)
-        return
     log("SIGTERM/SIGINT received; refresh loop exiting cleanly")
     spark.stop()
 

@@ -89,12 +89,9 @@ def egress_hosts(cfg: Any) -> list[tuple[str, str]]:
         what = " and ".join(kinds) or "dependencies"
         out.append((host, f"lb-deps resolves the {what} from it at deploy"))
     if cfg.observability.enabled:
-        out.append(
-            ("prometheus-community.github.io", "kube-prometheus-stack Helm chart, at deploy")
-        )
         out += [
-            ("quay.io", "kube-prometheus-stack images (Prometheus, operator)"),
-            ("registry.k8s.io", "kube-prometheus-stack images (kube-state-metrics)"),
+            ("quay.io", "Prometheus image for the per-deployment stack"),
+            ("docker.io", "Grafana and Pushgateway images for the per-deployment stack"),
         ]
     images = cfg.images
     used = {"spark": images.spark, "datagen": images.datagen, "postgres": images.postgres}

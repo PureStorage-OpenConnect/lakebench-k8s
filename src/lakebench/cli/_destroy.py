@@ -56,7 +56,7 @@ def _build_destroy_list(cfg) -> str:
     elif engine == "duckdb":
         items.append("DuckDB")
     if cfg.observability.enabled:
-        items.append("This deployment's PodMonitors (the shared Prometheus + Grafana stay)")
+        items.append("This deployment's Prometheus, Grafana and Pushgateway")
     items.append("All secrets, configs, and namespace")
     return "\n".join(f"  - {item}" for item in items)
 
@@ -452,7 +452,7 @@ def _destroy_impl(
     # Destroy
     destroy_start = time.time()
     try:
-        engine = DeploymentEngine(cfg)
+        engine = DeploymentEngine(cfg, quiet_sizing=True)
         results = engine.destroy_all(
             progress_callback=on_progress,
             allow_unverified_cluster=allow_unverified_cluster,

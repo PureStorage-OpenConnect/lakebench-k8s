@@ -51,13 +51,13 @@ SQL of the queries actually recorded, failed ones included.
 - It stores `silver.account_statements` running balances (`bal_after`) in
   arrival order, labelled `arrival_order_running_balance` when a statement
   arrives late.
-- The queries do not depend on either. FQ3 and both of IQ3's hops sum edge
+- The queries depend on neither. FQ3 and both of IQ3's hops sum edge
   rows per pair, and FQ4 recomputes each running balance in ledger order.
 - On batch silver they return what they did before, row for row. On settled
   continuous silver over the same corpus, they return the batch answer.
 - The change moved the AML query-set ids (12 queries, and the 8 before the
-  first TM pass), so no record from before it compares with one after. It is
-  part of workload version `aml-2`.
+  first TM pass), so records from before it do not compare with later ones.
+  It is part of workload version `aml-2`.
 - A batch record is still never compared with a continuous one: mode is a
   workload identity key.
 
@@ -119,8 +119,7 @@ aggregates `aggregate_alert_volume`, `aggregate_top_entities`,
 - The templates use a 7-day window and are called only from the unit tests
   (`load_aml_queries`). No CLI command runs them, and they do not produce the
   published recall or precision.
-- A recall figure cited with a 7-day window is wrong: the shipped numbers
-  come from `score_financial.py` and have no window.
+- Published recall comes from `score_financial.py` and has no window.
 - `aggregate_typology_coverage` asks whether at least one rule fires on each
   planted typology. `aggregate_reference_vs_rule` sets rule recall beside the
   reference model's per-typology row in `reference_metrics.parquet`.
@@ -135,6 +134,6 @@ aggregates `aggregate_alert_volume`, `aggregate_top_entities`,
 - The value is a property of the generator's typology windows
   (`datagen_rs/src/typology.rs`: 3 to 21 days for `micro_structuring`, one
   civil day for `rapid_layering`). It does not change with stack speed.
-- The runtime scorer does not compute it. Use it only to check that a rule
-  fires inside its typology window, never to compare speed.
+- The runtime scorer does not compute it. Use it to check that a rule fires
+  inside its typology window, never to compare speed.
 - Detection latency is `time_to_detect_seconds` ([8.2](continuous-metrics.md#82-continuous)).

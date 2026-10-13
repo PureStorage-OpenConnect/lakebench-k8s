@@ -3,7 +3,7 @@
 ## 2. Data model
 
 The stage scripts create tables through Spark DataFrameWriterV2 (Iceberg) or
-the Delta write helpers; Customer 360 has no DDL file. Default names come from
+the Delta write helpers; there is no DDL file. Default names come from
 `TableNamesConfig` (`default.bronze_raw`,
 `silver.customer_interactions_enriched`, `gold.customer_executive_dashboard`),
 prefixed at runtime with the pipeline catalog.
@@ -17,7 +17,7 @@ prefixed at runtime with the pipeline catalog.
 
 - The `c360-1` scale-10 record ran on generator image `lb-datagen:034f998`
   under identity version 1. Its row counts hold, but its corpus id names a
-  different image, so it is not comparable with any run of this release and
+  different image, so it is not comparable with a run of this release and
   cannot be a reference run.
 - The `c360-2` bump changed gold-finalize's strategy choice on repeat runs,
   not a first run's row counts.
@@ -27,18 +27,16 @@ prefixed at runtime with the pipeline catalog.
   silver `email_clean`, `phone_clean`, `state_standardized` and
   `city_standardized`, and gold `unique_emails`, do.
 - Domain dimensions (`config/scale.py`): scale 1 = 100,000 customer ids,
-  scale 10 = 1,000,000; nominal bronze 10 GB per scale unit. Its
-  `approx_rows` (customers x 24) is guidance only; datagen's row count comes
-  from file sizing ([3](generation.md#3-data-generation)).
+  scale 10 = 1,000,000; nominal bronze 10 GB per scale unit. `approx_rows`
+  (customers x 24) is guidance only; datagen's row count comes from file
+  sizing ([3](generation.md#3-data-generation)).
 
 ### 2.1 Bronze columns (41, Arrow schema `customer360_schema()`)
 
-Bronze is synthetic retail and e-commerce customer interactions. The
-generator (`datagen_rs/src/customer360.rs`) writes Snappy-compressed Apache
+The generator (`datagen_rs/src/customer360.rs`) writes Snappy-compressed
 Parquet directly to the S3 bronze bucket. Output is deterministic, seeded per
-(seed, file_id). Generation rules are in [3](generation.md#3-data-generation).
-
-The Arrow schema is in `datagen_rs/src/schema.rs`.
+(seed, file_id). Generation rules are in [3](generation.md#3-data-generation);
+the Arrow schema is in `datagen_rs/src/schema.rs`.
 
 | # | Column | Type | Description | Example values |
 |---|---|---|---|---|
@@ -47,7 +45,7 @@ The Arrow schema is in `datagen_rs/src/schema.rs`.
 | 3 | `event_timestamp` | timestamp(us, UTC) | Event time within a configurable date range | `2024-06-15 14:32:07.123456` |
 | 4 | `event_id` | string | UUID v4 per event | `a3f1b2c4-d5e6-4f78-9a0b-1c2d3e4f5678` |
 | 5 | `session_id` | string | UUID v4 per session | `b7c8d9e0-f1a2-4b3c-8d4e-5f6a7b8c9d0e` |
-| 6 | `customer_id` | int64 | Zipf-distributed customer identifier; the top id gets about 10% of events, so no id dominates every aggregate | `42`, `1337`, `499999` |
+| 6 | `customer_id` | int64 | Zipf-distributed customer identifier; the top id gets about 10% of events | `42`, `1337`, `499999` |
 | 7 | `email_raw` | string | Raw email, intentionally dirty (duplicates, corruption) | `user123456@gmail.com`, `user789.DUPLICATE@yahoo.com` |
 | 8 | `phone_raw` | string | Raw phone number in mixed formats | `+12025551234`, `(415) 555-6789` |
 | 9 | `interaction_type` | string | Interaction type (weighted) | `purchase`, `browse`, `support`, `login`, `abandoned_cart` |
@@ -56,7 +54,7 @@ The Arrow schema is in `datagen_rs/src/schema.rs`.
 | 12 | `transaction_amount` | float64 | Value in local currency; non-zero only for purchases (log-normal) | `73.42`, `549.99`, `0.0` |
 | 13 | `currency` | string | Currency code | `USD`, `EUR`, `GBP`, `CAD` |
 | 14 | `channel` | string | Interaction channel | `web`, `mobile_app`, `store`, `call_center`, `social_media` |
-| 15 | `device_type` | string | Device (null for store/call_center: a store visit has no browser; silver treats it as absent, not as a quality issue) | `desktop`, `mobile`, `tablet` |
+| 15 | `device_type` | string | Device (null for store/call_center; silver treats it as absent, not as a quality issue) | `desktop`, `mobile`, `tablet` |
 | 16 | `browser` | string | Browser (null for store/call_center) | `chrome`, `safari`, `firefox`, `edge` |
 | 17 | `ip_address` | string | Random IPv4 address of the client | `10.0.1.50` |
 | 18 | `city_raw` | string | Raw city name with inconsistencies and misspellings | `New York`, `NYC`, `Chicgao`, `Los Angelas` |

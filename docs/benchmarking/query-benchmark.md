@@ -18,7 +18,7 @@ The 8 Customer 360 queries. The AML set is in [Query Reference](../benchmarks/am
 
 ## Modes
 
-The three modes follow TPC methodology.
+The modes follow TPC methodology.
 
 | Mode | What runs | Formula |
 |---|---|---|
@@ -39,7 +39,7 @@ Example: 8 queries in 40 s give (8 / 40) x 3600 = 720 QpH.
 - Each round's `spread`: `qph_low` and `qph_high` (slowest and fastest round the samples allow) and `samples_per_query` (smallest count over successful queries). The scorecard repeats them as `benchmark_samples_per_query` and `qph_spread`.
 - Older records without `samples` read as one sample.
 - Cost: each round takes three times as long, plus warm-up (Customer 360 scale 100: ~8 to ~24 minutes). Below scale 50 the pre-maintenance round adds about 2 x 2 x one round.
-- Continuous rounds take one sample per query: gold changes under the round, and the rounds are the repeats.
+- Continuous rounds take one sample per query: gold changes under the round, so the rounds are the repeats.
 
 ## Cache modes
 
@@ -49,11 +49,11 @@ Example: 8 queries in 40 s give (8 / 40) x 3600 = 720 QpH.
 
 A continuous run benchmarks while the streams write, compact and change tables. Schedule keys: [running-pipelines.md](../running-pipelines.md#continuous-configuration).
 
-- First round after `benchmark_warmup` (default 300 s), then every `benchmark_interval` (default 300 s), counted from a round's end.
+- First round after `benchmark_warmup` (default 300 s, minimum 60 s), then every `benchmark_interval` (default 300 s, minimum 60 s), counted from a round's end.
 - Each round flushes the metadata cache, probes gold freshness and runs the full power benchmark.
 - The continuous `composite_qph` is the median across rounds.
 - A run shorter than `benchmark_warmup + benchmark_interval` has no round and no QpH, with a warning.
-- With `gold_refresh_interval` set, both are raised to it, with a warning (floor 300 s). Lower warmup hits an empty or stale gold and inflates QpH; a lower interval overlaps gold rewrites (Q9 contention). For more rounds, raise `run_duration`.
+- With `gold_refresh_interval` set, both are raised to it, with a warning (both can be set down to 60 s without a gold interval). A warmup before gold holds data hits an empty or stale gold and inflates QpH; an interval below the gold interval overlaps gold rewrites (Q9 contention). For a short window, set `benchmark_warmup` past the first handoff and a short `benchmark_interval`; for more rounds in a long one, raise `run_duration`.
 
 ### Planning round counts
 

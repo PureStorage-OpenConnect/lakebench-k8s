@@ -4,7 +4,7 @@
 
 Recall and false-positive figures never decide the verdict. A batch run fails
 when its scorer counts zero alerts ([5](correctness.md#5-correctness-contract))
-or scoring produced no result, since its answers went unchecked.
+or scoring produced no result.
 
 - The scorer is `spark/scripts/score_financial.py` (not the frozen reference
   scorer); its `recall.json` is copied into `financial_scoring`.
@@ -43,23 +43,23 @@ or scoring produced no result, since its answers went unchecked.
   rule's own. Only rules that ran are split by code. When no alert carries a
   code, or the alerts predate the column, the per-code blocks are empty and
   `by_code_status` says why. `reason_code_vocabulary` hashes the codes and the
-  cut points they read, naming which codes, meaning what, the figures use. A
-  rule's evidence-cap label applies to each of its codes.
+  cut points they read. A rule's evidence-cap label applies to each of its
+  codes.
 - `nonplanted_alerts_by_rule` and `customer_count` feed the published check
   that W5 and W6 non-planted alerts per customer stay flat across scale
   (below).
-- When any alert of a rule was cut by an evidence cap, that typology's recall
-  is bounded by a Lakebench cap, not the detector alone. Then:
+- When an evidence cap cut any alert of a rule, that typology's recall is
+  bounded by a Lakebench cap, not the detector alone. Then:
   - the rule is in `evidence_capped_alerts_by_rule`;
   - its typologies are in `recall_bounded_by_evidence_cap`;
   - each such typology's entry in `typologies` names the rule in
     `bounded_by_evidence_cap`.
 
-Recorded: in both 1.6 batch records 8 of 17 typologies were `scored`, 8
-`no_rule` and 1 `rule_skipped` (W1, giant component), n=1 each.
+Both 1.6 batch records (n=1 each) had 8 of 17 typologies `scored`, 8 `no_rule`
+and 1 `rule_skipped` (W1, giant component).
 
 **Screening rates across scale.** `scripts/aml_screen_rates.py` reads stored
-AML batch records (never a bucket or cluster) and writes
+AML batch records, never a bucket or cluster, and writes
 `docs/benchmarks/data/aml_screening_rates.json`.
 
 - Inputs: seed 43's runs at scale 1 and 10, plus the calibration seed's at
@@ -78,10 +78,12 @@ AML batch records (never a bucket or cluster) and writes
 - A row with `evidence_capped_alerts` above 0 is an upper bound; a ratio with
   either side cut is marked `bounded_by_evidence_cap`.
 
-**Continuous (covered mode).** After the [drain](../../glossary.md#drain)
-([4.5](pipeline.md#45-continuous-drain-and-tick-records)) the scorer runs over
-the snapshots the last completed tick read; `financial_scoring.mode` is
-`covered`.
+**Continuous (covered mode).** After the window closes and the streams
+stop, the scorer runs over the snapshots the last tick that completed and
+committed inside the window read ([4.5](pipeline.md#45-continuous-tick-records));
+`financial_scoring.mode` is `covered`. Each table is read at the snapshot
+the tick pinned (`VERSION AS OF`), so a later tick rewriting `gold.alerts`
+does not reach the score.
 
 - `financial_scoring.covered.typologies[].recall_covered` is the
   designated-hit rate over covered instances only: every participant payment
@@ -90,9 +92,6 @@ the snapshots the last completed tick read; `financial_scoring.mode` is
   entity in `silver.entities` at that snapshot. `covered_instances`,
   `corpus_instances`, `coverage` and `no_participant_txns` say how much of
   the manifest that was. No key named `recall` is written.
-- The scored tick can begin after the window closed (the drain waits for the
-  tick in progress, and the window's bucket listing runs first);
-  `tick.pinned_after_window_end_s` says by how much.
 - False positives and precision count every planted payment in the full
   manifest, so an alert on a planted payment the tick had not yet covered is
   not a false positive. The chance floor uses the covered `random` instances.
@@ -100,57 +99,58 @@ the snapshots the last completed tick read; `financial_scoring.mode` is
   `covered.excluded_typologies`. The per-code keys,
   `nonplanted_alerts_by_rule` and `customer_count` are batch only.
 - `financial_scoring.status` is `not_scored`, with a `reason`, when:
-  - the drain did not complete, or the run failed a gate;
-  - the last tick's record is missing or names a snapshot as `unknown` or
-    `none`;
+  - the run failed a gate;
+  - no tick completed and committed inside the window, or the last one
+    names a snapshot as `unknown` or `none`;
   - the tick still had a pending rule;
   - a recorded snapshot expired before scoring;
-  - the score job failed or was interrupted. An earlier tick is never scored instead, and the
-  current tables never stand in for a recorded snapshot.
+  - the score job failed or was interrupted.
+
+  An earlier tick is never scored instead, and the current tables never stand
+  in for a recorded snapshot.
 - The scored tick's alert-set fingerprint is recorded in
   `experiment.results.alert_set_continuous` as a diagnostic, never a result:
   continuous alerts depend on when ticks ran.
-- The scorecard says whether recall was scored and why not, and shows
+- The scorecard shows whether recall was scored (and why not) and
   `recall_covered` with its coverage, labelled "Recall over covered instances
-  (uncalibrated, in-sample)" (or the [registered look](../../glossary.md#look)'s role).
+  (uncalibrated, in-sample)" or the [registered look](../../glossary.md#look)'s
+  role.
 
 ## 8.7 Alert set
 
 Two AML batch runs are compared on results before speed, and the benchmark
 queries alone do not show that both raised the same alerts. After its last
 write to `gold.alerts`, gold-finalize fingerprints the run's alerts in Spark
-and prints one `LB_ALERT_SET` line, kept as `experiment.results.alert_set`:
+and prints one `LB_ALERT_SET` line, kept as `experiment.results.alert_set`.
 
-- An alert is `(rule_id, entity_id, alert_ts)`: rule, subject and the event
-  time the rule derived from the data. `alert_id`, `run_id`, `detected_ts`
-  and every other column are left out, so two runs raising the same alerts
-  read equal.
-- `by_rule` holds each rule's alert count (`rows`) and an order-independent
-  hash (`h`, an exact sum of one xxhash64 per alert); top-level `rows` and `h`
-  are their totals. `spec` (`as1`) and `cols_sha` name the definition and
-  column types. The value is the same on the Spark 4.0 and 4.1 lines.
+- An alert is `(rule_id, entity_id, alert_ts)`: rule, subject and the event time
+  the rule derived from the data. `alert_id`, `run_id`, `detected_ts` and every
+  other column are left out, so two runs raising the same alerts read equal.
+- `by_rule` holds each rule's alert count (`rows`) and an order-independent hash
+  (`h`, an exact sum of one xxhash64 per alert); top-level `rows` and `h` are
+  their totals. `spec` (`as1`) and `cols_sha` name the definition and column
+  types. The value is the same on the Spark 4.0 and 4.1 lines.
 
-A different alert set is a different result: two runs where any rule's count
-or hash differs are not comparable.
+A different alert set is a different result: two runs where any rule's count or
 
-- Consider an AML batch record written by 1.7 (exp2, or exp1 with
-  `v2_unavailable`) with no alert set: the fingerprint failed (reason in
-  `results.alert_set_unavailable`) or gold-finalize did not run. It cannot
-  show its results match another run's; do not compare it on query results
-  alone.
+
+- A 1.7 AML batch record (exp2, or exp1 with `v2_unavailable`) with no alert
+  set means the fingerprint failed (reason in `results.alert_set_unavailable`)
+  or gold-finalize did not run. Do not compare it with another run on query
+  results alone.
 - Records from 1.6 have no alert set.
 - A rule that ran and raised no alert is absent from `by_rule`, like a rule
   that did not run; `experiment.rules` records which rules ran.
-- Continuous runs never fingerprint inside a tick (a full scan inside time to
-  detect). Their alert set is taken once after the drain
+- Continuous runs never fingerprint inside a tick, since a full scan would fall
+  inside time to detect. The alert set is taken once after the window closes
   (`results.alert_set_continuous`) and is diagnostic only.
 
 ## 8.8 Band-leakage report and reference detector
 
-A rule tuned tightly to the distribution the generator plants can read high
-recall while learning nothing that generalises. Two checks address this: a
-legacy band-density report and the pre-registered fidelity gate (the
-reference detector). Both run in `score_financial_reference.py`, submitted by
+A rule tuned to the distribution the generator plants can read high recall
+while learning nothing that generalises. Two checks address this: a legacy
+band-density report and the pre-registered fidelity gate (the reference
+detector). Both run in `score_financial_reference.py`, submitted by
 `lakebench financial reference-score`
 ([4.4](pipeline.md#44-out-of-run-aml-commands)); `lakebench run` does not run
 it. `src/lakebench/aml/reference_score.py` supplies the band leakage gate.
@@ -177,9 +177,9 @@ outside the window and the ratios are loose.
   `counts_only` mismatch, checked in `score_financial_reference.py:main`)
   raises `SystemExit`. The pre-registered leakage caps that gate a corpus
   live in the fidelity gate.
-- It catches a rule that filters on the band alone: when every planted
-  payment sat in `[9500, 9999]` USD, "amount between 9000 and 10000" read
-  100% recall and 99% precision.
+- It catches a rule that filters on the band alone: when every planted payment
+  sat in `[9500, 9999]` USD, "amount between 9000 and 10000" read 100% recall
+  and 99% precision.
 
 **Reference detector.** After the band report, the script builds the
 pre-registered per-customer features from silver

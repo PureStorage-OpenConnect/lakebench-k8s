@@ -158,6 +158,17 @@ def test_cli_args_follow_the_active_target(kubeconfig) -> None:
     assert cli_args("kubectl", None) == ["--context", "B"]
     assert cli_args("helm", "") == ["--kube-context", "B"]
     assert cli_args("oc", "B") == ["--context", "B"]
+    # The pinned subprocess helpers build their argv from it.
+    from lakebench.k8s._pinned import _pinned_argv
+
+    assert _pinned_argv("helm", None, ["list"]) == ["helm", "--kube-context", "B", "list"]
+    assert _pinned_argv("kubectl", "", ["get", "pods"]) == [
+        "kubectl",
+        "--context",
+        "B",
+        "get",
+        "pods",
+    ]
 
 
 def test_cli_args_pins_the_current_context_on_a_first_tool_call(kubeconfig) -> None:
@@ -332,20 +343,6 @@ def test_existing_but_broken_kubeconfig_never_falls_back_to_in_cluster(
         ClusterTarget.resolve(None)
 
 
-def test_pinned_helpers_use_the_active_target(kubeconfig) -> None:
-    from lakebench.k8s._pinned import _pinned_argv
-
-    ClusterTarget.resolve(None).activate()
-    assert _pinned_argv("helm", None, ["list"]) == ["helm", "--kube-context", "B", "list"]
-    assert _pinned_argv("kubectl", "", ["get", "pods"]) == [
-        "kubectl",
-        "--context",
-        "B",
-        "get",
-        "pods",
-    ]
-
-
 def test_query_executor_prefix_uses_the_active_target(kubeconfig) -> None:
     for module_cls in [
         ("lakebench.modules.query_engines.trino.executor", "TrinoExecutor"),
@@ -475,13 +472,15 @@ def test_sustained_prometheus_lookup_refuses_a_second_context(kubeconfig, hosts)
     assert hosts == []
 
 
-def test_observability_lookup_reuses_the_active_target(kubeconfig, hosts) -> None:
-    from lakebench.deploy import observability
+def test_observability_kubelet_role_read_reuses_the_active_target(kubeconfig, hosts) -> None:
+    """The per-namespace observability path reads the kubelet ClusterRole via
+    the K8s client; the read must reuse this process's active cluster target."""
+    from lakebench.deploy.observability import kubelet_cluster_role_exists
 
     ClusterTarget.resolve(context="A").activate()
-    with patch.object(observability, "pinned_kubectl") as kubectl:
-        kubectl.return_value = MagicMock(returncode=1, stdout="", stderr="")
-        observability._find_helm_service("obs", "grafana", context=None)
+    # The function reads the ClusterRole, which the fake kubeconfig cannot
+    # serve, so it returns None; the test is about which cluster was reached.
+    kubelet_cluster_role_exists(context=None)
     assert hosts == [SERVER_A]
 
 

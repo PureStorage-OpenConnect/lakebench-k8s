@@ -156,26 +156,23 @@ def test_unreadable_held_out_record_fails_closed(mod, monkeypatch):
 
 def test_record_without_the_keys_is_refused_by_name(mod):
     for drop, why in [
-        ("nonplanted_alerts_by_rule", "nonplanted_alerts_by_rule lacks W5 or W6"),
-        ("customer_count", "customer_count is missing or not positive"),
+        (("nonplanted_alerts_by_rule",), "nonplanted_alerts_by_rule lacks W5 or W6"),
+        # Counting the other rules only is no better than counting none.
+        (("nonplanted_alerts_by_rule", W6), "nonplanted_alerts_by_rule lacks W5 or W6"),
+        (("customer_count",), "customer_count is missing or not positive"),
         (
-            "evidence_capped_alerts_by_rule",
+            ("evidence_capped_alerts_by_rule",),
             "evidence_capped_alerts_by_rule is missing or malformed",
         ),
     ]:
         rec = _record("old", 1.0, 40, 20, 10_000)
-        del rec["financial_scoring"][drop]
+        *parents, key = drop
+        target = rec["financial_scoring"]
+        for parent in parents:
+            target = target[parent]
+        del target[key]
         _doc, problems = mod.build([rec])
         assert _about(problems, "old") == [f"run old: financial_scoring.{why}"]
-
-
-def test_record_counting_other_rules_only_is_refused(mod):
-    rec = _record("partial", 1.0, 40, 20, 10_000)
-    del rec["financial_scoring"]["nonplanted_alerts_by_rule"][W6]
-    _doc, problems = mod.build([rec])
-    assert _about(problems, "partial") == [
-        "run partial: financial_scoring.nonplanted_alerts_by_rule lacks W5 or W6"
-    ]
 
 
 def test_a_non_count_is_refused(mod):

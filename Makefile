@@ -24,7 +24,7 @@ help:
 	@echo "Maintenance:"
 	@echo "  clean            Remove build artifacts and caches"
 	@echo ""
-	@echo "Release (RELEASING.md):"
+	@echo "Release:"
 	@echo "  release-check    Every scripted release step in order: VERSION=X.Y.Z [DRY=1]"
 	@echo "  rc-<step>        One release step alone, e.g. make rc-gate VERSION=X.Y.Z"
 
@@ -97,7 +97,7 @@ clean:
 	@echo "Cleaned build artifacts and caches."
 
 # ---------------------------------------------------------------------------
-# Release steps (RELEASING.md section 2). release-check runs every rc-<step>
+# Release steps. release-check runs every rc-<step>
 # in RELEASE_STEPS order, in one recipe, so make -j cannot reorder them. It
 # stops at the first failure; with DRY=1 it runs every step's dry variant to
 # the end and lists the failures.

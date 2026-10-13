@@ -46,6 +46,7 @@ from common import (
     _s3_table_path,
     arrival_time,
     await_stream,
+    create_namespace,
     env,
     landing_batch,
     log,
@@ -174,9 +175,7 @@ def main() -> None:
     bronze_warehouse = bronze_uri + "warehouse/default.db/"
     log(f"Namespace location: {bronze_warehouse}")
     try:
-        spark.sql(
-            f"CREATE NAMESPACE IF NOT EXISTS {catalog_name}.default LOCATION '{bronze_warehouse}'"
-        )
+        create_namespace(spark, catalog_name, "default", bronze_warehouse)
         log(f"Created namespace {catalog_name}.default")
     except Exception as e:
         log(f"Namespace creation note: {str(e)}")

@@ -94,80 +94,27 @@ def _scores_dict_keys() -> dict[str, set[str]]:
 # --- named directions --------------------------------------------------------
 
 
-#: Every directional score, by mode, with its direction; and the keys whose
-#: compare colour changed with the registry (the old name-token rule gave
-#: "higher" for qph/throughput/efficiency/rows_processed/ingest_ratio and
-#: "lower" for everything else not on its neutral list).
-DIRECTIONAL = [
-    ("total_core_hours", "batch", "lower"),
-    ("compute_efficiency_gb_per_core_hour", "batch", "higher"),
-    ("compute_efficiency_gb_per_core_hour", "sustained", "higher"),
-    ("pipeline_throughput_gb_per_second", "batch", "higher"),
-    ("pipeline_throughput_gb_per_second", "sustained", "higher"),
-    ("total_elapsed_seconds", "batch", "lower"),
-    ("composite_qph", "batch", "higher"),
-    ("composite_qph", "sustained", "higher"),
-    ("data_freshness_seconds", "sustained", "lower"),
-    ("sustained_throughput_rps", "sustained", "higher"),
-    ("time_to_detect_seconds", "sustained", "lower"),
-    ("time_to_detect_p95_seconds", "sustained", "lower"),
-    ("time_to_detect_max_seconds", "sustained", "lower"),
-    ("in_stream_composite_qph", "sustained", "higher"),
-    ("qph_degradation_pct", "sustained", "lower"),
-    ("time_to_value_seconds", "batch", "lower"),
-    ("maintenance_elapsed_seconds", "batch", "lower"),
-    ("maintenance_elapsed_seconds", "sustained", "lower"),
-    ("pre_compaction_qph", "batch", "higher"),
-    ("post_compaction_qph", "batch", "higher"),
-]
-NOT_DIRECTIONAL = [
-    ("qph_degradation_withheld", "sustained"),
-    ("total_core_hours", "sustained"),
-    ("total_elapsed_seconds", "sustained"),
-    ("total_data_processed_gb", "batch"),
-    ("composite_qph_rounds", "sustained"),
-    ("window_seconds", "sustained"),
-    ("arrival_seconds", "sustained"),
-    ("window_arrival_fraction", "sustained"),
-    ("pre_window_rows", "sustained"),
-    ("ingest_ratio", "sustained"),
-    ("corpus_ingest_ratio", "sustained"),
-    ("released_rows", "sustained"),
-    ("corpus_drain_seconds", "sustained"),
-    ("bronze_busy_fraction", "sustained"),
-    ("time_to_detect_alerts", "sustained"),
-    ("time_to_detect_late_alerts", "sustained"),
-    ("time_to_detect_unmeasured_cycles", "sustained"),
-    ("total_rows_processed", "sustained"),
-    ("total_s3_objects", "sustained"),
-    ("query_time_event_age_seconds", "sustained"),
-    ("benchmark_rounds_count", "sustained"),
-    ("scale_ratio", "batch"),
-    ("maintenance_pct_of_pipeline", "batch"),
-    ("pre_compaction_file_count", "batch"),
-    ("post_compaction_file_count", "batch"),
-    ("compaction_ratio", "batch"),
-    ("snapshots_expired", "batch"),
-    ("orphan_files_removed", "batch"),
-    ("storage_reclaimed_mb", "batch"),
-    ("maintenance_value_pct", "batch"),
-    ("benchmark_samples_per_query", "batch"),
-    ("maintenance_paired_queries", "batch"),
-    ("maintenance_settle_seconds", "batch"),
-]
-
-
-@pytest.mark.parametrize(("key", "mode", "direction"), DIRECTIONAL)
-def test_directional_scores(key, mode, direction):
-    assert reg.is_directional(key, mode)
+@pytest.mark.parametrize(
+    ("key", "mode", "direction"),
+    [
+        ("composite_qph", "sustained", "higher"),
+        ("data_freshness_seconds", "sustained", "lower"),
+        ("total_core_hours", "batch", "lower"),
+        # 1.7: lower is better (the name-token rule gave higher).
+        ("qph_degradation_pct", "sustained", "lower"),
+        # Continuous core-hours scale with the configured window.
+        ("total_core_hours", "sustained", None),
+        # A direction, but a diagnostic band: no better side.
+        ("compaction_ratio", "batch", None),
+        # A guard: best inside a range, never a winner.
+        ("ingest_ratio", "sustained", None),
+        ("query_time_event_age_seconds", "sustained", None),
+    ],
+)
+def test_direction_of_a_score(key, mode, direction):
+    assert reg.is_directional(key, mode) is (direction is not None)
     assert reg.higher_is_better(key, mode) is (direction == "higher")
-    assert reg.direction_hint(key, mode) == f"{direction} is better"
-
-
-@pytest.mark.parametrize(("key", "mode"), NOT_DIRECTIONAL)
-def test_scores_without_a_better_side(key, mode):
-    assert not reg.is_directional(key, mode)
-    assert reg.direction_hint(key, mode) == ""
+    assert reg.direction_hint(key, mode) == (f"{direction} is better" if direction else "")
 
 
 @pytest.mark.parametrize(
@@ -186,19 +133,21 @@ def test_a_score_without_a_better_side_keeps_its_band(key, mode, band):
     assert reg.lookup(key, mode).band == band
 
 
-def test_every_score_is_classified_here():
-    """Each emitted score is in one of the two lists above in each mode it
-    is emitted in, so a band change cannot slip by."""
-    listed = {(k, m) for k, m, _d in DIRECTIONAL} | set(NOT_DIRECTIONAL)
-    numeric_unlisted = []
+def test_every_emitted_score_has_a_band_and_a_side_when_performance():
+    """Each numeric score _scores_dict emits resolves to an entry in its
+    mode, and is directional exactly when its band is performance: a
+    performance score with no better side, or a diagnostic one coloured,
+    fails here."""
+    wrong = []
     for mode, keys in _scores_dict_keys().items():
         for key in keys:
             meta = reg.lookup(key, mode)
+            assert meta is not None, (key, mode)
             if meta.unit in ("bool", "text", "struct"):
                 continue
-            if (key, mode) not in listed and reg.is_directional(key, mode):
-                numeric_unlisted.append((key, mode))
-    assert numeric_unlisted == []
+            if reg.is_directional(key, mode) is not (meta.band == "performance"):
+                wrong.append((key, mode, meta.band, meta.direction))
+    assert wrong == []
 
 
 def test_stage_seconds_by_mode():
@@ -314,7 +263,6 @@ def test_each_bound_kind_caps_the_metrics_it_bounds():
 def test_the_trickle_caps_intake_only():
     """The trickle is not a bound kind; a reader passes it as extra. It caps
     the throughputs, not freshness or time to detect."""
-    assert reg.BOUND_TRICKLE == "trickle"
     for key in (
         "sustained_throughput_rps",
         "pipeline_throughput_gb_per_second",

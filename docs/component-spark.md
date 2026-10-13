@@ -1,33 +1,29 @@
 # Spark
 
-Reference: configure and size the Apache Spark pipeline engine: Spark Operator, config keys, job profiles, executor scaling, scratch storage, RBAC and OpenShift SCC.
+Reference: Spark pipeline engine: Spark Operator, config keys, job profiles, executor scaling, scratch storage, RBAC and OpenShift SCC.
 
 ## What it does
 
-Spark is the compute engine for the medallion pipeline in every recipe ([Recipes](recipes.md)). Lakebench submits `SparkApplication` resources through the Kubeflow Spark Operator v2.x. Spark runs PySpark scripts:
+Spark runs the medallion pipeline in every recipe ([Recipes](recipes.md)). Lakebench submits PySpark scripts as `SparkApplication` resources through the Kubeflow Spark Operator v2.x:
 
 - **Batch mode:** `bronze-verify`, `silver-build`, `gold-finalize` run one after another.
 - **Continuous mode:** `bronze-ingest`, `silver-stream`, `gold-refresh` run at the same time as structured streaming jobs with configurable trigger intervals.
 
 ### Script ConfigMaps
 
-Pipeline scripts are deployed as ConfigMaps (one per role), projected together at `/opt/spark/scripts` in every Spark pod. `run` validates them before submitting jobs and refuses to start if a listed file is missing or a map exceeds the ~840KB ConfigMap limit. `destroy` deletes all the maps.
+Pipeline scripts are deployed as ConfigMaps (one per role), projected together at `/opt/spark/scripts` in every Spark pod. `run` refuses to start if a listed file is missing or a map exceeds the ~840KB ConfigMap limit. `destroy` deletes all the maps.
 
 ## Spark Operator
 
-Lakebench requires **Kubeflow Spark Operator v2.x** (default: [version matrix](compatibility-matrix.md#component-version-matrix)). The v1.x line breaks volume injection and is not supported.
+Lakebench requires **Kubeflow Spark Operator v2.x** (default: [version matrix](compatibility-matrix.md#component-version-matrix)). v1.x does not inject volumes from `spec.volumes` into pods and is not supported. The operator version is unrelated to the Spark runtime version.
 
-- v1.x does not inject volumes from `spec.volumes` into pods.
-- The operator version is not the Spark runtime version.
-- `mainApplicationFile` uses `local://` URIs, so scripts must be in the container filesystem.
-
-`lakebench deploy` checks the operator. It never installs the operator; a missing one fails the deploy.
+`lakebench deploy` checks for the operator and fails if it is missing; it never installs it.
 
 - `deploy` adds the deployment's namespace to the operator's watch list (`spark.jobNamespaces`) and `destroy` removes it, both under the `lakebench-cluster-lock` lease in `lakebench-system`. Do not edit `spark.jobNamespaces` by hand.
 - An installed operator keeps its version whatever the config says.
 - `operator.install: true` is refused by the commands that change data; `destroy`, `status` and `admin` load it as false.
 
-A cluster admin installs the shared operator once with Lakebench, not raw Helm:
+A cluster admin installs the shared operator once:
 
 ```bash
 lakebench admin install --component spark-operator lakebench.yaml \
@@ -66,7 +62,7 @@ The Spark version parsed from the tag also picks:
 | 3.5.x | 1.12.262 | 24g |
 | 4.0.x, 4.1.x | 1.12.720 | 32g |
 
-Spark 4 drivers get 32g: `hadoop-aws:3.4.1` pulls a 558MB AWS SDK v2 bundle (280MB SDK v1 on 3.5.x), and the driver's netty file server serves those jars to executors.
+Spark 4 drivers get 32g because `hadoop-aws:3.4.1` pulls a 558MB AWS SDK v2 bundle (280MB SDK v1 on 3.5.x) that the driver's file server sends to executors.
 
 `lb-deps` resolves the runtime and Hadoop AWS jars and serves them by URL. Example for a Java 11 Spark 3.5 image such as `apache/spark:3.5.4-python3` on Hive: it gets `iceberg-spark-runtime-3.5_2.12:1.10.1` and `hadoop-aws:3.3.4`. Other Spark minors: [which runtime jar](compatibility-matrix.md#which-runtime-jar-gets-requested).
 
@@ -85,16 +81,15 @@ Spark settings live under `platform.compute.spark`, `platform.storage.scratch`, 
 |---|---|---|
 | `platform.compute.spark.driver_cores` | `null` | Replaces the profile's driver cores for every job. At most 16. |
 | `platform.compute.spark.driver_memory` | `null` | Replaces the profile's driver memory for every job (e.g. `16g`). Must be a whole number with unit k, m, g or t. Use on small nodes or at scale 500+, where the driver holds more Iceberg commit metadata. |
-| `bronze_executors`, `silver_executors`, `gold_executors` | `null` | Batch executor count. Set, it bypasses the scaling formula for that job. |
-| `bronze_ingest_executors`, `silver_stream_executors`, `gold_refresh_executors` | `null` | Continuous executor count. Set, it bypasses the scaling formula and the shared-cluster Lakebench cap. |
-| `bronze_ingest_executor_cores`, `silver_stream_executor_cores`, `gold_refresh_executor_cores` | `null` | Continuous executor size, 1-16 cores. Memory and scratch per core follow the profile; the count is unchanged, so total cores grow. |
+| `bronze_executors`, `silver_executors`, `gold_executors` | `null` | Executor count of the stage's job in the run's mode (bronze-verify or bronze-ingest, silver-build or silver-stream, gold-finalize or gold-refresh). Set, it bypasses the scaling formula and, in continuous mode, the shared-cluster Lakebench cap. |
+| `bronze_executor_cores`, `silver_executor_cores`, `gold_executor_cores` | `null` | Continuous mode only: executor size, 1-16 cores. Memory and scratch per core follow the profile; the count is unchanged, so total cores grow. Batch jobs ignore it. |
 | `platform.storage.scratch.enabled` | `false` | Portworx scratch PVCs for executors. Unset, a batch run at scale 50 and above turns it on. |
 | `platform.storage.scratch.storage_class` | `px-csi-scratch` | Scratch StorageClass. Must be `repl=1`. |
 | `spark.conf` | `{}` | Spark conf merged over the job defaults (below). |
 
 - Executor count overrides above 28 are refused by the commands that change data; `destroy` and read commands drop them with a note.
-- Unset `*_executor_cores`: bronze-ingest and silver-stream grow to 8 or 16 cores when the offered load needs more executors than the cap (keeping total cores), unless their `*_executors` count is set. gold-refresh is never grown.
-- Batch jobs take only a count override. The removed `platform.compute.spark.driver` and `.executor` blocks and `scratch.size` are listed in [UPGRADING-1.7.md](../UPGRADING-1.7.md#sizing-settings-that-sized-nothing-are-removed).
+- Unset `<stage>_executor_cores`: bronze-ingest and silver-stream grow to 8 or 16 cores when the offered load needs more executors than the cap (keeping total cores), unless the stage's `<stage>_executors` count is set. gold-refresh is never grown.
+- Batch jobs take only a count override. The removed `platform.compute.spark.driver` and `.executor` blocks and `scratch.size` are listed under 1.7.0 in the [changelog](../CHANGELOG.md#170---2026-10-06).
 
 ### Spark conf (S3A, shuffle, memory)
 
@@ -136,7 +131,7 @@ Two keys a user may set (`USER_OVERRIDABLE_SPARK_KEYS`): Lakebench sets `spark.d
 
 ## Job Profiles
 
-The built-in profiles set per-executor sizing, proven at 1TB+ scale. Reducing these values causes OOM kills or "No space left on device" failures.
+The built-in profiles set per-executor sizing proven at 1TB+ scale. Smaller values cause OOM kills or "No space left on device" failures.
 
 ### Batch Jobs
 
@@ -200,9 +195,9 @@ When enabled, each executor gets a dynamically provisioned PVC at `/tmp/spark-lo
 
 - **Batch, per-scale profile:** the stage's `scratch_gib_per_scale` x scale / executors, rounded up, between 50Gi and the profile's `scratch_size` (the ceiling). Examples: Customer 360 silver-build gets 8 x 50Gi at scale 1, 8 x 75Gi at scale 10 and 18 x 300Gi at scale 100; AML bronze-verify with 16 executors at scale 10 gets 50Gi each.
 - **No per-scale need** (c360 bronze-verify, 50Gi, and the streaming jobs): `scratch_size`. A widened streaming executor's PVC grows with its cores.
-- To change scratch, change the executor count (`platform.compute.spark.<job>_executors`). There is no size field.
+- To change scratch, change the executor count (`platform.compute.spark.<stage>_executors`). There is no size field.
 - `metrics.json` records the size per job as `config_snapshot.scratch.size_per_job`.
-- The StorageClass must use `repl=1`: `repl=2+` doubles storage with no benefit for recomputable shuffle data.
+- The StorageClass must use `repl=1`; replication only doubles storage for recomputable shuffle data.
 - `lakebench deploy` only checks that the StorageClass exists. A cluster admin creates it once with `lakebench admin install --component scratch-storage-class`.
 
 ## RBAC

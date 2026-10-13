@@ -259,6 +259,20 @@ class PolarisDeployer:
             )
             logger.info(f"Grant polaris schema access: {resp}")
 
+            # Polaris 1.8 no longer creates its schema during bootstrap (a DBA
+            # task); earlier releases create the same one with IF NOT EXISTS,
+            # so creating it here is safe for every version.
+            resp = _exec_psql(
+                "polaris",
+                "CREATE SCHEMA IF NOT EXISTS polaris_schema AUTHORIZATION polaris;",
+            )
+            logger.info(f"Create polaris_schema: {resp}")
+            if not psql_command_ok(resp, "CREATE SCHEMA"):
+                raise DeploymentSecretError(
+                    "could not create the polaris_schema schema in the polaris database; "
+                    "Polaris 1.8 bootstrap needs it. Check lakebench-postgres-0, then re-run deploy"
+                )
+
         except DeploymentSecretError:
             raise
         except Exception as e:

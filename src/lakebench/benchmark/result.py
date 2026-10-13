@@ -21,6 +21,9 @@ class QueryExecutorResult:
     rows_returned: int
     raw_output: str
     error: str | None = None
+    # The tag the engine was told to label this query with, for engines that
+    # can report per-query storage I/O afterwards (Trino). None otherwise.
+    engine_source: str | None = None
 
     @property
     def success(self) -> bool:

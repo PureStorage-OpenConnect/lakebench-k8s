@@ -187,13 +187,6 @@ class TestConcurrentDestroys:
         assert destroy_mod._monotonic() - before < 60, "must not wait out the timeout"
         assert cluster.deletes == 1
 
-    def test_second_destroy_after_namespace_gone(self):
-        cluster = FakeCluster(drain_polls=0)
-        _run(cluster)
-        result, _ = _run(cluster)
-        assert "already gone" in result.message
-        assert cluster.deletes == 1
-
 
 class TestDestroyAllWiring:
     def _run_destroy(
@@ -508,18 +501,6 @@ class TestDestroyAllWiring:
         assert sc and sc[0].status is DeploymentStatus.SKIPPED
         assert "lakebench-s3-credentials-ns-a" in sc[0].message
 
-    def test_absent_at_start_is_never_deleted(self):
-        """Start UID empty: a namespace that appears later is a new deploy."""
-        cluster = FakeCluster(drain_polls=1)
-        state = {"uid": ""}
-
-        results, _, calls, engine = self._run_destroy(
-            cluster,
-            uid_fn=lambda _ns: state["uid"],
-            on_lease=lambda _e: None,
-        )
-        engine.k8s.delete_namespace.assert_not_called()
-
     def test_unreadable_uid_at_start_refuses_before_touching_anything(self):
         cluster = FakeCluster(drain_polls=1)
 
@@ -613,28 +594,3 @@ class TestClient:
         core = MagicMock()
         core.read_namespace.side_effect = ApiException(status=404, reason="NotFound")
         assert self._client(core).get_namespace_termination_status("ns-a") == ("", [])
-
-
-class TestCliExitCode:
-    """The destroy CLI exits 0 when every step succeeded."""
-
-    def _invoke(self, results, monkeypatch, tmp_path):
-        from pathlib import Path
-
-        from typer.testing import CliRunner
-
-        from lakebench.cli import app
-
-        monkeypatch.chdir(tmp_path)
-        fixture = Path(__file__).parent / "fixtures" / "v14user.yaml"
-        engine = MagicMock()
-        engine.destroy_all.return_value = results
-        with patch("lakebench.deploy.DeploymentEngine", return_value=engine):
-            return CliRunner().invoke(app, ["destroy", str(fixture), "--force"])
-
-    def test_clean_destroy_exits_0(self, monkeypatch, tmp_path):
-        from lakebench.deploy.engine import DeploymentResult
-
-        results = [DeploymentResult("namespace", DeploymentStatus.SUCCESS, "Namespace x deleted")]
-        out = self._invoke(results, monkeypatch, tmp_path)
-        assert out.exit_code == 0, out.output

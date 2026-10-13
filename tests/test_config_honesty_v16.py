@@ -163,19 +163,11 @@ _REMOVED_FIELDS = [
 @pytest.mark.parametrize("data,key", _REMOVED_FIELDS)
 def test_removed_field_is_refused_for_mutation_and_loads_for_teardown(tmp_path, data, key):
     from lakebench.config import LoadPurpose
-    from lakebench.config.loader import ConfigValidationError
+    from lakebench.config.loader import ConfigValidationError, load_notes
 
     with pytest.raises(ConfigValidationError) as e:
         _load(tmp_path, data, LoadPurpose.MUTATE)
     assert f"'{key}'" in str(e.value)
-    assert _load(tmp_path, data, LoadPurpose.TEARDOWN).name == "t"
-
-
-def test_secret_ref_only_config_still_loads_for_teardown(tmp_path):
-    from lakebench.config import LoadPurpose
-    from lakebench.config.loader import load_notes
-
-    data = {"name": "t", "platform": _s3(secret_ref="my-secret")}
     cfg = _load(tmp_path, data, LoadPurpose.TEARDOWN)
-    assert not hasattr(cfg.platform.storage.s3, "secret_ref")
-    assert any("'secret_ref' (S3Config)" in t for t in load_notes(cfg).texts())
+    assert cfg.name == "t"
+    assert any(f"'{key}' (" in t for t in load_notes(cfg).texts())

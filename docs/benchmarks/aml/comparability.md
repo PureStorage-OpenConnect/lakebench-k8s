@@ -26,9 +26,9 @@ published AML result must show:
 
 Continuous runs also disclose the window, `continuous.trickle`,
 `limits.trickle_bound`, `intake_limit` and `corpus_ingest_ratio`: a window
-that did not drain the corpus measures a subset of it, and the arrival rate
-is Lakebench-set. Disclose every skipped rule and any skipped-rule warning
-the batch gate printed (not enforced).
+that did not drain the corpus measures a subset of it, and Lakebench sets the
+arrival rate. Disclose every skipped rule and any skipped-rule warning the
+batch gate printed (not enforced).
 
 ## 10. Comparability
 
@@ -51,12 +51,12 @@ comparable only when (`metrics/comparability.py`):
   query set, so such runs cannot show matching results.
 - Differing execution conditions
   ([7.2](execution-rules.md#72-permitted-tuning-still-publishable)), or only
-  the dependency pinset, leave the pair comparable but not like-for-like: a
-  difference in the numbers may come from them.
-  When architecture and system both differ, no difference can be put down to
-  either.
+  the dependency pinset, leave the pair comparable but not like-for-like.
+  When architecture and system both differ, no difference can be attributed
+  to either.
 - Batch and continuous runs are never comparable (mode is a Workload key).
 - A batch run whose TM layer did not run (8 queries) is not comparable with
   one where it ran (12), because the query sets differ.
 - Records written by Lakebench 1.6 (exp1, workload `aml-1`), including the
-  three cited runs, are not comparable with this release's records: they are reference figures, not baselines.
+  three cited runs, are not comparable with this release's records. They are
+  reference figures, not baselines.

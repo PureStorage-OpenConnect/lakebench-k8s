@@ -240,6 +240,7 @@ def _destroy_secret_deletes(pvc_present: bool, pvc=None, pvc_error=None) -> list
         patch("lakebench.deploy.ownership.verify_bucket_ownership", return_value=match),
         patch("kubernetes.client.CoreV1Api", return_value=core),
         patch("kubernetes.client.RbacAuthorizationV1Api", return_value=MagicMock()),
+        patch("kubernetes.client.AppsV1Api", return_value=MagicMock()),
         patch("kubernetes.client.CustomObjectsApi", return_value=MagicMock()),
         patch("lakebench.spark.SparkOperatorManager", MagicMock()),
         patch("lakebench.deploy.destroy.logger"),
@@ -248,7 +249,7 @@ def _destroy_secret_deletes(pvc_present: bool, pvc=None, pvc_error=None) -> list
     return [c.args[0] for c in core.delete_namespaced_secret.call_args_list]
 
 
-_ALWAYS_DELETED = {"lakebench-ca-certificate", "lakebench-s3-credentials"}
+_ALWAYS_DELETED = {"lakebench-ca-certificate", "lakebench-s3-credentials", "lakebench-grafana"}
 _PVC_BOUND = {ds.HIVE_DB_SECRET, ds.POLARIS_DB_SECRET, ds.POLARIS_CLIENT_SECRET}
 _TERMINATING = SimpleNamespace(metadata=SimpleNamespace(deletion_timestamp="2026-10-01T00:00:00Z"))
 
@@ -292,6 +293,8 @@ def _polaris_db(role_out: str, core: FakeCore, cfg: LakebenchConfig | None = Non
             return "CREATE ROLE"
         if sql.startswith("ALTER ROLE"):
             return "ALTER ROLE"
+        if sql.startswith("CREATE SCHEMA"):
+            return "CREATE SCHEMA"
         return "GRANT"
 
     with (
@@ -406,6 +409,8 @@ def test_create_race_falls_through_to_sync():
             return 'ERROR:  role "polaris" already exists'
         if sql.startswith("ALTER ROLE"):
             return "ALTER ROLE"
+        if sql.startswith("CREATE SCHEMA"):
+            return "CREATE SCHEMA"
         return "polaris" if "pg_database" in sql else "GRANT"
 
     with (
@@ -464,3 +469,22 @@ def test_job_redaction_regex_always_hides_the_catalog_credential(user):
     ours = re.match(r"\(\?i:[^)]*\)", regex)
     assert ours and re.search(ours.group(0), "spark.sql.catalog.lakehouse.credential")
     assert user in regex
+
+
+def test_polaris_db_creates_the_schema_polaris_1_8_bootstrap_needs():
+    sqls = _polaris_db("lbrole:0", FakeCore())
+    schema = [s for s in sqls if s.startswith("CREATE SCHEMA")]
+    assert schema == ["CREATE SCHEMA IF NOT EXISTS polaris_schema AUTHORIZATION polaris;"]
+    # After the database and its grants, before anything bootstraps.
+    assert sqls.index(schema[0]) > max(
+        i for i, s in enumerate(sqls) if s.startswith("GRANT ALL ON SCHEMA")
+    )
+
+
+def test_bootstrap_job_polls_health_on_the_management_port():
+    """Polaris serves /q/health on 8182; polling the REST port 8181 never
+    succeeds and made every deploy wait out the whole loop."""
+    text = _render("polaris/bootstrap-job.yaml.j2", "polaris-iceberg-spark-trino")
+    assert 'curl -sf "$POLARIS_HEALTH_URI/q/health/ready"' in text
+    assert ":8182" in text.split("POLARIS_HEALTH_URI")[1].splitlines()[1]
+    assert '"$POLARIS_URI/q/health' not in text

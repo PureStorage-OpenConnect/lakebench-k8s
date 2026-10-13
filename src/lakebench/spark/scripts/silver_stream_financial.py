@@ -82,6 +82,7 @@ import time
 from common import (
     SilverAbort,
     aml_opening_balance,
+    apply_silver_write_mode,
     assert_progress,
     clear_stream_started_marker,
     emit_stream_scale_admission,
@@ -152,6 +153,13 @@ CHECKPOINT_URI = env(
     "LB_FINANCIAL_SILVER_CHECKPOINT", "s3a://lb-bronze/_checkpoints/silver_stream_financial/"
 )
 TRIGGER_S = int(env("LB_FINANCIAL_SILVER_TRIGGER_S", "0"))
+# Soft cap on bronze rows read per trigger (Iceberg
+# streaming-max-rows-per-micro-batch); 0 lifts it.
+SILVER_MAX_ROWS = int(env("LB_FINANCIAL_SILVER_MAX_ROWS", "0"))
+# Iceberg write mode for the update-heavy silver tables (copy_on_write |
+# merge_on_read). Applied at bootstrap by apply_silver_write_mode; the DDL
+# default is copy-on-write, so an unset value leaves tables as created.
+SILVER_WRITE_MODE = env("LB_FINANCIAL_SILVER_WRITE_MODE", "merge_on_read")
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
@@ -1318,6 +1326,7 @@ def main() -> None:
     log(f"Sinks: {CATALOG}.{SILVER_TXNS} (delete+append), {CATALOG}.{SILVER_EDGES} (delete+append)")
     log(f"Checkpoint: {CHECKPOINT_URI}")
     log(f"triggerSeconds={TRIGGER_S}")
+    log(f"maxRowsPerTrigger={SILVER_MAX_ROWS or 'unbounded'}")
     log("=" * 60)
     # G5: label the imposed scale envelope so downstream reports never
     # present a Lakebench-bounded number as infrastructure performance
@@ -1423,6 +1432,16 @@ def main() -> None:
         for name, sql_type in columns:
             ensure_column(spark, f"{CATALOG}.{table}", name, sql_type.upper())
 
+    # Write mode for the update-heavy silver tables (entities, accounts,
+    # account_statements, entity_profiles). merge_on_read makes each per-batch
+    # MERGE write position-delete files instead of rewriting the touched data
+    # files, so the write cost tracks the rows the batch changes, not the
+    # table size. Idempotent ALTER; safe on every restart. The append-only
+    # tables (transactions, edges, pairs) keep the DDL default copy-on-write,
+    # so their snapshot-summary row counts stay exact.
+    for table in (SILVER_ENTITIES, SILVER_ACCOUNTS, SILVER_STATEMENTS, SILVER_PROFILES):
+        apply_silver_write_mode(spark, f"{CATALOG}.{table}", SILVER_WRITE_MODE)
+
     # The bronze table carries an OVERWRITE snapshot from the
     # bronze-verify preflight (LB_REGISTER_TABLE=1 does a full CTAS/register
     # of the pacs.008 corpus). Iceberg's streaming source refuses overwrite
@@ -1430,12 +1449,17 @@ def main() -> None:
     # "Cannot process overwrite snapshot", crash-looping silver-stream so
     # silver never fills. Skip non-append snapshots: bronze-ingest writes
     # append-only micro-batches, which is what silver must consume.
-    stream = (
+    reader = (
         spark.readStream.format("iceberg")
         .option("streaming-skip-overwrite-snapshots", "true")
         .option("streaming-skip-delete-snapshots", "true")
-        .load(f"{CATALOG}.{BRONZE_TABLE}")
     )
+    # A micro-batch takes the next whole data file, then stops adding files
+    # once SILVER_MAX_ROWS would be exceeded, so a slow batch cannot make the
+    # next one unboundedly larger. 0 lifts the cap (take every snapshot).
+    if SILVER_MAX_ROWS > 0:
+        reader = reader.option("streaming-max-rows-per-micro-batch", str(SILVER_MAX_ROWS))
+    stream = reader.load(f"{CATALOG}.{BRONZE_TABLE}")
     # A1: driver-side accumulator. _merge_batch returns the silver.transactions
     # rows committed for the batch; the wrapper folds each into a
     # lock-protected counter so a stream that saw only empty batches raises

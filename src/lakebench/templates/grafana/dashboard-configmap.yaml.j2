@@ -1,13 +1,15 @@
-{# Grafana dashboard provisioned via sidecar ConfigMap. #}
-{# Rendered ONCE cluster-wide into the shared observability namespace,  #}
-{# NOT per-deployment -- a fixed uid rendered per-namespace collides in the     #}
-{# shared Grafana (last writer wins). A `namespace` + `run_id` template         #}
-{# variable lets one dashboard serve every deployment/run.                      #}
+{# Grafana dashboard provisioned via file provider.                          #}
+{# One ConfigMap per deployment, in the deployment namespace. The dashboard   #}
+{# uid is fixed; namespaces no longer collide because each deployment runs    #}
+{# its own Grafana. `run_id` picks between runs in this namespace. Resource   #}
+{# panels come from cAdvisor and Trino from the JMX exporter, so they work    #}
+{# for batch and continuous runs; datagen and stage panels read Pushgateway   #}
+{# series, which batch stages push and continuous stages do not.              #}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: lakebench-grafana-dashboard
-  namespace: {{ observability_namespace | default('lakebench-observability') }}
+  namespace: {{ namespace }}
   labels:
     app.kubernetes.io/name: lakebench
     app.kubernetes.io/component: grafana-dashboard
@@ -15,190 +17,1127 @@ metadata:
 data:
   lakebench-overview.json: |
     {
-      "annotations": {"list": []},
+      "annotations": {
+        "list": []
+      },
       "editable": true,
       "fiscalYearStartMonth": 0,
       "graphTooltip": 1,
       "links": [],
-      "templating": {"list": [
-        {
-          "name": "datasource",
-          "type": "datasource",
-          "query": "prometheus",
-          "hide": 0,
-          "current": {},
-          "refresh": 1
-        },
-        {
-          "name": "namespace",
-          "type": "query",
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "query": "label_values(lakebench_stage_elapsed_seconds, namespace)",
-          "refresh": 2,
-          "includeAll": true,
-          "multi": true,
-          "current": {},
-          "sort": 1
-        },
-        {
-          "name": "run_id",
-          "type": "query",
-          "datasource": {"type": "prometheus", "uid": "${datasource}"},
-          "query": "label_values(lakebench_stage_elapsed_seconds{namespace=~\"$namespace\"}, run_id)",
-          "refresh": 2,
-          "includeAll": true,
-          "multi": true,
-          "current": {},
-          "sort": 1
-        }
-      ]},
+      "templating": {
+        "list": [
+          {
+            "name": "datasource",
+            "type": "datasource",
+            "query": "prometheus",
+            "hide": 2,
+            "current": {
+              "text": "Prometheus",
+              "value": "lakebench-prometheus"
+            },
+            "refresh": 1
+          },
+          {
+            "name": "run_id",
+            "type": "query",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "${datasource}"
+            },
+            "query": "label_values(lakebench_stage_elapsed_seconds, run_id)",
+            "refresh": 2,
+            "includeAll": true,
+            "multi": true,
+            "current": {},
+            "sort": 1
+          }
+        ]
+      },
       "panels": [
         {
-          "title": "Datagen: throughput MB/s (CAPPED -- Lakebench per-pod CPU/memory, not infra perf)",
-          "description": "Generator rate is bounded by the datagen pod resources Lakebench sets: CPU per pod as configured (default 8), auto-sized memory from the datagen memory model, capped at 16Gi per pod. A Lakebench-imposed cap, not backend throughput (invariant 6).",
-          "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
-          "targets": [
-            {
-              "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "lakebench_datagen_throughput_mbps{namespace=~\"$namespace\", run_id=~\"$run_id\"}",
-              "legendFormat": "pod {{ "{{" }}node_id{{ "}}" }}",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "MBs"}}
+          "id": 1,
+          "title": "Resources by component (cAdvisor, this namespace)",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "panels": []
         },
         {
-          "title": "Datagen: rows written by pod (capped rate)",
+          "id": 2,
+          "title": "CPU by component (cores)",
           "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 0,
+            "y": 1
+          },
           "targets": [
             {
-              "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "lakebench_datagen_rows_written{namespace=~\"$namespace\", run_id=~\"$run_id\"}",
-              "legendFormat": "pod {{ "{{" }}node_id{{ "}}" }}",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}}
-        },
-        {
-          "title": "Datagen: phase seconds (stacked)",
-          "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
-          "targets": [
-            {
-              "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "sum(lakebench_datagen_phase_seconds{namespace=~\"$namespace\", run_id=~\"$run_id\"}) by (phase)",
-              "legendFormat": "{{ "{{" }}phase{{ "}}" }}",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "s", "custom": {"stacking": {"mode": "normal"}}}}
-        },
-        {
-          "title": "Bronze/Silver: stage rows (input vs output)",
-          "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-          "targets": [
-            {
-              "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "lakebench_stage_input_rows{namespace=~\"$namespace\", run_id=~\"$run_id\"}",
-              "legendFormat": "{{ "{{" }}stage{{ "}}" }} in",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (rate(container_cpu_usage_seconds_total{pod=~\"lakebench-datagen-.*\",container!=\"\",container!=\"POD\"}[2m])))",
+              "legendFormat": "datagen",
               "refId": "A"
             },
             {
-              "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "lakebench_stage_output_rows{namespace=~\"$namespace\", run_id=~\"$run_id\"}",
-              "legendFormat": "{{ "{{" }}stage{{ "}}" }} out",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (rate(container_cpu_usage_seconds_total{pod=~\"(lakebench-bronze-ingest-driver|lb-bronze-ingest-.*-exec-.*)\",container!=\"\",container!=\"POD\"}[2m])))",
+              "legendFormat": "bronze-ingest",
               "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (rate(container_cpu_usage_seconds_total{pod=~\"(lakebench-silver-stream-driver|lb-silver-stream-.*-exec-.*)\",container!=\"\",container!=\"POD\"}[2m])))",
+              "legendFormat": "silver-stream",
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (rate(container_cpu_usage_seconds_total{pod=~\"(lakebench-gold-refresh-driver|lb-gold-refresh-.*-exec-.*)\",container!=\"\",container!=\"POD\"}[2m])))",
+              "legendFormat": "gold-refresh",
+              "refId": "D"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (rate(container_cpu_usage_seconds_total{pod=~\"(lakebench-(bronze-verify|silver-build|gold-finalize)-driver|lb-(bronze-verify|silver-build|gold-finalize)-.*-exec-.*)\",container!=\"\",container!=\"POD\"}[2m])))",
+              "legendFormat": "batch spark (verify/build/finalize)",
+              "refId": "E"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (rate(container_cpu_usage_seconds_total{pod=~\"lakebench-trino-coordinator-.*\",container!=\"\",container!=\"POD\"}[2m])))",
+              "legendFormat": "trino coordinator",
+              "refId": "F"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (rate(container_cpu_usage_seconds_total{pod=~\"lakebench-trino-worker-.*\",container!=\"\",container!=\"POD\"}[2m])))",
+              "legendFormat": "trino workers",
+              "refId": "G"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (rate(container_cpu_usage_seconds_total{pod=~\"lakebench-polaris-.*\",container!=\"\",container!=\"POD\"}[2m])))",
+              "legendFormat": "polaris",
+              "refId": "H"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (rate(container_cpu_usage_seconds_total{pod=~\"lakebench-postgres-.*\",container!=\"\",container!=\"POD\"}[2m])))",
+              "legendFormat": "postgres",
+              "refId": "I"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (rate(container_cpu_usage_seconds_total{pod=~\"lakebench-(prometheus|grafana|pushgateway)-.*\",container!=\"\",container!=\"POD\"}[2m])))",
+              "legendFormat": "observability",
+              "refId": "J"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (rate(container_cpu_usage_seconds_total{pod=~\"lb-deps-.*\",container!=\"\",container!=\"POD\"}[2m])))",
+              "legendFormat": "dependency server",
+              "refId": "K"
             }
           ],
-          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}}
-        },
-        {
-          "title": "Silver: per-table row counts",
-          "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
-          "targets": [
-            {
-              "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "lakebench_silver_table_rows{namespace=~\"$namespace\", run_id=~\"$run_id\"}",
-              "legendFormat": "{{ "{{" }}table{{ "}}" }}",
-              "refId": "A"
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "short",
+              "custom": {
+                "stacking": {
+                  "mode": "normal"
+                },
+                "fillOpacity": 25
+              }
             }
-          ],
-          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}}
+          },
+          "description": "Containers only, each counted once. Spark drivers and executors are grouped by stage."
         },
         {
-          "title": "Pipeline: stage elapsed seconds",
+          "id": 3,
+          "title": "Memory by component (working set)",
           "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+          "gridPos": {
+            "h": 9,
+            "w": 12,
+            "x": 12,
+            "y": 1
+          },
           "targets": [
             {
-              "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "lakebench_stage_elapsed_seconds{namespace=~\"$namespace\", run_id=~\"$run_id\"}",
-              "legendFormat": "{{ "{{" }}stage{{ "}}" }}",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "s"}}
-        },
-        {
-          "title": "Trino: Running Queries",
-          "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
-          "targets": [
-            {
-              "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "trino_execution_querymanager_runningqueries{namespace=~\"$namespace\"}",
-              "legendFormat": "Running Queries",
-              "refId": "A"
-            }
-          ],
-          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}}
-        },
-        {
-          "title": "Trino: Query Throughput (queries/min)",
-          "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
-          "targets": [
-            {
-              "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "rate(trino_execution_querymanager_completedqueries_totalcount{namespace=~\"$namespace\"}[5m]) * 60",
-              "legendFormat": "Completed/min",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (container_memory_working_set_bytes{pod=~\"lakebench-datagen-.*\",container!=\"\",container!=\"POD\"}))",
+              "legendFormat": "datagen",
               "refId": "A"
             },
             {
-              "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "rate(trino_execution_querymanager_failedqueries_totalcount{namespace=~\"$namespace\"}[5m]) * 60",
-              "legendFormat": "Failed/min",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (container_memory_working_set_bytes{pod=~\"(lakebench-bronze-ingest-driver|lb-bronze-ingest-.*-exec-.*)\",container!=\"\",container!=\"POD\"}))",
+              "legendFormat": "bronze-ingest",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (container_memory_working_set_bytes{pod=~\"(lakebench-silver-stream-driver|lb-silver-stream-.*-exec-.*)\",container!=\"\",container!=\"POD\"}))",
+              "legendFormat": "silver-stream",
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (container_memory_working_set_bytes{pod=~\"(lakebench-gold-refresh-driver|lb-gold-refresh-.*-exec-.*)\",container!=\"\",container!=\"POD\"}))",
+              "legendFormat": "gold-refresh",
+              "refId": "D"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (container_memory_working_set_bytes{pod=~\"(lakebench-(bronze-verify|silver-build|gold-finalize)-driver|lb-(bronze-verify|silver-build|gold-finalize)-.*-exec-.*)\",container!=\"\",container!=\"POD\"}))",
+              "legendFormat": "batch spark (verify/build/finalize)",
+              "refId": "E"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (container_memory_working_set_bytes{pod=~\"lakebench-trino-coordinator-.*\",container!=\"\",container!=\"POD\"}))",
+              "legendFormat": "trino coordinator",
+              "refId": "F"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (container_memory_working_set_bytes{pod=~\"lakebench-trino-worker-.*\",container!=\"\",container!=\"POD\"}))",
+              "legendFormat": "trino workers",
+              "refId": "G"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (container_memory_working_set_bytes{pod=~\"lakebench-polaris-.*\",container!=\"\",container!=\"POD\"}))",
+              "legendFormat": "polaris",
+              "refId": "H"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (container_memory_working_set_bytes{pod=~\"lakebench-postgres-.*\",container!=\"\",container!=\"POD\"}))",
+              "legendFormat": "postgres",
+              "refId": "I"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (container_memory_working_set_bytes{pod=~\"lakebench-(prometheus|grafana|pushgateway)-.*\",container!=\"\",container!=\"POD\"}))",
+              "legendFormat": "observability",
+              "refId": "J"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(max by (pod, container) (container_memory_working_set_bytes{pod=~\"lb-deps-.*\",container!=\"\",container!=\"POD\"}))",
+              "legendFormat": "dependency server",
+              "refId": "K"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "bytes",
+              "custom": {
+                "stacking": {
+                  "mode": "normal"
+                },
+                "fillOpacity": 25
+              }
+            }
+          }
+        },
+        {
+          "id": 4,
+          "title": "Network receive by component",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 10
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_receive_bytes_total{pod=~\"lakebench-datagen-.*\"}[2m]))",
+              "legendFormat": "datagen",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_receive_bytes_total{pod=~\"(lakebench-bronze-ingest-driver|lb-bronze-ingest-.*-exec-.*)\"}[2m]))",
+              "legendFormat": "bronze-ingest",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_receive_bytes_total{pod=~\"(lakebench-silver-stream-driver|lb-silver-stream-.*-exec-.*)\"}[2m]))",
+              "legendFormat": "silver-stream",
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_receive_bytes_total{pod=~\"(lakebench-gold-refresh-driver|lb-gold-refresh-.*-exec-.*)\"}[2m]))",
+              "legendFormat": "gold-refresh",
+              "refId": "D"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_receive_bytes_total{pod=~\"(lakebench-(bronze-verify|silver-build|gold-finalize)-driver|lb-(bronze-verify|silver-build|gold-finalize)-.*-exec-.*)\"}[2m]))",
+              "legendFormat": "batch spark (verify/build/finalize)",
+              "refId": "E"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_receive_bytes_total{pod=~\"lakebench-trino-coordinator-.*\"}[2m]))",
+              "legendFormat": "trino coordinator",
+              "refId": "F"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_receive_bytes_total{pod=~\"lakebench-trino-worker-.*\"}[2m]))",
+              "legendFormat": "trino workers",
+              "refId": "G"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_receive_bytes_total{pod=~\"lakebench-polaris-.*\"}[2m]))",
+              "legendFormat": "polaris",
+              "refId": "H"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_receive_bytes_total{pod=~\"lakebench-postgres-.*\"}[2m]))",
+              "legendFormat": "postgres",
+              "refId": "I"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_receive_bytes_total{pod=~\"lakebench-(prometheus|grafana|pushgateway)-.*\"}[2m]))",
+              "legendFormat": "observability",
+              "refId": "J"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_receive_bytes_total{pod=~\"lb-deps-.*\"}[2m]))",
+              "legendFormat": "dependency server",
+              "refId": "K"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "Bps",
+              "custom": {
+                "stacking": {
+                  "mode": "normal"
+                },
+                "fillOpacity": 25
+              }
+            }
+          }
+        },
+        {
+          "id": 5,
+          "title": "Network transmit by component",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 10
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_transmit_bytes_total{pod=~\"lakebench-datagen-.*\"}[2m]))",
+              "legendFormat": "datagen",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_transmit_bytes_total{pod=~\"(lakebench-bronze-ingest-driver|lb-bronze-ingest-.*-exec-.*)\"}[2m]))",
+              "legendFormat": "bronze-ingest",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_transmit_bytes_total{pod=~\"(lakebench-silver-stream-driver|lb-silver-stream-.*-exec-.*)\"}[2m]))",
+              "legendFormat": "silver-stream",
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_transmit_bytes_total{pod=~\"(lakebench-gold-refresh-driver|lb-gold-refresh-.*-exec-.*)\"}[2m]))",
+              "legendFormat": "gold-refresh",
+              "refId": "D"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_transmit_bytes_total{pod=~\"(lakebench-(bronze-verify|silver-build|gold-finalize)-driver|lb-(bronze-verify|silver-build|gold-finalize)-.*-exec-.*)\"}[2m]))",
+              "legendFormat": "batch spark (verify/build/finalize)",
+              "refId": "E"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_transmit_bytes_total{pod=~\"lakebench-trino-coordinator-.*\"}[2m]))",
+              "legendFormat": "trino coordinator",
+              "refId": "F"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_transmit_bytes_total{pod=~\"lakebench-trino-worker-.*\"}[2m]))",
+              "legendFormat": "trino workers",
+              "refId": "G"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_transmit_bytes_total{pod=~\"lakebench-polaris-.*\"}[2m]))",
+              "legendFormat": "polaris",
+              "refId": "H"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_transmit_bytes_total{pod=~\"lakebench-postgres-.*\"}[2m]))",
+              "legendFormat": "postgres",
+              "refId": "I"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_transmit_bytes_total{pod=~\"lakebench-(prometheus|grafana|pushgateway)-.*\"}[2m]))",
+              "legendFormat": "observability",
+              "refId": "J"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(rate(container_network_transmit_bytes_total{pod=~\"lb-deps-.*\"}[2m]))",
+              "legendFormat": "dependency server",
+              "refId": "K"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "Bps",
+              "custom": {
+                "stacking": {
+                  "mode": "normal"
+                },
+                "fillOpacity": 25
+              }
+            }
+          }
+        },
+        {
+          "id": 6,
+          "title": "Spark executors running by stage",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 0,
+            "y": 18
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "count(count by (pod) (container_memory_working_set_bytes{pod=~\"lb-bronze-ingest-.*-exec-.*\",container!=\"\"}))",
+              "legendFormat": "bronze-ingest",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "count(count by (pod) (container_memory_working_set_bytes{pod=~\"lb-silver-stream-.*-exec-.*\",container!=\"\"}))",
+              "legendFormat": "silver-stream",
+              "refId": "B"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "count(count by (pod) (container_memory_working_set_bytes{pod=~\"lb-gold-refresh-.*-exec-.*\",container!=\"\"}))",
+              "legendFormat": "gold-refresh",
+              "refId": "C"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "count(count by (pod) (container_memory_working_set_bytes{pod=~\"lb-(bronze-verify|silver-build|gold-finalize)-.*-exec-.*\",container!=\"\"}))",
+              "legendFormat": "batch spark",
+              "refId": "D"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "short"
+            }
+          },
+          "description": "Pods matching the stage's executor name. Streaming stages hold their executors for the whole window."
+        },
+        {
+          "id": 7,
+          "title": "Datagen pods running",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 12,
+            "y": 18
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "count(count by (pod) (container_memory_working_set_bytes{pod=~\"lakebench-datagen-.*\",container!=\"\"}))",
+              "legendFormat": "datagen pods",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "id": 8,
+          "title": "Trino",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 25
+          },
+          "panels": []
+        },
+        {
+          "id": 9,
+          "title": "Queries running and queued",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 26
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "trino_execution_querymanager_runningqueries",
+              "legendFormat": "running",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "trino_execution_querymanager_queuedqueries",
+              "legendFormat": "queued",
               "refId": "B"
             }
           ],
-          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}}
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "short"
+            }
+          }
         },
         {
-          "title": "CPU Usage by Pod (cores)",
+          "id": 10,
+          "title": "Query throughput (per minute)",
           "type": "timeseries",
-          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 26
+          },
           "targets": [
             {
-              "datasource": {"type": "prometheus", "uid": "${datasource}"},
-              "expr": "sum by (pod) (max by (pod, container) (rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\", container!=\"\", container!=\"POD\"}[5m])))",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "rate(trino_execution_querymanager_completedqueries_totalcount[5m]) * 60",
+              "legendFormat": "completed/min",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "rate(trino_execution_querymanager_failedqueries_totalcount[5m]) * 60",
+              "legendFormat": "failed/min",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "id": 11,
+          "title": "Active tasks and queued executor tasks",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 26
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(trino_execution_sqltaskmanager_activetaskscount)",
+              "legendFormat": "active tasks",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(trino_execution_queryexecution_executor_queuedtaskcount)",
+              "legendFormat": "queued executor tasks",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "id": 12,
+          "title": "Trino JVM heap used (per pod)",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 34
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (pod) (jvm_memory_used_bytes{job=\"trino\",area=\"heap\"})",
               "legendFormat": "{{ "{{" }}pod{{ "}}" }}",
               "refId": "A"
             }
           ],
-          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}}
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "bytes"
+            }
+          }
+        },
+        {
+          "id": 13,
+          "title": "Trino JVM GC time (per pod, s/s)",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 34
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum by (pod) (rate(jvm_gc_collection_seconds_sum{job=\"trino\"}[2m]))",
+              "legendFormat": "{{ "{{" }}pod{{ "}}" }}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "s"
+            }
+          }
+        },
+        {
+          "id": 14,
+          "title": "Datagen (live while generating)",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 42
+          },
+          "panels": []
+        },
+        {
+          "id": 15,
+          "title": "Datagen throughput (MB/s per pod)",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 43
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "lakebench_datagen_throughput_mbps{run_id=~\"$run_id\"}",
+              "legendFormat": "pod {{ "{{" }}node_id{{ "}}" }}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "MBs"
+            }
+          },
+          "description": "Generator rate is bounded by the datagen pod CPU and memory Lakebench sets, not by backend throughput."
+        },
+        {
+          "id": 16,
+          "title": "Datagen rows written (per pod)",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 43
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "lakebench_datagen_rows_written{run_id=~\"$run_id\"}",
+              "legendFormat": "pod {{ "{{" }}node_id{{ "}}" }}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "id": 17,
+          "title": "Datagen bytes written (total)",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 0,
+            "y": 51
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "sum(lakebench_datagen_bytes_written{run_id=~\"$run_id\"})",
+              "legendFormat": "all pods",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "bytes"
+            }
+          }
+        },
+        {
+          "id": 18,
+          "title": "Datagen elapsed seconds (per pod)",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 7,
+            "w": 12,
+            "x": 12,
+            "y": 51
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "lakebench_datagen_elapsed_seconds{run_id=~\"$run_id\"}",
+              "legendFormat": "pod {{ "{{" }}node_id{{ "}}" }}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "s"
+            }
+          }
+        },
+        {
+          "id": 19,
+          "title": "Pipeline stages (batch stages push live; continuous stages do not push)",
+          "type": "row",
+          "collapsed": false,
+          "gridPos": {
+            "h": 1,
+            "w": 24,
+            "x": 0,
+            "y": 58
+          },
+          "panels": []
+        },
+        {
+          "id": 20,
+          "title": "Stage rows (input vs output)",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 59
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "lakebench_stage_input_rows{run_id=~\"$run_id\"}",
+              "legendFormat": "{{ "{{" }}stage{{ "}}" }} in",
+              "refId": "A"
+            },
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "lakebench_stage_output_rows{run_id=~\"$run_id\"}",
+              "legendFormat": "{{ "{{" }}stage{{ "}}" }} out",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "id": 21,
+          "title": "Stage input size (GB)",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 59
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "lakebench_stage_input_size_gb{run_id=~\"$run_id\"}",
+              "legendFormat": "{{ "{{" }}stage{{ "}}" }}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "id": 22,
+          "title": "Silver per-table row counts (batch silver-build)",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 59
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "lakebench_silver_table_rows{run_id=~\"$run_id\"}",
+              "legendFormat": "{{ "{{" }}table{{ "}}" }}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "short"
+            }
+          }
+        },
+        {
+          "id": 23,
+          "title": "Stage elapsed seconds",
+          "type": "timeseries",
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 67
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "${datasource}"
+              },
+              "expr": "lakebench_stage_elapsed_seconds{run_id=~\"$run_id\"}",
+              "legendFormat": "{{ "{{" }}stage{{ "}}" }}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "unit": "s"
+            }
+          }
         }
       ],
       "schemaVersion": 39,
-      "tags": ["lakebench"],
-      "time": {"from": "now-1h", "to": "now"},
+      "tags": [
+        "lakebench"
+      ],
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
       "timepicker": {},
       "timezone": "browser",
       "title": "Lakebench Overview",
       "uid": "lakebench-overview",
-      "version": 2
+      "version": 3
     }

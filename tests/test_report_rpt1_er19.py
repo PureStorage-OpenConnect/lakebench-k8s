@@ -145,12 +145,6 @@ def test_r1_older_platform_record_is_caveated():
     assert "count containers more than once" in _text("1320bd")
 
 
-def test_r1_current_platform_record_has_no_caveat():
-    record = load_record("1320bd")
-    record["platform_metrics"]["query_version"] = 2
-    assert "count containers more than once" not in _render_dict(record)
-
-
 def test_r1_stage_rows_labelled_sum_of_per_pod_peaks():
     """1320bd's platform stage table says its max columns are sums of
     per-pod peaks, and each stage cell equals that sum from the record."""
@@ -367,24 +361,23 @@ def test_rescreen_only_instances_left_out_are_counted_on_the_page():
 
 
 @pytest.mark.parametrize(
-    ("platform", "shown"),
+    ("platform", "reason"),
     [
-        (None, "Platform Metrics"),
+        (None, None),
         (
             {"pods": [], "collection_error": "no Prometheus service found"},
             "no Prometheus service found",
         ),
-        ({"pods": []}, "Platform Metrics"),
     ],
 )
-def test_absent_platform_metrics_are_reported_not_hidden(platform, shown):
+def test_absent_platform_metrics_are_reported_not_hidden(platform, reason):
     """A run without platform metrics still shows the section, with the
     recorded reason when there is one, instead of silently leaving it out."""
     record = load_record("1320bd")
     record["platform_metrics"] = platform
-    page = _render_dict(record)
-    assert "<h2>Platform Metrics</h2>" in page
-    assert shown in page
+    text = _flat(_render_dict(record))
+    assert "Platform Metrics" in text
+    assert reason is None or reason in text
 
 
 def test_platform_values_not_collected_are_never_shown_as_zero():

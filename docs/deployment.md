@@ -1,10 +1,8 @@
 # Deployment Guide
 
-Guide: what `deploy`, `status`, `destroy` and `clean` do, step by step.
-
-One YAML config drives every command (see
-[Configuration](configuration.md)). Each command's flags and exit codes
-are in the [CLI reference](cli-reference.md).
+What `deploy`, `status`, `destroy` and `clean` do, step by step. One YAML
+config drives every command ([Configuration](configuration.md)). Flags and
+exit codes are in the [CLI reference](cli-reference.md).
 
 ## Prerequisites
 
@@ -28,23 +26,21 @@ are in the [CLI reference](cli-reference.md).
 
 Check the install with `lakebench version`.
 
-Binaries are single files for Linux (amd64) and macOS (amd64, arm64), and
-need no Python. There is no Linux arm64 binary; on that platform install
-from PyPI.
+Binaries are single files for Linux (amd64) and macOS (amd64, arm64) and
+need no Python. On Linux arm64, install from PyPI.
 
-What the install script checks:
+The install script:
 
-- It verifies the download against the release's `SHA256SUMS` file and runs
-  the downloaded binary's `version` before installing it.
-- It installs into `INSTALL_DIR` (default `/usr/local/bin`). Run it with
-  `sudo bash`, or set `INSTALL_DIR` to a directory you can write.
-- If the download fails, the checksum does not match or the binary does not
-  run, it installs nothing and keeps any lakebench already there.
-- This catches a corrupted or incomplete download. The checksum file comes
-  from the same release, so it does not prove who built the binary.
-- `SHA256SUMS` is published from 1.7.0 on. An older release installs
-  unverified, and the script says so on stderr. A release at 1.7.0 or later
-  without `SHA256SUMS` is refused.
+- Verifies the download against the release's `SHA256SUMS` and runs the
+  binary's `version` before installing. This catches a corrupted download;
+  the checksum file comes from the same release, so it does not prove who
+  built the binary.
+- Installs into `INSTALL_DIR` (default `/usr/local/bin`). Run it with
+  `sudo bash`, or set `INSTALL_DIR` to a writable directory.
+- Installs nothing, and keeps any existing lakebench, if the download fails,
+  the checksum differs or the binary does not run.
+- Installs a release older than 1.7.0 unverified (no `SHA256SUMS`) and says
+  so on stderr. A 1.7.0 or later release without `SHA256SUMS` is refused.
 
 Set `INSTALL_DIR` or `VERSION` on the `bash` side of the pipe, and pass them
 through `sudo` with `env`:
@@ -75,16 +71,17 @@ lakebench deploy my-config.yaml --yes      # no prompt
 lakebench deploy my-config.yaml --dry-run  # show the plan, change nothing
 ```
 
-Deploy runs its steps in a fixed order. Each step needs the one before it.
-The first step that fails stops the deploy and reports the error.
-
-With `--local`, the same pipeline runs in podman or docker containers on
-this machine, to try a recipe without a cluster.
+Deploy runs its steps in a fixed order and stops at the first failure.
+Warnings are printed together after the summary. With `--local`, the same
+pipeline runs in podman or docker containers on this machine.
 
 ### Capacity check
 
 Before it creates anything, deploy runs `run`'s read-only capacity check,
-without datagen. Details: [The capacity check](sizing.md#the-capacity-check).
+without datagen. A shortfall prints `WARNING: estimated capacity shortfall,
+continuing` and the deploy goes on; unreadable config values or node
+quantities still refuse. See
+[The capacity check](sizing.md#the-capacity-check).
 
 ### Timeout
 
@@ -93,12 +90,10 @@ step, including the wait for the cluster lease.
 
 - When it runs out, the step fails and names the component and what it was
   waiting for.
-- No shared change starts after it: a Spark Operator install or watch-list
-  upgrade, or a Stackable or observability install.
-- A shared change already started finishes with its rollout and verify.
-  That can run several minutes past the timeout while it holds the cluster
-  lease.
-- Helm calls already running finish first.
+- No shared change starts after it (Spark Operator install or watch-list
+  upgrade, Stackable or observability install). One already started finishes
+  its rollout and verify, which can run several minutes past the timeout
+  while it holds the cluster lease. Running Helm calls finish first.
 
 ### Deployment Order
 
@@ -140,8 +135,8 @@ step, including the wait for the cluster lease.
       `lakebench admin install --component spark-operator`.
     - The commands that change data refuse the 1.6 key
       `platform.compute.spark.operator.install: true`.
-    - With `observability.enabled`, the preflight stops before creating
-      anything when the shared observability stack is missing.
+    - With `observability.enabled`, a missing `lakebench-kubelet-metrics`
+      ClusterRole prints a warning and the deploy continues.
 11. **Dependency server** -- Starts `lb-deps` (a Deployment, a Service and
     the 5Gi PVC `lb-deps-data`) on the stock Spark image.
     - Its init containers resolve the jars onto the PVC, with a sha256 for
@@ -158,8 +153,6 @@ step, including the wait for the cluster lease.
       is not restarted and nothing is resolved again. A changed image, table
       format version, workload, query engine, mirror key or Lakebench
       resolver resolves again.
-    - The step reads pods, pod logs, events and the named StorageClass, and
-      execs into the server pod.
     - See [Dependency server failures](#dependency-server-failures).
 12. **Trino** -- The coordinator (Deployment) and workers (StatefulSet), with
     the connector pointed at the catalog. Skipped unless
@@ -172,15 +165,13 @@ step, including the wait for the cluster lease.
 14. **DuckDB** -- When the query engine is `duckdb`. Its wheel and
     extensions come from the dependency set the same way.
 15. **Observability** -- Only with `observability.enabled: true`.
-    - Prometheus and Grafana come from one shared `kube-prometheus-stack`
-      release in the `lakebench-observability` namespace.
-    - A cluster admin installs it once with
-      `lakebench admin install --component observability`, which also
-      applies the shared Grafana dashboard.
-    - Deploy never installs or changes it: a missing release fails the
-      step. Deploy applies only this deployment's PodMonitors and
-      Pushgateway, in its own namespace.
-    - Destroy never uninstalls the shared release.
+    - Deploys Prometheus, Grafana and the Pushgateway in this deployment's
+      namespace, so two deployments on one cluster never collide.
+    - The one cluster-scoped piece is the `lakebench-kubelet-metrics`
+      ClusterRole, applied once by a cluster admin with `lakebench admin
+      install --component observability`. Without it the stack still deploys
+      and platform CPU and memory read `not collected` in the report.
+    - Deploy waits until Prometheus is Ready. A slow Grafana is a warning.
     - The Pushgateway volume uses StorageClass `px-csi-scratch` unless
       `observability.pushgateway_storage_class` names another; set it on a
       cluster without Portworx.
@@ -225,26 +216,28 @@ With a config, `status` reads the Kubernetes API and shows the deployment's
 components (PostgreSQL, the configured catalog and query engine) with
 replica counts and readiness, and the datagen job's progress while it runs.
 With only `--namespace`, it lists every component Lakebench can deploy,
-plus the shared Prometheus and Grafana. Exit codes are under
+plus the per-deployment Prometheus and Grafana. Exit codes are under
 [status](cli-reference.md#status).
 
 ## Accessing Monitoring (Observability Stack)
 
-With `observability.enabled: true`, Prometheus and Grafana run in the
-shared `lakebench-observability` namespace.
+With `observability.enabled: true`, Prometheus, Grafana and the Pushgateway
+run in this deployment's namespace. Service names are fixed.
 
-- Grafana's user is `admin`. The chart generates the password per install,
-  and `deploy` prints the command that reads it:
-  `kubectl get secret -n lakebench-observability lakebench-observability-grafana -o jsonpath='{.data.admin-password}' | base64 -d`.
-- The chart shortens service names, so list them first:
+- Grafana user: `admin`. The password is generated per deploy into the
+  Secret `lakebench-grafana`:
+  `kubectl get secret -n <namespace> lakebench-grafana -o jsonpath='{.data.admin-password}' | base64 -d`.
+- Access:
 
 ```bash
-kubectl get svc -n lakebench-observability -l release=lakebench-observability
-kubectl port-forward -n lakebench-observability svc/<grafana service> 3000:80
+kubectl port-forward -n <namespace> svc/lakebench-grafana 3000:3000
+kubectl port-forward -n <namespace> svc/lakebench-prometheus 9090:9090
 ```
 
-The dashboards cover Spark job metrics, Trino query performance, storage
-throughput and cluster resource use.
+The Lakebench Overview dashboard covers resources by component, Trino, datagen
+and pipeline stages. On OpenShift, deploy also creates an edge-TLS Route for
+Grafana and prints its URL; `observability.grafana_route: false` skips it. See
+[Observability](component-observability.md#grafana).
 
 ## Destroying Infrastructure
 
@@ -253,8 +246,7 @@ lakebench destroy my-config.yaml           # prompts for confirmation
 lakebench destroy my-config.yaml --force   # no prompt
 ```
 
-Destroy is irreversible. Flags and exit codes are under
-[destroy](cli-reference.md#destroy).
+Destroy is irreversible. Flags and exit codes: [destroy](cli-reference.md#destroy).
 
 ### Destroy Order
 
@@ -276,8 +268,8 @@ Destroy is irreversible. Flags and exit codes are under
      catalog entry.
    - Spark Thrift, Delta: `DROP TABLE` deletes the table directory, so it
      runs only when `DESCRIBE DETAIL` puts the table's location in a bucket
-     destroy is about to empty, or the table's files are already gone. Any table left registered is listed in the
-     summary.
+     destroy is about to empty, or the table's files are already gone. Any
+     table left registered is listed in the summary.
    - Destroy runs no table maintenance: no Iceberg `expire_snapshots` or
      `remove_orphan_files`, no Delta `VACUUM`.
    - Files go only through the bucket step, from buckets destroy proves it
@@ -288,9 +280,8 @@ Destroy is irreversible. Flags and exit codes are under
 6. **S3 buckets** -- Empties the buckets, aborting incomplete multipart
    uploads, then deletes only the buckets this deployment created (see
    [Bucket ownership](#bucket-ownership)).
-7. **Observability** -- Leaves the shared kube-prometheus-stack release in
-   place, since other deployments may use it. Only a release an older
-   lakebench installed into this deployment's own namespace is uninstalled.
+7. **Observability** -- Deletes this deployment's kubelet-metrics
+   ClusterRoleBinding. The stack itself goes with the namespace (step 12).
 8. **Query engine** -- Removes Trino, Spark Thrift Server or DuckDB.
 9. **Catalog** -- Removes the HiveCluster or Polaris deployment (or a Unity
    Catalog deployment if the config selected `unity`; no recipe does).
@@ -304,18 +295,17 @@ Destroy is irreversible. Flags and exit codes are under
 12. **Remaining namespaced objects** -- Deletes by name what no step above
     removes:
     - the PostgreSQL ServiceAccount;
-    - with observability enabled, the Pushgateway Deployment, Service and
-      PVC, the Prometheus ConfigMap and the PodMonitors;
+    - with observability enabled, the Prometheus and Pushgateway objects
+      (Deployments, Services, PVCs, ServiceAccount, Role, ConfigMaps) and
+      the Grafana objects;
     - last, the dependency server: the `lb-deps` Deployment and Service, the
       `lb-deps-manifest` and `lb-deps-tools-*` ConfigMaps, then the
       `lb-deps-data` PVC;
     - when the namespace survives, the `lakebench.deployment/state-schema`
       and `lakebench.deployment/deps-set` namespace annotations.
 
-    The list is the Category-1 registry in
-    `src/lakebench/deploy/category1.py`. A unit test runs deploy and the
-    objects `run` creates against it and checks every template, so an
-    object destroy would leave fails the test.
+    The list is the registry in `src/lakebench/deploy/category1.py`; a unit
+    test checks every template against it.
 
     With `create_namespace: false`, two things stay on purpose:
     - The `lakebench-silver-state` ConfigMap. Its silver rebuild-epoch
@@ -341,8 +331,8 @@ Destroy is irreversible. Flags and exit codes are under
       redeploy re-created the name, destroy stops and leaves the new
       deployment alone.
 
-Destroy never deletes the scratch StorageClass. It is shared,
-cluster-scoped infrastructure that other deployments on the cluster use.
+Destroy never deletes the scratch StorageClass, which is shared across
+deployments.
 
 ### Bucket ownership
 
@@ -362,8 +352,6 @@ Destroy deletes only buckets lakebench created.
   `--force-legacy` and an owner marker (`.lakebench/owner.json`). A bucket
   listed in `lakebench.deployment/adopted-empty-buckets` (written by 1.6)
   without a marker is kept.
-- Emptied means a config pointed at a shared bucket gets that bucket
-  emptied.
 - A bucket that already held objects is left in place and reported, unless
   you pass `--force-legacy`.
 - Always kept: a bucket stamped by another cluster (`lakebench.cluster`),

@@ -1,14 +1,13 @@
 # Continuous scores
 
-Reference: the measurement window, continuous scores and formulas, offered load, capacity and steady-state runs, intake limits and throughput bounded by `max_files_per_trigger` (the [trickle](../glossary.md#trickle)).
+Reference: the measurement window, scores and formulas, offered load, capacity and steady-state runs, intake limits, and throughput bounded by `max_files_per_trigger` (the [trickle](../glossary.md#trickle)).
 
 Gate and answer checks: [verdict.md](verdict.md). Tuning: [continuous-tuning.md](continuous-tuning.md).
 
 ## Measurement window
 
-- Freshness, throughput and row counts are measured inside it. Opens at datagen's first data file in bronze, after every stream is running (after 300 s with a warning when no file arrives). With `--skip-generate`, when every stream is running.
-- Closes `run_duration` seconds later.
-- Kept in cluster time (host clock plus the API server offset), matching pod logs. Start, end and offset: `continuous.window`.
+- Freshness, throughput and row counts are measured inside it. It opens at datagen's first data file in bronze once every stream is running (after 300 s with a warning if no file arrives); with `--skip-generate`, once every stream is running. It closes `run_duration` seconds later.
+- Times are cluster time (host clock plus the API server offset), matching pod logs. Start, end and offset: `continuous.window`.
 - Rows a stream took before the window opened (it started while another retried its submission) are `pre_window_rows`, in no window score.
 - `ingest_ratio` and `corpus_drained` count every row up to the window's end, pre-window rows included.
 - `pipeline_throughput_gb_per_second` and `compute_efficiency_gb_per_core_hour` divide bucket sizes at the window's end by the window.
@@ -22,12 +21,12 @@ Gate and answer checks: [verdict.md](verdict.md). Tuning: [continuous-tuning.md]
 
 | Score | Formula | Meaning |
 |---|---|---|
-| `data_freshness_seconds` | max gold cycle freshness inside the window | Primary score; lower is better. See [Freshness](#freshness). Never a gate. Above half the run's duration it adds a warning. |
-| `sustained_throughput_rps` | bronze rows inside the window / `arrival_seconds` | Unique rows/s entering bronze while data arrived; gold's re-reads excluded. Higher is better. With `intake_limit: trickle_rate`, the offered load, not a capacity. |
-| `arrival_seconds` | whole window while corpus was left, else bronze's last write + one bronze cadence | Throughput is never averaged over idle time after the corpus ran out. |
+| `data_freshness_seconds` | max gold cycle freshness inside the window | Primary score; lower is better. See [Freshness](#freshness). Never a gate; above half the run's duration it adds a warning. |
+| `sustained_throughput_rps` | bronze rows inside the window / `arrival_seconds` | Unique rows/s entering bronze while data arrived; gold's re-reads excluded. Higher is better. With `intake_limit: trickle_rate` it is the offered load, not a capacity. |
+| `arrival_seconds` | whole window while corpus was left, else bronze's last write + one bronze cadence | Keeps throughput from averaging in idle time after the corpus ran out. |
 | `window_seconds` | window end - window start | Window length. |
 | `window_arrival_fraction` | `arrival_seconds / window_seconds` | Below 1: the corpus ran out inside the window. |
-| `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch latency. The much higher stage is the bottleneck. |
+| `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch latency; a much higher stage is the bottleneck. |
 | `ingest_ratio` | `bronze_rows / released_rows` | Share of released rows bronze took by the window's end; 1.0 = kept up. A little above 1 is estimate error. Falls back to `corpus_ingest_ratio` without a corpus file count. |
 | `corpus_ingest_ratio` | `bronze_rows / datagen_rows` | Share of everything datagen wrote. Own datagen: set by the backlog. `--skip-generate`: set by the trickle. Not a saturation signal. |
 | `pipeline_saturated` | `ingest_ratio < 0.95`, unless `intake_limit` is `trickle_rate` and silver kept up | Bronze fell behind and the pipeline did not keep pace. Null when not measurable. |
@@ -52,13 +51,13 @@ Gate and answer checks: [verdict.md](verdict.md). Tuning: [continuous-tuning.md]
 
 - Each gold refresh measures, after its write, the age of the newest row it included, from that row's file landing (bronze `ingest_ts`). It is the handoff lags (datagen to bronze, bronze to silver, silver to gold) plus gold's read and write time.
 - A configured `gold_refresh_interval` is not in it; it is labelled beside it (`experiment.limits.trigger_bound`). Readers see data up to one refresh interval older.
-- With `--skip-generate`, a file written before bronze started counts from when bronze took it. `continuous.freshness.from` says which.
+- With `--skip-generate`, a file written before bronze started counts from when bronze took it; `continuous.freshness.from` says which.
 - `continuous.freshness`: `p50_s`, `p95_s`, `max_s` over cycles that saw new data, `cycles`, `from`, `store_clock_offset_s`.
-- The balance gate, not freshness, decides whether gold kept up ([verdict.md](verdict.md#continuous-gate)).
+- Whether gold kept up is the balance check's question, not freshness's. The check is advisory: it warns and is recorded but does not fail the run ([verdict.md](verdict.md#continuous-gate)).
 
 ## Offered load and regimes
 
-Scale sets the offered load: AML 4 MB/s and Customer 360 10 MB/s of datagen files per scale unit, on every system, so runs at one scale are comparable. Sizing: [running-pipelines.md](../running-pipelines.md#datagen-and-offered-load).
+Scale sets the offered load, 4 MB/s (AML) or 10 MB/s (Customer 360) of datagen files per scale unit on every system, so runs at one scale are comparable. Sizing: [running-pipelines.md](../running-pipelines.md#datagen-and-offered-load).
 
 - Datagen writes flat out for the whole window; the run stops it with the `_corpus/stop` marker.
 - Each successive AML 24-month period has its own answer key.
@@ -83,18 +82,18 @@ When `ingest_ratio` is short, `intake_limit` says why:
 - `bronze_capacity`: bronze ran back to back; rows/s is its capacity.
 - `below_bronze_capacity`: bronze idle part of the window without keeping its trigger: a late start or stall (see the driver log).
 
-Saturated: add executors to the stage that fell behind. More load: raise the scale, or set `workload.datagen.cpu` and `parallelism` and size the streams for it. Larger corpus at the same load: lengthen the window.
+Saturated: add executors to the stage that fell behind. For more load, raise the scale, or set `workload.datagen.cpu` and `parallelism` and size the streams for it. For a larger corpus at the same load, lengthen the window.
 
 ## Trickle-bound throughput
 
-With `max_files_per_trigger` set (the trickle) and the pipeline keeping pace, or `intake_limit: trickle_rate`, throughput is the offered load, not capacity.
+With `max_files_per_trigger` set (the trickle) and the pipeline keeping pace, or with `intake_limit: trickle_rate`, throughput is the offered load, not capacity.
 
 - **Kept pace:** `ingest_ratio` (offered = `released_rows`) at least 0.99, and lag at window end (window seconds minus bronze's last write) at most one trigger interval. Lag is not tested when bronze took the whole corpus.
 - Shortfall within one cycle's batch and lag within one cycle, or an input not recorded: `kept_pace` null, the line says "the pipeline was not shown to keep pace", and throughput is still not shown as a capacity.
 - `experiment.limits.trickle_bound`: `{kind, value, source, kept_pace, ratio, lag_s, trigger_s, offered_rows, ingested_rows}`, plus `not_measured` (null `kept_pace`) and `lag_note` (lag not tested). Null when the trickle did not hold intake.
 - `limits.bound` line: `trickle: max_files_per_trigger N (auto), the pipeline kept pace`. Not in `limits.bound_kinds`, so not in the experiment identity.
 - Capped rows (`capped_by` names the trickle): `sustained_throughput_rps`, `pipeline_throughput_gb_per_second`, compute efficiency, `corpus_drain_seconds`.
-- The report labels those rows/s (headline card, Pipeline Stages summary, bronze stream and stage rows), GB/s and efficiency figures "BOUNDED BY: trickle (offered load, not capacity)". Tooltip: "trickle N files per trigger; this is the offered load, not infrastructure capacity".
+- The report labels those rows/s, GB/s and efficiency figures "BOUNDED BY: trickle (offered load, not capacity)", with the tooltip "trickle N files per trigger; this is the offered load, not infrastructure capacity".
 - Pre-1.7 records get this when read.
 
-AML continuous recall is scored over covered instances: planted cases whose every transaction and participant reached the scored [tick](../glossary.md#tick)'s tables. See [aml-scoring.md](../aml-scoring.md#continuous-recall-over-covered-instances).
+AML continuous recall is scored over covered instances: planted cases whose every transaction and participant reached the scored [tick](../glossary.md#tick)'s tables. See [AML spec 8.4](../benchmarks/aml/scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails).

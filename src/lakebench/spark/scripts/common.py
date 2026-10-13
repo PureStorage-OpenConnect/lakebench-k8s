@@ -726,6 +726,54 @@ def ensure_partition_transform(spark, fq_table, old, new):
     return True
 
 
+# The three Iceberg row-operation write modes. copy-on-write rewrites each
+# touched data file; merge-on-read writes position-delete files instead, so a
+# MERGE's write cost tracks the rows it changes rather than the table it
+# changes them in. Applied by ``apply_silver_write_mode`` to the update-heavy
+# silver tables only; the append-only tables keep the DDL default (copy-on-
+# write), which keeps their snapshot-summary row counts exact.
+_WRITE_MODE_PROPS = (
+    "write.merge.mode",
+    "write.update.mode",
+    "write.delete.mode",
+)
+# Valid Iceberg property values, keyed by the schema enum value.
+_WRITE_MODE_VALUES = {
+    "copy_on_write": "copy-on-write",
+    "merge_on_read": "merge-on-read",
+}
+
+
+def apply_silver_write_mode(spark, fq_table, mode):
+    """Set the row-operation write mode on a silver table, idempotently.
+
+    ``mode`` is a schema ``SilverWriteMode`` value (``copy_on_write`` or
+    ``merge_on_read``), read from the ``LB_FINANCIAL_SILVER_WRITE_MODE`` env.
+    Applies ``write.merge.mode``, ``write.update.mode`` and
+    ``write.delete.mode`` via ``ALTER TABLE SET TBLPROPERTIES``, which is a
+    no-op when the table already carries the value, so it is safe on every
+    stream restart and on a reused catalog. The DDL default is copy-on-write,
+    so an unset or unknown ``mode`` leaves the table as created.
+
+    merge-on-read makes a MERGE write position-delete files instead of
+    rewriting touched data files, bounding the per-batch write to the rows
+    the batch changes. The deletes are compacted by maintenance; see the
+    continuous maintenance path. Returns True when a property was set, False
+    when the mode was unknown or the ALTER failed (logged, never raised: a
+    failed property change must not stop a stream startup)."""
+    value = _WRITE_MODE_VALUES.get(str(mode))
+    if value is None:
+        return False
+    try:
+        props = ", ".join(f"'{k}' = '{value}'" for k in _WRITE_MODE_PROPS)
+        spark.sql(f"ALTER TABLE {fq_table} SET TBLPROPERTIES ({props})")
+    except Exception as e:  # noqa: BLE001
+        log(f"[startup] could not set write mode {value} on {fq_table}: {one_line(e)}")
+        return False
+    log(f"[startup] {fq_table}: write mode -> {value}")
+    return True
+
+
 def _path_size_gb_impl(spark, uri):
     """Total bytes under a Hadoop-FS path or glob, in GiB.
 
@@ -1008,6 +1056,7 @@ def log_job_metrics(job, *, input_size_gb, input_rows, output_rows, elapsed_seco
     log(f"input_rows: {int(input_rows)}")
     log(f"output_rows: {int(output_rows)}")
     log(f"elapsed_seconds: {elapsed_seconds:.1f}")
+    log_driver_output_bytes()
     for key, value in extra.items():
         if isinstance(value, bool):
             log(f"{key}: {'true' if value else 'false'}")
@@ -2464,6 +2513,27 @@ def ensure_namespaces(spark, catalog, tables):
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.{ns}")
 
 
+def create_namespace(spark, catalog, namespace, location):
+    """CREATE NAMESPACE IF NOT EXISTS with ``location``, or without one when
+    the catalog refuses it.
+
+    A Hive catalog takes the location and puts the layer's tables in its own
+    bucket. Polaris does not allow a namespace location by default ("Namespace
+    silver has a custom location, which is not enabled") and derives one from
+    the catalog's base location. The streaming scripts used to log that refusal
+    and go on, so the first table create then failed with NoSuchNamespace and
+    stopped the stream. Returns the location in effect, None when the namespace
+    was created without one. Raises when the namespace cannot be created at all.
+    """
+    try:
+        spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.{namespace} LOCATION '{location}'")
+        return location
+    except Exception as e:  # noqa: BLE001
+        log(f"[startup] {catalog}.{namespace} with location {location} refused: {one_line(e)}")
+    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.{namespace}")
+    return None
+
+
 _DDL_TABLE = re.compile(r"CREATE TABLE IF NOT EXISTS\s+[\w`]+\.([\w`]+)\.([\w`]+)", re.IGNORECASE)
 
 
@@ -3047,6 +3117,80 @@ def _jobs_evicted_since(jobs, mark_ms):
         comp is not None and comp < mark_ms and status not in ("RUNNING", "UNKNOWN")
         for _id, status, comp, _group in jobs
     )
+
+
+def driver_output_bytes(spark=None, *, wait_s=1.0):
+    """``(bytes, complete)``: the bytes the application's tasks wrote, summed
+    from the driver's status store, or None when it cannot be read.
+
+    Every task reports its output to the driver, so unlike the executors'
+    own counters (an executor can exit before its last increments are
+    scraped) this total is the whole job's. Read through the same status
+    store calls as ``rule_stage_profile`` (checked on Spark 4.0.1 and 4.1.1)
+    and only after the job's work: a few py4j calls and a short listener
+    drain, no work inside a timed stage.
+
+    ``complete`` is false when the figure may be low: the listener queue
+    had not drained or dropped events, or the store no longer holds every
+    job or stage the application ran (it keeps the newest few). A stage
+    attempt that was retried counts its last attempt only.
+    """
+    try:
+        if spark is None:
+            from pyspark.sql import SparkSession
+
+            spark = SparkSession.getActiveSession()
+        if spark is None:
+            return None
+        sc = spark.sparkContext
+        jsc = sc._jsc.sc()
+        complete = True
+        try:
+            jsc.listenerBus().waitUntilEmpty(int(wait_s * 1000))
+        except Exception:  # noqa: BLE001 -- TimeoutException, or no such call
+            complete = False
+        if _status_events_dropped(jsc) > 0:
+            complete = False
+        store = jsc.statusStore()
+        tracker = sc.statusTracker()
+        jobs = list(_store_jobs(store))
+        if len(jobs) < int(jsc.dagScheduler().numTotalJobs()):
+            complete = False  # the store dropped completed jobs
+        stage_ids = set()
+        for job_id, _status, _comp, _group in jobs:
+            info = tracker.getJobInfo(job_id)
+            if info is None:
+                complete = False
+                continue
+            stage_ids.update(int(x) for x in info.stageIds)
+        total = 0
+        for sid in sorted(stage_ids):
+            try:
+                sd = store.lastStageAttempt(sid)
+            except Exception as e:  # noqa: BLE001
+                if "NoSuchElementException" not in str(e):
+                    raise
+                complete = False  # dropped from the store
+                continue
+            if sd.status().toString() in ("SKIPPED", "PENDING"):
+                continue
+            total += int(sd.outputBytes())
+        return total, complete
+    except Exception as e:  # noqa: BLE001 -- a measurement, never the job's result
+        log(f"[output-bytes] unavailable reason={one_line(f'{type(e).__name__}: {e}')}")
+        return None
+
+
+def log_driver_output_bytes(spark=None):
+    """Emit ``output_bytes_written`` and ``output_bytes_complete`` inside the
+    ``=== JOB METRICS ===`` block, from ``driver_output_bytes``. Nothing is
+    emitted when the store cannot be read."""
+    got = driver_output_bytes(spark)
+    if got is None:
+        return
+    total, complete = got
+    log(f"output_bytes_written: {total}")
+    log(f"output_bytes_complete: {'true' if complete else 'false'}")
 
 
 def rule_profile_mark(spark):

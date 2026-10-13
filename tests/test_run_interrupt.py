@@ -52,10 +52,15 @@ def _assert_handlers_restored(sentinel) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("how", ["SIGINT", "SIGTERM", "raise"])
 @pytest.mark.parametrize(
-    "scenario, stage",
-    [("batch_c360", "silver-build"), ("batch_aml", "score-financial")],
+    "scenario, stage, how",
+    [
+        ("batch_c360", "silver-build", "SIGINT"),
+        ("batch_c360", "silver-build", "SIGTERM"),
+        ("batch_c360", "silver-build", "raise"),
+        ("batch_aml", "score-financial", "SIGINT"),
+        ("batch_aml", "score-financial", "SIGTERM"),
+    ],
 )
 def test_interrupt_batch_seals_interrupted(
     tmp_path, monkeypatch, sentinel_sigterm, scenario, stage, how

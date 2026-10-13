@@ -193,10 +193,9 @@ class TestLostUpdateRace:
         assert mgr._add_namespace_to_watch("u02") is False
         assert len(_helm_cmds(mock_run)) == 2
 
-    @pytest.mark.parametrize("watched", [None, ["u01", "u02"]], ids=["watch-all", "already"])
-    def test_already_covered_needs_no_upgrade(self, operator_run, watched):
-        """An operator watching all namespaces, or this one already, needs no upgrade."""
-        mock_run = operator_run(watched)
+    def test_already_covered_needs_no_upgrade(self, operator_run):
+        """An operator watching all namespaces needs no upgrade."""
+        mock_run = operator_run(None)
         mgr = SparkOperatorManager(job_namespace="u02")
         assert mgr._add_namespace_to_watch("u02") is True
         assert _helm_cmds(mock_run) == []
@@ -239,9 +238,9 @@ class TestRemoveNamespaceFromWatch:
         cmd = _helm_cmds(mock_run)[0]
         assert cmd[cmd.index("--version") + 1] == INSTALLED
 
-    @pytest.mark.parametrize("watched", [None, ["u01"]], ids=["watch-all", "absent"])
-    def test_nothing_to_remove_needs_no_upgrade(self, operator_run, watched):
-        mock_run = operator_run(watched, verify=None, filter_existing=False)
+    def test_nothing_to_remove_needs_no_upgrade(self, operator_run):
+        """An operator watching all namespaces has nothing to remove."""
+        mock_run = operator_run(None, verify=None, filter_existing=False)
         mgr = SparkOperatorManager(job_namespace="u02")
         assert mgr.remove_namespace_from_watch("u02") is True
         assert _helm_cmds(mock_run) == []

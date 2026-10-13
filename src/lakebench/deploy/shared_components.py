@@ -2,17 +2,18 @@
 
 Four components exist once per cluster and serve every deployment on it: the
 scratch StorageClass, the Kubeflow Spark Operator, the Stackable operators
-behind the Hive catalog, and the kube-prometheus-stack observability release.
-``deploy`` only verifies them; a cluster admin installs them with ``lakebench
-admin install --component <name>``, which runs here.
+behind the Hive catalog, and the ClusterRole that the per-deployment
+Prometheus binds to for kubelet cAdvisor reads.  ``deploy`` only verifies
+them; a cluster admin installs them with ``lakebench admin install --component
+<name>``, which runs here.
 
 The command is built so that an installed cluster is never changed by it:
 
 - Every requested component's status is read first, outside the lease. A
   status that cannot be read, a release in a state other than ``deployed``,
   a second copy of the component Lakebench can see (a Spark Operator in
-  another namespace, another kube-prometheus-stack release, Stackable
-  releases split across namespaces) or CRDs left with no operator refuses
+  another namespace, Stackable releases split across namespaces) or CRDs
+  left with no operator refuses
   the whole invocation before anything changes. An operator installed
   without Helm and without the labels these reads use is not seen.
 - The version to install is ``--version C=V`` when given, else the config's
@@ -22,8 +23,7 @@ The command is built so that an installed cluster is never changed by it:
   never upgrades the CRDs a chart ships in ``crds/``, and all three charts do,
   so v1.7 does not automate a version change.
 - When every component is already installed, nothing is mutated and the
-  lease is not taken (the shared Grafana dashboard ConfigMap is the one
-  thing re-applied, when it differs from this Lakebench's).
+  lease is not taken.
 - Otherwise one cluster lease is held for the whole invocation, each
   component's plan is recomputed inside it (another admin may have installed
   it meanwhile), and a fresh install uses ``helm install``, never ``upgrade
@@ -55,8 +55,6 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
-
-PROMETHEUS_REPO_URL = "https://prometheus-community.github.io/helm-charts"
 
 SCRATCH = "scratch-storage-class"
 SPARK_OPERATOR = "spark-operator"
@@ -784,200 +782,66 @@ class Stackable:
 
 
 class Observability:
-    """The shared kube-prometheus-stack release ``lakebench-observability``."""
+    """The kubelet-metrics ClusterRole shared by every deployment.
+
+    The Prometheus and Grafana of each deployment live in that deployment's
+    namespace (see ``deploy/observability.py``); the only cluster-scoped
+    piece is the ClusterRole ``lakebench-kubelet-metrics`` deploys bind
+    their service account to. ``admin install --component observability``
+    applies the role; ``deploy`` applies the binding, ``destroy`` deletes
+    it. The component is unversioned.
+    """
 
     name = OBSERVABILITY
-    versioned = True
+    versioned = False
 
     def config_version(self, s: Settings) -> str | None:
-        return s.observability.chart_version
+        return None
 
     def status(self, s: Settings) -> ComponentStatus:
-        from lakebench.deploy.observability import HELM_RELEASE_NAME, OBSERVABILITY_NAMESPACE
-
-        try:
-            every = _list_releases(s.kube_context, None)
-        except StatusUnknown as e:
-            return _unknown(str(e))
-        rels = [r for r in every if r.name == HELM_RELEASE_NAME]
-        # Another kube-prometheus-stack under another name carries the same
-        # cluster-scoped CRDs and webhooks; a second install would fight it.
-        others = sorted(
-            f"{r.name} in {r.namespace}"
-            for r in every
-            if r.name != HELM_RELEASE_NAME and r.chart.startswith("kube-prometheus-stack-")
+        from lakebench.deploy.observability import (
+            KUBELET_METRICS_CLUSTER_ROLE,
+            kubelet_cluster_role_exists,
         )
-        if not rels and others:
-            return ComponentStatus(
-                installed=True,
-                detail=f"another kube-prometheus-stack: {', '.join(others)}",
-                blocked=(
-                    EXIT_REFUSED,
-                    f"A kube-prometheus-stack release already exists ({', '.join(others)}); a "
-                    f"second one ({HELM_RELEASE_NAME}) would install the same cluster-wide CRDs "
-                    "and webhooks. Lakebench uses only its own release; set observability."
-                    "enabled: false, or remove the other one when nothing uses it.",
-                ),
-            )
-        if not rels:
-            return ComponentStatus(installed=False, detail="no observability release")
-        shared = [r for r in rels if r.namespace == OBSERVABILITY_NAMESPACE]
-        rel = shared[0] if shared else sorted(rels, key=lambda r: r.namespace)[0]
-        if rel.status != "deployed":
-            return ComponentStatus(
-                installed=True,
-                version=rel.chart_version,
-                detail=f"release {rel.status}",
-                blocked=_not_deployed(rel),
-            )
-        warnings: list[str] = (
-            [f"another kube-prometheus-stack release exists too: {', '.join(others)}"]
-            if others
-            else []
-        )
-        if rel.namespace != OBSERVABILITY_NAMESPACE:
-            warnings.append(
-                f"An observability release from an older lakebench exists in namespace "
-                f"{rel.namespace!r}; it scrapes only that namespace. admin install leaves it "
-                "alone; remove it when no deployment uses it, then re-run admin install."
-            )
-        from lakebench.deploy.observability import _wait_for_prometheus
 
-        # One readiness read, no wait: a deployed release whose Prometheus
-        # never came up is installed but not ready (exit 1, not a no-op).
-        problem = _wait_for_prometheus(rel.namespace, timeout_s=0, context=s.kube_context)
+        present = kubelet_cluster_role_exists(context=s.kube_context)
+        if present is False:
+            return ComponentStatus(
+                installed=False,
+                detail=f"ClusterRole {KUBELET_METRICS_CLUSTER_ROLE} is not present",
+            )
+        if present is None:
+            return _unknown(f"cannot read ClusterRole {KUBELET_METRICS_CLUSTER_ROLE}")
         return ComponentStatus(
             installed=True,
-            version=rel.chart_version,
-            ready=not problem,
-            detail=f"release in {rel.namespace}" + (f"; {problem}" if problem else ""),
-            warnings=tuple(warnings),
-            namespace=rel.namespace,
+            ready=True,
+            detail=f"ClusterRole {KUBELET_METRICS_CLUSTER_ROLE} present",
         )
 
     def prepare(self, s: Settings) -> str | None:
-        """Refresh the chart repo before the lease is taken; a problem, or None."""
-        for args, timeout in (
-            (["repo", "add", "prometheus-community", PROMETHEUS_REPO_URL], 30),
-            (["repo", "update", "prometheus-community"], 60),
-        ):
-            try:
-                r = pinned_helm(
-                    s.kube_context, args, capture_output=True, text=True, timeout=timeout
-                )
-            except (OSError, subprocess.SubprocessError) as e:
-                return f"helm {' '.join(args[:2])} failed: {e}"
-            if r.returncode != 0:
-                return f"helm {' '.join(args[:2])} failed: {(r.stderr or '').strip()[:300]}"
+        """Nothing to refresh (no Helm repo, no chart)."""
         return None
 
-    @staticmethod
-    def dashboard_manifests() -> list[dict[str, Any]]:
-        """The rendered shared Grafana dashboard ConfigMap(s)."""
-        import yaml
-
-        from lakebench.deploy.engine import TemplateRenderer
-        from lakebench.deploy.observability import DASHBOARD_TEMPLATE, OBSERVABILITY_NAMESPACE
-
-        text = TemplateRenderer().render(
-            DASHBOARD_TEMPLATE, {"observability_namespace": OBSERVABILITY_NAMESPACE}
+    def install(self, s: Settings, version: str | None) -> InstallResult:
+        """Apply the kubelet-metrics ClusterRole."""
+        from lakebench.deploy.observability import (
+            KUBELET_METRICS_CLUSTER_ROLE,
+            kubelet_cluster_role_manifests,
         )
-        return [d for d in yaml.safe_load_all(text) if d]
-
-    def dashboard_stale(self, s: Settings) -> bool:
-        """Whether the shared dashboard is missing or differs from this release's."""
-        from kubernetes import client as k8s_client
-        from kubernetes.client.exceptions import ApiException
-
-        from lakebench.deploy.observability import OBSERVABILITY_NAMESPACE
-
-        if not s.observability.dashboards_enabled:
-            return False
-        core = k8s_client.CoreV1Api()
-        for doc in self.dashboard_manifests():
-            name = (doc.get("metadata") or {}).get("name")
-            try:
-                live = core.read_namespaced_config_map(
-                    name, OBSERVABILITY_NAMESPACE, _request_timeout=LEASE_REQUEST_TIMEOUT
-                )
-            except ApiException as e:
-                if e.status == 404:
-                    return True
-                raise StatusUnknown(f"cannot read dashboard ConfigMap {name}: {e.status}") from e
-            except Exception as e:  # noqa: BLE001
-                raise StatusUnknown(f"cannot read dashboard ConfigMap {name}: {e}") from e
-            if (live.data or {}) != {k: str(v) for k, v in (doc.get("data") or {}).items()}:
-                return True
-        return False
-
-    def apply_dashboard(self, s: Settings) -> InstallResult:
-        from lakebench.deploy.observability import OBSERVABILITY_NAMESPACE
         from lakebench.k8s import get_k8s_client
 
-        if not s.observability.dashboards_enabled:
-            return InstallResult(True, "dashboards disabled")
-        k8s = get_k8s_client(context=s.kube_context or "", namespace=OBSERVABILITY_NAMESPACE)
-        for doc in self.dashboard_manifests():
-            try:
-                k8s.apply_manifest(doc, namespace=OBSERVABILITY_NAMESPACE)
-            except Exception as e:  # noqa: BLE001
-                return InstallResult(False, f"cannot apply the Grafana dashboard: {e}")
-        return InstallResult(True, "applied the shared Grafana dashboard")
-
-    def install(self, s: Settings, version: str | None) -> InstallResult:
-        from lakebench.deploy.observability import (
-            HELM_CHART,
-            HELM_RELEASE_NAME,
-            OBSERVABILITY_NAMESPACE,
-            build_helm_values,
-            is_openshift,
-            write_openshift_values_file,
-        )
-
-        ctx = s.kube_context
-        cmd = [
-            "install",
-            HELM_RELEASE_NAME,
-            HELM_CHART,
-            "--version",
-            str(version),
-            "--namespace",
-            OBSERVABILITY_NAMESPACE,
-            "--create-namespace",
-            # No --wait: Prometheus readiness is awaited after the lease.
-            "--timeout",
-            "5m",
-        ]
-        for key, val in build_helm_values(s.observability).items():
-            cmd.extend(["--set", f"{key}={val}"])
-        if is_openshift(ctx):
-            cmd.extend(["-f", write_openshift_values_file()])
+        k8s = get_k8s_client(context=s.kube_context or "", namespace="default")
         try:
-            result = pinned_helm(ctx, cmd, capture_output=True, text=True, timeout=360)
-        except (OSError, subprocess.SubprocessError) as e:
-            return InstallResult(False, f"helm install {HELM_RELEASE_NAME} failed: {e}")
-        if result.returncode != 0:
-            lines = (result.stderr or "").strip().splitlines()
-            errors = [ln for ln in lines if not ln.lstrip().startswith(("I0", "W0", '"Warning'))]
+            for doc in kubelet_cluster_role_manifests():
+                k8s.apply_manifest(doc)
+        except Exception as e:  # noqa: BLE001
             return InstallResult(
                 False,
-                f"helm install {HELM_RELEASE_NAME} failed: "
-                f"{chr(10).join(errors).strip()[:500] or 'unknown error'}",
+                f"cannot apply ClusterRole {KUBELET_METRICS_CLUSTER_ROLE}: {e}",
             )
-        dash = self.apply_dashboard(s)
-        if not dash.ok:
-            logger.warning(dash.message)
-
-        def _ready() -> str | None:
-            from lakebench.deploy.observability import _wait_for_prometheus
-
-            return _wait_for_prometheus(OBSERVABILITY_NAMESPACE, context=ctx)
-
         return InstallResult(
             True,
-            f"installed kube-prometheus-stack {version} as {HELM_RELEASE_NAME} in "
-            f"{OBSERVABILITY_NAMESPACE}" + ("" if dash.ok else f" ({dash.message})"),
-            after_lease=_ready,
+            f"applied ClusterRole {KUBELET_METRICS_CLUSTER_ROLE}",
         )
 
 
@@ -995,7 +859,6 @@ REGISTRY: dict[str, SharedComponent] = {
 
 NOOP = "noop"
 INSTALL = "install"
-DASHBOARD = "update-dashboard"
 REFUSE = "refuse"
 
 
@@ -1011,7 +874,7 @@ class Plan:
 
     @property
     def mutates(self) -> bool:
-        return self.action in (INSTALL, DASHBOARD)
+        return self.action == INSTALL
 
 
 def parse_versions(pairs: Iterable[str], requested: Iterable[str]) -> dict[str, str]:
@@ -1113,16 +976,6 @@ def plan_component(
             f"installed at {st.version}, the config (or Lakebench default) names {pin}; the "
             "installed version is kept and is what runs"
         )
-    if name == OBSERVABILITY:
-        try:
-            stale = REGISTRY[OBSERVABILITY].dashboard_stale(s)  # type: ignore[attr-defined]
-        except StatusUnknown as e:
-            warnings.append(f"{e}; dashboard not checked")
-            stale = False
-        from lakebench.deploy.observability import OBSERVABILITY_NAMESPACE
-
-        if stale and st.namespace == OBSERVABILITY_NAMESPACE:
-            return Plan(name, DASHBOARD, st, target=st.version, warnings=warnings)
     return Plan(name, NOOP, st, target=st.version, warnings=warnings)
 
 
@@ -1256,8 +1109,7 @@ def run_install(
         return Report(0, plans, final, False)
 
     for p in todo:
-        what = "update the shared dashboard of" if p.action == DASHBOARD else "install"
-        say("info", f"would {what} {p.component} {p.target or ''}".rstrip())
+        say("info", f"would install {p.component} {p.target or ''}".rstrip())
     if dry_run:
         return Report(0, plans, {p.component: p.status for p in plans}, False)
     prompt = (
@@ -1292,11 +1144,8 @@ def run_install(
                     say("info", f"{p.component}: installed meanwhile; nothing to do")
                     continue
                 comp = REGISTRY[p.component]
-                if fresh.action == DASHBOARD:
-                    result = REGISTRY[OBSERVABILITY].apply_dashboard(s)  # type: ignore[attr-defined]
-                else:
-                    say("info", f"installing {p.component} {fresh.target or ''}".rstrip())
-                    result = comp.install(s, fresh.target)
+                say("info", f"installing {p.component} {fresh.target or ''}".rstrip())
+                result = comp.install(s, fresh.target)
                 if result.ok:
                     say("ok", f"{p.component}: {result.message}")
                     if result.after_lease is not None:

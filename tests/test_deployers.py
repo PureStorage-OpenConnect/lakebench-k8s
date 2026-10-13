@@ -1,10 +1,11 @@
-"""Tests for deployer modules (P2).
+"""Tests for deployer modules.
 
 Covers:
-- HiveDeployer: skip, and fail naming admin install when Stackable is missing
-- DuckDBDeployer: skip guard, dry-run, template rendering, _wait_for_ready
-- ObservabilityDeployer: skip, dry-run, helm values
-- DatagenDeployer: _parse_size_to_bytes, dry-run
+- HiveDeployer: a missing Stackable fails the step and installs nothing
+- DuckDBDeployer: _wait_for_ready accepts only a pod on this deploy's set
+- ObservabilityDeployer: destroy deletes only this deployment's binding
+- DatagenDeployer: _parse_size_to_bytes, and the schema and bronze prefix
+  reaching the datagen context
 """
 
 from __future__ import annotations
@@ -122,18 +123,51 @@ class TestDuckDBDeployerWaitForReady:
 class TestObservabilityDeployerSkip:
     """Tests for ObservabilityDeployer skip/deploy/destroy logic."""
 
-    def test_destroy_never_removes_the_shared_stack(self, recording_k8s):
+    def test_destroy_removes_only_the_per_deployment_binding(self, recording_k8s):
+        """Destroy touches no namespaced objects (those go with the namespace);
+        it only deletes the ClusterRoleBinding this deployment created."""
         from lakebench.deploy.engine import DeploymentStatus
-        from lakebench.deploy.observability import ObservabilityDeployer
+        from lakebench.deploy.observability import (
+            KUBELET_METRICS_CLUSTER_ROLE,
+            ObservabilityDeployer,
+        )
 
         cfg = make_config(observability={"enabled": True})
         recording_k8s.for_config(cfg)
+        binding_name = f"{KUBELET_METRICS_CLUSTER_ROLE}-{cfg.get_namespace()}"
+        # Seed the binding so delete returns success (not 404).
+        recording_k8s.add(
+            "clusterrolebindings",
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRoleBinding",
+                "metadata": {"name": binding_name},
+                "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "ClusterRole",
+                    "name": KUBELET_METRICS_CLUSTER_ROLE,
+                },
+                "subjects": [
+                    {
+                        "kind": "ServiceAccount",
+                        "name": "lakebench-prometheus",
+                        "namespace": cfg.get_namespace(),
+                    }
+                ],
+            },
+        )
+
         engine = MagicMock()
         engine.config = cfg
         engine.dry_run = False
+
         result = ObservabilityDeployer(engine).destroy()
-        assert result.status == DeploymentStatus.SKIPPED
-        assert not recording_k8s.mutations()
+        assert result.status == DeploymentStatus.SUCCESS
+        # The binding is gone; no namespaced objects were touched.
+        deletes = [c for c in recording_k8s.mutations() if c.verb == "delete"]
+        assert len(deletes) == 1
+        assert deletes[0].kind == "clusterrolebindings"
+        assert deletes[0].name == binding_name
 
 
 # ===========================================================================

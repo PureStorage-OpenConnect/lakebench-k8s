@@ -429,27 +429,6 @@ def stop_delete(custom: Any, batch: Any, namespace: str, out: StopOutcome) -> No
             out.failures.append(f"deleting {ref}: cluster unreachable: {e}")
 
 
-def pre_stop(cfg: Any, k8s: Any) -> None:
-    """Runs before `stop` deletes anything. For a financial continuous
-    deployment whose gold-refresh is running, asks it to finish its tick
-    (``cli._aml_post.stop_drain``, 300 s), so ``gold.alerts`` is not left
-    half rewritten. Raises when the drain is not confirmed; the caller turns
-    that into one warning and still deletes.
-    """
-    from lakebench.cli._aml_post import stop_drain
-
-    try:
-        result = stop_drain(cfg, k8s)
-    except KeyboardInterrupt:
-        # A Ctrl-C ends the wait, not the stop: the jobs are still deleted.
-        raise RuntimeError("drain interrupted; gold.alerts may hold a partial tick") from None
-    if result is not None and result.state != "drained":
-        raise RuntimeError(
-            f"gold drain not confirmed ({result.state}: {result.reason}); "
-            "gold.alerts may hold a partial tick"
-        )
-
-
 # -- status --------------------------------------------------------------------
 
 # The `logs` component for each object `status` reads, for its drift hint.

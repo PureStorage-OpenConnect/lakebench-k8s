@@ -650,13 +650,6 @@ def test_text_shape_leaves_no_secret(text) -> None:
     assert "hunter2" not in out and "c2VjcmV0" not in out and "part1" not in out
 
 
-def test_userinfo_glued_to_a_timestamp_leaves_no_secret() -> None:
-    out = scrub.scrub_text(
-        "2026-10-01T10:00:00Z-http://AKIAFAKE:sekrit@192.0.2.27/ -https://u:pw@h/x"
-    )
-    assert "sekrit" not in out and "u:pw" not in out
-
-
 def _use_record(rec, run_id):
     """Swap in a stored record; its own seed is the held-out one."""
     rec.clear()

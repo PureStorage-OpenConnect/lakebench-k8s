@@ -1695,6 +1695,12 @@ class K8sRecorder:
             return OWN
         if kind == "secretclasses" and name in own_secretclass_names(own_ns):
             return OWN
+        if kind == "clusterrolebindings" and name == f"lakebench-kubelet-metrics-{own_ns}":
+            # Lakebench's per-deployment ClusterRoleBinding: cluster-scoped
+            # kind, but its name uniquely contains the namespace so two
+            # deployments never share one; deploy creates and destroy
+            # deletes it alongside its namespace.
+            return OWN
         if cluster_call or namespace != own_ns or kind in CLUSTER_SCOPED_KINDS:
             return SHARED
         if kind in NAMESPACED_KINDS:

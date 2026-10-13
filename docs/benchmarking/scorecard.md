@@ -11,10 +11,10 @@ Reference: batch scores and formulas, stage timing, per-stage and resource metri
 | `time_to_value_datagen_excluded_seconds` | sum over cycles of each `cycles[].datagen_start`..`datagen_end` overlap with the span | Multi-cycle Customer 360 only. Datagen seconds left out of time to value. 0 with `--skip-generate`. Absent when a cycle's datagen times are missing. Diagnostic. |
 | `total_elapsed_seconds` | `end_time - start_time` | Whole run, maintenance and benchmark included. |
 | `total_data_processed_gb` | `sum(stage.input_size_gb)` | GiB the jobs reported reading: bronze the raw files, silver the bronze input, gold silver's current snapshot (from table metadata). Never a bucket listing. Unreported stages and the query stage add nothing. |
-| `pipeline_throughput_gb_per_second` | `total_data_processed_gb / time_to_value_seconds` | Higher is better; scales with executors and cluster capacity. |
-| `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GiB per core-hour of requested executor compute for bronze, silver and gold. Drivers, datagen, query engine and maintenance not counted. Higher is better. Request 100 cores and use 20, and it drops. |
+| `pipeline_throughput_gb_per_second` | `total_data_processed_gb / time_to_value_seconds` | Higher is better. |
+| `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GiB per core-hour of requested executor compute for bronze, silver and gold. Drivers, datagen, query engine and maintenance not counted. Higher is better; requested cores count, used or not. |
 | `scale_ratio` | `bronze_input_gb / approx_bronze_gb` | Data completeness, from bronze input only. Below 0.95: datagen or ingestion was incomplete; not comparable with other runs at that scale. |
-| `composite_qph` | QpH from the [query benchmark](query-benchmark.md) | Engine performance against gold. Depends on engine, workers and memory, not on pipeline throughput. |
+| `composite_qph` | QpH from the [query benchmark](query-benchmark.md) | Engine performance against gold; depends on engine, workers and memory, not on pipeline throughput. |
 | `cycle_progression` | per-cycle elapsed, QpH, table health | Multi-cycle only (`cycles > 1`). Pipeline time and Iceberg metadata growth per cycle. |
 
 Typical time to value: 200-600 s at scale 10 (~100 GB), 1200-3600 s at scale 100 (~1 TB).
@@ -49,15 +49,14 @@ By default `lakebench run` measures bronze-verify, silver-build, gold-finalize a
 
 Datagen cost uses requested CPU, not utilization: CPU-seconds = pod CPU request x wall time.
 
-- Example (illustrative, not a measurement): 8 pods at 8 CPU running 200 s = 12,800 CPU-seconds, about 3.6 CPU-hours. Writing 100 GB, that is 36 CPU-hr/TB. With 12 Spark core-hours the pipeline total is 15.6 core-hours.
-- `$/TB` = `total_core_hours` x $/core-hour / TB, covering the whole pipeline.
-- `total_core_hours` includes datagen.
+- Illustration: 8 pods at 8 CPU running 200 s = 12,800 CPU-seconds, about 3.6 CPU-hours; for 100 GB that is 36 CPU-hr/TB. With 12 Spark core-hours the pipeline total is 15.6.
+- `total_core_hours` includes datagen. `$/TB` = `total_core_hours` x $/core-hour / TB, for the whole pipeline.
 
 `lakebench generate` writes a sidecar with the fleet record; a generating `run` writes its own. A replaced corpus's sidecar is removed first, so it is never attributed to a later run.
 
 ## Resource metrics
 
-Resource metrics are **requested** values (what you asked Kubernetes for and pay for in a cloud), not utilization.
+Resource metrics are **requested** values, not utilization.
 
 - `executor_count`, `executor_cores` (per executor), `executor_memory_gb` (per executor, overhead excluded).
 - Source: the job profiles in `spark/job.py` and the scale-derived executor count. Batch values are fixed per scale unless overridden.

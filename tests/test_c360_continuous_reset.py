@@ -10,6 +10,7 @@ same ownership gate AML uses.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -86,9 +87,11 @@ def test_c360_state_reset_clears_checkpoints_and_c360_landing_zone(monkeypatch, 
     if clear_raw:
         # Only the clearing marker the reset writes first is left of the raw zone.
         assert not survivors & raw
+        marker = ("c-b", "customer/interactions/_corpus/series.json")
         assert {k for k in survivors - keep if k[1].startswith("customer/interactions/")} == {
-            ("c-b", "customer/interactions/_corpus/series.json")
+            marker
         }
+        assert json.loads(store[marker])["clearing"] is True
     else:
         assert raw <= survivors
 

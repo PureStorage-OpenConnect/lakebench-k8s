@@ -11,16 +11,11 @@ the run id::
     Cycle N: completed run=<run>
 
 (the tt-record line is one line, logged only when the transactions snapshot
-is an id; an unknown value reads ``null``)
-
-and ``main`` logs ``Drain complete: ... last completed cycle N run=<run>``
-once the drain marker stopped the loop, after the last completed tick's
-pinned, tt-record, rule-status and committed lines again (a log rotated
-during that tick keeps them). An id is an Iceberg snapshot id, or
-``none`` (the table had no snapshot) or ``unknown`` (the lookup failed, or
-for ``versions`` the pinned read was not used). Cycle numbers restart with
-each driver start, so records are kept per driver start (the banner line
-opens a new one) and only the drain's own driver start is scored.
+is an id; an unknown value reads ``null``). An id is an Iceberg snapshot id,
+or ``none`` (the table had no snapshot) or ``unknown`` (the lookup failed,
+or for ``versions`` the pinned read was not used). Cycle numbers restart
+with each driver start, so records are kept per driver start (the banner
+line opens a new one) and only the latest driver start is scored.
 
 Pure parsing: no cluster or Spark access.
 """
@@ -48,9 +43,6 @@ _TT_RECORD = re.compile(
 _COMMITTED = re.compile(r"Cycle (\d+): committed alerts=(\S+) status=(\S+) run=(\S+)\s*$")
 _RULE_STATUS = re.compile(r"Cycle (\d+): rule-status ((?:\S+=\S+ )*)run=(\S+)\s*$")
 _COMPLETED = re.compile(r"Cycle (\d+): completed run=(\S+)\s*$")
-_DRAIN = re.compile(
-    r"Drain complete: (?:stop marker present at start; )?last completed cycle (\d+) run=(\S+)\s*$"
-)
 
 #: The pins a covered score needs, as (tick key, table named in a reason).
 SCORED_PINS = (
@@ -83,35 +75,23 @@ def is_pin(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def drain_cycle(logs: str | None, run_id: str) -> int | None:
-    """The cycle number of this run's ``Drain complete`` line, the last one in
-    the log; None when the log has none for *run_id*."""
-    found = None
-    for line in (logs or "").splitlines():
-        m = _DRAIN.search(line)
-        if m and m.group(2) == run_id:
-            found = int(m.group(1))
-    return found
-
-
 def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
-    """Every tick of *run_id* in the log, and the drain.
+    """Every tick of *run_id* in the log.
 
-    Returns ``{"ticks": [...], "drain_cycle": int | None, "drain_start":
-    int | None}``. Each tick is ``{start, cycle, pinned_txns,
-    pinned_entities, pinned_accounts, pinned_versions, pinned_at,
-    committed_alerts, committed_status, completed, completed_at, tt}``: ``start`` numbers
-    the driver start (0 for the first in the log), a field never logged is
+    Returns ``{"ticks": [...], "last_start": int | None}``. Each tick is
+    ``{start, cycle, pinned_txns, pinned_entities, pinned_accounts,
+    pinned_versions, pinned_at, committed_alerts, committed_status,
+    completed, completed_at, tt, rule_status}``: ``start`` numbers the
+    driver start (0 for the first in the log), a field never logged is
     None. ``tt`` is the tick's time-travel record (``{table, snapshot,
     committed_at, total_records, pos_deletes, eq_deletes, count_source}``)
-    or None. ``drain_start`` is the driver start the drain line belongs to.
-    Lines of another run id are ignored.
+    or None. ``last_start`` is the latest driver start seen (the one a
+    continuous run is scored against). Lines of another run id are
+    ignored.
     """
     start = -1
     ticks: dict[tuple[int, int], dict[str, Any]] = {}
     order: list[tuple[int, int]] = []
-    drain_cycle_n = None
-    drain_start = None
 
     def tick(cycle: int) -> dict[str, Any]:
         key = (max(start, 0), cycle)
@@ -177,18 +157,12 @@ def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
             ts = _LOG_TS.search(line)
             t = tick(int(m.group(1)))
             t["completed"] = True
-            # The first completed line: the drain repeats it later.
             if t["completed_at"] is None:
                 t["completed_at"] = ts.group(1) + "Z" if ts else None
             continue
-        m = _DRAIN.search(line)
-        if m and m.group(2) == run_id:
-            drain_cycle_n = int(m.group(1))
-            drain_start = max(start, 0)
     return {
         "ticks": [ticks[k] for k in order],
-        "drain_cycle": drain_cycle_n,
-        "drain_start": drain_start,
+        "last_start": None if start < 0 else start,
     }
 
 
@@ -203,25 +177,19 @@ def ticks_unpinned(ticks: list[dict[str, Any]]) -> int:
 def scored_tick(parsed: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     """The tick a covered score reads, or ``(None, reason)``.
 
-    Only the drain's last completed cycle, in the drain's driver start, is
-    scored, and only when that same cycle is the last one there to have
-    committed and completed, and every pin it logged is an int. An earlier
-    tick is never scored instead: gold.alerts holds the last tick's rewrite.
+    The highest cycle, in the latest driver start, whose record is both
+    completed and committed with every pin an int. gold.alerts holds that
+    tick's rewrite; snapshots the tick recorded (VERSION AS OF) carry the
+    rest, so an earlier tick is never scored instead.
     """
-    n = parsed.get("drain_cycle")
-    if n is None:
-        return None, "no drain line in the gold-refresh log"
-    if n == 0:
-        return None, "the drain stopped the driver before its first tick completed"
-    start = parsed.get("drain_start")
+    start = parsed.get("last_start")
+    if start is None:
+        return None, "no tick records in the gold-refresh log"
     mine = [t for t in parsed.get("ticks") or [] if t["start"] == start]
-    done = [t["cycle"] for t in mine if t.get("completed")]
-    committed = [t["cycle"] for t in mine if t.get("committed_alerts") is not None]
-    if not done or max(done) != n:
-        return None, f"no completed tick record for the drain's last cycle {n}"
-    if not committed or max(committed) != n:
-        return None, f"no committed tick record for the drain's last cycle {n}"
-    t = next(t for t in mine if t["cycle"] == n)
+    scorable = [t for t in mine if t.get("completed") and t.get("committed_alerts") is not None]
+    if not scorable:
+        return None, "no completed and committed tick record in the gold-refresh log"
+    t = max(scorable, key=lambda r: r["cycle"])
     for key, table in SCORED_PINS:
         if not is_pin(t.get(key)):
             return None, f"{table} snapshot unknown at the last completed tick"

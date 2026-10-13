@@ -4,12 +4,11 @@ Reference: configure the PostgreSQL metadata backend: config keys, credentials, 
 
 ## What it does
 
-PostgreSQL is the metadata backend for every recipe. Hive Metastore, Apache Polaris and Unity Catalog store their catalog metadata (table definitions, partition info, Iceberg snapshots) in it.
+PostgreSQL is the metadata backend for every recipe. Hive Metastore and Apache Polaris store their catalog metadata (table definitions, partition info, Iceberg snapshots) in it.
 
 - One instance per deployment, as a StatefulSet with a PersistentVolumeClaim, so metadata survives pod restarts.
-- Lakebench renders a ServiceAccount, a StatefulSet and a headless Service from Jinja2 templates.
 - Service DNS: `lakebench-postgres.<namespace>.svc.cluster.local:5432`.
-- Databases: `hive` (user `hive`); Polaris and Unity use their own `polaris` and `unity` databases on the same instance.
+- Databases: `hive` (user `hive`); Polaris uses its own `polaris` database on the same instance.
 
 ## Version and image
 
@@ -17,17 +16,15 @@ PostgreSQL is the metadata backend for every recipe. Hive Metastore, Apache Pola
 
 ## Configuration keys
 
-Defaults from `PostgresConfig` in `config/schema.py`.
-
 | Key | Default | Effect |
 |---|---|---|
 | `images.postgres` | [matrix](compatibility-matrix.md#component-version-matrix) | Container image |
-| `platform.compute.postgres.storage` | `10Gi` | PVC size for the data directory. Catalog metadata is compact; 10Gi fits most deployments. |
+| `platform.compute.postgres.storage` | `10Gi` | PVC size for the data directory. Catalog metadata is compact. |
 | `platform.compute.postgres.storage_class` | `""` | PVC StorageClass. Empty uses the cluster default. |
 
 ### Choosing a StorageClass
 
-Recommended: a replicated class such as `px-csi-db` (Portworx `repl=3`). Never use a scratch class -- losing this volume loses every table definition and partition record.
+Recommended: a replicated class such as `px-csi-db` (Portworx `repl=3`). Do not use a scratch class: losing this volume loses every table definition and partition record.
 
 ## Credentials
 
@@ -40,7 +37,6 @@ Each deployment gets its own passwords, generated once and stored in Secrets in 
 
 - User `hive` and database `hive` are fixed.
 - Each deploy re-syncs the `hive` and `polaris` role passwords from the Secrets.
-- Hive, Polaris and Unity get the JDBC connection string through template rendering.
 
 ## Deploy order
 
@@ -49,7 +45,7 @@ Each deployment gets its own passwords, generated once and stored in Secrets in 
 1. Namespace, Secrets, silver-state ConfigMap, S3 buckets
 2. Scratch StorageClass check (verify only; a cluster admin installs it with `lakebench admin install --component scratch-storage-class`)
 3. **PostgreSQL** (StatefulSet and Service)
-4. Hive Metastore or Polaris, then Spark RBAC, then Unity Catalog when that is the catalog
+4. Hive Metastore or Polaris, then Spark RBAC
 5. Spark Operator check and watch-list entry
 6. Dependency server (`lb-deps`)
 7. Query engine (Trino, Spark Thrift Server or DuckDB)

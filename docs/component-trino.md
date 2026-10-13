@@ -1,13 +1,13 @@
 # Trino
 
-Reference: configure and size the Trino query engine: config keys, catalog wiring, memory limits, timeouts and deploy behaviour.
+Reference: Trino query engine: config keys, catalog wiring, memory limits, timeouts and deploy behaviour.
 
 ## What it does
 
-Trino is the default query engine. It runs the benchmark query suite against Iceberg or Delta tables and is the ad-hoc SQL interface for every medallion layer.
+Trino is the default query engine. It runs the benchmark query suite against Iceberg or Delta tables and serves ad-hoc SQL on every medallion layer.
 
 - `architecture.query_engine.type: trino` (the default).
-- Lakebench connects Trino to the recipe's catalog, Hive Metastore or Polaris, so every table the pipeline registers is queryable at once. Delta runs with Hive only.
+- Trino is wired to the recipe's catalog (Hive Metastore or Polaris), so every registered table is queryable. Delta runs with Hive only.
 - Recipes: `hive-iceberg-spark-trino` (the default), `polaris-iceberg-spark-trino`, `hive-delta-spark-trino` ([Recipes](recipes.md)).
 
 ## Version and image
@@ -18,8 +18,6 @@ Trino is the default query engine. It runs the benchmark query suite against Ice
 - **Native S3:** Lakebench generates `fs.native-s3.enabled=true` with `s3.*` properties. Trino 483 removed the legacy `hive.s3.*` properties. On an older image, check that its S3 syntax matches.
 
 ## Configuration keys
-
-Defaults from `TrinoConfig`, `TrinoCoordinatorConfig` and `TrinoWorkerConfig` in `config/schema.py`.
 
 | Key | Default | Effect |
 |---|---|---|
@@ -78,8 +76,8 @@ When `trino.worker.replicas`, `cpu` and `memory` are at their defaults, Lakebenc
 | 51-500 | max(4, scale / 25) | 8 | 48Gi | 4 | 16Gi |
 | 501+ | max(10, scale / 50) | 8 | 64Gi | 4 | 16Gi |
 
-- **Scale out before scaling up.** More workers spread query fragments and raise `query.max-memory` with them.
-- **The coordinator processes no data.** 2 CPU / 8Gi suits most workloads.
+- Scale out before scaling up: more workers also raise `query.max-memory`.
+- The coordinator processes no data; 2 CPU / 8Gi suits most workloads.
 
 ### Query memory limits
 

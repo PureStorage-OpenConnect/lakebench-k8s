@@ -1,6 +1,6 @@
-"""``deploy`` refuses a config the cluster cannot hold before it creates
-anything, and ``run --skip-deploy`` still runs the read-only prerequisite
-checks."""
+"""``deploy`` warns, and carries on, when the capacity model says the cluster
+cannot hold the config (``run`` enforces capacity), and ``run --skip-deploy``
+still runs the read-only prerequisite checks."""
 
 from __future__ import annotations
 
@@ -67,29 +67,21 @@ def _seed(recording_k8s, cfg_file, nodes):
     return cfg
 
 
-def test_deploy_refuses_a_cluster_too_small_and_creates_nothing(recording_k8s, cfg_file):
+def test_deploy_warns_on_a_cluster_too_small_and_carries_on(recording_k8s, cfg_file):
     # Two 16-core / 64 GiB workers: the scale-1 peak (36 cores, 525 GB) does not fit.
-    _seed(
+    cfg = _seed(
         recording_k8s,
         cfg_file,
         [_node("w1", "16", "64Gi"), _node("w2", "16", "64Gi"), _node("m", "8", "32Gi", True)],
     )
-    res = CliRunner().invoke(app, ["deploy", str(cfg_file), "-y"])
-    assert res.exit_code == ExitCode.PREREQUISITE, res.output
-    assert "cluster-capacity" in res.output and "Nothing was created" in res.output
-    # The check read the nodes, and nothing was created, patched or deleted.
-    recording_k8s.assert_recorded(kind="nodes", verb="list")
-    assert recording_k8s.mutations() == []
-    assert not (cfg_file.parent / ".lakebench").exists()
-
-
-def test_deploy_capacity_check_sizes_a_copy(recording_k8s, cfg_file):
     from lakebench.cli._prerequisites import deploy_capacity_check
 
-    cfg = _seed(recording_k8s, cfg_file, [_node(f"w{i}", "40", "402Gi") for i in range(8)])
-    before = cfg.model_dump()
-    deploy_capacity_check(cfg)
-    assert cfg.model_dump() == before
+    result = deploy_capacity_check(cfg)
+    assert result.passed, result.message
+    assert result.message.startswith("WARNING: estimated capacity shortfall")
+    assert "CPU: need" in result.message
+    recording_k8s.assert_recorded(kind="nodes", verb="list")
+    assert recording_k8s.mutations() == []
 
 
 def test_unreachable_cluster_does_not_block_deploy_preflight(cfg_file):
@@ -219,4 +211,4 @@ def test_deploy_sizes_against_the_worker_allocatable(cfg_file):
     nodes = [_worker(f"w{i}", "40", "402Gi") for i in range(8)]
     busy = [_busy_pod(f"w{i}", "35", "338Gi") for i in range(8)]
     result = _deploy_check(cfg_file, _client(nodes, pods=busy))
-    assert not result.passed, result.message
+    assert result.passed and result.message.startswith("WARNING: estimated"), result.message

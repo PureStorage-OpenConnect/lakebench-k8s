@@ -188,3 +188,22 @@ class TestBenchmarkRunnerQueryFiltering:
         expected = [q for q in BENCHMARK_QUERIES if q.query_class == query_class]
         assert len(result.queries) == len(expected)
         assert all(q.query.query_class == query_class for q in result.queries)
+
+
+# ---------------------------------------------------------------------------
+# 5. Result serialization
+# ---------------------------------------------------------------------------
+
+
+def test_duckdb_result_serialization(mock_executor):
+    mock_executor.engine_name.return_value = "duckdb"
+    with patch("lakebench.benchmark.executor.get_executor", return_value=mock_executor):
+        runner = BenchmarkRunner(make_config(recipe="hive-iceberg-spark-duckdb"))
+    d = runner.run_power().to_dict()
+
+    assert d["mode"] == "power"
+    # The real engine, not "trino_query" on every engine.
+    assert d["benchmark_type"] == "duckdb_query"
+    assert len(d["queries"]) == 8
+    assert isinstance(d["qph"], float)
+    assert isinstance(d["category_qph"], dict)

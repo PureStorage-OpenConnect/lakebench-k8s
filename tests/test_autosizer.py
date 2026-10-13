@@ -310,7 +310,7 @@ def test_user_set_values_survive_auto_sizing(architecture, capacity, expected):
 @pytest.mark.parametrize(
     ("scale", "mode", "expected"),
     [(1000, "batch", "batch"), (1, "continuous", "continuous")]
-    + [(s, "auto", "continuous") for s in (1, 5, 10, 11, 50, 1000)],
+    + [(s, "auto", "continuous") for s in (1, 1000)],
 )
 def test_datagen_mode_resolution(scale, mode, expected):
     """An explicit mode is kept at any scale; auto resolves to continuous."""

@@ -1,13 +1,17 @@
-"""``lakebench init``: write a first-day config.
+"""``lakebench init``: write a config with the keys a deployment tunes in it.
 
-The file is built from a small dict and written by a short emitter that
-keeps comments, so it holds only what a first run needs: a unique name, the
-recipe written once, the workload and scale, the S3 endpoint and the two
-credentials as ``${VAR}`` references. The components the recipe sets are
-written commented. No plaintext secret is ever written, and no Polaris
-client secret is written: deploy generates one for a new Polaris and keeps
-it in the deployment's namespace. Before anything is written the text is
-validated in-process, so ``init`` never leaves a file that does not load.
+The live lines are what a first run needs: a unique name, the recipe written
+once, the workload and scale, the S3 endpoint and the two credentials as
+``${VAR}`` references. The keys a deployment usually tunes follow in schema
+order, commented at its default with a one-line description; every other key
+keeps its default and is described in docs/configuration.md. A commented line is the
+YAML line with a leading ``# ``: remove that prefix, and the prefix of the
+block lines above the key, to set it. The components the recipe sets are in
+the same tree with the recipe's own values. No plaintext secret is ever
+written, and no Polaris client secret is written: deploy generates one for a
+new Polaris and keeps it in the deployment's namespace. Before anything is
+written the text is validated in-process, so ``init`` never leaves a file
+that does not load.
 
 The guided wizard (``init_wizard.py``) is removed. ``--interactive``, ``-i``
 and ``--advanced`` print one line saying so and write the default config;
@@ -17,8 +21,12 @@ values.
 
 from __future__ import annotations
 
+import enum
+import json
 import re
 import secrets
+import types
+import typing
 import warnings
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
@@ -167,6 +175,313 @@ def first_day_dict(
     }
 
 
+#: Schema paths shown under the key a config writes: the workload block is
+#: written at the top level, and ``pipeline.continuous`` is the canonical
+#: spelling of the ``sustained`` field.
+_DISPLAY_RENAMES = (
+    ("architecture.workload.", "workload."),
+    ("architecture.pipeline.sustained.", "architecture.pipeline.continuous."),
+)
+#: The keys a deployment usually tunes. The file lists these, the keys it
+#: writes live and the recipe's own components; every other key keeps its
+#: default and is described in docs/configuration.md. A test checks that each
+#: path exists in the schema, so a renamed key cannot leave a stale entry.
+_TUNED = frozenset(
+    {
+        "images.datagen",
+        "images.spark",
+        "images.polaris",
+        "images.polaris_admin_tool",
+        "images.trino",
+        "images.pull_policy",
+        "platform.kubernetes.context",
+        "platform.kubernetes.namespace",
+        "platform.storage.s3.endpoint",
+        "platform.storage.s3.region",
+        "platform.storage.s3.path_style",
+        "platform.storage.s3.access_key",
+        "platform.storage.s3.secret_key",
+        "platform.storage.s3.ca_cert",
+        "platform.storage.s3.verify_ssl",
+        "platform.storage.s3.buckets.bronze",
+        "platform.storage.s3.buckets.silver",
+        "platform.storage.s3.buckets.gold",
+        "platform.storage.scratch.enabled",
+        "platform.storage.scratch.storage_class",
+        "platform.compute.spark.bronze_executors",
+        "platform.compute.spark.silver_executors",
+        "platform.compute.spark.gold_executors",
+        "platform.compute.spark.bronze_executor_cores",
+        "platform.compute.spark.silver_executor_cores",
+        "platform.compute.spark.gold_executor_cores",
+        "platform.compute.spark.driver_memory",
+        "platform.compute.spark.driver_cores",
+        "platform.compute.postgres.storage",
+        "platform.compute.postgres.storage_class",
+        "architecture.query_engine.trino.coordinator.cpu",
+        "architecture.query_engine.trino.coordinator.memory",
+        "architecture.query_engine.trino.worker.replicas",
+        "architecture.query_engine.trino.worker.cpu",
+        "architecture.query_engine.trino.worker.memory",
+        "architecture.query_engine.trino.worker.spill_enabled",
+        "architecture.query_engine.trino.worker.spill_max_per_node",
+        "architecture.query_engine.trino.worker.storage",
+        "architecture.query_engine.trino.worker.storage_class",
+        "architecture.pipeline.mode",
+        "architecture.pipeline.cycles",
+        "architecture.pipeline.pre_benchmark_maintenance",
+        "architecture.benchmark.mode",
+        "architecture.benchmark.streams",
+        "architecture.benchmark.cache",
+        "architecture.benchmark.iterations",
+        "workload.schema",
+        "workload.datagen.scale",
+        "workload.datagen.mode",
+        "workload.datagen.seed",
+        "workload.datagen.parallelism",
+        "workload.datagen.cpu",
+        "workload.datagen.memory",
+        "workload.datagen.dirty_data_ratio",
+        "workload.datagen.timestamp_start",
+        "workload.datagen.timestamp_end",
+        "workload.retention_workload",
+        "workload.retention_months",
+        "workload.tm_operations.enabled",
+        "workload.tm_operations.continuous_interval_seconds",
+        "observability.enabled",
+        "observability.dashboards_enabled",
+        "observability.grafana_route",
+        "observability.retention",
+        "observability.storage",
+        "observability.prometheus_storage_class",
+        "spark.conf",
+    }
+)
+#: Every key under these is tuned: the continuous window is what a continuous
+#: run is about.
+_TUNED_PREFIXES = ("architecture.pipeline.continuous.",)
+_WRAP = 78
+#: A second-level block opens with a marker only when it holds this many keys.
+_BANNER_MIN_KEYS = 3
+
+
+def _display(path: str) -> str:
+    for old, new in _DISPLAY_RENAMES:
+        if path.startswith(old):
+            return new + path[len(old) :]
+    return path
+
+
+def _block_model(annotation: Any) -> Any:
+    """The model class when *annotation* is a nested config block, else None."""
+    from pydantic import BaseModel
+
+    args = typing.get_args(annotation) or (annotation,)
+    models = [a for a in args if isinstance(a, type) and issubclass(a, BaseModel)]
+    if models and typing.get_origin(annotation) not in (dict, list):
+        return models[0]
+    return None
+
+
+def _schema_leaves() -> list[tuple[str, Any]]:
+    """``(displayed path, FieldInfo)`` of every key, in schema order."""
+    from lakebench.config.schema import LakebenchConfig
+
+    out: list[tuple[str, Any]] = []
+
+    def walk(model: Any, prefix: str) -> None:
+        for name, field in model.model_fields.items():
+            key = f"{prefix}{field.alias or name}"
+            block = _block_model(field.annotation)
+            if block is not None:
+                walk(block, f"{key}.")
+            elif not (field.description or "").lstrip("*").startswith("Deprecated"):
+                out.append((_display(key), field))
+
+    walk(LakebenchConfig, "")
+    return out
+
+
+def _type_text(annotation: Any) -> str:
+    origin = typing.get_origin(annotation)
+    if origin in (typing.Union, types.UnionType):
+        args = typing.get_args(annotation)
+        parts = [_type_text(a) for a in args if a is not type(None)]
+        return " or ".join(parts) + (" or null" if type(None) in args else "")
+    if origin is typing.Literal:
+        return "one of " + ", ".join(str(v) for v in typing.get_args(annotation))
+    if origin is dict:
+        return "mapping"
+    if origin is list:
+        return "list"
+    if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
+        return "one of " + ", ".join(str(m.value) for m in annotation)
+    names = {str: "string", int: "integer", float: "number", bool: "boolean"}
+    return names.get(annotation, getattr(annotation, "__name__", str(annotation)))
+
+
+def _range_text(field: Any) -> str:
+    bounds: dict[str, Any] = {}
+    for item in field.metadata:
+        for attr in ("ge", "gt", "le", "lt"):
+            if getattr(item, attr, None) is not None:
+                bounds[attr] = getattr(item, attr)
+    low, high = bounds.get("ge", bounds.get("gt")), bounds.get("le", bounds.get("lt"))
+    if low is not None and high is not None:
+        return f"{low}-{high}"
+    if low is not None:
+        return f">= {low}" if "ge" in bounds else f"> {low}"
+    if high is not None:
+        return f"<= {high}" if "le" in bounds else f"< {high}"
+    return ""
+
+
+def _default_text(field: Any) -> str:
+    """The field's default as a YAML flow value."""
+    if field.default_factory is not None:
+        value = field.default_factory()
+    else:
+        value = field.default
+    if isinstance(value, enum.Enum):
+        value = value.value
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if value is None or value is Ellipsis or type(value).__name__ == "PydanticUndefinedType":
+        return "null"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    return _scalar(value)
+
+
+#: One short note under each section's banner, in place of a line per key.
+#: A section absent here gets the banner alone.
+_SECTION_GUIDE = {
+    "images": "Container images. Set these to your registry's copies; tags only, no digests.",
+    "platform": "Where the deployment runs: the cluster context and namespace, the S3\n"
+    "store and its credentials, and the CPU, memory and storage the pods get.",
+    "platform.storage": "S3 endpoint, credentials and bucket names, and the scratch volumes\n"
+    "Spark and Trino spill to. Bucket names default to <name>-<layer>.",
+    "platform.compute": "Sizing for Spark and its drivers. Unset executor counts are sized\n"
+    "from the scale; set them only to pin a stage.",
+    "architecture": "The recipe fixes catalog, table format and engines; leave those\n"
+    "commented. Query-engine and pipeline settings follow.",
+    "architecture.query_engine": "Trino coordinator and worker sizing.",
+    "architecture.pipeline": "Batch or continuous mode. The continuous keys set the run length,\n"
+    "the cadence of each stage and the silver write mode.",
+    "architecture.benchmark": "Which benchmark and how it is scored.",
+    "workload": "What is generated and queried: scale, datagen pods and the\n"
+    "time-travel operations. Unset datagen sizing follows the scale.",
+    "workload.datagen": "Datagen pods. Parallelism, cpu and memory are sized from the scale\n"
+    "and the cluster when unset; the values shown are floors.",
+    "observability": "Prometheus, Grafana and the metrics the report reads.",
+    "spark": "Spark configuration passed through to every job.",
+}
+
+
+def _is_tuned(path: str) -> bool:
+    return path in _TUNED or path.startswith(_TUNED_PREFIXES)
+
+
+def _template_tree(
+    active: dict[str, Any],
+    comments: dict[str, str],
+    owned: dict[str, str],
+    derived: dict[str, str],
+) -> dict[str, Any]:
+    """Every schema key as a nested dict: a leaf is ``(path, text, note)``
+    with *text* its live value or its default."""
+    tree: dict[str, Any] = {}
+    seen: set[str] = set()
+    for path, field in _schema_leaves():
+        if not (path in active or path in owned or _is_tuned(path)):
+            continue
+        parts = path.split(".")
+        node = tree
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        if path in active:
+            seen.add(path)
+            description = ""
+            node[parts[-1]] = (path, _scalar(active[path]), comments.get(path, ""), description)
+            continue
+        if path in owned:
+            description = "Set by the recipe; if written out, it must agree with it."
+            node[parts[-1]] = (path, owned[path], "", description)
+            continue
+        note = _type_text(field.annotation)
+        bounds = _range_text(field)
+        if bounds:
+            note = bounds
+        elif not note.startswith("one of"):
+            note = ""  # the value shows the type
+        description = ""
+        text = derived.get(path) or _default_text(field)
+        node[parts[-1]] = (path, text, note, description)
+    missing = set(active) - seen
+    if missing:
+        raise ValueError(f"init writes keys the schema does not have: {sorted(missing)}")
+    return tree
+
+
+def _banner(label: str, heavy: bool, guide: str = "") -> list[str]:
+    """A section marker made of prose lines (``##``), then its guidance."""
+    notes = [f"## {ln}" for ln in guide.splitlines()]
+    if heavy:
+        rule = "## " + "=" * (_WRAP - 2)
+        return [rule, f"## {label}", rule, *notes]
+    return [f"## ---- {label} ".ljust(_WRAP + 1, "-"), *notes]
+
+
+def _template_lines(tree: dict[str, Any], active_paths: set[str]) -> list[str]:
+    """The tree as lines.
+
+    Three kinds of line, told apart by their start: ``##`` is prose (a banner
+    or section guidance), ``# `` is a key left at its default (the YAML line with
+    ``# `` in front), and anything else is live. The top two levels of
+    the tree open with a banner and a short note on the section.
+    """
+    lines: list[str] = []
+
+    def live(path: str) -> bool:
+        return path in active_paths or any(a.startswith(f"{path}.") for a in active_paths)
+
+    def size(node: dict[str, Any]) -> int:
+        return sum(size(c) if isinstance(c, dict) else 1 for c in node.values())
+
+    def blank() -> None:
+        if lines and lines[-1] != "":
+            lines.append("")
+
+    def walk(node: dict[str, Any], depth: int, prefix: str) -> None:
+        pad = "  " * depth
+        for key, child in node.items():
+            path = f"{prefix}{key}"
+            if isinstance(child, dict):
+                if depth == 0 or (depth == 1 and size(child) >= _BANNER_MIN_KEYS):
+                    blank()
+                    lines.extend(
+                        _banner(
+                            key.upper() if depth == 0 else path,
+                            depth == 0,
+                            _SECTION_GUIDE.get(path, ""),
+                        )
+                    )
+                header = f"{pad}{key}:"
+                lines.append(header if live(path) else f"# {header}")
+                walk(child, depth + 1, f"{path}.")
+                continue
+            _, text, note, _description = child
+            line = f"{pad}{key}: {text}"
+            if note:
+                line = f"{line}  # {note}"
+            lines.append(line if path in active_paths else f"# {line}")
+
+    walk(tree, 0, "")
+    while lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def first_day_config(
     *,
     name: str,
@@ -180,7 +495,7 @@ def first_day_config(
     """The text of the config ``init`` writes."""
     from lakebench.config.recipes import recipe_components
 
-    tree = first_day_dict(
+    first_day = first_day_dict(
         name=name,
         recipe=recipe,
         workload=workload,
@@ -189,23 +504,41 @@ def first_day_config(
         credentials_env=credentials_env,
         namespace=namespace,
     )
+    active: dict[str, Any] = {}
+
+    def flatten(node: dict[str, Any], prefix: str) -> None:
+        for key, value in node.items():
+            if isinstance(value, dict):
+                flatten(value, f"{prefix}{key}.")
+            else:
+                active[f"{prefix}{key}"] = value
+
+    flatten(first_day, "")
     comments = {"workload.datagen.scale": _SCALE_COMMENT.get(workload, "")}
     comments = {k: v for k, v in comments.items() if v}
     if not endpoint:
         comments["platform.storage.s3.endpoint"] = "set this, e.g. http://your-s3:80"
+    owned = {
+        path: str(value) for path, value in recipe_components(recipe).items() if path not in active
+    }
+    owned = {path: (_scalar(value) if value else '""') for path, value in owned.items()}
+    # Defaults that follow the deployment name, written with the name filled in.
+    derived = {
+        f"platform.storage.s3.buckets.{layer}": _scalar(f"{name}-{layer}")
+        for layer in ("bronze", "silver", "gold")
+    }
+    tree = _template_tree(active, comments, owned, derived)
     lines = [
-        "# Written by `lakebench init`. Every key is in docs/configuration.md;",
-        "# `lakebench config recipes` lists the recipes.",
-        *emit(tree, comments),
-    ]
-    components = recipe_components(recipe)
-    lines += [
-        "# Set by the recipe. Written out, each must agree with it:",
-        "# architecture:",
-        f"#   catalog: {{type: {components['architecture.catalog.type']}}}",
-        f"#   table_format: {{type: {components['architecture.table_format.type']}}}",
-        f"#   pipeline_engine: {components['architecture.pipeline_engine']}",
-        f"#   query_engine: {{type: {components['architecture.query_engine.type']}}}",
+        "## Written by `lakebench init`.",
+        "##",
+        "## Lines that start with '##' are guidance. Lines with no '#' in front are set",
+        "## for this deployment. The keys a deployment usually tunes follow at their",
+        "## defaults, commented out with '# ': remove the '# ' from the key, and from the",
+        "## block lines above it, to set it. Every other key keeps its default; the",
+        "## whole schema is described in docs/configuration.md, and",
+        "## `lakebench config recipes` lists the recipes.",
+        "",
+        *_template_lines(tree, set(active)),
     ]
     return "\n".join(lines) + "\n"
 
@@ -380,13 +713,17 @@ def init(
         typer.Option("--advanced", hidden=True, help="Removed: init no longer has a wizard"),
     ] = False,
 ) -> None:
-    """Write a starter configuration file.
+    """Write a configuration file with the keys a deployment tunes in it.
 
     The file names the deployment (lb-<user>-<4 hex> unless --name is
     given), the recipe (polaris-iceberg-spark-trino unless --recipe is
     given), the workload, the scale (1), the S3 endpoint and the two S3
     credentials as ${VAR} references: export LAKEBENCH_S3_ACCESS_KEY and
     LAKEBENCH_S3_SECRET_KEY, or pick the names with --credentials-env.
+    The keys a deployment usually tunes follow in schema order, commented at
+    their defaults with a one-line description; remove the leading '# ' from
+    a key and from the block lines above it to set it. Every other key keeps
+    its default and is described in docs/configuration.md.
     The choices are printed on stderr.
 
     Use 'lakebench config recommend' for cluster sizing guidance.

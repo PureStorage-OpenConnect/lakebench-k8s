@@ -21,9 +21,10 @@
 - **Repeat batch run** on one deployment: needs `--force-rebuild` (silver
   refuses to overwrite a populated table). With `--generate` it also needs
   `--regenerate`, which works only on a bronze bucket this deployment can
-  prove it owns. On any other bucket `--regenerate` is refused, and `--allow-stale-bronze` generates over the
-  objects and records that ([3](generation.md#3-data-generation)). Use
-  `--skip-generate` to reuse the corpus.
+  prove it owns; on any other bucket `--regenerate` is refused and
+  `--allow-stale-bronze` generates over the objects and records that
+  ([3](generation.md#3-data-generation)). `--skip-generate` reuses the
+  corpus.
 
 ### 7.2 Maintenance policy handling
 
@@ -43,9 +44,9 @@ recorded in `experiment.effective_maintenance` with classes `ran`,
 
 Both Iceberg compaction statements aim at the table's 128 MB
 `write.target-file-size-bytes` but select files differently. The record names
-the operation (`compaction=ran(trino_optimize:128MB)` against
-`compaction=ran(iceberg_rewrite_data_files)`), and the compaction operation is
-a Conditions key, so a Trino-vs-Thrift pair that both compacted is not
+the operation (`compaction=ran(trino_optimize:128MB)` or
+`compaction=ran(iceberg_rewrite_data_files)`) and the operation is a
+Conditions key, so a Trino-vs-Thrift pair that both compacted is not
 like-for-like (`metrics/maintenance_policy.py`,
 [10](comparability.md#10-comparability)).
 
@@ -53,8 +54,8 @@ like-for-like (`metrics/maintenance_policy.py`,
 `--skip-maintenance` or `pre_benchmark_maintenance: false`):
 
 1. file count probe;
-2. a pre-maintenance round (warm-up pass, then timed), at
-   scale below 50 only;
+2. a pre-maintenance round (warm-up pass, then timed), at scale below 50
+   only;
 3. maintenance and compaction under one 1,800 s budget; the first statement
    timeout or the deadline stops the rest and records `maintenance_stopped`;
 4. query-engine readiness wait;
@@ -87,7 +88,7 @@ like-for-like (`metrics/maintenance_policy.py`,
 ### 7.3 Permitted tuning (still publishable)
 
 None of these changes the Workload or Corpus identity keys, so runs differing
-only here stay comparable. State them beside any published comparison.
+only here stay comparable. State them beside a published comparison.
 
 | Difference | Identity effect |
 |---|---|
@@ -174,11 +175,11 @@ What may be tuned:
 
 - `datagen.file_size` is fixed at `64mb`, so it cannot move the corpus.
 - The codec (`DG_COMPRESSION`) changes every file's rows but is reachable only
-  by editing the datagen Job by hand; an exp1 corpus id does not see it, so do
+  by editing the datagen Job by hand. An exp1 corpus id does not see it; do
   not publish a comparison across such an edit.
 - Editing stage scripts or the KPI list without bumping `WORKLOAD_VERSIONS`
-  would compare under the same version; bump it. Nothing detects such a
-  change: the tests pin only the current value.
+  compares under the same version. Nothing detects such a change; the tests
+  pin only the current value.
 
 ### 7.5 Lakebench-imposed caps and how a bound cap is reported
 

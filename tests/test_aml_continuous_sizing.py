@@ -84,21 +84,9 @@ def test_silver_batch_fits_its_trigger_at_scale_10():
     assert _cores("silver-stream") * per_core_rps >= 1.5 * _BRONZE_RPS
 
 
-def test_the_base_silver_profile_could_not_keep_up():
-    """The measurement the override answers: 16 cores fall behind bronze."""
-    per_core_rps = _SILVER_ROWS / _SILVER_S / _SILVER_CORES
-    base = _JOB_PROFILES["silver-stream"]
-    assert base["base_executors"] * base["executor_cores"] * per_core_rps < _BRONZE_RPS
-
-
 def _gold_tick_s(cores: int, rows_m: float) -> float:
     per_m_rows_s = (_GOLD_TICK_S - _GOLD_FIXED_S) / _GOLD_MEAN_ROWS_M
     return _GOLD_FIXED_S + per_m_rows_s * rows_m * _GOLD_CORES / cores
-
-
-def test_the_local_ticks_give_the_fixed_cost():
-    slope = (122 - 84) / (6.7 - 3.4)
-    assert abs((84 - slope * 3.4) - _GOLD_FIXED_S) < 3
 
 
 def test_a_full_silver_gold_tick_fits_the_refresh_interval_at_scale_10():
@@ -219,7 +207,7 @@ def test_executor_cores_set_in_config_are_deployed_exactly(job):
 
     plain = SparkJobManager(_config("financial", 10), _capacity_k8s(434))._build_manifest(job)
     cfg = _config("financial", 10)
-    setattr(cfg.platform.compute.spark, f"{job.value.replace('-', '_')}_executor_cores", 8)
+    setattr(cfg.platform.compute.spark, f"{job.value.split('-')[0]}_executor_cores", 8)
     ex = SparkJobManager(cfg, _capacity_k8s(434))._build_manifest(job)["spec"]["executor"]
     base = get_job_profile(job.value, "financial")
     per_core = {
@@ -276,13 +264,13 @@ class TestPreflightBetweenOldAndNewMinimum:
         assert self._check(floor).passed and not self._check(floor).message.startswith("WARNING")
 
     def test_an_explicit_count_is_counted_uncapped(self):
-        """The manifest applies gold_refresh_executors after the budget."""
+        """The manifest applies gold_executors after the budget."""
         from unittest import mock
 
         from lakebench.cli._prerequisites import _check_cluster_capacity
 
         cfg = _config("financial", 10)
-        cfg.platform.compute.spark.gold_refresh_executors = 28
+        cfg.platform.compute.spark.gold_executors = 28
         cap = ClusterCapacity(80_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap

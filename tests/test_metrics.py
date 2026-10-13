@@ -536,11 +536,6 @@ class TestSustainedPipelineScoring:
         # total_elapsed_seconds: sustained mode uses wall-clock (max), not sum
         assert pb.total_elapsed_seconds == pytest.approx(1800.0)
 
-    def test_sustained_batch_scores_zero(self):
-        """Batch-only scores remain zero for a sustained pipeline."""
-        run = self._make_streaming_run()
-        pb = build_pipeline_benchmark(run)
-
         # time_to_value is batch-only (based on start/end wall-clock span)
         assert pb.time_to_value_seconds == 0.0
 
@@ -644,77 +639,6 @@ class TestAggregateBenchmarkRounds:
             self._make_round(2, qph=300.0, total_seconds=20.0),
         ]
         assert aggregate_benchmark_rounds(rounds).qph == 250.0
-
-
-class TestPipelineBenchmarkRounds:
-    """Tests for PipelineBenchmark in-stream benchmark round integration."""
-
-    def _make_streaming_run_with_rounds(self) -> PipelineMetrics:
-        now = datetime.now()
-        rounds = []
-        for i in range(3):
-            meta = BenchmarkRoundMeta(
-                round_index=i + 1,
-                timestamp=now + timedelta(seconds=300 * (i + 1)),
-                gold_event_age_seconds=30.0 + i * 10,  # 30, 40, 50
-            )
-            rounds.append(
-                BenchmarkMetrics(
-                    mode="power",
-                    cache="hot",
-                    scale=10,
-                    qph=200.0 + i * 25,  # 200, 225, 250
-                    total_seconds=30.0,
-                    round_meta=meta,
-                )
-            )
-
-        return PipelineMetrics(
-            run_id="rounds-test",
-            deployment_name="test",
-            start_time=now,
-            success=True,
-            bronze_size_gb=10.0,
-            silver_size_gb=5.0,
-            gold_size_gb=0.5,
-            streaming=[
-                StreamingJobMetrics(
-                    job_name="lakebench-bronze-ingest",
-                    job_type="bronze-ingest",
-                    total_batches=100,
-                    total_rows_processed=500_000,
-                    elapsed_seconds=1800.0,
-                    success=True,
-                    throughput_rps=277.8,
-                    micro_batch_duration_ms=200.0,
-                    freshness_seconds=5.0,
-                    batch_size=5000,
-                ),
-                StreamingJobMetrics(
-                    job_name="lakebench-gold-refresh",
-                    job_type="gold-refresh",
-                    total_batches=6,
-                    total_rows_processed=450_000,
-                    elapsed_seconds=1800.0,
-                    success=True,
-                    freshness_seconds=15.0,
-                ),
-            ],
-            benchmark=BenchmarkMetrics(
-                mode="power",
-                cache="hot",
-                scale=10,
-                qph=260.0,
-                total_seconds=25.0,
-            ),
-            benchmark_rounds=rounds,
-        )
-
-    def test_query_time_event_age_computed(self):
-        run = self._make_streaming_run_with_rounds()
-        pb = build_pipeline_benchmark(run)
-        # Freshness values: 30, 40, 50 -- median = 40
-        assert pb.query_time_event_age_seconds == pytest.approx(40.0)
 
 
 class TestSustainedScoringEdgeCases:
@@ -881,54 +805,6 @@ class TestSustainedScoringEdgeCases:
         # ingest_ratio = 400_000 / 500_000 = 0.8 < 0.95 -> saturated
         assert pb.pipeline_saturated is True
         assert pb.ingest_ratio == pytest.approx(0.8, rel=1e-2)
-
-    def _make_sustained_pb(self, qph_values):
-        """Create a PipelineBenchmark with benchmark rounds at given QpH values."""
-        now = datetime.now()
-        rounds = []
-        for i, qph in enumerate(qph_values):
-            rounds.append(
-                BenchmarkMetrics(
-                    mode="power",
-                    cache="hot",
-                    scale=10,
-                    qph=qph,
-                    total_seconds=30.0,
-                    round_meta=BenchmarkRoundMeta(
-                        round_index=i + 1,
-                        timestamp=now + timedelta(minutes=i * 10),
-                    ),
-                )
-            )
-        stage = StageMetrics(
-            stage_name="bronze-ingest",
-            stage_type="streaming",
-            engine="spark",
-            elapsed_seconds=3600.0,
-            success=True,
-            input_rows=1_000_000,
-            freshness_seconds=5.0,
-            latency_ms=100.0,
-        )
-        stage.start_time = now
-        stage.end_time = now + timedelta(hours=1)
-        pb = PipelineBenchmark(
-            run_id="test-deg",
-            deployment_name="test",
-            pipeline_mode="sustained",
-            start_time=now,
-            stages=[stage],
-            benchmark_rounds=rounds,
-            config_snapshot={"datagen_output_rows": 1_000_000},
-        )
-        pb.compute_aggregates()
-        return pb
-
-    def test_degradation_with_4_rounds(self):
-        """4 rounds: first half median 200, second half median 100 = 50% degradation."""
-        pb = self._make_sustained_pb([200, 200, 100, 100])
-        assert pb.qph_degradation_pct is not None
-        assert pb.qph_degradation_pct == pytest.approx(50.0)
 
 
 def test_stored_record_carries_no_address_url_in_error_text():

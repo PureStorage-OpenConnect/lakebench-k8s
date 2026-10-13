@@ -68,6 +68,16 @@ SPARK35 = "apache/spark:3.5.4-python3"
             None,
             ["io.delta:delta-spark_4.1_2.13:4.1.0", "org.apache.hadoop:hadoop-aws:3.4.2"],
         ),
+        (
+            SPARK41,
+            "iceberg",
+            "1.12.0",
+            [
+                "org.apache.iceberg:iceberg-spark-runtime-4.1_2.13:1.12.0",
+                "org.apache.iceberg:iceberg-aws-bundle:1.12.0",
+                "org.apache.hadoop:hadoop-aws:3.4.2",
+            ],
+        ),
     ],
 )
 def test_jar_coordinates(image, fmt, version, expected):
@@ -97,38 +107,21 @@ def test_pinset_hash_ignores_size_and_resolve_time():
     )
 
 
-def test_request_hash_covers_resolver_image_and_versions():
-    cfg = make_config(recipe="hive-iceberg-spark-trino")
-    base = req.select_request(cfg, tools_digest="t").request_sha256
-    assert req.select_request(cfg, tools_digest="t2").request_sha256 != base
-    assert (
-        req.select_request(
-            _cfg(SPARK40, recipe="hive-iceberg-spark-trino"), tools_digest="t"
-        ).request_sha256
-        != base
-    )
-    assert (
-        req.select_request(
-            _cfg(SPARK41, "iceberg", "1.10.1", recipe="hive-iceberg-spark-trino"), tools_digest="t"
-        ).request_sha256
-        != base
-    )
-
-
 def test_every_request_field_enters_the_hash():
     """A field that falls out of request_sha256 would let a redeploy keep a
     set resolved for another request (the resolve skips on the hash)."""
     for field, value in [
         ("py_reference", ("numpy==2.2.7",)),
         ("pypi_index", "http://pypi.mirror/simple/"),
-        ("duckdb_version", "1.5.6"),
+        ("duckdb_version", "1.5.7"),
         ("duckdb_extensions", ("httpfs", "iceberg")),
         ("duckdb_image", "python:3.12-slim"),
         ("duckdb_extension_repository", "http://ext.mirror"),
         ("repositories", ("http://nexus/m2/",)),
         ("jar_coordinates", ("g:a:2",)),
-        ("spark_image", "apache/spark:4.1.1-python3"),
+        ("spark_image", SPARK40),
         ("groups", ("jars",)),
+        ("tools_sha256", "t2"),
     ]:
         import dataclasses
 

@@ -2,10 +2,7 @@
 
 Guide: run the pipeline with `lakebench run` and read what it measured.
 
-`lakebench run` runs a sequence of Spark jobs that turn raw bronze data into
-queryable gold tables, then a query benchmark on the active engine. It
-records metrics at every stage. [CLI Reference](cli-reference.md#run) lists
-every flag, refused combination and exit code.
+`lakebench run` runs Spark jobs that turn raw bronze data into gold tables, then a query benchmark on the active engine, and records metrics at every stage. Flags, refused combinations and exit codes: [CLI Reference](cli-reference.md#run).
 
 ## Basic usage
 
@@ -14,12 +11,9 @@ lakebench run my-config.yaml --generate   # first run: generate the corpus, then
 lakebench run my-config.yaml              # later runs: reuse the corpus in bronze
 ```
 
-- `run` runs the stages in order, waits for each, runs the benchmark and
-  saves metrics.
-- Without `--generate`, `run` reuses the corpus already in bronze. On an
-  empty bronze bucket it exits 4 and names `--generate`.
-- The output shows per-stage timing, a QpH (queries per hour) score and the
-  path to the metrics file.
+- `run` runs the stages in order, waits for each, runs the benchmark and saves metrics.
+- Without `--generate`, `run` reuses the corpus in bronze. On an empty bronze bucket it exits 4 and names `--generate`.
+- The output shows per-stage timing, a QpH (queries per hour) score and the metrics file path.
 
 Common variations:
 
@@ -53,19 +47,13 @@ Per-executor cores, memory and scratch for each job are in
 - I/O-bound: it exercises the S3 read path.
 - Financial (AML) falls back to a CTAS rewrite when `add_files` fails or the
   source exceeds 1.5 TiB or 800,000 files; the profile is sized for it
-  because AML sources cross these from about scale 5 (job.py profile note).
-  The CTAS spills about twice the per-executor input to local disk. That is why its scratch PVC
-  is larger.
+  because AML sources cross these from about scale 5. The CTAS spills about twice the per-executor input to local disk, hence the larger scratch PVC.
 
 ### Stage 2: silver-build
 
-The core transformation. It reads validated bronze and writes an enriched
-Iceberg table to the silver bucket with five transforms: email
-normalization, phone normalization, geo enrichment, customer segmentation
-and quality flagging.
+Reads validated bronze and writes an enriched table to the silver bucket with five transforms: email normalization, phone normalization, geo enrichment, customer segmentation and quality flagging.
 
-It picks a write strategy from the measured bronze size. These are
-silver-build strategies, not pipeline modes:
+It picks a write strategy from the measured bronze size (silver-build strategies, not pipeline modes):
 
 | Strategy | Bronze size | What it does |
 |---|---|---|
@@ -78,10 +66,7 @@ silver-build job stops at start and the stage fails.
 
 ### Stage 3: gold-finalize
 
-Aggregates silver into daily KPI summaries for the executive dashboard:
-daily active customers, total revenue, conversions, engagement scores and
-churn risk counts. The output is a compact gold Iceberg table partitioned by
-date.
+Aggregates silver into daily KPI summaries (daily active customers, total revenue, conversions, engagement scores, churn risk counts) in a compact gold table partitioned by date.
 
 ### Stage 4: benchmark
 
@@ -175,8 +160,7 @@ bronze-ingest + silver-stream + gold-refresh  (concurrent)
   transforms and writes the silver table.
 - **gold-refresh** updates gold from new silver rows (see below).
 
-Each stage reads only what the stage before it committed. The commit is the
-handoff.
+Each stage reads only what the stage before it committed.
 
 ### Datagen and offered load
 
@@ -221,11 +205,8 @@ executors = load / (stage MB/s per core x 0.8) / executor cores
 
 - A stage whose need is above its profile's executor cap (`max_executors`)
   first grows its executors to 8 cores, then 16.
-- If it still cannot carry the load, `run` names it before the run starts
-  ("cannot balance"). Its lag will grow and the run will FAIL the balance
-  check. Lower the scale or give the stage more cores.
-- Every stage's executor count and cores per executor can be set under
-  `platform.compute.spark`.
+- If it still cannot carry the load, `plan` and `config recommend` name it ("cannot balance"); the run reports it as not balanced because its lag grows. Lower the scale or give the stage more cores.
+- Each stage's executor count and cores per executor can be set under `platform.compute.spark` (`<stage>_executors`, `<stage>_executor_cores`).
 - The record's `stage_capacity` gives, per stage (bronze, silver), the share
   of the window it was busy and the MB/s per core it would take busy all
   window, plus datagen's MB/s per core. A low busy share extrapolates
@@ -299,8 +280,7 @@ Every two minutes inside the window the run prints each handoff's lag: how
 long the oldest commit the next stage has not taken has waited
 (`datagen->bronze`, `bronze->silver`, `silver->gold`).
 
-**Clock offset.** Datagen's landing times come from the object store's
-clock, which can be minutes off the cluster's. At start, bronze measures the
+**Clock offset.** Datagen's landing times come from the object store's clock, which can be minutes off the cluster's. At start, bronze measures the
 offset with a probe object and moves landing times onto the cluster clock
 (`continuous.freshness.store_clock_offset_s`). Bronze retries the probe and
 fails if it keeps failing.
@@ -323,9 +303,7 @@ climb through the window's second half:
   falls behind therefore cannot widen its own allowance.
 - The start-up ramp, and a lag that swings by one batch time, do not count.
 
-The run is balanced if every stage keeps up. A run that is not balanced
-FAILS. Its bottleneck line names the stage, its lag and busy share, and the
-executors to raise.
+The run is balanced if every stage keeps up. The check is advisory: a stage that does not keep up prints `balance (advisory): ...` naming the stage, its lag and busy share, and the executors to raise. It is recorded in `continuous.balance` and the report shows "not balanced", but the run does not fail on it.
 
 **What the record keeps.** `continuous.balance` holds the lag samples and
 `continuous.freshness` gold freshness p50, p95 and max. Both workloads
@@ -350,8 +328,8 @@ architecture:
       run_duration: 1800              # 30 minutes
       # max_files_per_trigger: unset   # no limit while datagen generates
       checkpoint_base: checkpoints
-      benchmark_interval: 300         # Seconds between in-stream rounds
-      benchmark_warmup: 300           # Seconds before first round
+      benchmark_interval: 300         # Seconds between in-stream rounds (60-3600)
+      benchmark_warmup: 300           # Seconds before first round (60-1800)
 ```
 
 Override the window on the command line:
@@ -360,9 +338,7 @@ Override the window on the command line:
 lakebench run my-config.yaml --continuous --duration 3600
 ```
 
-Each key's type, range and default is in
-[Configuration](configuration.md#architecture----pipeline). When to change
-them:
+Types, ranges and defaults: [Configuration](configuration.md#architecture----pipeline). When to change them:
 
 - **Trigger intervals**: leave at 0 to measure the pipeline. A positive
   interval holds the stage to that cadence and is labelled as a Lakebench
@@ -374,19 +350,21 @@ them:
   5 benchmark rounds:
   `benchmark_warmup + 4 * (benchmark_interval + round_time) + max(60, 1.2 * round_time)`.
   [Planning round counts](benchmarking/query-benchmark.md#planning-round-counts) has a planning table.
-- **`benchmark_warmup`**: raise it for a slow first gold refresh.
-- **`benchmark_interval`**: for more rounds, raise `run_duration` instead of
-  lowering the interval. With gold on a longer interval, both are raised to
-  it.
+- **`benchmark_warmup`**: 60 s and up. Set it past the first handoff (the run's
+  `lag:` lines): a round before gold holds data reads an empty gold layer. Raise
+  it for a slow first gold refresh.
+- **`benchmark_interval`**: 60 s and up, counted from a round's end, so rounds
+  never overlap each other or a maintenance round (one loop runs them in turn).
+  A lower interval buys more rounds in a short window, each against less
+  settled tables; for a long window keep the default. With gold on a longer
+  interval, both are raised to it.
 - **Target file sizes**: reduce `bronze_target_file_size_mb` and
   `silver_target_file_size_mb` to 128-256 MB below scale 10, where 512 MB
   files are never reached. `gold_target_file_size_mb` rarely needs changing.
 
 ### Iceberg Retention
 
-Continuous pipelines create a new snapshot every micro-batch. Without
-maintenance, snapshot metadata and orphan files grow without bound: a
-24-hour run can produce over a million S3 objects.
+Continuous pipelines create a snapshot every micro-batch. Without maintenance, snapshot metadata and orphan files grow without bound: a 24-hour run can produce over a million S3 objects.
 
 Lakebench runs `expire_snapshots` and `remove_orphan_files` (Delta:
 `VACUUM`) during the run. The `retention_interval` and
@@ -480,9 +458,7 @@ python3 -m json.tool "$(ls -td lakebench-output/runs/run-*/ | head -1)metrics.js
   `time_to_value_seconds` (batch) or `data_freshness_seconds` (continuous),
   and pipeline throughput.
 
-**HTML report** sits beside the metrics JSON. It is self-contained: summary
-panel, per-stage breakdown, storage metrics, resource estimates and
-recommendations.
+**HTML report** sits beside the metrics JSON and is self-contained ([layout](benchmarking/html-report.md)):
 
 ```bash
 open lakebench-output/runs/run-*/report.html   # open in a browser
@@ -493,7 +469,7 @@ lakebench report                                # build a report from a previous
 
 - Formula, per-job table and AML overrides:
   [Auto-Scaling](component-spark.md#auto-scaling).
-- Count overrides (`platform.compute.spark.<job>_executors`), driver memory
+- Count overrides (`platform.compute.spark.<stage>_executors`), driver memory
   and tested ranges: [Executor Override Guide](configuration.md#executor-override-guide).
 - Counts grow more slowly than the data, so data per executor grows with
   scale.

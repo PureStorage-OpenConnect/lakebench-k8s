@@ -80,7 +80,9 @@ def test_reset_drops_every_table_the_continuous_run_writes(spark, load_script, m
     assert left == [], f"the continuous reset left {left}"
 
 
-@pytest.mark.parametrize("table", STREAM_SILVER)
+# The two tables the refusal once missed; one refusal path covers the list,
+# whose membership tests/test_aml_continuous_reset_tables.py pins.
+@pytest.mark.parametrize("table", ["silver.account_statements", "silver.entity_profiles"])
 def test_fresh_checkpoint_refuses_any_populated_stream_table(spark, load_script, tmp_path, table):
     ssf = load_script("silver_stream_financial")
     common = load_script("common")

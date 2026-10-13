@@ -57,7 +57,7 @@ spec:
       {% endif %}
       containers:
         - name: pushgateway
-          image: {{ pushgateway_image | default('prom/pushgateway:v1.11.1') }}
+          image: {{ pushgateway_image | default('prom/pushgateway:v1.11.4') }}
           args:
             # Persist so a pod restart does not drop a completed stage's final
             # push before Prometheus scrapes it (best-effort; see design doc).

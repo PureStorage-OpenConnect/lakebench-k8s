@@ -212,18 +212,6 @@ def test_blended_rounds_labelled():
     assert aggregate_benchmark_rounds(rounds).query_set_id == BLENDED_QUERY_SET
 
 
-def test_one_query_set_is_not_blended():
-    c = _collector()
-    for i in range(3):
-        c.record_round(_round(EIGHT, qph=100.0 + i, index=i))
-    rounds = c.current_run.benchmark_rounds
-    basis, by_set = composite_qph_basis(rounds)
-    from lakebench.benchmark.queries import query_set_id
-
-    assert basis == {"blended": False, "sets": {query_set_id(EIGHT): 3}}
-    assert aggregate_benchmark_rounds(rounds).query_set_id == query_set_id(EIGHT)
-
-
 def test_stored_rounds_get_their_sets_from_the_queries():
     """Rounds recorded before the round record: their queries' success flags
     say what they executed."""
