@@ -1491,8 +1491,13 @@ def _run_iceberg_compaction(
     budget: MaintenanceBudget | None = None,
     start_at: int = 0,
     outcomes: list | None = None,
+    only_tables: set[str] | None = None,
 ) -> int | None:
     """Run table compaction (format-aware).
+
+    ``only_tables`` (bare names, no catalog prefix) restricts the pass to
+    those tables; used by the post-stream merge-on-read delete fold-in,
+    which compacts only the tables that accumulate position deletes.
 
     ``live_streams``: continuous jobs are writing. For AML the gold tables
     are then skipped: gold-refresh deletes and rewrites each rule's alerts
@@ -1566,6 +1571,8 @@ def _run_iceberg_compaction(
             tables.silver_batch_versions,
         }
         names = [t for t in names if t not in merged]
+    if only_tables is not None:
+        names = [t for t in names if t in only_tables]
     all_tables = [f"{catalog}.{t}" for t in names]
     table_names = _rotated(all_tables, start_at)
 
@@ -4799,6 +4806,42 @@ def _run_sustained(
                     interrupt=_interrupt,
                     run_failed=not pipeline_success,
                 )
+
+            # Fold merge-on-read position deletes into the data files once
+            # the window's measurements and the snapshot-pinned time-travel
+            # reads are done. In-window compaction of these tables is unsafe
+            # (silver's MERGE has no driver retries, so a rewrite conflict
+            # ends the stream), and every recorded number was captured before
+            # the streams stopped, so this moves no result; it leaves the
+            # delivered silver tables clean for a human or a later batch run.
+            # account_statements uses DELETE+INSERT per partition and carries
+            # no position deletes, so it is not in the set.
+            if (
+                cfg.architecture.table_format.type.value == "iceberg"
+                and cfg.architecture.workload.schema_type.value == "financial"
+                and sustained_cfg.silver_write_mode.value == "merge_on_read"
+                and streams_stopped
+            ):
+                _stage = "mor-compaction"
+                _mor_tables = {
+                    cfg.architecture.tables.silver_entities,
+                    cfg.architecture.tables.silver_accounts,
+                    cfg.architecture.tables.silver_entity_profiles,
+                }
+                try:
+                    _run_iceberg_compaction(
+                        cfg,
+                        k8s,
+                        console,
+                        j,
+                        live_streams=False,
+                        timeout=timeout,
+                        only_tables=_mor_tables,
+                    )
+                except Exception as e:  # noqa: BLE001 -- cleanup, never fails the run
+                    print_warning(
+                        f"Merge-on-read delete compaction skipped: {type(e).__name__}: {e}"
+                    )
             _stage = "summary"
 
         # Summary. Only the green "completed" panel is success-gated: printing

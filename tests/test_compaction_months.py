@@ -321,3 +321,27 @@ def test_an_unusable_month_read_falls_back_to_one_statement_per_table(read_rc, k
     assert (rec["total"], rec["statements_total"]) == (4, 4)
     assert (rec["succeeded"], rec["failed"]) == (2, 2)
     assert "partition read failed on lakehouse.silver.transactions" in rec["note"]
+
+
+def test_only_tables_restricts_a_stopped_streams_pass_to_the_named_tables():
+    """The merge-on-read delete fold-in runs once the streams are stopped and
+    compacts only the tables that accumulate position deletes. With live
+    streams those same tables are left alone."""
+    cfg = _cfg()
+    mor = {
+        cfg.architecture.tables.silver_entities,
+        cfg.architecture.tables.silver_accounts,
+        cfg.architecture.tables.silver_entity_profiles,
+    }
+    trino = _trino()
+    (rec,) = compact(trino, cfg, live_streams=False, only_tables=mor)
+    assert (rec["total"], rec["succeeded"], rec["failed"]) == (3, 3, 0), rec.get("failures")
+    assert len(trino.statements) == 3
+    for table in mor:
+        assert sum(f"lakehouse.{table}" in s for s in trino.statements) == 1, table
+    assert not any(TXNS in s or STMTS in s for s in trino.statements)
+
+    live = _trino()
+    (rec,) = compact(live, cfg, live_streams=True, only_tables=mor)
+    assert rec["total"] == 0
+    assert live.statements == []
