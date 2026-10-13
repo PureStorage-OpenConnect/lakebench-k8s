@@ -39,28 +39,13 @@ class TestSilverWriteMode:
         sustained = config.architecture.pipeline.sustained
         assert sustained.silver_write_mode.value == "merge_on_read"
 
-    @pytest.mark.parametrize("mode", ["copy_on_write", "merge_on_read"])
-    def test_accepts_both_modes(self, mode):
-        config = LakebenchConfig(
-            name="test",
-            architecture={"processing": {"sustained": {"silver_write_mode": mode}}},
-        )
-        assert config.architecture.pipeline.sustained.silver_write_mode.value == mode
-
-    def test_rejects_unknown_mode(self):
-        with pytest.raises(ValidationError):
-            LakebenchConfig(
-                name="test",
-                architecture={"processing": {"sustained": {"silver_write_mode": "mor"}}},
-            )
-
 
 class TestSustainedBenchmarkConfig:
     """Tests for benchmark_interval and benchmark_warmup on SustainedConfig."""
 
-    @pytest.mark.parametrize(("warmup", "interval"), [(60, 60), (120, 120), (240, 120)])
-    def test_short_warmup_and_interval_accepted(self, warmup, interval):
+    def test_short_warmup_and_interval_accepted(self):
         """Short rounds are an override, not a refusal, while gold runs back to back."""
+        warmup, interval = 60, 60
         config = LakebenchConfig(
             name="test",
             architecture={

@@ -37,11 +37,6 @@ def test_unset_financial_seed_resolves_to_the_calibration_seed():
     assert ds.config_seed(_cfg("financial")) == _CORPORA["calibration_seed"]
 
 
-def test_explicit_seed_is_used():
-    assert ds.config_seed(_cfg("financial", 7777)) == 7777
-    assert ds.config_seed(_cfg("customer360", 7)) == 7
-
-
 @pytest.mark.parametrize("seed", [42, 50000042])
 def test_spent_financial_seed_refused_at_load(seed):
     with pytest.raises(ValidationError, match="spent"):

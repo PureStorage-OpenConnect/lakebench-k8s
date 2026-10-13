@@ -1,11 +1,13 @@
-"""Executor internals: DuckDB payload parsing, Spark Thrift row counting and
-the Trino session zone."""
+"""Executor internals: DuckDB payload parsing, Spark Thrift row counting, the
+Trino session zone and the executor a recipe selects."""
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from tests.conftest import make_config
 
 
 class TestDuckDBExecuteQuery:
@@ -91,3 +93,30 @@ class TestTrinoSession:
             ex.execute_query("SELECT 1")
         cmd = mock_run.call_args[0][0]
         assert cmd[cmd.index("--timezone") + 1] == "UTC"
+
+
+class TestGetExecutor:
+    def test_polaris_duckdb_config_creates_executor(self):
+        """polaris-iceberg-spark-duckdb recipe creates DuckDBExecutor with correct S3 config."""
+        from lakebench.benchmark.executor import DuckDBExecutor, get_executor
+
+        cfg = make_config(
+            recipe="polaris-iceberg-spark-duckdb",
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "https://fb.example.com",
+                        "access_key": "ak",
+                        "secret_key": "sk",
+                        "region": "eu-west-1",
+                        "path_style": False,
+                    }
+                }
+            },
+        )
+
+        executor = get_executor(cfg, namespace="polaris-ns")
+        assert isinstance(executor, DuckDBExecutor)
+        assert executor.s3_endpoint == "https://fb.example.com"
+        assert executor.s3_region == "eu-west-1"
+        assert executor.s3_path_style is False

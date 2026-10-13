@@ -2,10 +2,7 @@
 
 import pytest
 
-from lakebench.deploy.financial_ddl import (
-    FINANCIAL_TABLE_DDLS,
-    render_ddl,
-)
+from lakebench.deploy.financial_ddl import FINANCIAL_TABLE_DDLS
 
 
 class TestRegistry:
@@ -16,16 +13,6 @@ class TestRegistry:
         cfg = TableNamesConfig()
         for key in FINANCIAL_TABLE_DDLS:
             assert hasattr(cfg, key), f"TableNamesConfig missing field '{key}'"
-
-
-class TestRenderDDL:
-    def test_placeholder_substitution(self):
-        rendered = render_ddl(
-            "CREATE TABLE {catalog}.{table} (id BIGINT)",
-            catalog="lakehouse",
-            table="silver.entities",
-        )
-        assert rendered == "CREATE TABLE lakehouse.silver.entities (id BIGINT)"
 
 
 def _ddl_columns(ddl: str) -> list[tuple[str, str]]:

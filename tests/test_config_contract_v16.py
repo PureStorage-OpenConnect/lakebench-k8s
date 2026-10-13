@@ -1,12 +1,11 @@
-"""v1.6 config contract (design-contradictions #4, #7, #12, #13, #15, #18, #19,
+"""v1.6 config contract (design-contradictions #4, #7, #12, #13, #18, #19,
 outcome 5).
 
 Each test here fails with its fix reverted: AML on Delta and the Java/Iceberg
 pairing used to load, `custom` used to run the Customer 360 queries, the
 workload block lived only under architecture, `sustained` was the canonical
 mode, dead fields loaded silently, a benchmark exception left the run
-successful, bucket names were fixed and global, and destroy uninstalled the
-shared observability stack.
+successful, and bucket names were fixed and global.
 """
 
 from __future__ import annotations
@@ -15,7 +14,6 @@ import ast
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -249,115 +247,6 @@ def test_benchmark_error_round_trips_and_reaches_the_report(tmp_path):
     ok, reasons, _ = gen._compute_overall_status(loaded)
     assert not ok
     assert any("Benchmark did not complete" in r for r in reasons)
-
-
-# -- #15: shared observability stack ------------------------------------------
-
-
-def _obs_engine(namespace="dep-a", dry_run=False):
-    cfg = make_config(
-        name=namespace,
-        observability={"enabled": True},
-    )
-    renderer = MagicMock()
-    renderer.render.return_value = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n"
-    return SimpleNamespace(
-        config=cfg,
-        k8s=MagicMock(),
-        renderer=renderer,
-        context={"namespace": namespace, "openshift_mode": False},
-        dry_run=dry_run,
-    )
-
-
-def test_destroy_removes_the_per_deployment_binding():
-    """Destroy deletes the ClusterRoleBinding this deployment created, nothing else."""
-    from lakebench.deploy.engine import DeploymentStatus
-    from lakebench.deploy.observability import (
-        KUBELET_METRICS_CLUSTER_ROLE,
-        ObservabilityDeployer,
-    )
-
-    deleted = []
-
-    class FakeRbac:
-        def delete_cluster_role_binding(self, name):
-            deleted.append(name)
-
-    deployer = ObservabilityDeployer(_obs_engine("dep-a"))
-    with patch("kubernetes.client.RbacAuthorizationV1Api", return_value=FakeRbac()):
-        result = deployer.destroy()
-    assert result.status == DeploymentStatus.SUCCESS
-    assert deleted == [f"{KUBELET_METRICS_CLUSTER_ROLE}-dep-a"]
-
-
-def test_deploy_applies_namespace_scoped_templates():
-    """Deploy renders Prometheus, Grafana, dashboard, Pushgateway and the kubelet binding."""
-    from lakebench.deploy.engine import DeploymentStatus
-    from lakebench.deploy.observability import ObservabilityDeployer
-
-    engine = _obs_engine("dep-a")
-    with (
-        patch(
-            "lakebench.deploy.observability.kubelet_cluster_role_exists",
-            return_value=True,
-        ),
-        patch(
-            "lakebench.deploy.observability._wait_for_deployment_ready",
-            return_value="",
-        ),
-        patch(
-            "lakebench.deploy.observability.read_grafana_password",
-            return_value=None,
-        ),
-    ):
-        result = ObservabilityDeployer(engine).deploy()
-    assert result.status == DeploymentStatus.SUCCESS, result.message
-    rendered = [c.args[0] for c in engine.renderer.render.call_args_list]
-    for t in (
-        "prometheus/prometheus.yaml.j2",
-        "grafana/grafana.yaml.j2",
-        "grafana/dashboard-configmap.yaml.j2",
-        "pushgateway/pushgateway.yaml.j2",
-        "prometheus/kubelet-metrics-binding.yaml.j2",
-    ):
-        assert t in rendered
-
-
-def test_deploy_fails_when_prometheus_not_ready():
-    """A Prometheus pod that never becomes Ready fails the step."""
-    from lakebench.deploy.engine import DeploymentStatus
-    from lakebench.deploy.observability import ObservabilityDeployer
-
-    engine = _obs_engine("dep-a")
-
-    def ready(_ns, selector, **_kw):
-        if "prometheus" in selector:
-            return "not Ready after 300s"
-        return ""
-
-    with (
-        patch(
-            "lakebench.deploy.observability.kubelet_cluster_role_exists",
-            return_value=True,
-        ),
-        patch(
-            "lakebench.deploy.observability._wait_for_deployment_ready",
-            side_effect=ready,
-        ),
-        patch(
-            "lakebench.deploy.observability.read_grafana_password",
-            return_value=None,
-        ),
-    ):
-        result = ObservabilityDeployer(engine).deploy()
-    assert result.status == DeploymentStatus.FAILED
-    assert "Prometheus not Ready" in result.message
-
-
-def test_benchmark_postprocessing_error_keeps_a_recorded_result():
-    body = ast.unparse(_benchmark_except_handler())
-    assert "if _bench_recorded:" in body
 
 
 @pytest.mark.parametrize(

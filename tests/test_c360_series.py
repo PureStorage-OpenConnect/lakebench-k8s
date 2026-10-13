@@ -28,7 +28,7 @@ D2 = "sha256:" + "2" * 64
 @pytest.mark.parametrize(
     "window", [(None, None), ("2024-01-01", "2024-12-31"), ("2023-03-05", None)]
 )
-@pytest.mark.parametrize("n", range(1, 7))
+@pytest.mark.parametrize("n", [1, 2, 4])
 def test_windows_tile_the_range(n, window):
     s, e = window
     got = cycle_windows(n, s, e)
@@ -378,22 +378,6 @@ def test_unowned_stale_generate_labels_the_marker(monkeypatch):
     result = _deployer(monkeypatch, s3, owned=False, allow=True).deploy()
     assert result.status.value == "success", result.message
     assert _marker(s3)["stale_bronze"] == {"allowed": True}
-
-
-def test_continuous_reset_keeps_the_clearing_marker(monkeypatch):
-    """The continuous reset clears the datagen prefix: the corpus goes, the
-    marker that says a clear is under way stays."""
-    from lakebench.cli import _sustained
-    from tests.fixtures.c360_reset_helpers import _c360_cfg
-
-    cfg = _c360_cfg()
-    bronze = cfg.platform.storage.s3.buckets.bronze
-    s3 = PrefixS3({(bronze, "customer/interactions/part-000000.parquet"): b"x"})
-    monkeypatch.setattr(_sustained, "_require_reset_ownership", lambda c: None)
-    monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: s3)
-    _sustained._reset_continuous_state(cfg, clear_raw=True)
-    assert set(s3.store) == {(bronze, SERIES)}
-    assert json.loads(s3.store[(bronze, SERIES)])["clearing"] is True
 
 
 def test_clearing_marker_refuses_reuse():

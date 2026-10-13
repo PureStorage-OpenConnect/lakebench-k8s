@@ -29,7 +29,7 @@ def _run_destroy(engine, manager_cls) -> list:
     """Run destroy with everything but the namespace step neutralised."""
     from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
-    # PR-1's Step-0 identity check would otherwise reach the API server;
+    # The namespace identity check would otherwise reach the API server;
     # this test is about un-watch ordering, so we bypass identity with a
     # clean MATCH verdict.
     match_report = IdentityReport(
@@ -58,13 +58,12 @@ def _run_destroy(engine, manager_cls) -> list:
         return destroy_all(engine, clean_buckets=False)
 
 
-class TestDestroyIsNotBlocked:
+class TestNamespaceDeleteIsBlocked:
     def test_unwatch_failure_now_blocks_namespace_delete(self):
-        """ADR-F1: with strict watch-list, a failed drop MUST prevent
-        the namespace delete -- deleting a namespace the operator still
-        watches crash-loops the operator globally, which is the exact
-        failure PR-2 was written to prevent. Destroy records the
-        failure loudly and points at ``admin repair-operator``.
+        """A failed watch-list drop prevents the namespace delete:
+        deleting a namespace the operator still watches crash-loops the
+        operator for every namespace. Destroy records the failure and
+        points at ``admin repair-operator``.
         """
         from lakebench.modules.pipeline_engines.spark.operator import (
             WatchListMutationError,

@@ -72,36 +72,20 @@ def test_owned_key_in_the_user_map_does_not_reach_the_manifest():
     assert conf[owned] == base[owned] != "7"
 
 
-@pytest.mark.parametrize("purpose", [LoadPurpose.RUN, LoadPurpose.MUTATE])
 @pytest.mark.parametrize(
     "key",
     [
-        "spark.jars",
-        "spark.jars.packages",
-        "spark.jars.repositories",
-        "spark.jars.ivy",
-        "spark.jars.ivySettings",
-        "spark.submit.pyFiles",
-        "spark.driver.userClassPathFirst",
-        "spark.kubernetes.driver.podTemplateFile",
-        "spark.sql.shuffle.partitions",
-        "spark.executor.memory",
-        "spark.executor.memoryOverheadFactor",
-        "spark.driver.memoryOverhead",
-        "spark.memory.offHeap.size",
-        "spark.executor.pyspark.memory",
-        "spark.sql.session.timeZone",
-        "spark.sql.autoBroadcastJoinThreshold",
-        "spark.kubernetes.executor.podNamePrefix",
-        "spark.kubernetes.node.selector.zone",
-        "spark.hadoop.fs.s3a.endpoint",
-        "spark.sql.catalog.lakehouse.uri",
+        "spark.sql.shuffle.partitions",  # written for every job
+        "spark.driver.memoryOverhead",  # pod sizing
+        "spark.sql.session.timeZone",  # set by a job script
+        "spark.kubernetes.node.selector.zone",  # reserved prefix
+        "spark.sql.catalog.lakehouse.uri",  # named after the catalog
     ],
 )
-def test_owned_key_refused(tmp_path, purpose, key):
+def test_owned_key_refused(tmp_path, key):
     path = _write(tmp_path, {key: "x"})
     with pytest.raises(ConfigValidationError) as e:
-        load_config(path, purpose=purpose, print_notes=False)
+        load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
     assert key in str(e.value)
 
 

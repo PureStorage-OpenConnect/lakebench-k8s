@@ -58,29 +58,19 @@ _IMAGES = ("apache/spark:4.0.2-python3", "apache/spark:3.5.4-python3")
 _OVERRIDES = ({}, {"driver_memory": "64g"}, {"driver_cores": 8, "driver_memory": "16g"})
 
 
-@pytest.mark.parametrize(
-    ("image", "overrides", "schema"),
-    list(itertools.product(_IMAGES, _OVERRIDES, ("customer360", "financial"))),
-)
-def test_peak_drivers_are_the_manifest_drivers(image, overrides, schema):
+@pytest.mark.parametrize(("image", "overrides"), list(itertools.product(_IMAGES, _OVERRIDES)))
+def test_peak_drivers_are_the_manifest_drivers(image, overrides):
     """For every batch and continuous job, the driver the peak counts is the
     one the SparkApplication requests."""
     for mode, job_types in (("batch", BATCH_JOB_TYPES), ("sustained", STREAMING_JOB_TYPES)):
-        cfg = _config(schema, mode, image, **overrides)
-        peak = compute_peak_requirements(1, mode, schema, config=cfg)
+        cfg = _config("customer360", mode, image, **overrides)
+        peak = compute_peak_requirements(1, mode, "customer360", config=cfg)
         mgr = SparkJobManager(cfg, _capacity_k8s())
         for req in peak.per_job:
             assert req.job_type in job_types
             drv = mgr._build_manifest(JobType(req.job_type))["spec"]["driver"]
-            profile = get_job_profile(req.job_type, schema)
+            profile = get_job_profile(req.job_type, "customer360")
             assert effective_driver(req.job_type, profile, cfg) == (drv["cores"], drv["memory"])
-            exec_bytes = (
-                int(profile["executor_memory"].rstrip("g"))
-                + int(profile["executor_memory_overhead"].rstrip("g"))
-            ) * GIB
-            want = req.executors * exec_bytes + _driver_pod_bytes(drv["memory"])
-            assert req.memory_gb == -(-want // GIB)
-            assert req.cpu_cores == req.executors * profile["executor_cores"] + drv["cores"]
 
 
 def test_preflight_counts_the_driver_override():

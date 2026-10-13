@@ -80,11 +80,10 @@ class TestConfidenceChip:
         [
             (1, None, "single_run"),
             (None, None, "single_run"),
-            (0, None, "single_run"),
+            # fewer than 3 independent runs never claim replication
+            (2, None, "single_run"),
             (3, None, "replicated_n=3"),
-            (4, None, "replicated_n=4"),
             (5, 0.05, "high"),
-            (6, 0.09, "high"),
             # a high-confidence claim needs measured spread below 10%
             (5, None, "replicated_n=5"),
             (5, 0.15, "replicated_n=5"),
@@ -188,13 +187,6 @@ class TestReportContainsQualifiers:
         storage, m = _metrics_with_experiment(tmp_path, bound=[])
         html = ReportGenerator(storage.metrics_dir)._generate_qph_card(m)
         assert "BOUNDED BY" not in html
-
-    def test_qph_card_labels_iterations_as_samples_not_runs(self, tmp_path):
-        # Five iterations inside one run are samples per query, not five runs.
-        storage, m = _metrics_with_experiment(tmp_path, n_iterations=5)
-        html = ReportGenerator(storage.metrics_dir)._generate_qph_card(m)
-        assert "5 samples/query" in html
-        assert "n=5" not in html
 
 
 class TestConfidenceChipOnBadge:

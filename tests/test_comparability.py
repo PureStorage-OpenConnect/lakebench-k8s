@@ -561,9 +561,6 @@ class TestSkippedMaintenance:
         b["experiment"]["effective_maintenance"] = {"id": delta_id}
         return a, b
 
-    def test_iceberg_and_delta_both_skipped_are_one_condition(self):
-        assert "effective maintenance" not in _condition_keys(*self._pair(self.ICE, self.DELTA))
-
     def test_settings_of_maintenance_that_never_ran_are_not_compared(self):
         a, b = self._pair(self.ICE, self.DELTA)
         a["experiment"]["maintenance_settings"] = {"retention_interval": 1800}

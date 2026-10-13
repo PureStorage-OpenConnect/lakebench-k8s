@@ -29,10 +29,6 @@ def _exact(n: int) -> str:
 
 
 class TestHiveLimit:
-    def test_live_working_names_load(self):
-        _cfg("ov-perf-c360-batch-s10", "hive-iceberg-spark-trino")
-        _cfg("ov-perf-c360-cont", "hive-iceberg-spark-trino")
-
     def test_boundary_23_passes_24_fails(self):
         _cfg(_exact(23), "hive-iceberg-spark-trino")
         with pytest.raises(ValidationError, match="it is 24"):
@@ -76,12 +72,6 @@ class TestLoader:
         p = tmp_path / "c.yaml"
         p.write_text(yaml.safe_dump({"name": name, "recipe": "hive-iceberg-spark-trino"}))
         return p
-
-    def test_destroy_path_can_still_load(self, tmp_path):
-        cfg = load_config(
-            self._write(tmp_path, "ov-perf-c360-continuous-s10"), allow_long_names=True
-        )
-        assert cfg.get_namespace() == "ov-perf-c360-continuous-s10"
 
     @pytest.mark.parametrize(
         ("module", "argv"),

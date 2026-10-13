@@ -1,21 +1,16 @@
-"""Destroy refuses on legacy (annotation-less / tag-less) resources.
+"""Destroy refuses on legacy (annotation-less) and foreign resources.
 
-Regression against the roleplay P0: the design doc claimed destroy
-refuses on `IdentityVerdict.ABSENT`, but the code was warn-and-proceed.
-A destroy pointed at a legacy annotationless namespace would happily
-proceed to empty its buckets -- the exact silent-corruption class the
-ownership invariant was written to prevent.
-
-Post-fix contract:
+Warn-and-proceed on an annotation-less namespace would let destroy go on to
+empty its buckets, the silent-corruption class the ownership invariant
+exists to prevent.
 
 - ABSENT namespace annotations without ``--force-legacy``: refuse and
   return with ``ownership-check`` FAILED, no namespaced resources
   touched.
-- ABSENT bucket tag without ``--force-legacy``: refuse and return with
-  ``s3-buckets`` FAILED, no ``empty_bucket`` call.
 - ABSENT + ``--force-legacy``: proceed loudly with a WARN in logs and
   the destroy summary.
-- MISMATCH always refuses, ``--force-legacy`` does not override.
+- MISMATCH on the namespace or a bucket always refuses; ``--force-legacy``
+  does not override it.
 """
 
 from __future__ import annotations
@@ -186,7 +181,7 @@ class TestNamespaceAbsent:
 
 
 class TestBucketAbsent:
-    """ABSENT bucket tag must refuse unless --force-legacy."""
+    """A bucket tagged by another deployment refuses, --force-legacy or not."""
 
     def _run_with_s3(self, force_legacy: bool, bucket_verdict):
         from lakebench.deploy.destroy import destroy_all

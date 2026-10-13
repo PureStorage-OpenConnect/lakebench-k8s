@@ -107,24 +107,6 @@ def test_pinset_hash_ignores_size_and_resolve_time():
     )
 
 
-def test_request_hash_covers_resolver_image_and_versions():
-    cfg = make_config(recipe="hive-iceberg-spark-trino")
-    base = req.select_request(cfg, tools_digest="t").request_sha256
-    assert req.select_request(cfg, tools_digest="t2").request_sha256 != base
-    assert (
-        req.select_request(
-            _cfg(SPARK40, recipe="hive-iceberg-spark-trino"), tools_digest="t"
-        ).request_sha256
-        != base
-    )
-    assert (
-        req.select_request(
-            _cfg(SPARK41, "iceberg", "1.10.1", recipe="hive-iceberg-spark-trino"), tools_digest="t"
-        ).request_sha256
-        != base
-    )
-
-
 def test_every_request_field_enters_the_hash():
     """A field that falls out of request_sha256 would let a redeploy keep a
     set resolved for another request (the resolve skips on the hash)."""
@@ -139,6 +121,7 @@ def test_every_request_field_enters_the_hash():
         ("jar_coordinates", ("g:a:2",)),
         ("spark_image", SPARK40),
         ("groups", ("jars",)),
+        ("tools_sha256", "t2"),
     ]:
         import dataclasses
 

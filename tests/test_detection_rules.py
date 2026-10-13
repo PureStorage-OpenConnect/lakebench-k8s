@@ -1,18 +1,12 @@
-"""Static and API-shape tests for detection_rules.py.
+"""Static tests for the AML detection rules and the files around them.
 
-Full end-to-end tests need a live Spark session (which the CI environment
-here doesn't provide -- `import pyspark` fails). These tests exercise
-what's testable without pyspark:
-
-1. Rule dispatcher shape: get_rule returns callables for the documented
-   rule ids; known_rules() lists them; unknown rule returns None.
-2. Structuring thresholds table covers the currencies the datagen emits
-   (see datagen_rs/src/amounts.rs::structuring_band).
-3. Rule constants are non-empty strings (regression guard against a
-   silent rename that would ship as unknown-rule from the dispatcher).
-
-Live-Spark integration tests belong in a separate `tests/spark/`
-directory once a mini-cluster fixture is available.
+The rules run inside Spark drivers, so most of these read the driver scripts
+as source or AST instead of importing them: the packaged AML reference data,
+the rule dispatch and typology maps against their orchestrator-side copies,
+which rules each gold script schedules, W7's deterministic dedup, the
+run-scoped alert projection and the gold.alerts column order. Also the
+scripts ConfigMaps shipping the reference JSON and the Spark Thrift memory
+the autosizer gives a financial workload.
 """
 
 from __future__ import annotations
@@ -25,30 +19,13 @@ import pytest
 DETECTION_RULES_PATH = Path(__file__).resolve().parents[1] / (
     "src/lakebench/spark/scripts/detection_rules.py"
 )
+GOLD_FINALIZE_PATH = Path(__file__).resolve().parents[1] / (
+    "src/lakebench/spark/scripts/gold_finalize_financial.py"
+)
 
 
 def _module_ast():
     return ast.parse(DETECTION_RULES_PATH.read_text())
-
-
-def test_aml_reference_files_exist_and_parse():
-    """The packaged AML reference JSON files must exist, be valid JSON,
-    and carry the entries array the rules expect."""
-    import json
-
-    ref_dir = Path(__file__).resolve().parents[1] / "src/lakebench/spark/data/aml"
-    for filename in (
-        "high_risk_jurisdictions.json",
-        "synthetic_corridors.json",
-    ):
-        p = ref_dir / filename
-        assert p.exists(), f"missing AML reference {p}"
-        payload = json.loads(p.read_text())
-        assert "entries" in payload
-        assert isinstance(payload["entries"], list)
-        assert len(payload["entries"]) > 0
-        assert "source" in payload
-        assert "license" in payload
 
 
 def test_aml_reference_shapes():
@@ -56,12 +33,14 @@ def test_aml_reference_shapes():
     import json
 
     ref_dir = Path(__file__).resolve().parents[1] / "src/lakebench/spark/data/aml"
-    hrj = json.loads((ref_dir / "high_risk_jurisdictions.json").read_text())["entries"]
-    for row in hrj:
+    hrj = json.loads((ref_dir / "high_risk_jurisdictions.json").read_text())
+    corr = json.loads((ref_dir / "synthetic_corridors.json").read_text())
+    for doc in (hrj, corr):
+        assert doc["entries"] and "license" in doc
+    for row in hrj["entries"]:
         assert "country_code" in row and len(row["country_code"]) == 2
         assert row["risk_tier"] in ("grey", "black")
 
-    corr = json.loads((ref_dir / "synthetic_corridors.json").read_text())
     assert corr["source"].startswith("SYNTHETIC")
     for row in corr["entries"]:
         assert row["risk_tier"] == "synthetic_corridor"
@@ -261,15 +240,6 @@ def test_w7_country_dedup_is_deterministic():
         "w7 must collapse silver.entities to one country per entity_id via "
         "a deterministic aggregation"
     )
-
-
-# ---------------------------------------------------------------------------
-# W1 vertex-cap skip is a distinct third outcome, not a zero.
-# ---------------------------------------------------------------------------
-
-GOLD_FINALIZE_PATH = Path(__file__).resolve().parents[1] / (
-    "src/lakebench/spark/scripts/gold_finalize_financial.py"
-)
 
 
 # ---------------------------------------------------------------------------

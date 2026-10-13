@@ -695,11 +695,12 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
         assert destroy_mod._operative_sql("SET a=b; VACUUM t RETAIN 0 HOURS") == "VACUUM"
         assert destroy_mod._operative_sql("DROP TABLE IF EXISTS t") == "DROP"
 
-    def test_iceberg_destroy_skips_snapshot_and_orphan_maintenance(self):
-        """Trino only unregisters (a DROP deletes every referenced
-        file); no maintenance statement runs."""
+    @pytest.mark.parametrize("table_format", ["iceberg", "delta"])
+    def test_destroy_skips_maintenance_and_only_unregisters(self, table_format):
+        """Trino only unregisters: no snapshot, orphan or vacuum statement
+        runs, because the buckets are emptied and deleted right after."""
         ran: list[str] = []
-        tables = self._run_tables(ran.append, table_format="iceberg")
+        tables = self._run_tables(ran.append, table_format=table_format)
         assert ran == [self.UNREG_SILVER, self.UNREG_GOLD]
         assert tables.status is DeploymentStatus.SUCCESS
         assert "maintenance skipped" in tables.message
@@ -714,14 +715,6 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
 
         tables = self._run_tables(missing, table_format="delta")
         assert tables.status is DeploymentStatus.SUCCESS, tables.message
-
-    def test_delta_destroy_skips_vacuum_and_only_drops(self):
-        """Policy 2026-09-26: the buckets are emptied and deleted right after."""
-        ran: list[str] = []
-        tables = self._run_tables(ran.append, table_format="delta")
-        assert ran == [self.UNREG_SILVER, self.UNREG_GOLD]
-        assert tables.status is DeploymentStatus.SUCCESS
-        assert "maintenance skipped" in tables.message
 
     # -- Polaris via Trino: DROP always requests purge, Polaris refuses it ----
 

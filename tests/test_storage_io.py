@@ -24,7 +24,6 @@ from lakebench.metrics.io import (
     BASIS_TRINO_READ,
     BASIS_TRINO_WRITE,
     REASON_ENGINE,
-    REASON_EXECUTOR_IO,
     REASON_NOT_RECORDED,
     bucket_series,
     build_io,
@@ -351,18 +350,6 @@ def test_other_query_engines_are_not_instrumented():
             "reason": REASON_ENGINE,
         }
     ]
-
-
-def test_spark_stages_are_listed_as_not_measured_in_both_directions():
-    rec = {
-        "pipeline_benchmark": {
-            "stages": [{"stage_name": n} for n in ("datagen", "bronze", "silver", "gold", "query")]
-        }
-    }
-    io = build_io(rec)
-    got = {(n["stage"], n["direction"]) for n in io["not_measured"] if n["source"] == "spark"}
-    assert got == {(s, d) for s in ("bronze", "silver", "gold") for d in ("read", "write")}
-    assert all(n["reason"] == REASON_EXECUTOR_IO for n in io["not_measured"])
 
 
 def test_datagen_bytes_come_from_the_fleet_and_are_unplaced_without_a_window():

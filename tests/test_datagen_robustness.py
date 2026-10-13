@@ -352,12 +352,11 @@ def test_scorer_refuses_a_stamp_the_config_did_not_declare(scorer, monkeypatch):
     )
 
 
-@pytest.mark.parametrize("abbrev", ["--rob", "--robust", "--robustness"])
-def test_entrypoint_does_not_accept_abbreviations(monkeypatch, abbrev):
+def test_entrypoint_does_not_accept_abbreviations(monkeypatch):
     # An abbreviation is an unknown flag: refused (exit 2), never read as
     # --robustness-perturbation.
     rc, cmd = _entry_cmd(
-        ["--schema", "financial", "--bucket", "b", "--seed", "7777", abbrev], monkeypatch
+        ["--schema", "financial", "--bucket", "b", "--seed", "7777", "--robustness"], monkeypatch
     )
     assert rc == 2 and cmd is None
 

@@ -83,6 +83,11 @@ def _submits(rec, job):
 
 
 def test_repeat_three_records_one_series(tmp_path, monkeypatch):
+    """Three repetitions make one series. No node markers: repetitions 2 and
+    3 carry repetition 1's corpus block verbatim, inherited_from and the
+    series digest (without the inherited block they would carry their own,
+    with no inherited_from). Each record carries its own observation of
+    bronze, taken before its save, equal to D1."""
     result, rec, records, manifest = _series(tmp_path, monkeypatch)
     assert result.exit_code == 0, result.output
     assert [r["series"]["index"] for r in records] == [1, 2, 3]
@@ -100,12 +105,6 @@ def test_repeat_three_records_one_series(tmp_path, monkeypatch):
     assert manifest["corpus"]["stale_bronze"] is None
     assert manifest["stopped_reason"] is None
 
-
-def test_repeat_inherits_block_without_markers(tmp_path, monkeypatch):
-    """No node markers: repetitions 2 and 3 carry repetition 1's corpus
-    block verbatim, inherited_from and the series digest. Without the
-    inherited block they would carry their own (no inherited_from)."""
-    result, rec, records, manifest = _series(tmp_path, monkeypatch)
     rep1 = _corpus(records[0])
     d1 = manifest["corpus"]["bronze_listing_sha256"]
     assert "inherited_from" not in rep1
@@ -114,13 +113,6 @@ def test_repeat_inherits_block_without_markers(tmp_path, monkeypatch):
         assert c.pop("inherited_from") == records[0]["run_id"]
         assert c.pop("bronze_listing_sha256") == d1
         assert c == {k: v for k, v in rep1.items() if k != "problems"}
-
-
-def test_series_digest_taken_before_save(tmp_path, monkeypatch):
-    """Each repetition's record carries its own observation of bronze, taken
-    before its save, and it equals D1."""
-    result, rec, records, manifest = _series(tmp_path, monkeypatch)
-    d1 = manifest["corpus"]["bronze_listing_sha256"]
     for r in records:
         obs = r["config_snapshot"]["experiment_inputs"]["corpus_observation"]
         assert obs["bronze_listing_sha256"] == d1

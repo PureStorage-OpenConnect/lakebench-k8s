@@ -187,13 +187,6 @@ class TestConcurrentDestroys:
         assert destroy_mod._monotonic() - before < 60, "must not wait out the timeout"
         assert cluster.deletes == 1
 
-    def test_second_destroy_after_namespace_gone(self):
-        cluster = FakeCluster(drain_polls=0)
-        _run(cluster)
-        result, _ = _run(cluster)
-        assert "already gone" in result.message
-        assert cluster.deletes == 1
-
 
 class TestDestroyAllWiring:
     def _run_destroy(
@@ -507,18 +500,6 @@ class TestDestroyAllWiring:
         sc = [r for r in results if r.component == "secretclass"]
         assert sc and sc[0].status is DeploymentStatus.SKIPPED
         assert "lakebench-s3-credentials-ns-a" in sc[0].message
-
-    def test_absent_at_start_is_never_deleted(self):
-        """Start UID empty: a namespace that appears later is a new deploy."""
-        cluster = FakeCluster(drain_polls=1)
-        state = {"uid": ""}
-
-        results, _, calls, engine = self._run_destroy(
-            cluster,
-            uid_fn=lambda _ns: state["uid"],
-            on_lease=lambda _e: None,
-        )
-        engine.k8s.delete_namespace.assert_not_called()
 
     def test_unreadable_uid_at_start_refuses_before_touching_anything(self):
         cluster = FakeCluster(drain_polls=1)

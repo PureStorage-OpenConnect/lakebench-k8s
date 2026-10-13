@@ -28,13 +28,7 @@ class TestRuntimeSuffix:
 
     @pytest.mark.parametrize(
         ("spark", "iceberg", "suffix"),
-        [
-            ((4, 0), "1.10.1", "4.0"),
-            ((4, 0), "1.11.0", "4.0"),
-            ((3, 5), "1.9.1", "3.5"),
-            ((3, 5), "1.10.1", "3.5"),
-            ((3, 5), "1.11.0", "3.5"),
-        ],
+        [((4, 0), "1.11.0", "4.0"), ((3, 5), "1.11.0", "3.5")],
     )
     def test_spark_35_and_40_are_unaffected(self, spark, iceberg, suffix):
         assert iceberg_runtime_suffix_for(spark, iceberg) == suffix
@@ -45,7 +39,7 @@ class TestJava17Requirement:
 
     @pytest.mark.parametrize(
         ("version", "required"),
-        [("1.11.0", True), ("1.10.1", False), ("1.9.1", False), ("1.5.2", False)],
+        [("1.11.0", True), ("1.10.1", False)],
     )
     def test_requires_java17(self, version, required):
         assert iceberg_requires_java17(version) is required

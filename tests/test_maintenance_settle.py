@@ -397,20 +397,14 @@ def test_run_records_a_stopped_maintenance_budget_on_the_saved_run(tmp_path, mon
     assert scores["maintenance_stop_reason"] == reason
 
 
-def test_completed_maintenance_is_not_flagged(tmp_path):
-    from lakebench.reports.generator import ReportGenerator
-
-    pm, pb = _pb_with_settle(None)
-    assert "maintenance_stopped" not in pb.to_dict()["scorecard"]
-    html = ReportGenerator(metrics_dir=tmp_path)._generate_maintenance_section(pm)
-    assert "stopped before completion" not in html
-
-
 def test_headline_qph_is_flagged_when_maintenance_stopped(tmp_path):
     from lakebench.reports.generator import ReportGenerator
 
     rg = ReportGenerator(metrics_dir=tmp_path)
     pm, pb = _pb_with_settle(None)
+    # Completed maintenance is not flagged anywhere.
+    assert "maintenance_stopped" not in pb.to_dict()["scorecard"]
+    assert "stopped before completion" not in rg._generate_maintenance_section(pm)
     assert "qph-stop-warning" not in rg._generate_batch_summary(pm).guards["Query rate"]
     assert "qph-stop-warning" not in rg._generate_qph_card(pm)
     pb.maintenance_stopped = True

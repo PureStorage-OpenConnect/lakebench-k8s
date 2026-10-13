@@ -193,7 +193,8 @@ def _rebuilt(run_id: str):
     return build_experiment(m)
 
 
-@pytest.mark.parametrize("run_id", sorted(SEVEN))
+# The records with the smallest and the largest lag.
+@pytest.mark.parametrize("run_id", ["011043-e338c5", "205000-ebb26f"])
 def test_block_records_the_trickle_and_identity_does_not_move(run_id):
     from lakebench.metrics.experiment import identity_hash
 

@@ -111,8 +111,9 @@ def test_storage_lane_places_only_windowed_intervals() -> None:
     st = d["storage"]
     assert sum(st["read"]) * st["step"] * 1e6 == pytest.approx(100_000_000, rel=1e-2)
     assert sum(st["write"]) == 0
-    assert d["storage_unplaced"] == ["datagen"]
-    assert d["storage_gaps"] == ["spark bronze", "spark gold"]
+    # Only a read with no counter is a gap; a write entry and datagen are not.
+    assert d["storage_read_gap"] == ["bronze"]
+    assert "Storage read bytes omit bronze" in render_replay(d)
 
 
 def test_no_io_means_no_storage_lane() -> None:
@@ -120,7 +121,7 @@ def test_no_io_means_no_storage_lane() -> None:
     del rec["io"]
     d = build_replay(rec)
     assert d["storage"] is None
-    assert "Not measured: Storage" in render_replay(d)
+    assert "Not in the record: Storage" in render_replay(d)
 
 
 @pytest.mark.parametrize(
@@ -222,7 +223,7 @@ def test_without_a_series_the_platform_lanes_say_not_measured() -> None:
     d = build_replay(_record())
     assert d["lanes"] == {}
     assert d["not_measured"] == ["Compute", "Network", "Kubernetes"]
-    assert "Not measured: Compute, Network, Kubernetes" in render_replay(d)
+    assert "Not in the record: Compute, Network, Kubernetes" in render_replay(d)
 
 
 def test_a_series_starting_after_the_run_is_shifted_onto_its_clock() -> None:

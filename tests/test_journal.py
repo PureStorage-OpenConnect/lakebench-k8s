@@ -103,7 +103,7 @@ class TestJournal:
 
     def test_begin_end_command(self, tmp_path: Path) -> None:
         j = Journal(journal_dir=tmp_path)
-        j.open_session(config_name="test")
+        sid = j.open_session(config_name="test")
         j.begin_command(CommandName.DEPLOY, {"dry_run": False})
         j.end_command(success=True, message="Deploy completed")
 
@@ -118,6 +118,8 @@ class TestJournal:
         assert events[2]["success"] is True
         assert isinstance(events[2]["duration_s"], (int, float))
         assert events[2]["duration_s"] >= 0
+        assert j.load_session_events(sid) == events
+        assert j.load_session_events("nonexistent-session") == []
 
     def test_record_event_appends_jsonl(self, tmp_path: Path) -> None:
         j = Journal(journal_dir=tmp_path)
@@ -168,22 +170,6 @@ class TestJournal:
         assert sessions[1]["config_name"] == "bench-1"
         assert sessions[1]["closed"] is True
         assert "deploy" in sessions[1]["commands"]
-
-    def test_load_session_events(self, tmp_path: Path) -> None:
-        j = Journal(journal_dir=tmp_path)
-        sid = j.open_session(config_name="test")
-        j.begin_command(CommandName.VALIDATE)
-        j.end_command(success=True)
-
-        events = j.load_session_events(sid)
-        assert len(events) == 3
-        types = [e["event_type"] for e in events]
-        assert types == ["session.start", "command.start", "command.end"]
-
-    def test_load_session_events_missing(self, tmp_path: Path) -> None:
-        j = Journal(journal_dir=tmp_path)
-        events = j.load_session_events("nonexistent-session")
-        assert events == []
 
     def test_purge_deletes_all(self, tmp_path: Path) -> None:
         j = Journal(journal_dir=tmp_path)

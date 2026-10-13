@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from lakebench.metrics.io import (
     BASIS_SPARK_DRIVER,
     BASIS_SPARK_READ,
@@ -134,11 +132,18 @@ def test_writes_far_below_what_landed_are_flagged_not_trusted() -> None:
 
 
 def test_a_record_with_no_spark_io_is_as_before() -> None:
-    io = build_io(_record("iceberg", None))
+    """Without spark_io every Spark stage is listed as not measured in both
+    directions; the datagen and query stages are not Spark stages."""
+    rec = _record("iceberg", None)
+    rec["pipeline_benchmark"]["stages"] = [
+        {"stage_name": s} for s in ("datagen", "bronze", "silver", "gold", "query")
+    ]
+    io = build_io(rec)
     assert not [i for i in io["intervals"] if i["source"] == "spark"]
     assert {(n["stage"], n["direction"]) for n in io["not_measured"]} == {
         (s, d) for s in ("bronze", "silver", "gold") for d in ("read", "write")
     }
+    assert all(n["reason"] == REASON_EXECUTOR_IO for n in io["not_measured"])
 
 
 def test_exporter_is_added_after_the_options_already_there() -> None:
@@ -161,12 +166,10 @@ def test_exporter_is_added_after_the_options_already_there() -> None:
     assert spec["containers"][0]["volumeMounts"][0]["mountPath"] == jmx_exporter.DIR
 
 
-@pytest.mark.parametrize("pods", [0, 1])
-def test_zero_gain_steps_add_no_interval(pods: int) -> None:
-    flat = [_res("lb-bronze-v-exec-1", [(0, 5), (15, 5), (30, 5)])] if pods else []
+def test_zero_gain_steps_add_no_interval() -> None:
+    flat = [_res("lb-bronze-v-exec-1", [(0, 5), (15, 5), (30, 5)])]
     out = build_spark_io(flat, flat, T0, T1)
-    if out is None:
-        return
+    assert out is not None
     io = build_io(_record("delta", out))
     assert not [i for i in io["intervals"] if i["source"] == "spark"]
 

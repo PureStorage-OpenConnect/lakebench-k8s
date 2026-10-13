@@ -158,6 +158,17 @@ def test_cli_args_follow_the_active_target(kubeconfig) -> None:
     assert cli_args("kubectl", None) == ["--context", "B"]
     assert cli_args("helm", "") == ["--kube-context", "B"]
     assert cli_args("oc", "B") == ["--context", "B"]
+    # The pinned subprocess helpers build their argv from it.
+    from lakebench.k8s._pinned import _pinned_argv
+
+    assert _pinned_argv("helm", None, ["list"]) == ["helm", "--kube-context", "B", "list"]
+    assert _pinned_argv("kubectl", "", ["get", "pods"]) == [
+        "kubectl",
+        "--context",
+        "B",
+        "get",
+        "pods",
+    ]
 
 
 def test_cli_args_pins_the_current_context_on_a_first_tool_call(kubeconfig) -> None:
@@ -330,20 +341,6 @@ def test_existing_but_broken_kubeconfig_never_falls_back_to_in_cluster(
     monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.1.50")
     with pytest.raises(ConfigException):
         ClusterTarget.resolve(None)
-
-
-def test_pinned_helpers_use_the_active_target(kubeconfig) -> None:
-    from lakebench.k8s._pinned import _pinned_argv
-
-    ClusterTarget.resolve(None).activate()
-    assert _pinned_argv("helm", None, ["list"]) == ["helm", "--kube-context", "B", "list"]
-    assert _pinned_argv("kubectl", "", ["get", "pods"]) == [
-        "kubectl",
-        "--context",
-        "B",
-        "get",
-        "pods",
-    ]
 
 
 def test_query_executor_prefix_uses_the_active_target(kubeconfig) -> None:

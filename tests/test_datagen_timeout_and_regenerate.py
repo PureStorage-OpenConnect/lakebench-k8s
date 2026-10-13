@@ -10,8 +10,6 @@
   bronze prefix (exit 3) unless ``--regenerate`` is passed; with the flag, on
   a bucket this deployment may empty, the datagen prefix is cleared before
   datagen submits. tests/test_bronze_gate.py covers the unowned rows.
-- The deployer's cycle path (``deploy_cycle``) does not call the CLI gate;
-  the multi-cycle loop in ``run`` does, before cycle 0.
 """
 
 from __future__ import annotations
@@ -344,6 +342,3 @@ class TestRunGenerateRegenerate:
         )
         assert res.exit_code == 9, (res.output[-2000:], repr(res.exception))
         assert call_order == ["empty", "deploy"], call_order
-
-
-# --- Multi-cycle is not touched --------------------------------------------

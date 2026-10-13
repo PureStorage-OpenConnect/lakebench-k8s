@@ -1,18 +1,10 @@
-"""Tests for the continuous AML detection spine.
+"""The continuous AML run fails on zero alerts, and the AML bronze-verify
+budget clears its measured cost.
 
-The continuous gold stage (gold_refresh_financial) re-runs detection over the
-full silver corpus each tick, reusing the batch DELETE-per-rule + INSERT
-driver (run_detection_rules), and the sustained runner fails an AML run that
-produced zero alerts. These scripts execute inside a
-Spark driver and cannot import pyspark in the test env, so the driver-side
-assertions are source/AST-based. The sustained-runner helper is pure Python
-and is exercised directly.
-
-Design note guarded here: an earlier sliding-data-clock-window design was
-rejected in adversarial review (silent recall loss from windows anchored at
-the global max over an out-of-order corpus, plus content-hash alert_id drift
-across ticks). These tests assert the corrected full-rescan design and guard
-against the windowed approach regressing back in.
+The sustained runner reads the cumulative alert count from the gold driver
+log and fails a financial run that produced none (a log with no detection
+line is unknown, not zero). The bronze-verify timeout budget is checked
+against the measured scale-10 cost.
 """
 
 from __future__ import annotations
@@ -77,7 +69,3 @@ def test_aml_bronze_verify_timeout_budget_clears_measured_cost():
     # Float scales (local mode allows <1) must not blow up.
     assert budget(0.1) == 5400
     assert budget(2.5) == 5400
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

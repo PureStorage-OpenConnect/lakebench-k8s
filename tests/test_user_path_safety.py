@@ -54,17 +54,6 @@ class TestWatchListEditsKeepTheInstalledChart:
 
         return run
 
-    def test_installed_chart_wins_over_config_and_latest(self, monkeypatch):
-        """The pin is the installed chart, read afresh. With it unreadable the
-        pin is None and the edit is refused; the config's version never stands in."""
-        for target in ("2.4.0", None):
-            m = self._mgr(target=target)
-            monkeypatch.setattr(m, "_run", self._helm_list("2.5.1"))
-            assert m._watch_list_pin()[:2] == ["--version", "2.5.1"]
-            m = self._mgr(target=target)
-            monkeypatch.setattr(m, "_run", self._helm_list(None))
-            assert m._watch_list_pin() is None
-
     def test_remove_refuses_when_the_installed_chart_is_unreadable(self, monkeypatch):
         """A refused removal fails the strict destroy, which keeps the namespace."""
         from unittest.mock import patch

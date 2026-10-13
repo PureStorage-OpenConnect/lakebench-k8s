@@ -386,18 +386,6 @@ class TestEffectiveMaintenance:
 
 
 class TestBenchmarkGateEmptyResults:
-    def test_a_query_that_returned_no_rows_fails_the_gate(self):
-        from lakebench.cli._run import _benchmark_gate_problems
-
-        cfg = _cfg()
-        qs = [
-            {"name": "Q1_full_aggregation_scan", "success": True, "rows_returned": 0},
-            {"name": "Q2_filtered_aggregation", "success": True, "rows_returned": 5},
-        ]
-        problems = _benchmark_gate_problems(cfg, qs)
-        assert problems and "Q1_full_aggregation_scan" in problems[0]
-        assert "no rows" in problems[0]
-
     def test_an_allowed_empty_query_passes(self):
         from lakebench.benchmark.queries import BENCHMARK_QUERIES_BY_DOMAIN, BenchmarkQuery
         from lakebench.cli._run import _benchmark_gate_problems

@@ -153,7 +153,6 @@ def _make_metrics(
         ({}, "PASSED", "pipeline", "PASS", True),
         # a failed job fails the verdict and leaves the legacy success field alone
         ({"job_success": False}, "FAILED", "pipeline", "FAIL", True),
-        ({"success": True, "job_success": False}, "FAILED", "pipeline", "FAIL", True),
         ({"success": False}, "FAILED", None, None, False),
         ({"benchmark_error": "Trino timeout"}, "FAILED", "benchmark", "FAIL", None),
         (

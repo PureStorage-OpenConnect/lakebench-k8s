@@ -25,9 +25,9 @@ from typer.testing import CliRunner
 from lakebench.cli import app
 from lakebench.config import ConfigError, LoadPurpose, load_config
 from lakebench.config.loader import load_notes
+from lakebench.config.recipes import recipe_components
 from lakebench.config.refused_keys import REFUSED_KEYS
 from lakebench.config.schema import LakebenchConfig
-from lakebench.config.support import recipe_names
 from lakebench.metrics.experiment import planned_experiment
 
 runner = CliRunner()
@@ -159,7 +159,12 @@ def _assert_round_trip(monkeypatch, old: Path, new: Path, output: str, *, name=N
 
 # -- round trips ------------------------------------------------------------------
 
-V16_EXAMPLES = sorted((FIXTURES / "v16-examples").glob("*.yaml"))
+# The other 1.6 examples differ from examples/ only in image and version
+# strings, or in the same Polaris client_secret reference as the Trino one.
+V16_EXAMPLES = [
+    FIXTURES / "v16-examples" / "polaris-iceberg-spark-trino.yaml",
+    FIXTURES / "v16-examples" / "polaris-iceberg-spark-financial.yaml",
+]
 EXAMPLES = sorted((ROOT / "examples").glob("*.yaml"))
 V16_INIT = sorted((FIXTURES / "v16-init").glob("*.yaml"))
 
@@ -199,15 +204,52 @@ def test_init_from_round_trip_flat_v12(tmp_path, monkeypatch):
     assert cfg.get_namespace() == "flat12-ns"
 
 
-@pytest.mark.parametrize("workload", ["customer360", "financial"])
-@pytest.mark.parametrize("recipe", recipe_names())
+def _components(cfg: LakebenchConfig) -> dict[str, str]:
+    arch = cfg.architecture
+    return {
+        "architecture.catalog.type": arch.catalog.type.value,
+        "architecture.table_format.type": arch.table_format.type.value,
+        "architecture.pipeline_engine": arch.pipeline_engine.value,
+        "architecture.query_engine.type": arch.query_engine.type.value,
+    }
+
+
+@pytest.mark.parametrize(
+    ("recipe", "workload"),
+    [
+        ("hive-iceberg-spark-trino", "customer360"),
+        ("polaris-iceberg-spark-trino", "financial"),
+        ("hive-delta-spark-thrift", "customer360"),
+        ("polaris-iceberg-spark-duckdb", "customer360"),
+        ("hive-iceberg-spark-none", "financial"),
+    ],
+)
 def test_init_from_round_trip_of_init_output(tmp_path, monkeypatch, recipe, workload):
+    """init writes a file that loads quietly to its recipe, with the
+    credentials as references; ``init --from`` of it round-trips."""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LAKEBENCH_S3_ACCESS_KEY", SENTINEL_AK)
+    monkeypatch.setenv("LAKEBENCH_S3_SECRET_KEY", SENTINEL_SK)
     first = tmp_path / "first.yaml"
     r = runner.invoke(app, ["init", "-r", recipe, "-w", workload, "-o", str(first)])
-    if r.exit_code != 0:
-        assert workload == "financial" and "-delta-" in recipe  # Iceberg-only workload
-        return
+    assert r.exit_code == 0, r.output
+    text = first.read_text()
+    raw = yaml.safe_load(text)
+    cfg = load_config(first)
+    assert cfg.recipe == recipe
+    assert _components(cfg) == recipe_components(recipe)
+    assert cfg.architecture.workload.schema_type.value == workload
+    assert cfg.architecture.workload.datagen.scale == 1
+    s3 = raw["platform"]["storage"]["s3"]
+    assert s3["access_key"] == "${LAKEBENCH_S3_ACCESS_KEY}"
+    assert s3["secret_key"] == "${LAKEBENCH_S3_SECRET_KEY}"
+    assert SENTINEL_AK not in text and SENTINEL_SK not in text
+    assert "client_secret" not in str(raw)  # listed commented, never live
+    assert "architecture" not in raw  # recipe-owned keys are commented
+    assert len(re.findall(r"(?m)^recipe:", text)) == 1
+    # The load is quiet: no deprecation or upgrade note on a fresh file.
+    assert list(cfg._load_notes) == []
+
     new = tmp_path / "new.yaml"
     r = runner.invoke(app, ["init", "--from", str(first), "-o", str(new)])
     assert r.exit_code == 0, r.output

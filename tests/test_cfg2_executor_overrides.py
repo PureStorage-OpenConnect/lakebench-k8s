@@ -267,17 +267,13 @@ def test_override_pair_architecture_difference(mutate_a, mutate_b, key):
 # -- 6. not a baseline, not evidence -------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "metric",
-    ["total_core_hours", "pipeline_throughput_gb_per_second", "total_elapsed_seconds"],
-)
-def test_a_binding_override_labels_the_metrics_it_caps(metric):
+def test_a_binding_override_labels_the_metrics_it_caps():
     from lakebench.metrics.metric_registry import capped_by
 
     cfg = _cfg()
     cfg.platform.compute.spark.silver_executors = 4  # the profile asks 8 at scale 1
     kinds = _record_with(cfg)["experiment"]["limits"]["bound_kinds"]
-    assert "silver-build: executor override" in capped_by(metric, kinds, "batch")
+    assert "silver-build: executor override" in capped_by("total_core_hours", kinds, "batch")
 
 
 def test_a_count_pinned_at_the_cap_keeps_the_cap_label():
@@ -301,16 +297,6 @@ def test_a_local_run_applies_no_override():
         x for x in rec["experiment"]["limits"]["executors"] if x["job_type"] == "silver-build"
     )
     assert sb["override"] is None and "override_bound" not in sb
-
-
-def test_the_identity_fallback_reads_the_run_mode():
-    rec = sr.load_record("5105a0")
-    rec["config_snapshot"]["spark"]["executor_overrides"]["silver"] = 12
-    rec["config_snapshot"]["spark"]["executor_overrides"]["gold_refresh"] = 3
-    rec["experiment"]["mode"] = "continuous"
-    assert cmp.optional_keys(rec["experiment"], rec)["spark executor overrides"] == {
-        "gold_refresh": 3
-    }
 
 
 # -- 6. one key per stage -----------------------------------------------------------

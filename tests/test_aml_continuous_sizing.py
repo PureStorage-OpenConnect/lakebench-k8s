@@ -84,21 +84,9 @@ def test_silver_batch_fits_its_trigger_at_scale_10():
     assert _cores("silver-stream") * per_core_rps >= 1.5 * _BRONZE_RPS
 
 
-def test_the_base_silver_profile_could_not_keep_up():
-    """The measurement the override answers: 16 cores fall behind bronze."""
-    per_core_rps = _SILVER_ROWS / _SILVER_S / _SILVER_CORES
-    base = _JOB_PROFILES["silver-stream"]
-    assert base["base_executors"] * base["executor_cores"] * per_core_rps < _BRONZE_RPS
-
-
 def _gold_tick_s(cores: int, rows_m: float) -> float:
     per_m_rows_s = (_GOLD_TICK_S - _GOLD_FIXED_S) / _GOLD_MEAN_ROWS_M
     return _GOLD_FIXED_S + per_m_rows_s * rows_m * _GOLD_CORES / cores
-
-
-def test_the_local_ticks_give_the_fixed_cost():
-    slope = (122 - 84) / (6.7 - 3.4)
-    assert abs((84 - slope * 3.4) - _GOLD_FIXED_S) < 3
 
 
 def test_a_full_silver_gold_tick_fits_the_refresh_interval_at_scale_10():

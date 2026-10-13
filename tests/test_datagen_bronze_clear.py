@@ -1,14 +1,14 @@
 """Before a fresh generate the deployer clears only the owned bronze prefix.
 
 Covers ``DatagenDeployer._clear_bronze_prefix_if_fresh``:
-- clears at cycle 0 only for a bucket this deployment proved its own, scoped
-  to the datagen prefix with incomplete uploads aborted;
-- never clears on append cycles (n > 0);
-- refuses over a non-empty prefix it may not clear, unless built with
-  ``allow_stale_bronze``;
+- clears at cycle 0 for a bucket this deployment proved its own, scoped to
+  the datagen prefix with incomplete uploads aborted;
 - never clears a whole bucket (empty prefix);
 - fails the generate when clearing an owned bucket cannot complete;
 - the dry-run deploy path never clears.
+
+Append cycles, the refusal over an unowned prefix and ``allow_stale_bronze``
+are covered against a recorded cluster in ``test_bronze_gate.py``.
 """
 
 from __future__ import annotations
@@ -20,16 +20,11 @@ from lakebench.deploy.engine import DeploymentEngine
 from tests.conftest import make_config
 
 
-def _deployer(
-    schema="customer360", create_buckets=True, dry_run=True, allow=False, continuous=False
-):
+def _deployer(schema="customer360", dry_run=True):
     cfg = make_config(
         architecture={"workload": {"schema": schema, "datagen": {"seed": 43}}},
     )
-    cfg.platform.storage.s3.create_buckets = create_buckets
-    return DatagenDeployer(
-        DeploymentEngine(cfg, dry_run=dry_run), allow_stale_bronze=allow, continuous=continuous
-    )
+    return DatagenDeployer(DeploymentEngine(cfg, dry_run=dry_run))
 
 
 class _FakeS3:
@@ -92,40 +87,6 @@ def test_clears_prefix_at_cycle_zero_for_owned_bucket(monkeypatch, schema, prefi
     assert len(_FakeS3.instances) == 1
     assert _FakeS3.instances[0].deleted == [(bucket, prefix)]
     assert _FakeS3.instances[0].aborts == [True]  # multipart ghosts are aborted
-
-
-@pytest.mark.parametrize("owned", [True, False])
-def test_append_cycle_never_clears(monkeypatch, owned):
-    monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
-    _own(monkeypatch, owned)
-    d = _deployer(schema="customer360")
-    d._clear_bronze_prefix_if_fresh(1, "customer/interactions")
-    assert all(i.deleted == [] for i in _FakeS3.instances)
-
-
-def test_allow_stale_bronze_writes_over_unowned_prefix_without_clearing(monkeypatch):
-    monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
-    _own(monkeypatch, False)
-    monkeypatch.setattr("lakebench.deploy.datagen._holds_corpus", lambda *a, **k: True)
-    d = _deployer(schema="customer360", allow=True)
-    d._clear_bronze_prefix_if_fresh(0, "customer/interactions")
-    assert all(i.deleted == [] for i in _FakeS3.instances)
-    with pytest.raises(StaleBronzeRefused):
-        _deployer(schema="customer360", allow=False)._clear_bronze_prefix_if_fresh(
-            0, "customer/interactions"
-        )
-    assert all(i.deleted == [] for i in _FakeS3.instances)
-
-
-def test_operator_managed_bucket_follows_ownership(monkeypatch):
-    """create_buckets false: a pre-provisioned bucket is cleared only when it is
-    this deployment's (adopted with --force-legacy); otherwise refused."""
-    monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
-    _own(monkeypatch, False)
-    d = _deployer(schema="customer360", create_buckets=False)
-    with pytest.raises(StaleBronzeRefused):
-        d._clear_bronze_prefix_if_fresh(0, "customer/interactions")
-    assert _FakeS3.instances[0].deleted == []
 
 
 def test_empty_prefix_is_never_cleared(monkeypatch):

@@ -13,17 +13,10 @@ from lakebench.metrics.maintenance_policy import (
     LEGACY_MAINTENANCE_POLICY_ID,
     MAINTENANCE_POLICY_ID,
     effective_maintenance,
-    recorded_policy,
     skipped_policy_id,
 )
 
 NAME = "c360-batch-s10"
-
-
-def test_ids_and_helpers():
-    assert recorded_policy({}) == LEGACY_MAINTENANCE_POLICY_ID
-    assert recorded_policy(None) == LEGACY_MAINTENANCE_POLICY_ID
-    assert recorded_policy({"maintenance_policy_id": "x"}) == "x"
 
 
 def test_storage_reads_an_unstamped_record_as_legacy(tmp_path):

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import copy
 import json
-from pathlib import Path
 
 from lakebench.metrics import alert_set as als
 from lakebench.metrics import experiment as ex
@@ -19,8 +18,6 @@ from tests.fixtures.comparability_helpers import SYSID
 from tests.fixtures.corpus_identity_helpers import observe, two_nodes
 from tests.fixtures.corpus_identity_helpers import series as series_body
 from tests.fixtures.experiment_helpers import _cfg, _metrics
-
-SCRIPTS = Path(__file__).resolve().parents[1] / "src" / "lakebench" / "spark" / "scripts"
 
 
 def _aset(**rules: tuple[int, str]) -> dict:

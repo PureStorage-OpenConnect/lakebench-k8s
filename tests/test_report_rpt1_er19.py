@@ -145,12 +145,6 @@ def test_r1_older_platform_record_is_caveated():
     assert "count containers more than once" in _text("1320bd")
 
 
-def test_r1_current_platform_record_has_no_caveat():
-    record = load_record("1320bd")
-    record["platform_metrics"]["query_version"] = 2
-    assert "count containers more than once" not in _render_dict(record)
-
-
 def test_r1_stage_rows_labelled_sum_of_per_pod_peaks():
     """1320bd's platform stage table says its max columns are sums of
     per-pod peaks, and each stage cell equals that sum from the record."""

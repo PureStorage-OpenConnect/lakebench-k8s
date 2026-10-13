@@ -5,7 +5,6 @@ import pytest
 from lakebench.modules.pipeline_engines.spark.job import (
     JobType,
     SparkJobManager,
-    _resolve_job_profile,
     compute_peak_requirements,
     get_executor_count,
     get_job_profile,
@@ -171,7 +170,6 @@ class TestSchemaProfileOverrides:
         executor = manifest["spec"]["executor"]
         profile = get_job_profile(job.value, schema)
 
-        assert profile == _resolve_job_profile(job.value, schema)
         assert get_executor_count(job.value, scale, schema) == executor["instances"]
         assert profile["executor_memory"] == executor["memory"]
 

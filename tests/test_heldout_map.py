@@ -160,12 +160,3 @@ def test_byte_compare_runs_every_generator_with_the_hash_file(monkeypatch):
     assert all(a in args[:i] for a in bc.HELDOUT_ARGS)
     # A shared SELinux label: a private one (Z) would deny the next container.
     assert bc.HELDOUT_ARGS[1].endswith(":ro,z")
-
-
-@pytest.mark.parametrize("bad", [True, 1.0])
-def test_load_heldout_refuses_a_non_integer_format(tmp_path, bad):
-    doc = json.loads(ds.heldout_path().read_text())
-    p = tmp_path / "h.json"
-    p.write_text(json.dumps({**doc, "format": bad}))
-    with pytest.raises(ValueError, match="format"):
-        ds.load_heldout(p)

@@ -1,10 +1,11 @@
-"""Tests for deployer modules (P2).
+"""Tests for deployer modules.
 
 Covers:
-- HiveDeployer: skip, and fail naming admin install when Stackable is missing
-- DuckDBDeployer: skip guard, dry-run, template rendering, _wait_for_ready
-- ObservabilityDeployer: skip, dry-run, helm values
-- DatagenDeployer: _parse_size_to_bytes, dry-run
+- HiveDeployer: a missing Stackable fails the step and installs nothing
+- DuckDBDeployer: _wait_for_ready accepts only a pod on this deploy's set
+- ObservabilityDeployer: destroy deletes only this deployment's binding
+- DatagenDeployer: _parse_size_to_bytes, and the schema and bronze prefix
+  reaching the datagen context
 """
 
 from __future__ import annotations

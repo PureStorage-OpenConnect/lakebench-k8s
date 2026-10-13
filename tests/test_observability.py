@@ -1,10 +1,10 @@
-"""Tests for the observability package (P0 + P2).
+"""Tests for the observability package.
 
 Covers:
-- PlatformCollector: collect(), _query_range(), _query_instant(), _infer_component()
-- S3MetricsWrapper: enabled/disabled paths, error recording, proxy behavior
-- ObservabilityDeployer deploy/destroy paths; build_helm_values() and the admin
-  install component's prepare() and install()
+- PlatformCollector: collect(), failed and partial queries, _infer_component()
+- ObservabilityDeployer deploy/destroy paths, the Grafana route and the
+  provisioned dashboard
+- The shared Observability component's status() and install()
 """
 
 from __future__ import annotations
@@ -179,16 +179,6 @@ class TestInferComponent:
 
 
 # ===========================================================================
-# CLI _collect_platform_metrics helper
-# ===========================================================================
-
-
-# ===========================================================================
-# S3MetricsWrapper
-# ===========================================================================
-
-
-# ===========================================================================
 # ObservabilityDeployer (per-namespace stack)
 # ===========================================================================
 
@@ -220,11 +210,21 @@ class TestObservabilityDeployer:
         result = ObservabilityDeployer(engine).deploy()
         assert result.status == DeploymentStatus.SKIPPED
 
-    def test_deploy_renders_and_applies_templates(self):
+    @pytest.mark.parametrize("dashboards", [True, False])
+    def test_deploy_renders_and_applies_templates(self, dashboards):
         from lakebench.deploy.engine import DeploymentStatus
         from lakebench.deploy.observability import ObservabilityDeployer
 
         engine = _obs_engine()
+        engine.config = make_config(
+            name="lakebench-dep",
+            observability={
+                "enabled": True,
+                "retention": "14d",
+                "storage": "20Gi",
+                "dashboards_enabled": dashboards,
+            },
+        )
         with (
             patch(
                 "lakebench.deploy.observability.kubelet_cluster_role_exists",
@@ -242,12 +242,21 @@ class TestObservabilityDeployer:
             result = ObservabilityDeployer(engine).deploy()
         assert result.status == DeploymentStatus.SUCCESS, result.message
         rendered = [c.args[0] for c in engine.renderer.render.call_args_list]
-        # Prometheus, Grafana, dashboard, Pushgateway, kubelet binding.
+        # Prometheus, Grafana, dashboard (unless disabled), Pushgateway,
+        # kubelet binding.
         assert "prometheus/prometheus.yaml.j2" in rendered
         assert "grafana/grafana.yaml.j2" in rendered
-        assert "grafana/dashboard-configmap.yaml.j2" in rendered
+        assert ("grafana/dashboard-configmap.yaml.j2" in rendered) is dashboards
         assert "pushgateway/pushgateway.yaml.j2" in rendered
         assert "prometheus/kubelet-metrics-binding.yaml.j2" in rendered
+        # The config's retention and storage reach the Prometheus context.
+        ctx = next(
+            c.args[1]
+            for c in engine.renderer.render.call_args_list
+            if c.args[0] == "prometheus/prometheus.yaml.j2"
+        )
+        assert ctx["prometheus_retention"] == "14d"
+        assert ctx["prometheus_storage"] == "20Gi"
 
     @pytest.mark.parametrize(
         ("openshift", "route_on", "expect_route"),
@@ -389,31 +398,22 @@ class TestObservabilityDeployer:
 class TestObservabilityComponent:
     """The shared ClusterRole: admin install applies it, deploy reads it."""
 
-    def test_component_status_reads_the_clusterrole(self):
+    @pytest.mark.parametrize("present", [True, False])
+    def test_component_status_reads_the_clusterrole(self, present):
         from lakebench.deploy.shared_components import Observability, Settings
 
         cfg = make_config(observability={"enabled": True})
         settings = Settings.from_config(cfg)
         with patch(
             "lakebench.deploy.observability.kubelet_cluster_role_exists",
-            return_value=True,
+            return_value=present,
         ):
             status = Observability().status(settings)
-        assert status.installed is True
-        assert status.ready is True
-
-    def test_component_status_absent(self):
-        from lakebench.deploy.shared_components import Observability, Settings
-
-        cfg = make_config(observability={"enabled": True})
-        settings = Settings.from_config(cfg)
-        with patch(
-            "lakebench.deploy.observability.kubelet_cluster_role_exists",
-            return_value=False,
-        ):
-            status = Observability().status(settings)
-        assert status.installed is False
-        assert "not present" in status.detail
+        assert status.installed is present
+        if present:
+            assert status.ready is True
+        else:
+            assert "not present" in status.detail
 
     def test_component_install_applies_the_clusterrole(self):
         from lakebench.deploy.shared_components import Observability, Settings
@@ -428,13 +428,6 @@ class TestObservabilityComponent:
         applied = fake_k8s.apply_manifest.call_args_list[0].args[0]
         assert applied["kind"] == "ClusterRole"
         assert applied["metadata"]["name"] == "lakebench-kubelet-metrics"
-
-    def test_component_is_unversioned(self):
-        from lakebench.deploy.shared_components import Observability, Settings
-
-        cfg = make_config(observability={"enabled": True})
-        assert Observability().versioned is False
-        assert Observability().config_version(Settings.from_config(cfg)) is None
 
 
 class TestDashboardTemplate:
