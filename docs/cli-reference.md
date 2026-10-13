@@ -58,7 +58,7 @@ line to stderr:
 
 ### init
 
-Write a configuration file with every key in it: the lines a first run needs are live, the rest are commented at their defaults.
+Write a configuration file: the lines a first run needs are live, and the keys a deployment usually tunes follow commented at their defaults.
 
 <!-- BEGIN GENERATED: cli init -->
 ```

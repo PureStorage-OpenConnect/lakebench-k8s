@@ -116,17 +116,22 @@ The file has three kinds of line, told apart by how they start:
 - A line starting `# ` is a key left at its default, with its type or range
   after it where that says something.
 
-Every key of the schema is in the file, in schema order, in sections opened by
-a banner, with a blank line between keys. That is about 660 lines; this is an
+The keys a deployment usually tunes are in the file, in schema order, in
+sections opened by a banner, with a blank line between keys: the connection,
+the images, the stage sizes, the continuous window, datagen, the Trino sizing,
+scratch, observability and the benchmark. That is about 360 lines. Every other
+key keeps its default and is described on the
+[configuration page](configuration.md#complete-field-reference). This is an
 excerpt:
 
 ```yaml
 ## Written by `lakebench init`.
 ##
 ## Lines that start with '##' are descriptions. Lines with no '#' in front are set
-## for this deployment. Every other key is listed at its default, commented out
-## with '# ': remove the '# ' from the key, and from the block lines above it,
-## to set it. docs/configuration.md describes each key in full, and
+## for this deployment. The keys a deployment usually tunes follow at their
+## defaults, commented out with '# ': remove the '# ' from the key, and from the
+## block lines above it, to set it. Every other key keeps its default; the
+## whole schema is described in docs/configuration.md, and
 ## `lakebench config recipes` lists the recipes.
 
 ## Unique deployment name.
@@ -165,7 +170,6 @@ recipe: polaris-iceberg-spark-trino
   with the name filled in. Keys the run sizes when they are unset, such as the
   datagen `parallelism`, `cpu` and `memory`, say so in their description;
   leave them commented to keep the automatic sizing.
-- The configuration page describes every key in full.
 - The recipe sets the catalog, table format, pipeline engine and query
   engine. A component with a different value (say `catalog.type: hive`
   under this recipe) is refused at load, naming both keys. Pick another

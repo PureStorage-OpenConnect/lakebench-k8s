@@ -142,29 +142,41 @@ def test_the_live_lines_stay_within_the_first_day_budget():
         ("hive-delta-spark-thrift", "customer360"),
     ],
 )
-def test_uncommenting_every_key_loads_and_covers_the_schema(recipe, workload):
-    """The file is the full reference: every key of the schema is in it exactly
-    once, and the defaults it prints are values the schema accepts."""
-    from lakebench.cli._init import _schema_leaves, config_problem
+def test_uncommenting_every_listed_key_loads_and_lists_the_tuned_keys(recipe, workload):
+    """The file lists the keys a deployment tunes, each once, and the defaults it
+    prints are values the schema accepts."""
+    from lakebench.cli._init import _is_tuned, _schema_leaves, config_problem
 
     text = first_day_config(name="all-t", recipe=recipe, workload=workload, endpoint="http://s3:80")
     full = _uncomment(text)
     assert config_problem(full, "LAKEBENCH_S3") is None
 
-    expected = [path for path, _ in _schema_leaves()]
+    leaves = [path for path, _ in _schema_leaves()]
     flat: list[str] = []
 
     def walk(node, prefix):
         for key, value in node.items():
             path = f"{prefix}{key}"
-            if isinstance(value, dict) and path not in expected:
+            if isinstance(value, dict) and path not in leaves:
                 walk(value, f"{path}.")
             else:
                 flat.append(path)
 
     walk(yaml.safe_load(full), "")
-    assert sorted(flat) == sorted(expected)
     assert len(set(flat)) == len(flat)
+    tuned = {path for path in leaves if _is_tuned(path)}
+    assert tuned <= set(flat)
+    # Beyond the tuned keys: the name, the recipe and the recipe's own components.
+    assert set(flat) - tuned == {"name", "recipe", *recipe_components(recipe)}
+
+
+def test_every_tuned_key_exists_in_the_schema():
+    from lakebench.cli._init import _TUNED, _TUNED_PREFIXES, _schema_leaves
+
+    leaves = {path for path, _ in _schema_leaves()}
+    assert sorted(_TUNED - leaves) == []
+    for prefix in _TUNED_PREFIXES:
+        assert any(path.startswith(prefix) for path in leaves), prefix
 
 
 def test_one_key_uncommented_with_its_blocks_sets_only_that_key(tmp_path, creds):

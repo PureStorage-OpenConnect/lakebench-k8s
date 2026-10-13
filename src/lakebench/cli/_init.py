@@ -1,10 +1,10 @@
-"""``lakebench init``: write a config with every key in it.
+"""``lakebench init``: write a config with the keys a deployment tunes in it.
 
 The live lines are what a first run needs: a unique name, the recipe written
 once, the workload and scale, the S3 endpoint and the two credentials as
-``${VAR}`` references. Every other key of the schema follows in schema order,
-commented at its default with its type, range and a one-line description, so
-the file is the full reference for the deployment. A commented line is the
+``${VAR}`` references. The keys a deployment usually tunes follow in schema
+order, commented at its default with a one-line description; every other key
+keeps its default and is described in docs/configuration.md. A commented line is the
 YAML line with a leading ``# ``: remove that prefix, and the prefix of the
 block lines above the key, to set it. The components the recipe sets are in
 the same tree with the recipe's own values. No plaintext secret is ever
@@ -183,7 +183,87 @@ _DISPLAY_RENAMES = (
     ("architecture.pipeline.sustained.", "architecture.pipeline.continuous."),
 )
 _DESCRIPTION_CHARS = 300
+#: The keys a deployment usually tunes. The file lists these, the keys it
+#: writes live and the recipe's own components; every other key keeps its
+#: default and is described in docs/configuration.md. A test checks that each
+#: path exists in the schema, so a renamed key cannot leave a stale entry.
+_TUNED = frozenset(
+    {
+        "images.datagen",
+        "images.spark",
+        "images.polaris",
+        "images.polaris_admin_tool",
+        "images.trino",
+        "images.pull_policy",
+        "platform.kubernetes.context",
+        "platform.kubernetes.namespace",
+        "platform.storage.s3.endpoint",
+        "platform.storage.s3.region",
+        "platform.storage.s3.path_style",
+        "platform.storage.s3.access_key",
+        "platform.storage.s3.secret_key",
+        "platform.storage.s3.ca_cert",
+        "platform.storage.s3.verify_ssl",
+        "platform.storage.s3.buckets.bronze",
+        "platform.storage.s3.buckets.silver",
+        "platform.storage.s3.buckets.gold",
+        "platform.storage.scratch.enabled",
+        "platform.storage.scratch.storage_class",
+        "platform.compute.spark.bronze_executors",
+        "platform.compute.spark.silver_executors",
+        "platform.compute.spark.gold_executors",
+        "platform.compute.spark.bronze_executor_cores",
+        "platform.compute.spark.silver_executor_cores",
+        "platform.compute.spark.gold_executor_cores",
+        "platform.compute.spark.driver_memory",
+        "platform.compute.spark.driver_cores",
+        "platform.compute.postgres.storage",
+        "platform.compute.postgres.storage_class",
+        "architecture.query_engine.trino.coordinator.cpu",
+        "architecture.query_engine.trino.coordinator.memory",
+        "architecture.query_engine.trino.worker.replicas",
+        "architecture.query_engine.trino.worker.cpu",
+        "architecture.query_engine.trino.worker.memory",
+        "architecture.query_engine.trino.worker.spill_enabled",
+        "architecture.query_engine.trino.worker.spill_max_per_node",
+        "architecture.query_engine.trino.worker.storage",
+        "architecture.query_engine.trino.worker.storage_class",
+        "architecture.pipeline.mode",
+        "architecture.pipeline.cycles",
+        "architecture.pipeline.pre_benchmark_maintenance",
+        "architecture.benchmark.mode",
+        "architecture.benchmark.streams",
+        "architecture.benchmark.cache",
+        "architecture.benchmark.iterations",
+        "workload.schema",
+        "workload.datagen.scale",
+        "workload.datagen.mode",
+        "workload.datagen.seed",
+        "workload.datagen.parallelism",
+        "workload.datagen.cpu",
+        "workload.datagen.memory",
+        "workload.datagen.dirty_data_ratio",
+        "workload.datagen.timestamp_start",
+        "workload.datagen.timestamp_end",
+        "workload.retention_workload",
+        "workload.retention_months",
+        "workload.tm_operations.enabled",
+        "workload.tm_operations.continuous_interval_seconds",
+        "observability.enabled",
+        "observability.dashboards_enabled",
+        "observability.grafana_route",
+        "observability.retention",
+        "observability.storage",
+        "observability.prometheus_storage_class",
+        "spark.conf",
+    }
+)
+#: Every key under these is tuned: the continuous window is what a continuous
+#: run is about.
+_TUNED_PREFIXES = ("architecture.pipeline.continuous.",)
 _WRAP = 78
+#: A second-level block opens with a marker only when it holds this many keys.
+_BANNER_MIN_KEYS = 3
 #: Types the default value already shows, so the line says nothing about them.
 _OBVIOUS_TYPES = {"string", "boolean", "integer", "number"}
 #: Keys whose schema default is a floor, not what a run uses: unset, the run
@@ -294,6 +374,10 @@ def _first_sentence(description: str | None) -> str:
     return text
 
 
+def _is_tuned(path: str) -> bool:
+    return path in _TUNED or path.startswith(_TUNED_PREFIXES)
+
+
 def _template_tree(
     active: dict[str, Any],
     comments: dict[str, str],
@@ -305,6 +389,8 @@ def _template_tree(
     tree: dict[str, Any] = {}
     seen: set[str] = set()
     for path, field in _schema_leaves():
+        if not (path in active or path in owned or _is_tuned(path)):
+            continue
         parts = path.split(".")
         node = tree
         for part in parts[:-1]:
@@ -358,6 +444,9 @@ def _template_lines(tree: dict[str, Any], active_paths: set[str]) -> list[str]:
     def live(path: str) -> bool:
         return path in active_paths or any(a.startswith(f"{path}.") for a in active_paths)
 
+    def size(node: dict[str, Any]) -> int:
+        return sum(size(c) if isinstance(c, dict) else 1 for c in node.values())
+
     def blank() -> None:
         if lines and lines[-1] != "":
             lines.append("")
@@ -367,7 +456,7 @@ def _template_lines(tree: dict[str, Any], active_paths: set[str]) -> list[str]:
         for key, child in node.items():
             path = f"{prefix}{key}"
             if isinstance(child, dict):
-                if depth <= 1:
+                if depth == 0 or (depth == 1 and size(child) >= _BANNER_MIN_KEYS):
                     blank()
                     lines.extend(_banner(key.upper() if depth == 0 else path, depth == 0))
                 header = f"{pad}{key}:"
@@ -448,9 +537,10 @@ def first_day_config(
         "## Written by `lakebench init`.",
         "##",
         "## Lines that start with '##' are descriptions. Lines with no '#' in front are set",
-        "## for this deployment. Every other key is listed at its default, commented out",
-        "## with '# ': remove the '# ' from the key, and from the block lines above it,",
-        "## to set it. docs/configuration.md describes each key in full, and",
+        "## for this deployment. The keys a deployment usually tunes follow at their",
+        "## defaults, commented out with '# ': remove the '# ' from the key, and from the",
+        "## block lines above it, to set it. Every other key keeps its default; the",
+        "## whole schema is described in docs/configuration.md, and",
         "## `lakebench config recipes` lists the recipes.",
         "",
         *_template_lines(tree, set(active)),
@@ -628,16 +718,17 @@ def init(
         typer.Option("--advanced", hidden=True, help="Removed: init no longer has a wizard"),
     ] = False,
 ) -> None:
-    """Write a configuration file with every key in it.
+    """Write a configuration file with the keys a deployment tunes in it.
 
     The file names the deployment (lb-<user>-<4 hex> unless --name is
     given), the recipe (polaris-iceberg-spark-trino unless --recipe is
     given), the workload, the scale (1), the S3 endpoint and the two S3
     credentials as ${VAR} references: export LAKEBENCH_S3_ACCESS_KEY and
     LAKEBENCH_S3_SECRET_KEY, or pick the names with --credentials-env.
-    Every other key follows in schema order, commented at its default with
-    its type, range and a one-line description; remove the leading '# ' from
-    a key and from the block lines above it to set it.
+    The keys a deployment usually tunes follow in schema order, commented at
+    their defaults with a one-line description; remove the leading '# ' from
+    a key and from the block lines above it to set it. Every other key keeps
+    its default and is described in docs/configuration.md.
     The choices are printed on stderr.
 
     Use 'lakebench config recommend' for cluster sizing guidance.

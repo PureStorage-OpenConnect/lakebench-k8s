@@ -1109,14 +1109,15 @@ The limits on Spark, Iceberg, Delta, Hive and Polaris versions are in
 
 ## Generating a Starter Config
 
-`lakebench init` writes a config with every key in it: see
+`lakebench init` writes a config with the keys a deployment tunes in it: see
 [Getting Started, step 1](getting-started.md#1-generate-a-configuration-file)
 for what it writes and [CLI Reference](cli-reference.md#init) for the flags.
-The lines a first run needs are live; every other key follows in schema order,
-in sections opened by a banner, commented at its default with a description
-above it (lines starting `##` are prose, lines starting `# ` are keys left at
-their defaults). Remove the leading `# ` from a key, and from the block lines
-above it, to set it. The full description of each key is on this page.
+The lines a first run needs are live. The keys a deployment usually tunes
+follow in schema order, in sections opened by a banner, commented at their
+defaults with a description above each (lines starting `##` are prose, lines
+starting `# ` are keys left at their defaults). Remove the leading `# ` from a
+key, and from the block lines above it, to set it. Every key it leaves out
+keeps its default and is described on this page.
 
 ### Converting an older config
 
