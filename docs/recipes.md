@@ -1,15 +1,12 @@
 # Recipes
 
-Reference: the 11 recipes, how to choose one and its catalog, and their support states.
+The 11 recipes, how to choose one and its catalog, and where support states
+are listed.
 
-A **recipe** is a validated combination of catalog,
-table format, pipeline engine and query engine. It defines a deployment's
-data architecture.
-
-- Lakebench validates the architecture at config load and rejects anything
-  outside the recipe list, with the reason.
-- A recipe is architecture only. Whether a workload and mode are supported
-  on it is answered by the [support table](#pipeline-modes-and-support-states).
+A **recipe** is a validated combination of catalog, table format, pipeline
+engine and query engine. Config load rejects any architecture outside the
+recipe list, with the reason. A recipe says nothing about which workloads and
+modes it supports; see [Pipeline modes and support states](#pipeline-modes-and-support-states).
 
 ## Setting a recipe
 
@@ -18,7 +15,7 @@ Set `recipe:` instead of `catalog`, `table_format`, `pipeline_engine` and
 
 ```yaml
 name: my-lakehouse
-recipe: polaris-iceberg-spark-trino    # sets catalog, format, engine, and query engine in one line
+recipe: polaris-iceberg-spark-trino    # sets catalog, format, engine and query engine
 ```
 
 - `lakebench init` writes `recipe: polaris-iceberg-spark-trino` unless
@@ -35,8 +32,8 @@ recipe: polaris-iceberg-spark-trino    # sets catalog, format, engine, and query
 
 ## Quick Reference
 
-Every recipe uses Spark as the pipeline engine. Spark image defaults per
-recipe: [Compatibility Matrix](compatibility-matrix.md#component-version-matrix).
+Every recipe uses Spark as the pipeline engine. Image defaults:
+[Compatibility Matrix](compatibility-matrix.md#component-version-matrix).
 
 | Name | `recipe:` | Catalog | Format | Query engine | Best for |
 |---|---|---|---|---|---|
@@ -55,9 +52,7 @@ recipe: [Compatibility Matrix](compatibility-matrix.md#component-version-matrix)
 - No DuckDB + Delta recipe: DuckDB cannot read Delta on non-AWS S3.
 - No Polaris + Delta recipe: Polaris is Iceberg-only.
 - The Hive Delta recipes differ from their Iceberg twins in table format
-  and run Customer 360 only. `hive-delta-spark-thrift` and
-  `hive-delta-spark-none` also differ in Spark default
-  ([version matrix](compatibility-matrix.md#component-version-matrix)).
+  and run Customer 360 only.
 
 ## Choosing a Recipe
 
@@ -84,9 +79,8 @@ recipe: [Compatibility Matrix](compatibility-matrix.md#component-version-matrix)
 | Credential vending | No; credentials injected via SecretClass | No: `stsUnavailable: true`, and Spark and Trino keep static S3 credentials |
 | PostgreSQL backend | `hive` database | Separate `polaris` database |
 
-- **Choose Hive** for the simplest deployment, a single compute cluster, or Delta. It is proven at 1TB+ scale.
-- **Choose Polaris** for REST access to the catalog, or to share tables across engines or clusters.
-- Lakebench does not use Polaris credential vending (FlashBlade has no STS), so vending is no reason to choose Polaris.
+- **Choose Hive** for the simplest deployment, a single compute cluster, or Delta.
+- **Choose Polaris** for REST access to the catalog, or to share tables across engines or clusters. Lakebench does not use Polaris credential vending.
 - Unity Catalog OSS (lineage, governance) is not supported: no Unity combination is accepted. Nessie is not implemented.
 - Details: [Hive Metastore](component-hive.md), [Polaris](component-polaris.md).
 
@@ -126,8 +120,7 @@ Every recipe deploys PostgreSQL (the catalog backend) and Spark RBAC.
 
 ## Pipeline Modes and Support States
 
-The pipeline mode, `batch` or `continuous`, defines how data flows through
-the recipe:
+The pipeline mode, `batch` or `continuous`, sets how data flows:
 
 | Mode | Stages |
 |---|---|
@@ -157,19 +150,16 @@ lakebench config recommend my-config.yaml
 ```
 
 - It sizes the config as written (recipe, workload, mode, datagen settings)
-  at each scale, with the same function as the `run` capacity preflight.
-- It does not select a recipe. The recipe controls what is deployed; the
-  scale controls how large.
+  at each scale, with the same function as the `run` capacity check.
+- It does not select a recipe.
 - The config file is optional (default `lakebench.yaml`). A config that does
   not load is an error.
 - The top-level `lakebench recommend` is deprecated and hidden from help.
 
 ## Advanced Configuration
 
-A recipe sets the four architecture axes. Every other setting (component
-versions, Spark sizing, executor counts, worker replicas, pipeline mode,
-datagen parallelism, timeouts, observability) can be overridden without
-leaving the recipe:
+A recipe sets the four architecture axes. Every other setting can be
+overridden without leaving the recipe:
 
 ```yaml
 name: my-lakehouse
@@ -178,7 +168,7 @@ recipe: polaris-iceberg-spark-trino     # recipe sets the architecture
 platform:
   compute:
     spark:
-      silver_executors: 16             # override auto-scaled executor count
+      silver_executors: 16             # sizes silver-build (batch) or silver-stream (continuous)
       gold_executors: 12
 
 architecture:
@@ -196,7 +186,7 @@ workload:
     scale: 100                       # 1 TB test
 
 observability:
-  enabled: true                        # deploy Prometheus + Grafana
+  enabled: true                        # per-deployment Prometheus, Grafana, Pushgateway
 ```
 
 Full YAML schema: [Configuration Reference](configuration.md).

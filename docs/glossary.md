@@ -1,6 +1,6 @@
 # Glossary
 
-Reference: terms used in Lakebench reports, records and docs.
+Terms used in Lakebench reports, records and docs.
 
 | Term | Meaning | Defined in |
 |---|---|---|
@@ -15,7 +15,7 @@ Reference: terms used in Lakebench reports, records and docs.
 | <a id="intake-limit"></a>Intake limit | The `intake_limit` field: why `ingest_ratio` is under 0.95 (`trickle_rate`, `bronze_capacity`, `below_bronze_capacity`), or `none`. | [Intake limits](benchmarking/continuous.md#intake-limits) |
 | <a id="offered-load"></a>Offered load | The rate datagen writes files in a continuous run, set by scale: AML 4 MB/s and Customer 360 10 MB/s per scale unit. | [Offered load and regimes](benchmarking/continuous.md#offered-load-and-regimes) |
 | <a id="capacity-run"></a>Capacity run, steady-state run | Capacity (`datagen_ahead: true`, `intake_limit: bronze_capacity`): datagen outran bronze, so the paces are the pipeline's capacity. Steady state (`datagen_ahead: false`): the pipeline kept up, so freshness is the score and paces are the arrival rate. | [Offered load and regimes](benchmarking/continuous.md#offered-load-and-regimes) |
-| <a id="balance"></a>Balance check, bottleneck | The continuous gate fails a run whose stage lag rose by more than one cadence across the window's second half. The bottleneck is the stage that fell behind, named in `continuous.balance`. | [Continuous gate](benchmarking/verdict.md#continuous-gate) |
+| <a id="balance"></a>Balance check, bottleneck | Advisory in a continuous run: a stage whose lag rose by more than one cadence across the window's second half is "not balanced". It does not fail the run. The bottleneck is the stage that fell behind, named in `continuous.balance`. | [Continuous gate](benchmarking/verdict.md#continuous-gate) |
 | <a id="settle"></a>Settle | Batch: the storage settle wait after maintenance. Settled means two consecutive probes agree within `tolerance_pct` and neither is slower than the pre-maintenance median by more; with no pre round (scale 50 and above), three consecutive probes must agree (`maintenance_settled`). | [Storage settle wait](benchmarking/maintenance.md#storage-settle-wait) |
 | <a id="caps"></a>Lakebench caps (binding) | Limits Lakebench imposes: executor caps, budgets, the trickle, benchmark iterations. `experiment.limits` lists the caps a run executed under; `limits.bound` the binding ones, which bounded it. A number measured under a binding cap is a property of the cap, not the infrastructure. | [Lakebench caps](benchmarking/maintenance.md#lakebench-caps) |
 | <a id="support-states"></a>Support states | `supported`: the release validation record lists the workload x recipe x mode at the run's Spark minor and table format version, Lakebench runs from an unmodified tree, and the scale is inside the supported band. `unverified`: valid but not validated. `unsupported`: refused before a run. | [Support states](compatibility-matrix.md#support-states) |

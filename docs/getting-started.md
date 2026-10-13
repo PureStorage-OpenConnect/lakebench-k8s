@@ -1,10 +1,8 @@
 # Getting Started
 
-Guide: from an empty cluster to a first report and back: install, deploy, run
-the pipeline at scale 1, read the report, destroy.
-
-The stack is
-Polaris, Iceberg, Spark and Trino, from one YAML file.
+From an empty cluster to a first report and back: install, deploy, run the
+pipeline at scale 1, read the report, destroy. The default stack is Polaris,
+Iceberg, Spark and Trino, configured from one YAML file.
 
 ## Prerequisites
 
@@ -21,7 +19,7 @@ Polaris, Iceberg, Spark and Trino, from one YAML file.
   `hive-iceberg-spark-trino`. [Sizing](sizing.md) has every workload, mode
   and scale. `lakebench plan` checks your cluster.
 
-The checks a cluster must pass, and the fix for each, are on the generated
+The checks a cluster must pass, and the fix for each, are on the
 [Prerequisites](prerequisites.md) page.
 
 ### CLI tools on PATH
@@ -40,7 +38,7 @@ You need a default StorageClass, or set `postgres.storage_class` and
 
 ### S3-compatible object storage
 
-You need an endpoint URL, an access key and a secret key, for the bronze,
+An endpoint URL, an access key and a secret key, with access to the bronze,
 silver and gold buckets.
 
 - Validated: Pure Storage FlashBlade (HTTP, path-style) and Garage.
@@ -75,7 +73,7 @@ install script and source installs are in
 
 ## First run
 
-The whole path, on a fresh cluster:
+The whole path on a fresh cluster:
 
 ```bash
 lakebench init --endpoint http://your-s3-endpoint:80   # writes lakebench.yaml
@@ -86,14 +84,12 @@ lakebench report lakebench.yaml                        # print the scorecard
 lakebench destroy lakebench.yaml --yes                 # remove what this deployment created
 ```
 
-Both flags on `run` matter:
-
 - `--yes` lets `run` deploy the namespace and components. Without it `run`
   refuses and asks you to run `lakebench deploy` first.
 - `--generate` fills the bronze bucket first. Without it `run` refuses with
-  exit 4 and names `--generate`.
+  exit 4.
 
-The steps below walk the same path with the checks in between.
+The steps below cover the same path with checks in between.
 
 ### 1. Generate a configuration file
 
@@ -166,10 +162,10 @@ lakebench config validate lakebench.yaml
 lakebench run lakebench.yaml --generate --yes
 ```
 
-Scale 1 (about 10 GB) exercises every stage of the pipeline. This deploys (if needed), generates the data, runs the pipeline and the
-benchmark. `--yes` skips confirmation prompts and enables auto-deploy.
+Scale 1 (about 10 GB) exercises every stage. This deploys if needed,
+generates the data, runs the pipeline and runs the benchmark.
 
-Or run each step on its own:
+Each step on its own:
 
 ```bash
 lakebench deploy lakebench.yaml --yes     # deploy infrastructure
@@ -178,15 +174,13 @@ lakebench generate lakebench.yaml         # generate test data
 lakebench run lakebench.yaml              # run pipeline + benchmark
 ```
 
-`run` executes three Spark jobs in sequence, then a query benchmark:
+`run` executes three Spark jobs in sequence, then the query benchmark:
 
 1. **bronze-verify** validates and deduplicates the raw Parquet data.
 2. **silver-build** enriches, normalizes and writes an Iceberg table.
 3. **gold-finalize** aggregates into an executive dashboard.
 4. **benchmark** runs 8 analytical queries (12 for AML) against the silver
    and gold tables through the query engine (Trino by default).
-
-Each job's progress, duration and throughput are recorded.
 
 ### 4. Read the report
 
@@ -195,9 +189,10 @@ lakebench report
 ```
 
 - Every run writes `lakebench-output/runs/run-<id>/report.html`: job
-  performance, query latencies, throughput and a configuration snapshot.
+  performance, query latencies, throughput, storage I/O and a configuration
+  snapshot.
 - `lakebench report` prints the latest run's summary and the path to that
-  file. Open it in a browser.
+  file.
 - `lakebench report --render` writes a fresh copy under
   `lakebench-output/reports/` without touching the original.
 - `lakebench report --list` lists all recorded runs.
@@ -216,15 +211,14 @@ lakebench report lakebench-hive.yaml
 
 Give the two configs different names: a name is one deployment.
 
-Read the two HTML reports side by side (`report` prints each path). The
-Experiment section of each states the corpus, datagen image, components,
-maintenance, the stages and rules that ran, the benchmark query set id and,
-for AML batch runs, the alert set.
+Read the two HTML reports side by side. The Experiment section of each states
+the corpus, datagen image, components, maintenance, the stages and rules that
+ran, the benchmark query set id and, for AML batch runs, the alert set.
 
 Compare performance only when the corpus, the query set id and the alert set
 match. Lakebench does not compare query answers: check the per-query row
-counts and numbers of both reports by eye. A number bounded by a Lakebench
-cap is labelled as such.
+counts and values by eye. A number bounded by a Lakebench cap is labelled as
+such. See [Comparing runs](benchmarking/comparing.md).
 
 ### 6. Tear down
 
@@ -248,12 +242,11 @@ The full order and the bucket ownership rules are in
 
 - **Deploy fails partway.** Re-run it. `deploy` is idempotent: components
   that already exist are skipped.
-- **Generate fails or times out.** Raise the timeout with `--timeout 14400`
-  (4 hours). The generator cannot resume, so a re-run starts from the
-  beginning. The failed run left partial data in bronze, so re-run with
+- **Generate fails or times out.** The generator cannot resume and the
+  failed run left partial data in bronze. Re-run with
   `lakebench generate lakebench.yaml --regenerate`, which clears the datagen
-  prefix first. Without it `generate` exits 3 (refused) and names the
-  non-empty prefix.
+  prefix first (without it `generate` exits 3), and raise the timeout with
+  `--timeout 14400` if needed.
 - **A pipeline stage fails.** Re-run that stage:
   `lakebench run lakebench.yaml --stage silver-build`.
 - **The benchmark fails but the pipeline succeeded.** Trino may not be
@@ -263,11 +256,6 @@ The full order and the bucket ownership rules are in
   `lakebench deploy lakebench.yaml`.
 
 More in [Troubleshooting](troubleshooting.md).
-
-## What ran
-
-The pipeline ran bronze-silver-gold stages and a query workload. See
-[Running pipelines](running-pipelines.md) for details.
 
 ## Useful commands
 
@@ -314,25 +302,22 @@ for scale factors and row counts.
 - `lakebench config recommend lakebench.yaml` gives the largest scale your
   cluster holds.
 - The `generate` and `run` timeouts grow with scale. Leave `--timeout`
-  unset; raise it only after a job times out
+  unset until a job times out
   ([Operations](operations.md#several-deployments-on-one-cluster)).
 
 ## Other recipes and workloads
 
-- **Recipes.** There are 11; `lakebench init` writes
-  `polaris-iceberg-spark-trino`, and a config with no recipe falls back to
-  Hive, Iceberg and Trino. See [Recipes](recipes.md) to choose.
-- **Component versions** and how to override them:
+- **Recipes.** There are 11. `lakebench init` writes
+  `polaris-iceberg-spark-trino`; a config with no recipe falls back to
+  Hive, Iceberg and Trino. See [Recipes](recipes.md).
+- **Component versions** and overrides:
   [Supported Components](compatibility-matrix.md#components).
 - **AML (financial crime).** Any Iceberg recipe runs it. Set
   `workload.schema: financial`, or start from
   [`examples/polaris-iceberg-spark-financial.yaml`](../examples/polaris-iceberg-spark-financial.yaml).
-  The loop is the same: `deploy`, `generate`, `run`. `run` scores the nine
-  detection rules (W1-W8 and W17) inline after gold-finalize.
-
-  Recall and precision from the default seed, 43, are in-sample and
-  uncalibrated. What that means, how to cite them, and the reference
-  detector: [AML Scoring](aml-scoring.md).
+  `run` scores the nine detection rules (W1-W8 and W17) inline after
+  gold-finalize. Recall and precision from the default seed, 43, are
+  in-sample and uncalibrated; see [AML Scoring](aml-scoring.md).
 
 ## Next steps
 

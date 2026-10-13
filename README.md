@@ -7,95 +7,38 @@
 
 Lakebench runs defined data workloads against configurable lakehouse
 architectures on Kubernetes. It measures how the assembled system behaves,
-where time and resources are consumed, and how results change when
-architectural choices or operating conditions change.
-
-Rather than benchmarking individual components in isolation, Lakebench
-evaluates the behaviour of the architecture as a whole.
-
-## Why Lakebench?
-
-A lakehouse is a composition of technologies. Its behaviour depends on how
-those technologies work together, the workload being executed and the
-infrastructure underneath them.
-
-Component benchmarks cannot tell you how the complete architecture will
-behave when ingesting, transforming, analyzing and maintaining data.
-
-Lakebench provides a repeatable way to investigate three questions:
-
-1. **How does the architecture behave?** Execute a defined workload and
-   measure its outcomes, processing stages and resource consumption.
-2. **Where are the constraints?** Examine where execution time is spent and
-   which system resources contribute to observed behaviour.
-3. **What changes when the architecture changes?** Repeat the workload with
-   different supported components, configurations or operating conditions
-   and compare the evidence.
-
-Lakebench produces measurements and supporting context. It does not
-automatically determine the best architecture or establish production
+where time and resources go, and how results change when the architecture or
+operating conditions change. It produces measurements and supporting
+context, not a verdict on the best architecture or its production
 suitability.
 
-## How Lakebench Works
+## How Lakebench works
 
-Every Lakebench experiment brings together four elements:
+An experiment combines four elements:
 
-**Workload:** The data, processing, queries and outcomes that exercise the
-architecture.
-
-**Architecture:** The supported composition of processing engines, table
-formats, catalogs and query engines.
-
-**System:** The Kubernetes, compute, network and storage environment on
-which the architecture runs.
-
-**Execution conditions:** The scale, resource allocations, execution mode
-and other controls under which the workload executes.
-
-Together, these produce evidence of how the workload behaved.
+- **Workload:** the data, processing, queries and outcomes that exercise the
+  architecture.
+- **Architecture:** the composition of processing engines, table formats,
+  catalogs and query engines.
+- **System:** the Kubernetes, compute, network and storage environment.
+- **Execution conditions:** scale, resource allocations, execution mode and
+  other controls.
 
 `Workload x Architecture x System x Execution conditions -> Evidence`
 
-Lakebench automates supported deployment and execution activities, collects
-measurements and produces reports for examining the results.
+Lakebench deploys the components, generates data, runs the workload,
+collects measurements and writes reports.
 
 ## Workloads
 
-Lakebench currently provides two synthetic workloads.
+- **Customer 360:** a retail analytics workload. Customer interactions are
+  ingested, validated, transformed, aggregated and queried.
+- **Financial Crime / AML:** transaction-monitoring over synthetic financial
+  transactions: ingestion, transformation, detection and analytical queries.
+  It evaluates how the architecture executes the workload, not the
+  effectiveness of a production AML system.
 
-### Customer 360
-
-Customer 360 exercises a retail analytics workload. Customer interactions
-are ingested, validated, transformed and aggregated into analytical datasets
-that are queried for business insights.
-
-It exercises the architecture through data preparation, transformation,
-aggregation and analytical querying.
-
-### Financial Crime / AML
-
-The financial-crime workload exercises transaction-monitoring data
-processing using synthetic financial transactions.
-
-It combines ingestion, transformation, detection and analytical activity to
-examine both processing behaviour and detection outcomes.
-
-Its purpose is to evaluate how the architecture executes the workload, not
-to establish the effectiveness of a production AML detection system.
-
-The two workloads exercise different data-processing behaviours while using
-the same underlying architectural composition model.
-
-## Running an Experiment
-
-Lakebench supports a workflow that:
-
-1. Defines the workload, architecture and execution configuration.
-2. Deploys the required supported components onto Kubernetes.
-3. Generates synthetic workload data.
-4. Executes the workload.
-5. Collects measurements and produces results.
-6. Supports subsequent investigation and comparison.
+## Running an experiment
 
 ### Install
 
@@ -119,10 +62,9 @@ lakebench report lakebench.yaml                         # print results
 lakebench destroy lakebench.yaml                        # remove what this deployment created
 ```
 
-- `init` writes a minimal configuration. `--recipe <name>` selects an
-  architectural composition; `--workload financial` selects the AML
-  workload. There are 11 supported recipes. `lakebench config recipes`
-  lists them.
+- `init` writes a minimal configuration. `--recipe <name>` selects the
+  architecture; `--workload financial` selects the AML
+  workload. `lakebench config recipes` lists the 11 supported recipes.
 - `admin install` places shared cluster components (Spark Operator,
   Stackable operators for Hive recipes, scratch StorageClass). Run once
   per cluster.
@@ -137,31 +79,20 @@ lakebench destroy lakebench.yaml                        # remove what this deplo
 
 The full walkthrough is [Getting Started](docs/getting-started.md).
 
-## Understanding Results
+## Results
 
-Lakebench records how the workload executed under the specified conditions.
-
-Depending on the workload and available instrumentation, this can include:
-
-- Workload outcomes and correctness.
-- Execution time and processing-stage behaviour.
-- Throughput and resource efficiency.
-- Query or detection performance.
-- Compute, memory and storage observations.
-
-Results describe observed behaviour under particular conditions. They are
-not universal performance claims.
-
-Comparing results requires understanding what changed between runs and
-whether their execution conditions and workload semantics are equivalent.
+Depending on the workload, a run records outcomes and correctness, stage
+timings, throughput, query or detection performance, storage I/O, and
+compute and memory use. Results describe behaviour under the conditions of
+that run. Compare runs only when their execution conditions and workload
+semantics match.
 
 `lakebench report` prints a summary and the path to the HTML report.
-`--render` writes a fresh copy; `--format json` or `csv` for scripts.
+`--render` writes a fresh copy; `--format json` or `csv` is for scripts.
 
 ## Prerequisites
 
-Lakebench requires a supported Kubernetes environment and access to
-compatible storage. It does not provision the underlying infrastructure.
+Lakebench does not provision the Kubernetes cluster or the storage.
 
 **Host tooling:**
 
@@ -181,13 +112,12 @@ compatible storage. It does not provision the underlying infrastructure.
 
 **Cluster capacity:**
 
-- Room for the workload. Scale 1 batch needs about 41 cores and 544 GB.
-  Requirements grow with scale and differ by workload and execution mode.
-  `lakebench plan` checks the cluster;
-  [Sizing](docs/sizing.md) has every combination.
+- Room for the workload. Scale 1 batch needs about 41 cores and 544 GB;
+  requirements grow with scale and differ by workload and mode.
+  `lakebench plan` checks the cluster and [Sizing](docs/sizing.md) lists
+  every combination.
 
-The [Prerequisites](docs/prerequisites.md) page lists every check and its
-fix.
+[Prerequisites](docs/prerequisites.md) lists every check and its fix.
 
 ## Documentation
 
