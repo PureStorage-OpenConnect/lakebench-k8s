@@ -287,7 +287,7 @@ def test_trino_queries_become_intervals_with_their_basis():
         first["source"] == "trino" and first["stage"] == "query" and first["label"] == "benchmark"
     )
     assert first["read_basis"] == BASIS_TRINO_READ and first["write_basis"] == BASIS_TRINO_WRITE
-    assert first["start"].endswith("+00:00") and first["clock"] == "trino_coordinator"
+    assert first["start"].endswith("+00:00") and first["clock"] == "trino_client"
     assert io["totals"]["trino"] == {"read_bytes": 1500, "write_bytes": 20}
     assert io["problems"] == []
 
@@ -320,7 +320,7 @@ def test_none_stays_none_and_zero_stays_zero():
     iv = io["intervals"][0]
     assert iv["read_bytes"] is None and iv["write_bytes"] == 0 and iv["complete"] is False
     assert io["totals"]["trino"] == {"read_bytes": None, "write_bytes": 0}
-    assert io["problems"] == ["trino: 1 query sample(s) had no I/O report"]
+    assert io["problems"] == ["1 query sample(s) had no I/O report"]
 
 
 def test_an_older_trino_record_says_not_recorded():
@@ -338,7 +338,9 @@ def test_an_older_trino_record_says_not_recorded():
     ]
 
 
-def test_other_query_engines_are_not_instrumented():
+def test_an_instrumented_engine_without_io_says_not_recorded():
+    # DuckDB reports its own read bytes now, so a record with no io block on
+    # its queries is "not recorded", not "engine not instrumented".
     rec = {"benchmark": _bench([{"name": "Q1"}], engine="duckdb")}
     io = build_io(rec)
     assert io["not_measured"] == [
@@ -347,9 +349,33 @@ def test_other_query_engines_are_not_instrumented():
             "stage": "query",
             "label": "benchmark",
             "direction": "both",
+            "reason": REASON_NOT_RECORDED,
+        }
+    ]
+
+
+def test_an_unknown_query_engine_is_not_instrumented():
+    rec = {"benchmark": _bench([{"name": "Q1"}], engine="presto")}
+    io = build_io(rec)
+    assert io["not_measured"] == [
+        {
+            "source": "presto",
+            "stage": "query",
+            "label": "benchmark",
+            "direction": "both",
             "reason": REASON_ENGINE,
         }
     ]
+
+
+def test_duckdb_query_read_bytes_become_an_interval():
+    rec = {"benchmark": _bench([_q("Q1", 4096, 0)], engine="duckdb")}
+    io = build_io(rec)
+    iv = io["intervals"][0]
+    assert iv["source"] == "duckdb" and iv["stage"] == "query"
+    assert iv["read_bytes"] == 4096 and iv["read_basis"] == "duckdb_filesystem_read"
+    assert iv["clock"] == "duckdb_client" and iv["write_basis"] is None
+    assert io["totals"]["duckdb"]["read_bytes"] == 4096
 
 
 def test_datagen_bytes_come_from_the_fleet_and_are_unplaced_without_a_window():

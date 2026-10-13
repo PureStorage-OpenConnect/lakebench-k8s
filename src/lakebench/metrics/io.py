@@ -199,10 +199,20 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
     problems: list[str] = []
 
     short = 0
+    # Engines that report their own per-query read bytes (``queries[*].io``):
+    # Trino via system.runtime.tasks, DuckDB via the httpfs filesystem log,
+    # Spark Thrift via the Spark REST SQL metrics. An engine with no io block
+    # on any query is marked not measured.
+    read_basis_for = {
+        "trino": BASIS_TRINO_READ,
+        "duckdb": "duckdb_filesystem_read",
+        "spark-thrift": "spark_thrift_input",
+    }
     for label, group, bench in _benchmarks(record):
         engine = bench.get("engine") or "trino"
         queries = bench.get("queries") or []
-        if engine != "trino":
+        read_basis = read_basis_for.get(engine)
+        if read_basis is None:
             not_measured.append(
                 {
                     "source": engine,
@@ -223,17 +233,17 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
                 short += samples - captured
             intervals.append(
                 {
-                    "source": "trino",
+                    "source": engine,
                     "stage": "query",
                     "label": label,
                     "query": q.get("name") or q.get("query_name"),
                     "start": _iso(io.get("start_epoch")),
                     "end": _iso(io.get("end_epoch")),
-                    "clock": "trino_coordinator",
+                    "clock": f"{engine}_client",
                     "read_bytes": io.get("read_bytes"),
                     "write_bytes": io.get("write_bytes"),
-                    "read_basis": BASIS_TRINO_READ,
-                    "write_basis": BASIS_TRINO_WRITE,
+                    "read_basis": read_basis,
+                    "write_basis": BASIS_TRINO_WRITE if engine == "trino" else None,
                     "complete": captured == samples and samples > 0,
                     # Where the figures sit in the record, as a path covering
                     # every query of the round: a rendered total can name it.
@@ -246,7 +256,7 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
         if not any(isinstance(q, Mapping) and isinstance(q.get("io"), Mapping) for q in queries):
             not_measured.append(
                 {
-                    "source": "trino",
+                    "source": engine,
                     "stage": "query",
                     "label": label,
                     "direction": "both",
@@ -254,7 +264,7 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
                 }
             )
     if short:
-        problems.append(f"trino: {short} query sample(s) had no I/O report")
+        problems.append(f"{short} query sample(s) had no I/O report")
     # One entry per round would repeat itself.
     not_measured = list(
         {

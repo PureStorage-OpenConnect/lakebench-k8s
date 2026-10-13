@@ -71,6 +71,7 @@ def _record(mode: str = "batch", schema: str = "customer360") -> dict:
             "intervals": [
                 {
                     "source": "trino",
+                    "stage": "query",
                     "label": "benchmark",
                     "start": "2026-01-01T00:05:00+00:00",
                     "end": "2026-01-01T00:05:10+00:00",

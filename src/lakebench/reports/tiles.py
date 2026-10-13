@@ -99,7 +99,7 @@ def _storage_tile(record: Mapping[str, Any]) -> Tile:
             str(i["paths"]["read"])
             for i in io.get("intervals") or []
             if isinstance(i, Mapping)
-            and i.get("source") == "trino"
+            and i.get("stage") == "query"
             and isinstance(i.get("paths"), Mapping)
             and i["paths"].get("read")
         }

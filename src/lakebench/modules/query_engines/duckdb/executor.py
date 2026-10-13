@@ -10,6 +10,7 @@ import logging
 import re
 import subprocess
 import time
+import uuid
 
 from lakebench.benchmark.result import (
     QueryExecutorResult,
@@ -82,6 +83,11 @@ class DuckDBExecutor:
         self.table_names = table_names or {}
         self.kube_context = kube_context or None
         self._pod: str | None = None
+        # Read bytes captured inline per query, keyed by a per-query source id;
+        # query_io() returns these so the storage I/O plumbing is shared with
+        # the other engines. Each query runs in a fresh DuckDB session, so the
+        # bytes are exactly this query's.
+        self._io: dict[str, dict[str, float | int | None]] = {}
 
     def engine_name(self) -> str:
         return "duckdb"
@@ -136,7 +142,7 @@ class DuckDBExecutor:
             if timeout
             else ""
         )
-        return (
+        setup = (
             f"{alarm}"
             "import duckdb, json, os; "
             "conn = duckdb.connect(); "
@@ -152,14 +158,37 @@ class DuckDBExecutor:
             "conn.execute(\"SET s3_access_key_id='\" + os.environ['AWS_ACCESS_KEY_ID'] + \"'\"); "
             "conn.execute(\"SET s3_secret_access_key='\" + os.environ['AWS_SECRET_ACCESS_KEY'] + \"'\"); "
             "conn.execute('SET unsafe_enable_version_guessing = true'); "
-            f"{SESSION_SETTINGS}; "
-            f"rel = conn.sql('{escaped_sql}'); "
-            f"{FETCH_ROWS}; "
-            "print(json.dumps({'rows': len(rows), 'data': [str(r) for r in rows[:100]]}))"
+            f"{SESSION_SETTINGS}"
+        )
+        # A real multi-line script (passed via ``python -c`` as one argv, so the
+        # newlines are preserved). Count the bytes this query reads from S3: the
+        # httpfs filesystem log records one READ row per range request, and the
+        # S3FileSystem READ bytes are the real transfer, with pruning reflected.
+        # The logging is wrapped so an older DuckDB without the logging framework
+        # still runs the query and simply reports s3_read_bytes as null.
+        return (
+            f"{setup}\n"
+            "io_read = None\n"
+            "try:\n"
+            "    conn.execute(\"CALL enable_logging('FileSystem')\")\n"
+            "except Exception:\n"
+            "    pass\n"
+            f"rel = conn.sql('{escaped_sql}')\n"
+            f"{FETCH_ROWS}\n"
+            "try:\n"
+            "    io_read = conn.execute(\"SELECT sum(bytes) FROM duckdb_logs_parsed('FileSystem')"
+            " WHERE op='READ' AND fs='S3FileSystem'\").fetchone()[0]\n"
+            "except Exception:\n"
+            "    io_read = None\n"
+            "print(json.dumps({'rows': len(rows),"
+            " 's3_read_bytes': (int(io_read) if io_read is not None else None),"
+            " 'data': [str(r) for r in rows[:100]]}))"
         )
 
     def execute_query(self, sql: str, timeout: int = 300) -> QueryExecutorResult:
         pod = self._discover_pod()
+        source = f"lakebench-{uuid.uuid4().hex[:16]}"
+        start_epoch = time.time()
         script = self._build_python_script(sql, timeout=timeout)
         cmd = [
             *self._kubectl_prefix(),
@@ -223,13 +252,27 @@ class DuckDBExecutor:
                 error="Query produced no readable result payload",
             )
 
+        read_bytes = payload.get("s3_read_bytes")
+        self._io[source] = {
+            "read_bytes": int(read_bytes) if isinstance(read_bytes, (int, float)) else None,
+            "write_bytes": 0,
+            "start": start_epoch,
+            "end": time.time(),
+        }
         return QueryExecutorResult(
             sql=sql,
             engine="duckdb",
             duration_seconds=elapsed,
             rows_returned=payload["rows"],
             raw_output=output,
+            engine_source=source,
         )
+
+    def query_io(self, sources: list[str]) -> dict[str, dict[str, float | int | None]]:
+        """Read bytes captured inline for each query's source id. S3FileSystem
+        READ bytes from the httpfs filesystem log, so actual bytes transferred
+        (with pruning). write_bytes is 0: benchmark queries do not write."""
+        return {s: self._io[s] for s in sources if s in self._io}
 
     def health_check(self) -> bool:
         try:

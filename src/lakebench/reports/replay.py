@@ -395,14 +395,14 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
     bench_ends = sorted(
         e - t0
         for i in intervals
-        if i.get("source") == "trino" and i.get("label") == "benchmark"
+        if i.get("stage") == "query" and i.get("label") == "benchmark"
         for e in [_epoch(i.get("end"))]
         if e is not None
     )
-    trino_windows = [
+    query_windows = [
         (s, e)
         for i in intervals
-        if i.get("source") == "trino"
+        if i.get("stage") == "query"
         for s, e in [(_epoch(i.get("start")), _epoch(i.get("end")))]
         if s is not None and e is not None
     ]
@@ -416,9 +416,9 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
         start = end = value = None
         path = None
         if key == "query":
-            if trino_windows:
-                start = min(s for s, _ in trino_windows) - t0
-                end = max(e for _, e in trino_windows) - t0
+            if query_windows:
+                start = min(s for s, _ in query_windows) - t0
+                end = max(e for _, e in query_windows) - t0
             bench = record.get("benchmark") or {}
             queries = [q for q in bench.get("queries") or [] if isinstance(q, Mapping)]
             if queries:
