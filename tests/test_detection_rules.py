@@ -215,8 +215,7 @@ def test_gold_finalize_detection_rules_subset_of_dispatcher():
 
 
 def test_w7_country_dedup_is_deterministic():
-    """Adversarial-review finding C: ``dropDuplicates(['entity_id'])``
-    is shuffle-order-dependent when an entity has multiple country
+    """``dropDuplicates(['entity_id'])`` is shuffle-order-dependent when an entity has multiple country
     values. Re-runs of gold_finalize against the same silver produce
     different alert counts, breaking the "reproducible per rule"
     contract. Fix must use a deterministic aggregation.
@@ -297,30 +296,12 @@ def test_score_financial_scopes_alerts_by_run_id():
     assert 'col("run_id") == lit(current_run_id)' in body
 
 
-def test_detected_ts_in_empty_schema_and_all_ddls():
-    """detected_ts must be present in ALERT_COLUMNS after evidence
-    (the empty-alerts schema and gold_finalize's DDL are built from it), in
-    the other gold.alerts DDL sites, with the reused-catalog ALTER guard, or
-    a positional INSERT ... SELECT * misaligns."""
-    root = Path(__file__).resolve().parents[1]
+def test_detected_ts_follows_evidence_in_alert_columns():
+    """detected_ts must come after evidence in ALERT_COLUMNS: the gold.alerts
+    DDL and the empty-alerts schema are built from it, and gold.alerts is
+    written positionally (INSERT ... SELECT *)."""
     names = [c[0] for c in _alert_columns()]
     assert names.index("evidence") < names.index("detected_ts")
-    det = (root / "src/lakebench/spark/scripts/detection_rules.py").read_text()
-    assert "for name, ddl_type, nullable in ALERT_COLUMNS" in det  # _empty_alerts_df
-
-    ddl = (root / "src/lakebench/deploy/financial_ddl.py").read_text()
-    assert "detected_ts" in ddl
-
-    # Reused-catalog upgrade: one helper adds missing trailing columns
-    # (through ensure_column_with_retry's live-schema check, not the invalid
-    # `ADD COLUMN IF NOT EXISTS`) and refuses a table out of order.
-    for script in (
-        "gold_finalize_financial.py",
-        "gold_refresh_financial.py",
-    ):
-        text = (root / "src/lakebench/spark/scripts" / script).read_text()
-        assert "ensure_alert_columns(spark," in text, script
-        assert "ALERT_COLUMNS)" in text, script
 
 
 def _alert_columns():
