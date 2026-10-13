@@ -35,6 +35,7 @@ class Tile:
     source: str  # the record field(s) the tile reads
     alt_value: str = ""  # the same figure in the other unit (bytes), when it has one
     alt_sub: str = ""
+    unit_label: str = ""  # what the count view counts ("Interactions"), for the switch
 
 
 def _num(record: Mapping[str, Any], *keys: str) -> float | None:
@@ -193,6 +194,7 @@ def _pace_batch(record: Mapping[str, Any]) -> Tile:
         paths,
         alt,
         alt_sub,
+        noun.capitalize(),
     )
 
 
@@ -303,12 +305,25 @@ _CSS = """
 .lb-tiles .lb-tile strong{display:block;font-size:32px;letter-spacing:-1px;margin-top:7px;font-variant-numeric:tabular-nums}
 .lb-tiles .lb-tile small{display:block;font-size:12px;color:#7c8e81;margin-top:2px}
 .lb-tiles .lb-tile.nr strong{color:#9aa89d}
-.lb-tiles .lb-tile{position:relative}
-.lb-tiles .lb-unit{position:absolute;top:12px;right:12px;display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden}
-.lb-tiles .lb-unit button{border:0;background:#fff;color:#66776c;font:inherit;font-size:11px;padding:2px 8px;cursor:pointer}
-.lb-tiles .lb-unit button.on{background:#e3f3e9;color:#1d6548;font-weight:700}
 @media(max-width:900px){.lb-tiles .lb-grid{grid-template-columns:repeat(2,1fr)}}
 """
+
+
+UNIT_CSS = """
+.lb-unit{display:inline-flex;gap:4px;align-items:center}
+.lb-unit button{border:1px solid #6fbb89;background:transparent;color:#fff;border-radius:6px;padding:6px 12px;font:inherit;font-size:14px;font-weight:650;cursor:pointer}
+.lb-unit button.on{background:#d4f4dd;border-color:#d4f4dd;color:#1d5439}
+"""
+
+
+def unit_switch(label: str) -> str:
+    """The Count / Bytes switch, named for what the count view counts. Every
+    switch on the page flips every figure that has a second unit."""
+    return (
+        '<span class="lb-unit" role="group" aria-label="Pace unit">'
+        f'<button type="button" data-set="count" class="on">{escape(label)}</button>'
+        '<button type="button" data-set="bytes">Bytes</button></span>'
+    )
 
 
 _SCRIPT = (
@@ -335,20 +350,17 @@ def render_tiles(tiles: list[Tile]) -> str:
                 f'<span data-unit="count">{escape(t.sub)}</span>'
                 f'<span data-unit="bytes" hidden>{escape(t.alt_sub)}</span>'
             )
-            pill = (
-                '<span class="lb-unit"><button type="button" data-set="count" class="on">'
-                'Count</button><button type="button" data-set="bytes">Bytes</button></span>'
-            )
         else:
-            value, sub, pill = t.value, escape(t.sub), ""
+            value, sub = t.value, escape(t.sub)
         return (
             f'<div class="lb-tile {t.evidence}" title="{escape(t.source, quote=True)}">'
-            f"{pill}<b>{escape(t.label)}</b><strong>{value}</strong><small>{sub}</small></div>"
+            f"<b>{escape(t.label)}</b><strong>{value}</strong><small>{sub}</small></div>"
         )
 
     cells = "".join(cell(t) for t in tiles)
-    script = _SCRIPT if any(t.alt_value for t in tiles) else ""
+    with_alt = any(t.alt_value for t in tiles)
+    script = _SCRIPT if with_alt else ""
     return (
-        f'<style>{_CSS}</style><div class="lb-tiles"><div class="lb-grid">{cells}</div></div>'
-        f"{script}"
+        f"<style>{_CSS}{UNIT_CSS}</style>"
+        f'<div class="lb-tiles"><div class="lb-grid">{cells}</div></div>{script}'
     )

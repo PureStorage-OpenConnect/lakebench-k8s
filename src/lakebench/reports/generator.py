@@ -266,8 +266,8 @@ def _limits_interpretation_html(metrics) -> str:
         return ""
     lis = "".join(f"<li>{i}</li>" for i in items)
     return (
-        '<div class="limits-interpretation" style="margin-top: 0.75rem; font-size: 0.8rem;">'
-        f'<strong>What limits interpretation:</strong><ul style="margin: 0.25rem 0 0 1.25rem;">{lis}</ul></div>'
+        '<div class="limits-interpretation" style="margin-top: 1rem;">'
+        f'<strong>Limits</strong><ul style="margin: 0.25rem 0 0 1.25rem;">{lis}</ul></div>'
     )
 
 
@@ -653,8 +653,14 @@ class ReportGenerator:
         colour = {
             "PASSED": "var(--warning)" if fm.warnings else "var(--success)",
         }.get(fm.verdict, "var(--danger)")
+        short = {"Support state": fm.support_basis}
         rows = []
         for label, text in fm.lines():
+            # The support basis is a paragraph; the page shows the state and
+            # keeps the basis as hover text (the terminal report prints it
+            # in full).
+            if label == "Support state":
+                text = fm.support_state
             value = (
                 f"<strong style='color: {colour};'>{e(text)}</strong>"
                 if label == "Verdict"
@@ -662,8 +668,9 @@ class ReportGenerator:
             )
             if label in ("Digest", "Provenance"):
                 value = f'<code class="mono">{e(text)}</code>'
+            hover = f' title="{e(str(short[label]), quote=True)}"' if label in short else ""
             rows.append(
-                f'<div class="fm-{label.lower().replace(" ", "-")}">'
+                f'<div class="fm-{label.lower().replace(" ", "-")}"{hover}>'
                 f'<span class="read-first-key" style="color: var(--text-muted);">{e(label)}:</span> '
                 f"{value}</div>"
             )
@@ -674,15 +681,13 @@ class ReportGenerator:
         if notes:
             lis = "".join(f"<li>{e(q)}</li>" for q in notes)
             extra = (
-                '<div class="fm-qualifiers" style="margin-top: 0.75rem; font-size: 0.8rem;">'
-                f'<strong>Qualifiers and warnings:</strong><ul style="margin: 0.25rem 0 0 1.25rem;">{lis}</ul></div>'
+                '<div class="fm-qualifiers" style="margin-top: 1rem;">'
+                f'<strong>Notes</strong><ul style="margin: 0.25rem 0 0 1.25rem;">{lis}</ul></div>'
             )
         return f"""
-        <section class="read-first front-matter" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid {colour};">
-            <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.5rem;">
-                Read this first
-            </div>
-            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.5rem 1.5rem; font-size: 0.85rem;">
+        <section class="read-first front-matter" style="margin-bottom: 1rem; border-left: 3px solid {colour};">
+            <h2>Run record</h2>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0.5rem 1.5rem;">
                 {"".join(rows)}
             </div>
             {extra}
@@ -2075,7 +2080,6 @@ class ReportGenerator:
 
         {_tiles_html}
 
-        {_read_first_html}
 
         {run_context_html}
 
@@ -2107,6 +2111,8 @@ class ReportGenerator:
         {platform_html}
 
         {config_html}
+
+        {_read_first_html}
 
         {_score_close}
 

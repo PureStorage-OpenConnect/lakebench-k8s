@@ -21,6 +21,7 @@ from html import escape
 from typing import Any
 
 from lakebench.metrics.io import bucket_series
+from lakebench.reports.tiles import UNIT_CSS, unit_switch
 
 REPLAY_VERSION = 1
 
@@ -291,6 +292,8 @@ _CSS = """
 #lb-replay .traces{height:140px}
 #lb-replay .platformnav button:disabled{text-decoration:line-through}
 #lb-replay .job span.fail{color:#b3261e}
+#lb-replay .controls .lb-unit button{background:transparent;color:#fff;border:1px solid #6fbb89;padding:6px 12px;font-size:14px}
+#lb-replay .controls .lb-unit button.on{background:#d4f4dd;border-color:#d4f4dd;color:#1d5439}
 #lb-replay .note{padding:2px 14px 8px;font-size:11px;color:#859187}
 
 """
@@ -393,8 +396,8 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         for i, j in enumerate(data["jobs"])
     )
     pipe = "".join(
-        f'<div class="handoff"><div class="handoff-head"><b>{e(stages[i]["name"])} → '
-        f'{e(stages[i + 1]["name"])}</b><strong data-h="{i}">Waiting</strong></div>'
+        f'<div class="handoff"><div class="handoff-head"><b>{e(stages[i]["phase"])} → '
+        f'{e(stages[i + 1]["phase"])}</b><strong data-h="{i}">Waiting</strong></div>'
         f'<div class="track"><div class="fill" data-f="{i}"></div></div>'
         f'<div class="sub" data-s="{i}"></div></div>'
         for i in range(4)
@@ -409,7 +412,12 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         for n in lanes
     )
     gaps = sorted(set(data["storage_gaps"]) | set(data["storage_unplaced"]))
-    note = "Not measured: " + ", ".join([*lanes, *(f"storage {g}" for g in gaps)])
+    spark = any(g.startswith("spark") for g in gaps)
+    other = [g for g in gaps if not g.startswith("spark")]
+    note = "Not measured: " + ", ".join(
+        [*lanes, *(["Spark storage"] if spark else []), *(f"{g} storage" for g in other)]
+    )
+    switch = unit_switch(pace.unit_label) if pace is not None and pace.alt_value else ""
     pace_html = ""
     if pace is not None and pace.evidence != "nr":
         alt = (
@@ -421,7 +429,7 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
             f"<span>{e(pace.sub.split(' in ')[0].split(' ', 1)[-1])} per second</span></div>"
         )
     return (
-        f"<style>{_CSS}</style>"
+        f"<style>{_CSS}{UNIT_CSS}</style>"
         '<div id="lb-replay"><div class="headline"><div>'
         f'<div class="eyebrow">{e(data["subtitle"])}</div><h1>{e(data["title"])}</h1></div>'
         '<div class="headline-right">'
@@ -429,14 +437,14 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         '<div class="mini">'
         f"<strong>{int(data['duration']) // 60}:{int(data['duration']) % 60:02d}</strong>"
         "<span>run length</span></div></div></div>"
-        '<div class="canvas"><div class="layer-head">01 / Workload</div>'
+        '<div class="canvas"><div class="layer-head">Workload</div>'
         f'<div class="runsteps">{steps}</div>'
         '<div class="phasepanel"><div class="phasename"><small>Batch execution</small>'
         '<strong id="rp-phase">-</strong><span id="rp-phasenote"></span></div>'
         f'<div class="jobs">{jobs}</div></div>'
-        '<div class="pipe-head">02 / Pipeline</div>'
+        '<div class="pipe-head">Pipeline</div>'
         f'<div class="pipe">{pipe}</div>'
-        '<div class="platform-head">03 / Platform</div>'
+        '<div class="platform-head">Platform</div>'
         f'<div class="platform"><div class="platformnav">{nav}</div>'
         '<div class="traces"><div class="graph"><div class="charttitle">'
         '<b id="rp-lname">Storage / S3</b><strong id="rp-lval">-</strong></div>'
@@ -449,6 +457,7 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         '<div class="controls"><button type="button" data-act="play">▶ Play</button>'
         '<button type="button" data-act="speed">1×</button>'
         '<button type="button" data-act="restart">↺ Restart</button>'
+        f"{switch}"
         '<input type="range" min="0" max="0" value="0" step="1" data-act="seek" '
         'aria-label="Run timeline"><span class="time" data-act="clock"></span></div></div></div>'
         f'<script type="application/json" id="lb-replay-data">{_json_for_script(data)}</script>'
