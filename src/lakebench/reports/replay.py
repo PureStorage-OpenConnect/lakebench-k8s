@@ -481,14 +481,17 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
             "read": [round(v / step / 1e6, 3) for v in series["read"]],
             "write": [round(v / step / 1e6, 3) for v in series["write"]],
         }
-    not_placed = [i for i in intervals if not (i.get("start") and i.get("end"))]
-    # Stages whose storage bytes are not collected: the lane is blank for
-    # them because nothing was measured, not because nothing moved.
-    gaps = sorted(
+    # Reads with no client counter (Iceberg exposes none), per stage. This is
+    # the only real storage gap: writes are measured, and datagen bytes are a
+    # window total with no per-interval timestamps, so they are measured but
+    # not placed on the timeline -- not a gap.
+    read_gap = sorted(
         {
-            f"{n.get('source')} {n.get('stage')}"
+            str(n.get("stage"))
             for n in io.get("not_measured") or []
-            if isinstance(n, Mapping) and n.get("stage") != "query"
+            if isinstance(n, Mapping)
+            and n.get("direction") == "read"
+            and n.get("stage") != "query"
         }
     )
 
@@ -515,8 +518,8 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
         if sustained and profile.get("workload") == "financial"
         else None,
         "storage": storage,
-        "storage_unplaced": [i.get("source") for i in not_placed],
-        "storage_gaps": gaps,
+        # Only genuine gap: Iceberg table reads have no client byte counter.
+        "storage_read_gap": read_gap,
         "storage_problems": [
             str(x) for x in io.get("problems") or [] if str(x).startswith("spark ")
         ],
@@ -554,15 +557,11 @@ _CSS = """
 #lb-replay .value strong{font-size:clamp(15px,1.55vw,22px);letter-spacing:-.6px;display:block;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:clip}
 #lb-replay .step.current .value strong{font-size:clamp(22px,2.7vw,34px)}
 #lb-replay .value label{font-size:12px;color:#778b7d}
-#lb-replay .exechead{display:flex;align-items:baseline;justify-content:space-between;gap:14px;padding:4px 16px 0}
-#lb-replay .exechead small{font-size:12px;color:#518166;font-weight:750}
-#lb-replay .exechead strong{font-size:16px;margin-left:8px;letter-spacing:-.3px}
-#lb-replay .exechead #rp-phasenote{font-size:12px;color:#778b7e;margin-left:8px}
-#lb-replay .execmark{font-size:11px;color:#8a978c;max-width:46%;text-align:right}
-/* The strip mirrors the card flex weights (set from JS) so each box tracks
-   the width of the card above it. */
-#lb-replay .execstrip{display:flex;gap:10px;padding:6px 16px 12px;align-items:stretch}
-#lb-replay .xbox{flex:1;min-width:0;padding:10px 12px;background:#f7fbf8;border:1px solid #dae7dd;border-radius:9px;transition:flex .4s}
+/* The Pipeline is its own white container, like Workload and Platform. One box
+   per handoff (sustained) or stage pair (batch), left-aligned and equal width;
+   a fixed height so an empty box holds its size instead of expanding. */
+#lb-replay .execstrip{display:grid;grid-template-columns:repeat(var(--xn,3),minmax(0,1fr));gap:10px;padding:10px 12px 12px}
+#lb-replay .xbox{min-width:0;min-height:96px;padding:11px 13px;background:#f7fbf8;border:1px solid #dae7dd;border-radius:9px;display:flex;flex-direction:column}
 #lb-replay .xbox b{font-size:13px;font-weight:700;color:#3f5a4c;display:block}
 #lb-replay .xbox .track{height:6px;border-radius:10px;background:#e7f0e8;overflow:hidden;margin:8px 0 6px}
 #lb-replay .xbox .fill{height:100%;width:0;background:#73ad8b;transition:width .25s}
@@ -591,8 +590,8 @@ _CSS = """
 #lb-replay .controls .time{font:12px ui-monospace,monospace;color:#e9f4ec;min-width:104px;text-align:right}
 #lb-replay .controls .mark{font-size:11px;color:#d6e5d8;white-space:nowrap}
 /* Short viewports: keep everything inside one frame without scroll. */
-@media(max-height:820px){#lb-replay .runsteps{min-height:170px;padding:9px 12px 6px}#lb-replay .step{padding:11px;gap:5px}#lb-replay .step h2{font-size:21px}#lb-replay .art{min-height:46px}#lb-replay .value strong{font-size:24px}#lb-replay .step.current .value strong{font-size:27px}#lb-replay .phasepanel{min-height:64px}#lb-replay .traces{height:108px}#lb-replay .platform{flex-basis:168px}}
-@media(max-width:900px){#lb-replay .runsteps{overflow-x:auto;min-height:310px}#lb-replay .step{flex:0 0 175px}#lb-replay .step.current{flex:0 0 245px}#lb-replay .execstrip{flex-wrap:wrap}#lb-replay .xbox{flex:0 0 46%}#lb-replay .execmark{display:none}#lb-replay .platform{flex:auto}#lb-replay .traces{height:170px}#lb-replay .controls{position:sticky;bottom:0}}
+@media(max-height:820px){#lb-replay .runsteps{min-height:170px;padding:9px 12px 6px}#lb-replay .step{padding:11px;gap:5px}#lb-replay .step h2{font-size:21px}#lb-replay .art{min-height:46px}#lb-replay .value strong{font-size:24px}#lb-replay .step.current .value strong{font-size:27px}#lb-replay .traces{height:108px}#lb-replay .platform{flex-basis:168px}}
+@media(max-width:900px){#lb-replay .runsteps{overflow-x:auto;min-height:310px}#lb-replay .step{flex:0 0 175px}#lb-replay .step.current{flex:0 0 245px}#lb-replay .execstrip{grid-template-columns:repeat(2,1fr)}#lb-replay .execmark{display:none}#lb-replay .platform{flex:auto}#lb-replay .traces{height:170px}#lb-replay .controls{position:sticky;bottom:0}}
 
 #lb-replay{font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#1c332c;margin-bottom:1.5rem}
 #lb-replay *{box-sizing:border-box}
@@ -693,31 +692,23 @@ function draw(){
  // an AML sustained run the alert card enlarges with it.
  var pair=sel===null&&D.kind==='sustained'&&D.pair&&focus===D.pair[0]?D.pair[1]:-1;
  S.forEach(function(s,i){var on=i===focus||i===pair;
-  var card=root.querySelector('[data-step="'+i+'"]');card.classList.toggle('current',on);
-  // Mirror the card's flex onto the box below it, so the box lines up.
-  var box=root.querySelector('[data-x="'+i+'"]');if(box)box.style.flex=on?'1.9':'1'});
+  root.querySelector('[data-step="'+i+'"]').classList.toggle('current',on)});
  var f=S[focus],ff=frac(f);
- $('#rp-phase').textContent=f.phase+' · '+f.name;
- $('#rp-phasenote').textContent=phaseNote(focus,f,ff);
- // The pipeline box of each stage: its inbound handoff's lag, keeps-up, and
- // the red bottleneck. Generate and the last stage have no inbound handoff.
- S.forEach(function(s,i){var bx=root.querySelector('[data-x="'+i+'"]');if(!bx)return;
-  var hi=+bx.dataset.lagh,x=s.exec||{},started=s.start!=null&&s.start<=t;
-  var strong=bx.querySelector('[data-xv="'+i+'"]'),span=bx.querySelector('[data-xs="'+i+'"]'),fill=bx.querySelector('[data-xf="'+i+'"]');
-  if(D.kind==='sustained'){
-   if(hi<0){strong.textContent=started?'streaming':'-';span.textContent='';fill.style.width='0%';bx.classList.remove('bottleneck');return}
-   var h=D.handoffs[hi],v=lagAt(h);
-   strong.textContent=v===null?'-':fmtLag(v)+' behind';
-   span.textContent=v===null?'':h.keeps_up===false?'falls behind the arrival rate':'keeps up';
-   fill.style.width=(v===null?0:Math.min(100,v/LMAX*100))+'%';
-   bx.classList.toggle('bottleneck',!!x.bottleneck&&started);
-  }else{
-   var fb=frac(s);
-   strong.textContent=fb===null?'-':fb===0?'Waiting':fb===1?'Complete':Math.round(fb*100)+'%';
-   span.textContent=fb===null?'no window recorded':fb===0?'Awaiting upstream':fb===1?'Output available':'processing';
-   fill.style.width=(fb===null?0:fb*100)+'%';
-   bx.classList.remove('bottleneck');
-  }});
+ // The pipeline row is the handoffs between stages. Sustained: each box is a
+ // recorded handoff, showing its lag, keeps-up, and the red bottleneck. Batch:
+ // each box is a stage pair, filling over the downstream stage's window.
+ if(D.kind==='sustained'){
+  D.handoffs.forEach(function(h,i){var bx=root.querySelector('[data-x="'+i+'"]');if(!bx)return;
+   var v=lagAt(h);
+   bx.querySelector('[data-xv="'+i+'"]').textContent=v===null?'not running':fmtLag(v)+' behind';
+   bx.querySelector('[data-xs="'+i+'"]').textContent=v===null?'no lag recorded yet':h.keeps_up===false?'falls behind the arrival rate':'keeps up';
+   bx.querySelector('[data-xf="'+i+'"]').style.width=(v===null?0:Math.min(100,v/LMAX*100))+'%';
+   bx.classList.toggle('bottleneck',h.keeps_up===false&&v!==null)});
+ }else for(var i=0;i<S.length-1;i++){var bx=root.querySelector('[data-x="'+i+'"]');if(!bx)continue;
+  var fb=frac(S[i+1]);
+  bx.querySelector('[data-xv="'+i+'"]').textContent=fb===null?'-':fb===0?'Waiting':fb===1?'Complete':Math.round(fb*100)+'%';
+  bx.querySelector('[data-xs="'+i+'"]').textContent=fb===null?'no window recorded':fb===0?'Awaiting upstream':fb===1?'Output available':'processing';
+  bx.querySelector('[data-xf="'+i+'"]').style.width=(fb===null?0:fb*100)+'%';}
  var k=st?Math.max(0,Math.min(st.read.length-1,Math.floor(t/st.step))):0;
  if(lane==='lag'){
   $('#rp-lname').textContent='Lag behind upstream';
@@ -736,8 +727,8 @@ function draw(){
   var L=D.lanes[lane],ix=function(a){return Math.max(0,Math.min(a.length-1,Math.floor((t-L.shift)/L.step)))};
   if(lane==='compute'){
    $('#rp-legend').innerHTML='';
-   $('#rp-lname').textContent='Compute / CPU';
-   $('#rp-lval').textContent=L.cpu[ix(L.cpu)].toFixed(1)+' cores · '+(L.mem.length?L.mem[ix(L.mem)].toFixed(0):'NR')+' GiB';
+   $('#rp-lname').textContent='Compute · CPU & memory';
+   $('#rp-lval').textContent=L.cpu[ix(L.cpu)].toFixed(1)+' cores · '+(L.mem.length?L.mem[ix(L.mem)].toFixed(0)+' GiB':'NR');
    plot('#rp-lplot',[{v:L.cpu,c:'#538da9',dt:L.step,shift:L.shift}],Math.max(1,Math.max.apply(null,L.cpu)))}
   else if(lane==='network'){
    $('#rp-legend').innerHTML='';
@@ -783,18 +774,27 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         f'<div class="value"><strong>-</strong><label>{e(s["label"])}</label></div></article>'
         for i, s in enumerate(stages)
     )
-    # The pipeline row: one box per stage, lined up under its card, showing
-    # the lag of the stage's inbound handoff (stage i <- handoff i-1) and
-    # whether it keeps up. The bottleneck box is drawn red. Generate and the
-    # last stage have no inbound handoff, so they carry no lag.
-    nhand = len(data.get("handoffs") or []) if data.get("kind") == "sustained" else 4
-    execboxes = "".join(
-        f'<div class="xbox" data-x="{i}" data-lagh="{i - 1 if 1 <= i <= nhand else -1}">'
-        f'<b>{e(s["phase"])}</b>'
-        f'<div class="track"><div class="fill" data-xf="{i}"></div></div>'
-        f'<strong data-xv="{i}">-</strong><span data-xs="{i}"></span></div>'
-        for i, s in enumerate(stages)
-    )
+    # The pipeline row is the handoffs between stages. A sustained run has one
+    # box per recorded handoff ("A -> B"), showing its lag and whether it keeps
+    # up, the bottleneck box red. The end stages (Generate, the sink) have no
+    # handoff, so there is no box for them. A batch run instead has one box per
+    # stage, each filling over its own recorded window.
+    if data.get("kind") == "sustained":
+        execboxes = "".join(
+            f'<div class="xbox" data-x="{i}" data-lagh="{i}">'
+            f'<b>{e(h["label"])}</b>'
+            f'<div class="track"><div class="fill" data-xf="{i}"></div></div>'
+            f'<strong data-xv="{i}">not running</strong><span data-xs="{i}">no lag recorded yet</span></div>'
+            for i, h in enumerate(data.get("handoffs") or [])
+        )
+    else:
+        execboxes = "".join(
+            f'<div class="xbox" data-x="{i}" data-lagh="-1">'
+            f'<b>{e(stages[i]["phase"])} → {e(stages[i + 1]["phase"])}</b>'
+            f'<div class="track"><div class="fill" data-xf="{i}"></div></div>'
+            f'<strong data-xv="{i}">not running</strong><span data-xs="{i}">no lag recorded yet</span></div>'
+            for i in range(len(stages) - 1)
+        )
     lanes = list(data["not_measured"])
     if not data["storage"]:
         lanes.insert(0, "Storage")
@@ -824,19 +824,22 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         f'<button type="button" disabled title="not in the run record">{e(n)}</button>'
         for n in lanes
     )
-    gaps = sorted(set(data["storage_gaps"]) | set(data["storage_unplaced"]))
-    unmeasured = [*lanes, *(f"{g} storage" for g in gaps)]
-    note = "Not measured: " + ", ".join(unmeasured) + "."
-    win = data.get("window")
-    if win:
-        mm = lambda x: f"{int(x) // 60}:{int(x) % 60:02d}"  # noqa: E731
-        note += (
-            f" Shaded: the measured window, {mm(win['start'])} to {mm(win['end'])};"
-            " the rest is drain and maintenance."
+    notes = []
+    read_gap = data.get("storage_read_gap") or []
+    if read_gap:
+        # The one real storage caveat: Iceberg table reads expose no client
+        # byte counter, so the Storage lane's read side omits these stages.
+        notes.append(
+            "Storage read bytes omit "
+            + " and ".join(read_gap)
+            + " (Iceberg table reads expose no client byte counter)."
         )
+    if lanes:
+        notes.append("Not in the record: " + ", ".join(lanes) + ".")
     problems = data.get("storage_problems") or []
     if problems:
-        note += " Partial: " + "; ".join(problems) + "."
+        notes.append("Partial: " + "; ".join(problems) + ".")
+    note = " ".join(notes)
     switch = unit_switch(pace.unit_label) if pace is not None and pace.alt_value else ""
     pace_html = ""
     if pace is not None and pace.evidence != "nr":
@@ -858,11 +861,9 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         f"<strong>{int(data['duration']) // 60}:{int(data['duration']) % 60:02d}</strong>"
         "<span>run length</span></div></div></div>"
         '<div class="canvas"><div class="layer-head">Workload</div>'
-        f'<div class="runsteps">{steps}</div>'
-        '<div class="exechead"><div><small>Pipeline</small>'
-        '<strong id="rp-phase">-</strong><span id="rp-phasenote"></span></div>'
-        f'<div class="execmark" id="rp-execmark">{"Lag behind the stage upstream; red is the stage the balance check says fell behind." if data.get("kind") == "sustained" else "Each stage fills as its recorded window runs."}</div></div>'
-        f'<div class="execstrip">{execboxes}</div></div>'
+        f'<div class="runsteps">{steps}</div></div>'
+        '<div class="canvas"><div class="layer-head">Pipeline</div>'
+        f'<div class="execstrip" style="--xn:{len(data.get("handoffs") or []) if data.get("kind") == "sustained" else len(stages) - 1}">{execboxes}</div></div>'
         '<div class="platform-head">Platform</div>'
         f'<div class="platform"><div class="platformnav">{nav}</div>'
         '<div class="traces"><div class="graph"><div class="charttitle">'
