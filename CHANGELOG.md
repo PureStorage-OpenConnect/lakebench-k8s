@@ -37,6 +37,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`io` block in the run record.** Storage bytes read and written as the engines report them: every Trino benchmark query (from `system.runtime.tasks`, read once per stream after the timed queries) and the datagen total, each with its basis and time window; Spark stages and other query engines are listed as not measured. Nothing is added inside a timed query. See [Run records](docs/benchmarking/records.md#storage-io).
 - **Storage I/O section in the report.** Trino read and written bytes per round, datagen's total, a MB/s chart from the queries' time windows, and an explicit list of what was not measured. See [HTML report](docs/benchmarking/html-report.md#storage-io).
 - **Workload replay tab in the report.** A batch run opens on a replay of its recorded stage and job windows, row counts and storage rate, beside the Scorecard tab. See [HTML report](docs/benchmarking/html-report.md#views).
+- **Datagen's window is recorded.** A run that generates its own corpus stores the datagen stage's start and end, so the report's replay and storage lane place it. Time to value does not count it and is unchanged.
 - **Scorecard tiles in the report.** Eight tiles open the Scorecard tab, each citing its record field and marked recorded, derived or NR (not measured). See [HTML report](docs/benchmarking/html-report.md#scorecard-tiles).
 
 ### Changed

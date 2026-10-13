@@ -561,3 +561,40 @@ def test_rate_chart_is_empty_without_bytes():
     assert _rate_chart_svg([0.0, 0.0], [0.0, 0.0], 5.0, t, t) == ""
     svg = _rate_chart_svg([5e6, 0.0], [0.0, 1e6], 5.0, t, t)
     assert svg.startswith("<svg") and "read" in svg and "written" in svg
+
+
+def test_datagen_window_is_recorded_and_time_to_value_does_not_count_it() -> None:
+    """A run that records when datagen ran places the stage on the timeline;
+    time to value is still first pipeline stage start to last stage end."""
+    from datetime import datetime, timedelta, timezone
+
+    from lakebench.metrics.collector import (
+        JobMetrics,
+        PipelineMetrics,
+        build_pipeline_benchmark,
+    )
+
+    t0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    run = PipelineMetrics(run_id="r", deployment_name="d", start_time=t0, end_time=t0)
+    run.jobs = [
+        JobMetrics(
+            job_name="b",
+            job_type="bronze-verify",
+            start_time=t0 + timedelta(seconds=100),
+            end_time=t0 + timedelta(seconds=160),
+            elapsed_seconds=60.0,
+            success=True,
+        )
+    ]
+    bare = build_pipeline_benchmark(run, datagen_elapsed=90.0, datagen_output_rows=10)
+    timed = build_pipeline_benchmark(
+        run,
+        datagen_elapsed=90.0,
+        datagen_output_rows=10,
+        datagen_start=t0,
+        datagen_end=t0 + timedelta(seconds=90),
+    )
+    dg = next(s for s in timed.stages if s.stage_name == "datagen")
+    assert dg.to_dict()["start_time"] == t0.isoformat()
+    assert dg.to_dict()["end_time"] == (t0 + timedelta(seconds=90)).isoformat()
+    assert timed.time_to_value_seconds == bare.time_to_value_seconds == 60.0

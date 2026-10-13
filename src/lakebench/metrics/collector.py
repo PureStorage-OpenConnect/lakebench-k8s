@@ -1261,9 +1261,11 @@ class PipelineBenchmark:
         # otherwise dropping it would silently understate wall-clock and
         # inflate pipeline_throughput_gb_per_second. Whole-pipeline failure
         # is reflected separately via `success = False`.
-        starts = [s.start_time for s in self.stages if s.start_time]
+        # Datagen's window places it on the timeline; it is not pipeline time.
+        timed = [s for s in self.stages if s.stage_name != "datagen"]
+        starts = [s.start_time for s in timed if s.start_time]
         latest_end = None
-        for s in self.stages:
+        for s in timed:
             candidate = s.end_time or s.start_time
             if candidate and (latest_end is None or candidate > latest_end):
                 latest_end = candidate
@@ -2225,6 +2227,8 @@ def build_pipeline_benchmark(
     datagen_output_rows: int = 0,
     datagen_output_files: int = 0,
     datagen_fleet: dict[str, Any] | None = None,
+    datagen_start: datetime | None = None,
+    datagen_end: datetime | None = None,
 ) -> PipelineBenchmark:
     """Build a PipelineBenchmark from a completed PipelineMetrics.
 
@@ -2266,6 +2270,9 @@ def build_pipeline_benchmark(
         datagen_elapsed: Datagen elapsed seconds (0 to omit datagen stage).
         datagen_output_gb: Datagen output size in GB.
         datagen_output_rows: Datagen output row count.
+        datagen_start, datagen_end: When this run's datagen ran, timezone
+            aware. They place the stage on the timeline (the report's replay
+            and storage lane); time to value does not count them.
 
     Returns:
         PipelineBenchmark with stages populated and aggregates computed.
@@ -2314,6 +2321,8 @@ def build_pipeline_benchmark(
             stage_name="datagen",
             stage_type="datagen",
             engine="datagen",
+            start_time=datagen_start,
+            end_time=datagen_end,
             elapsed_seconds=elapsed,
             output_size_gb=output_gb,
             output_rows=output_rows,
