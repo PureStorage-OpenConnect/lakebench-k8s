@@ -56,14 +56,18 @@ _PROFILES: dict[tuple[str, str], dict[str, Any]] = {
         "title": "AML / Batch",
         "subtitle": "Financial · Transaction monitoring",
         "phases": ("Generate", "Ingest", "Prepare", "Monitor", "Output"),
-        "names": ("Payments", "Ingest", "Process", "AML rules", "Detections"),
+        "names": ("Payments", "Ingest", "Process", "AML rules", "Alert queries"),
         "labels": (
             "Rows generated",
             "Rows ingested",
             "Rows prepared",
-            "Rows evaluated",
+            "Transactions screened",
             "Queries completed",
         ),
+        # The count a stage shows when it is not its output_rows: the monitor
+        # stage's output is the alerts it raised, its work is the transactions
+        # it screened.
+        "fields": {"gold": "input_rows"},
     },
 }
 
@@ -183,8 +187,9 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
             s, e = _epoch(rec.get("start_time")), _epoch(rec.get("end_time"))
             start = None if s is None else s - t0
             end = None if e is None else e - t0
-            value = rec.get("output_rows")
-            path = f"pipeline_benchmark.stages[{key}].output_rows"
+            field = (profile.get("fields") or {}).get(key, "output_rows")
+            value = rec.get(field)
+            path = f"pipeline_benchmark.stages[{key}].{field}"
         stages.append(
             {
                 "key": key,

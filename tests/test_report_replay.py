@@ -161,7 +161,7 @@ def test_golden_replay_block_matches_its_record(run_id: str) -> None:
         if s["key"] == "query":
             continue
         rec = stages[s["key"]]
-        assert s["value"] == rec["output_rows"]
+        assert s["value"] == rec[s["path"].rsplit(".", 1)[1]]
         if rec.get("start_time"):
             assert s["start"] == pytest.approx(_ts(rec["start_time"]) - t0)
             assert s["end"] == pytest.approx(_ts(rec["end_time"]) - t0)
