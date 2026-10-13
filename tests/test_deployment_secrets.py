@@ -488,3 +488,67 @@ def test_bootstrap_job_polls_health_on_the_management_port():
     assert 'curl -sf "$POLARIS_HEALTH_URI/q/health/ready"' in text
     assert ":8182" in text.split("POLARIS_HEALTH_URI")[1].splitlines()[1]
     assert '"$POLARIS_URI/q/health' not in text
+
+
+def _run_setup_catalog(tmp_path, grant_code: str):
+    """Run the rendered setup-catalog script against a fake curl.
+
+    The fake answers the token call, reports `grant_code` for the grant PUTs and
+    200 for every other call that asks for a status, and logs each call.
+    """
+    import os
+    import subprocess
+
+    import yaml
+
+    text = _render("polaris/bootstrap-job.yaml.j2", "polaris-iceberg-spark-trino")
+    job = next(d for d in yaml.safe_load_all(text) if d and d.get("kind") == "Job")
+    container = next(
+        c for c in job["spec"]["template"]["spec"]["containers"] if c["name"] == "setup-catalog"
+    )
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = tmp_path / "calls.log"
+    (bindir / "curl").write_text(
+        "#!/bin/sh\n"
+        'echo "$*" >> "$CALLS"\n'
+        'case "$*" in *oauth/tokens*) echo \'{"access_token":"tok"}\'; exit 0;; esac\n'
+        'case "$*" in *"-w"*) ;; *) exit 0;; esac\n'
+        'case "$*" in *"-X PUT"*) printf "%s" "$GRANT_CODE";; *) printf 200;; esac\n'
+    )
+    (bindir / "curl").chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+        "CALLS": str(calls),
+        "GRANT_CODE": grant_code,
+        **{e["name"]: e.get("value", "x") for e in container["env"]},
+    }
+    done = subprocess.run(
+        ["sh", "-c", container["args"][0]], env=env, capture_output=True, text=True, timeout=60
+    )
+    return done, calls.read_text().splitlines()
+
+
+def test_bootstrap_job_grants_the_data_privileges_that_authorize_metrics_reports(tmp_path):
+    """Polaris refuses the Iceberg client's scan-metrics report (REPORT_READ_METRICS)
+    without TABLE_READ_DATA, and every Spark and Trino scan logged the 403."""
+    done, calls = _run_setup_catalog(tmp_path, "201")
+    assert done.returncode == 0, done.stderr
+    grants = [c for c in calls if "catalog-roles/catalog_admin/grants" in c]
+    assert len(grants) == 2
+    assert all("-X PUT" in c and '"type": "catalog"' in c for c in grants)
+    assert '"privilege": "TABLE_READ_DATA"' in grants[0]
+    assert '"privilege": "TABLE_WRITE_DATA"' in grants[1]
+    # After the catalog and its namespaces exist, and before the job ends.
+    last_namespace = max(i for i, c in enumerate(calls) if "/namespaces" in c)
+    assert calls.index(grants[0]) > last_namespace
+    assert "Granted TABLE_READ_DATA to catalog_admin" in done.stdout
+    assert "Polaris bootstrap complete" in done.stdout
+
+
+def test_a_refused_grant_warns_and_does_not_fail_the_deploy(tmp_path):
+    done, _ = _run_setup_catalog(tmp_path, "403")
+    assert done.returncode == 0, done.stderr
+    assert "WARNING: Granting TABLE_READ_DATA returned HTTP 403" in done.stdout
+    assert "Polaris bootstrap complete" in done.stdout

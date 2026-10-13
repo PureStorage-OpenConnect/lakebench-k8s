@@ -11,7 +11,7 @@ Each run saves `lakebench-output/runs/run-<id>/metrics.json`:
   "run_id": "20260201-143052-a1b2c3",
   "maintenance_policy_id": "m2-2026-09-26",
   "provenance": {
-    "lakebench_version": "1.7.2",
+    "lakebench_version": "1.7.3",
     "git_sha": "<40-char commit, or null when unknown>",
     "git_dirty": false,
     "install": "checkout",
