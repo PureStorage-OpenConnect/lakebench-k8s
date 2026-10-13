@@ -120,7 +120,7 @@ def test_no_io_means_no_storage_lane() -> None:
     del rec["io"]
     d = build_replay(rec)
     assert d["storage"] is None
-    assert "not measured" in render_replay(d)
+    assert "Not measured: Storage" in render_replay(d)
 
 
 @pytest.mark.parametrize(

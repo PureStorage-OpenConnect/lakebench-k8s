@@ -1859,15 +1859,15 @@ class ReportGenerator:
     <title>Lakebench Scorecard - {_html_escape(str(metrics.deployment_name))}</title>
     <style>
         :root {{
-            --primary: #2563eb;
-            --success: #16a34a;
+            --primary: #257553;
+            --success: #257553;
             --danger: #dc2626;
             --warning: #d97706;
-            --bg: #f8fafc;
+            --bg: #f2f3ef;
             --card-bg: #ffffff;
-            --text: #1e293b;
-            --text-muted: #64748b;
-            --border: #e2e8f0;
+            --text: #1c332c;
+            --text-muted: #6e8173;
+            --border: #dce5dd;
         }}
 
         * {{
@@ -1877,7 +1877,7 @@ class ReportGenerator:
         }}
 
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             background: var(--bg);
             color: var(--text);
             line-height: 1.6;
@@ -2157,10 +2157,10 @@ class ReportGenerator:
             '<button type="button" role="tab" data-view="replay">Workload replay</button>'
             '<button type="button" role="tab" data-view="scorecard">Scorecard</button>'
             "</nav>"
-            "<style>.lb-tabs{display:flex;gap:.5rem;margin-bottom:1.25rem}"
-            ".lb-tabs button{font:inherit;padding:.45rem 1.1rem;border:1px solid var(--border);"
-            "background:var(--card-bg);border-radius:.5rem;cursor:pointer;color:var(--text-muted)}"
-            ".lb-tabs button.on{background:var(--primary);color:#fff;border-color:var(--primary)}"
+            "<style>.lb-tabs{display:flex;gap:3px;margin:0 0 1.25rem;border-bottom:1px solid var(--border)}"
+            ".lb-tabs button{font:inherit;font-weight:650;font-size:13px;padding:.7rem 1rem;border:0;"
+            "border-bottom:3px solid transparent;background:transparent;cursor:pointer;color:#66776c}"
+            ".lb-tabs button.on{color:#1f6449;border-bottom-color:#25835d;background:#f6faf7}"
             "</style>"
         )
         script = (

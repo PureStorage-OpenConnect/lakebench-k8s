@@ -232,35 +232,21 @@ def build_tiles(
 
 _CSS = """
 .lb-tiles{margin-bottom:1.5rem}
-.lb-tiles .lb-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem}
-.lb-tiles .lb-tile{background:var(--card-bg);border-radius:.5rem;padding:1rem;box-shadow:0 1px 3px rgba(0,0,0,.1);border-top:3px solid var(--border)}
-.lb-tiles .lb-tile.recorded{border-top-color:var(--primary)}
-.lb-tiles .lb-tile.derived{border-top-color:var(--warning)}
-.lb-tiles .lb-tile.nr{border-top-color:var(--border);color:var(--text-muted)}
-.lb-tiles .lb-tile b{display:block;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted)}
-.lb-tiles .lb-tile strong{display:block;font-size:1.6rem;margin:.25rem 0;font-variant-numeric:tabular-nums}
-.lb-tiles .lb-tile small{display:block;font-size:.72rem;color:var(--text-muted)}
-.lb-tiles .lb-legend{font-size:.75rem;color:var(--text-muted);margin-top:.6rem}
-.lb-tiles .lb-legend i{display:inline-block;width:.7rem;height:.7rem;border-radius:2px;margin:0 .25rem 0 .75rem;vertical-align:-1px}
+.lb-tiles .lb-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.lb-tiles .lb-tile{background:var(--card-bg);border:1px solid var(--border);border-radius:10px;padding:18px;min-height:110px}
+.lb-tiles .lb-tile b{display:block;font-size:13px;font-weight:600;color:#5f7767}
+.lb-tiles .lb-tile strong{display:block;font-size:32px;letter-spacing:-1px;margin-top:7px;font-variant-numeric:tabular-nums}
+.lb-tiles .lb-tile small{display:block;font-size:12px;color:#7c8e81;margin-top:2px}
+.lb-tiles .lb-tile.nr strong{color:#9aa89d}
 @media(max-width:900px){.lb-tiles .lb-grid{grid-template-columns:repeat(2,1fr)}}
 """
 
 
 def render_tiles(tiles: list[Tile]) -> str:
-    """The tile grid and the evidence legend."""
+    """The tile grid. A tile's record field is its hover text."""
     cells = "".join(
         f'<div class="lb-tile {t.evidence}" title="{escape(t.source, quote=True)}">'
         f"<b>{escape(t.label)}</b><strong>{t.value}</strong><small>{escape(t.sub)}</small></div>"
         for t in tiles
     )
-    return (
-        f"<style>{_CSS}</style>"
-        '<div class="lb-tiles"><div class="lb-grid">'
-        f"{cells}</div>"
-        '<div class="lb-legend"><b>Evidence:</b>'
-        '<i style="background:var(--primary)"></i>Recorded: a stored value, shown as is.'
-        '<i style="background:var(--warning)"></i>Derived: computed on this page from recorded '
-        "fields."
-        '<i style="background:var(--border)"></i>NR: not measured. Hover a tile for its record '
-        "field.</div></div>"
-    )
+    return f'<style>{_CSS}</style><div class="lb-tiles"><div class="lb-grid">{cells}</div></div>'
