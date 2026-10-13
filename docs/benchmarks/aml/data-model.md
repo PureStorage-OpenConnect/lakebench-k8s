@@ -10,11 +10,11 @@
   with the silver and TM column lists.
 - No table declares a primary key; the keys below are logical.
 
-Row counts marked recorded come from the 1.6 batch records (scale 1 and 10),
-on the 1.6 generator image, not comparable with 1.7, n=1 each at that run's
-seed. Bronze and everything downstream move with the seed through the
-screening track ([3.2](generation.md#32-scale-factor)). Both records hold the
-corpus as declared by the config, not observed from the datagen pods
+Row counts marked recorded come from the 1.6 batch records (scale 1 and 10):
+1.6 generator image, n=1 each at that run's seed, not comparable with 1.7.
+Bronze and everything downstream move with the seed through the screening
+track ([3.2](generation.md#32-scale-factor)). Both records hold the corpus as
+declared by the config, not observed from the datagen pods
 (`experiment.corpus.observed: false`).
 
 ### 2.1 Raw corpus (S3, written by the generator)

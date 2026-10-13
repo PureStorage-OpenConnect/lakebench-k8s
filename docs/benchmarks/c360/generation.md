@@ -39,8 +39,7 @@ loyalty lookup (`Rng::new(seed)`) and one RNG per file
 - The payload size is fixed at 2 KiB; the file size at 64 MB
   (`datagen.file_size` refuses any other value).
 - Each pod of the Kubernetes Indexed Job gets a `JOB_COMPLETION_INDEX`. File
-  `N` goes to pod `N % total_nodes`, so files spread evenly whatever the pod
-  count.
+  `N` goes to pod `N % total_nodes`.
 - A file's content depends only on the seed, file id, rows per file, customer
   id space, dirty ratio and timestamp window, so pod count does not change
   the corpus.

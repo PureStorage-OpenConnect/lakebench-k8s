@@ -1,17 +1,15 @@
 # AML (financial) Pipeline Benchmark Specification
 
-Reference: the AML benchmark specification: purpose, supported compositions, and links to the numbered pages.
-
 - Workload version `aml-3` (`experiment.workload.version`).
 - Generator model `datagen-v2-rs-0.4`.
 - Query sets `qs12-910d16a91962` (batch with TM operations) and `qs8-ffe2bc1a012e` (FQ1 to FQ8).
 - Maintenance policy `m2-2026-09-26`.
 
-For engineers who run or compare this benchmark, and contributors
-who implement it on a new component. Every statement describes the code of
-this release and names the module. Python paths are relative to
-`src/lakebench/`; generator paths to `datagen_rs/`. A reader's guide to the
-scores is [aml-scoring.md](../aml-scoring.md).
+The specification for engineers who run or compare the benchmark and
+contributors who implement it on a new component. It describes the code of
+this release. Python paths are relative to `src/lakebench/`, generator paths
+to `datagen_rs/`. For how to read the scores, see
+[aml-scoring.md](../aml-scoring.md).
 
 Figures labelled "recorded" come from three 1.6 run records
 ([recorded 1.6 figures](aml/limitations.md#recorded-16-figures)).
@@ -32,10 +30,10 @@ Figures labelled "recorded" come from three 1.6 run records
 
 ## 1. Purpose and scope
 
-The workload models a bank's transaction-monitoring (TM) back office. It
-runs over a five-year archive of ISO 20022 pacs.008 credit transfers. A
-synthetic generator plants known money-laundering typologies into a clean
-payment stream. The pipeline:
+The workload models a bank's transaction-monitoring (TM) back office over a
+five-year archive of ISO 20022 pacs.008 credit transfers. A synthetic
+generator plants known money-laundering typologies into a clean payment
+stream. The pipeline:
 
 - lands the messages (bronze);
 - normalises them into payments, parties, accounts, statements, a
@@ -45,43 +43,44 @@ payment stream. The pipeline:
 
 A fixed query set is then timed against the result.
 
-What it measures about an architecture (catalog x table format x pipeline
-engine x query engine, on a known system):
+Per architecture (catalog x table format x pipeline engine x query engine, on
+a known system), it measures:
 
 | Mode | Measures |
 |---|---|
 | Batch | time to turn a fixed raw corpus into queryable gold (`time_to_value_seconds`); data volume and requested compute used; query-set speed (`composite_qph`) |
 | Continuous | gold staleness while datagen writes at the scale's offered load (`data_freshness_seconds`); time from a planted pattern's payments landing to its alert (`time_to_detect_seconds`); the ingest rate bronze holds; QpH while tables are written |
 
-- These figures are valid only when the verdict passes
+- Figures are valid only when the verdict passes
   ([5](aml/correctness.md#5-correctness-contract)).
-- A batch comparison also needs both runs to have the same query set and
-  alert set ([10](aml/comparability.md#10-comparability)). Lakebench does not
-  compare query answers.
-- An AML continuous run's alerts depend on when detection and TM passes ran
-  relative to arrival. A continuous comparison can never establish its
+- A batch comparison also needs the same query set and alert set
+  ([10](aml/comparability.md#10-comparability)). Lakebench does not compare
+  query answers.
+- A continuous run's alerts depend on when detection and TM passes ran
+  relative to arrival, so a continuous comparison cannot establish matching
   results.
 
 What it does not claim:
 
 - **It is not an AML product.** The rules are illustrative detectors with
-  fixed, self-chosen parameters. The TM workflow is a seeded simulation with
-  default analyst (0.90) and investigator (0.95) accuracies. Both are
-  configurable and hashed into the workload parameters, so a change makes two
-  runs not comparable ([7.3](aml/execution-rules.md#73-prohibited-changes-invalidate-a-result-or-are-refused)).
+  fixed parameters. The TM workflow is a seeded simulation with default
+  analyst (0.90) and investigator (0.95) accuracies. Both are configurable
+  and hashed into the workload parameters, so a change makes two runs not
+  comparable ([7.3](aml/execution-rules.md#73-prohibited-changes-invalidate-a-result-or-are-refused)).
 - **Detection quality is not an architecture property.** Recall and
   false-positive rate belong to the corpus and the rules. They are reported
-  beside a run and never decide its verdict. What does fail a run
+  beside a run and never decide its verdict. These fail a run
   ([5](aml/correctness.md#5-correctness-contract)):
   - batch: rule errors, disallowed skips, expected rules that did not run,
     or zero alerts;
   - continuous: a mode-excluded rule that ran, an expected rule that
     skipped, errored or did not run on the scored [tick](../glossary.md#tick), or zero alerts.
 - **Capped figures measure the cap.** Lakebench imposes executor ceilings,
-  rule caps, the continuous [trickle](../glossary.md#trickle) and the TM per-customer alert
-  cap ([7.4](aml/execution-rules.md#74-lakebench-imposed-caps)).
-- **The fidelity gate and [registered looks](../glossary.md#look) measure generator realism**, not
-  an architecture. Neither runs inside `lakebench run`.
+  rule caps, the continuous [trickle](../glossary.md#trickle) and the TM
+  per-customer alert cap ([7.4](aml/execution-rules.md#74-lakebench-imposed-caps)).
+- **The fidelity gate and [registered looks](../glossary.md#look) measure
+  generator realism**, not an architecture. Neither runs inside
+  `lakebench run`.
   - On a development seed the gate runs on the cluster with
     `lakebench financial reference-score`.
   - A registered evaluation or robustness look is refused there. It runs
@@ -94,9 +93,9 @@ AML runs on Iceberg only. Of the 11 structurally valid tuples, 8 are
 workload-compatible, in batch and continuous (`config/schema.py`,
 `WORKLOAD_TABLE_FORMATS` and `WORKLOAD_MODES`).
 
-Support states per recipe and mode are in the generated
-[support table](../compatibility-matrix.md#support-states). AML is supported
-only on the cells it lists; every other valid combination is unverified.
+The generated [support table](../compatibility-matrix.md#support-states)
+lists support states per recipe and mode. AML is supported only on the cells
+it lists; every other valid combination is unverified.
 
 | Recipe | Query access path | Spark image | Notes |
 |---|---|---|---|
@@ -110,9 +109,9 @@ only on the cells it lists; every other valid combination is unverified.
 | polaris-iceberg-spark-none | none | 4.1.3 | as none above |
 | hive-delta-spark-{trino,thrift,none} | -- | -- | unsupported, refused at load: the AML stage scripts and DDL are Iceberg-only |
 
-- The pipeline engine is Spark in every recipe. Each recipe names its Spark
-  image (`config/recipes.py`): `apache/spark:4.1.3-python3` on every recipe. A config that sets `images.spark`
-  runs that image.
+- The pipeline engine is Spark in every recipe. Every recipe uses
+  `apache/spark:4.1.3-python3` (`config/recipes.py`); a config that sets
+  `images.spark` runs that image.
 - The release matrix's AML rows (`config/support.py`): batch
   hive-iceberg-spark-trino at scale 1 and 10, batch
   polaris-iceberg-spark-trino, continuous hive-iceberg-spark-trino and

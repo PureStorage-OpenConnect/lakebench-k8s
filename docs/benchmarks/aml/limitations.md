@@ -28,8 +28,8 @@
     over those days widened by the rule's windows (a day for W2, about six
     weeks for W3 and W17, a week for W4), merged with the standing alerts.
   - The alerts equal a full recompute over the same silver while no path cap
-    binds (W3 and W17's caps apply to the rows a tick reads). So tick cost
-    follows the arrival rate, not the corpus or datagen pod drift.
+    binds (W3 and W17's caps apply to the rows a tick reads). Tick cost
+    follows the arrival rate, not the corpus.
   - Continuous W4 raises one alert per entity per week of payments; batch W4
     one per entity over the corpus.
   - Continuous results are not comparable with batch.
@@ -37,12 +37,12 @@
   ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)),
   not batch `recall`; no published record carries one yet.
 - **Continuous results are never checked across runs**: alerts depend on
-  when ticks ran, so any comparison including one is NOT ESTABLISHED at best. The published
+  when ticks ran, so a comparison including one is at best NOT ESTABLISHED. The published
   continuous record (1.6, scale 1, n=1) ingested 43.7% of the corpus in the
   default 1,800 s window.
 - **Continuous throughput follows the offered load** (4 MB/s per scale unit by
   default). When the pipeline keeps up, `sustained_throughput_rps` is that
-  load. It is a capacity only when datagen stays ahead with bronze busy
+  load; it is a capacity only when datagen stays ahead with bronze busy
   (`datagen_ahead`, `intake_limit: bronze_capacity`). Under `--skip-generate`
   or a set `max_files_per_trigger` the [trickle](../../glossary.md#trickle) bounds it, named in
   `limits.bound` and `limits.trickle_bound`. The published continuous record
@@ -59,11 +59,12 @@
 - **The batch corpus is fixed in time and zone-less**
   ([3.5](generation.md#35-content-time-range-and-dirty-data)). The ignored
   timestamp and dirty-data fields are still recorded and hashed into corpus
-  id v1, and `corpus.timestamp_start` and `timestamp_end` are the config's
+  id v1; `corpus.timestamp_start` and `timestamp_end` are the config's
   values, not the corpus's range.
 - **Corpus id v1 hashes inert fields**: on exp1 records an edit to a field
   the AML generator never receives (the timestamps, `dirty_data_ratio`, the
-  Customer 360 `unique_customers`) makes identical corpora not comparable. Only an image that writes corpus markers produces v2
+  Customer 360 `unique_customers`) makes identical corpora not comparable.
+  Only an image that writes corpus markers produces v2
   ([3.1](generation.md#31-generator-identity)).
 - **Bronze tables are unpartitioned** (zero-copy registration), so bronze
   scans are full scans on every engine.
@@ -90,12 +91,11 @@
   checked against `config/datagen_lineage.yaml` by hand.
 - **A materialised MERGE source can fail a micro-batch.** An executor lost
   between materialising a silver-stream MERGE source and the MERGE fails that
-  micro-batch, and the stream restarts through its replay path. No published
-  record shows AML continuous on Spark 4.1; the published continuous record
-  ran Spark 4.0.2.
+  micro-batch, and the stream restarts through its replay path. The published
+  continuous record ran Spark 4.0.2; none shows AML continuous on Spark 4.1.
 - **No counter-leakage hard negatives.** The generator plants no legitimate
   accounts built to mimic a typology's shortcut signature (for example
-  naturally long-quiet seasonal or travel accounts that break the dormancy gap
+  long-quiet seasonal or travel accounts that break the dormancy gap
   signature). The leakage gate runs, but a detector can still score on such a
   shortcut.
 - **Stream restarts longer than 1 h are not safe.** Iceberg snapshot expiry is

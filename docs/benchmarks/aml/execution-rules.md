@@ -20,13 +20,13 @@
 
 A publishable AML result is a full batch `lakebench run` without `--stage`,
 with the benchmark and a query engine, on an unverified or supported
-composition, with verdict PASSED. An AML continuous run's alerts depend on
-when ticks ran, so it cannot show it returned another run's answers.
+composition, with verdict PASSED. A continuous run's alerts depend on when
+ticks ran, so it cannot show matching answers.
 
 ## 7.2 Permitted tuning (still publishable)
 
 None of these changes the Workload or Corpus identity keys, so runs differing
-only here stay comparable. What a difference means (`metrics/comparability.py`):
+only here stay comparable (`metrics/comparability.py`):
 
 - **Architecture keys**: catalog (Hive or Polaris) and query engine within
   the Iceberg recipes; component versions; query access path (catalog or
@@ -128,7 +128,7 @@ throughput figures measure the offered load the trickle set, not
 infrastructure capacity (`metrics/bounds.py`).
 
 **Per-alert evidence caps** keep one alert row from growing with the corpus.
-Lakebench sets them; they are not tuned to any result.
+They are not tuned to any result.
 
 | Rule | List | Cap | Kept |
 |---|---|---|---|

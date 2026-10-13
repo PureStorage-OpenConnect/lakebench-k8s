@@ -5,7 +5,7 @@
 `metrics.json` carries an `experiment` block, schema `exp2` or `exp1`
 ([7.4](execution-rules.md#74-prohibited-changes-invalidate-a-result-or-are-refused);
 `v2_unavailable` names what was missing, `metrics/experiment.py`). A
-published result carries all of it:
+published result shows:
 
 | Area | Must show |
 |---|---|
@@ -35,16 +35,15 @@ comparable only when (`metrics/comparability.py`):
   is equal and neither run has a corpus problem;
 - they ran the same query set.
 
-- Lakebench does not compare query answers: a reader compares the
-  per-query row counts and numbers of the two reports by eye.
+- Lakebench does not compare query answers; compare the per-query row counts
+  and numbers of the two reports.
 - A run with no benchmark (`--skip-benchmark`, a `*-none` recipe) has no
   query set to compare.
 - Execution conditions: effective maintenance, compaction operation,
   maintenance settings, benchmark iterations and mode, the Lakebench caps
-  that bound, and (continuous) the in-stream round count. When they differ,
-  or only the dependency pinset does, a difference in the numbers may come
-  from them. A Trino-vs-Thrift Iceberg pair that both compacted differs in
-  conditions ([7.2](execution-rules.md#72-maintenance-policy-handling)).
+  that bound, and (continuous) the in-stream round count. When they or the
+  dependency pinset differ, a difference in the numbers may come from them. A
+  Trino-vs-Thrift Iceberg pair that both compacted differs in conditions ([7.2](execution-rules.md#72-maintenance-policy-handling)).
 - Query access path and system are Architecture and System keys, not
   conditions; when architecture and system both differ, no difference can be
   put down to either.

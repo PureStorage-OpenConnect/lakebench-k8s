@@ -40,7 +40,7 @@ Primary: `data_freshness_seconds`, lower is better.
 | `total_core_hours` | core-h | none | core-hours of the three streams, which run the whole window, so it follows the window length |
 
 `qph_degradation_pct` needs four rounds to read as a trend; a typical run
-produces five. Read a five-round value as a signal, not a conclusion.
+produces five.
 
 With TM on, a round adds IQ1 to IQ4 once the run has a case, so rounds can
 run different query sets. `composite_qph_basis.blended` then says so,
@@ -58,9 +58,8 @@ carry the keys, null when nothing was measured.
 - Time to detect = the commit of its rule's INSERT into `gold.alerts` minus
   the newest bronze `ingest_ts` among its related payments.
 - That spans from the last evidence's file landing in the raw zone to the
-  alert being visible in gold. It includes the wait for bronze. For a corpus
+  alert being visible in gold, including the wait for bronze. For a corpus
   written before the run, landing is when bronze took the file.
-- Every rule runs every tick.
 - `detected_ts` is the first pass that wrote the alert's content.
 - Each tick logs a histogram in 10 s bins. The collector merges every tick;
   the median and 95th percentile are read at the upper edge of the bin that
@@ -76,9 +75,8 @@ carry the keys, null when nothing was measured.
 - A tick that logged no measurement counts in
   `time_to_detect_unmeasured_cycles`; its alerts are measured one tick late.
 - Ticks also log a pass-end histogram (every new alert measured at the end of
-  the pass, the definition before per-rule commit times).
-- They log one histogram per rule, kept with the gold-refresh stage metrics,
-  so a rule that got slower is not hidden in the merged figure.
+  the pass, the definition before per-rule commit times) and one histogram per
+  rule, kept with the gold-refresh stage metrics.
 
 **Time-travel reads** (`continuous.time_travel`; reported, never gating).
 Each tick records the `silver.transactions` snapshot it read. After a passing
@@ -105,8 +103,7 @@ attributed to the earliest round that could have expired them.
 | `not_run` | the job could not run, or the run failed its gates |
 | `pass` | otherwise |
 
-At the default 30 min retention, older tick snapshots are expected to expire
-inside a 2 h window and the last ones to stay. Lakebench creates no tag or
-branch, so expiry and destroy are unchanged. The check is shown beside the
-verdict and never fails the run. No published record carries a time-travel
-result yet.
+At the default 30 min retention, older tick snapshots expire inside a 2 h
+window and the last ones stay. Lakebench creates no tag or branch, so expiry
+and destroy are unchanged. The check is shown beside the verdict and never
+fails the run. No published record carries a time-travel result yet.

@@ -159,7 +159,7 @@ in bronze.
        detect;
      - runs a TM pass when due (every `continuous_interval_seconds`, default
        1,800 s), with a final pass before the window closes.
-   - Every rule runs every tick. An alert keeps the `detected_ts` of the
+   - An alert keeps the `detected_ts` of the
      tick that first wrote its content.
    - W5 is the transaction screen only: a payment is screened on arrival. A
      later list version or party country change does not rescreen it.
@@ -197,6 +197,8 @@ in bronze.
      stopped, outside every measured interval, and never fails the run.
 8. **Gates**: the continuous window gate, the drain check, the AML continuous
    gate, the TM verdict and the record gates ([5](correctness.md#5-correctness-contract)).
+   The continuous balance check is advisory: an unbalanced stage is recorded
+   in `continuous.balance` and reported, and does not fail the run.
 
 No published record carries a covered score yet; the published continuous
 record predates the drain.
@@ -257,7 +259,7 @@ logged snapshot, so the scorer sees exactly the sealed batches detection saw.
 - Records come from the current gold-refresh driver pod's log, so a restarted
   driver leaves its earlier pod's ticks out (`continuous.drain.ticks_scope`).
 - Lakebench keeps each stream driver's log from the moment its pod runs
-  (`<run_dir>/drivers/`). It reads that copy, continued by the pod log, so
+  (`<run_dir>/drivers/`) and reads that copy, continued by the pod log, so
   kubelet log rotation does not trim a long window.
 - `continuous.drain.log_from_driver_start` is false when the log still does
   not reach the driver's first tick. The run then fails with "driver log

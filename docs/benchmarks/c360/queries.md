@@ -18,8 +18,7 @@ sorted by name (a name not in the registry hashes by name only).
 - Power-run order: Q1, Q2, Q4, Q3, Q7, Q5, Q6, Q9 (by class: scan,
   filter/prune, aggregation, analytics, operational). There is no Q8.
 - Throughput mode: each stream shuffles the order independently.
-- The results report QpH per class, which shows whether scan, aggregation or
-  analytics queries are the bottleneck.
+- The results report QpH per class.
 
 | Id | Class | Reads | Business question | Rows on a correct corpus |
 |---|---|---|---|---|

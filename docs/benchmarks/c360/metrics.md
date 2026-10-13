@@ -3,8 +3,7 @@
 ## 8. Metrics
 
 Units, directions and bands come from the metric registry
-(`metrics/metric_registry.py`), which the report reads.
-Direction `none`: a delta has no better side.
+(`metrics/metric_registry.py`). Direction `none`: a delta has no better side.
 
 ### 8.1 Batch
 
@@ -57,11 +56,10 @@ Primary: `time_to_value_seconds`, lower is better.
   drift floor.
 
 Batch time to value includes the non-degeneracy gate's gold count and
-distinct silver date count, which grow with silver. Under workload version
+distinct silver date count, which grow with silver. From workload version
 `c360-2`, gold-finalize never picks its incremental strategy from table size
 (gold with rows, silver over 1,000 GB), so a repeat run rebuilds every gold
-day. A `c360-2` run compares with no run recorded
-under `c360-1`.
+day. A run under `c360-2` or later compares with no `c360-1` run.
 
 ### 8.2 Continuous
 
@@ -119,6 +117,6 @@ continuous `composite_qph` must carry `composite_qph_basis`.
 | `snapshots_expired`, `orphan_files_removed`, `storage_reclaimed_mb` | count, count, MB | none | reserved for what table maintenance removed; no code path fills them in this release, so they never appear in a record |
 | `storage_multiple_total` | ratio | lower, diagnostic (never a directional delta) | physical over logical table bytes at run end under the maintenance policy that ran (`storage_multiple.total.multiple`); a condition of the policy, not a system score |
 
-`storage_multiple_total` is shown by the report and read by nothing that
-gates. None of these is under `scores`. Per-stage and per-query figures
-(`<stage>_seconds`, `query_qph_<query>`) are recorded beside these and follow the stage and query definitions above.
+`storage_multiple_total` is shown by the report and gates nothing. None of
+these is under `scores`. Per-stage and per-query figures (`<stage>_seconds`,
+`query_qph_<query>`) are recorded beside them.

@@ -11,10 +11,10 @@ the operations pass runs every `continuous_interval_seconds` (default
 
 `tm_operations.ops` reports the alert funnel (payments, monitored, alerts,
 escalated, cases, SARs), dispositions, priorities, alert aging and SLA
-breaches, case status, filing-days median and p95, late filings and
-continuing reviews. Every one depends on simulated parameters
-(`spark/scripts/tm_operations.py`, recorded in `tm_operations.ops.simulation`),
-so they measure the simulation, not the architecture:
+breaches, case status, filing-days median and p95, late filings and continuing
+reviews. Each depends on simulated parameters (`spark/scripts/tm_operations.py`,
+recorded in `tm_operations.ops.simulation`), so they measure the simulation,
+not the architecture:
 
 | Parameter | Default |
 |---|---|
@@ -56,7 +56,7 @@ planted (non-control) typology payment. The L1 analyst decides correctly with
 probability `analyst_accuracy`; the L2 investigator and QA reviewer with
 `investigator_accuracy`. Every draw is a hash of the seed and a stable key
 (the alert's identity, the case id), so a rerun reproduces the decisions. The
-report says every operations number is conditional on these values.
+report marks every operations number as conditional on these values.
 
 **Regulatory clocks.**
 
@@ -73,9 +73,9 @@ report says every operations number is conditional on these values.
 - Late filings are drawn at `late_filing_rate` and flagged `filed_late`.
 
 **Alert identity across cycles.** Detection re-runs over the whole corpus each
-cycle, so an alert's window can grow as payments arrive. The layer matches
-each alert to the last completed cycle's, read at the table snapshots that
-cycle recorded in the ledger:
+cycle, so an alert's window can grow as payments arrive. The layer matches each
+alert to the last completed cycle's, read at the table snapshots that cycle
+recorded in the ledger:
 
 - Same content first. Else the same rule on the same customer, largest
   overlap first, where:
@@ -87,15 +87,15 @@ cycle recorded in the ledger:
   identity.
 - Rules cap the related-payment list by payment id. An alert growing past
   about three times that cap between cycles can lose its identity: carried as
-  withdrawn and raised again as new. That inflates alert counts but never
-  moves a decision.
+  withdrawn and raised again as new. That inflates alert counts but does not
+  move a decision.
 - A matched alert keeps its key, generated date, truth and priority as first
   seen. An alert detection stops emitting is kept (`in_current_detection`
   false). A new alert whose payments predate the previous cycle is dated on
   this cycle, the first day it could have been raised.
-- The day-by-day replay is causal and its inputs for seen alerts are frozen,
-  so recomputing it reproduces every earlier decision; the `history_stable`
-  invariant checks that against the previous cycle's table.
+- The day-by-day replay is causal and its inputs for seen alerts are frozen, so
+  recomputing it reproduces every earlier decision. The `history_stable`
+  invariant checks this against the previous cycle's table.
 - Case activity counts are recomputed each cycle from silver.
 
 **Who a scenario alerts on.**
@@ -142,10 +142,10 @@ finish before the window closes. The close is the first gold-refresh
 driver's start, persisted in its checkpoint, plus the window length.
 
 - One pass over the full corpus takes minutes at scale 10, and gold is not
-  refreshed meanwhile. A freshness sample is logged after each pass, and the
-  pass time counts in the freshness score. Samples after a pass follow the
-  tick's own rule (only while data is moving), so a drained corpus's idle
-  time never becomes the score.
+  refreshed meanwhile. A freshness sample is logged after each pass and the
+  pass time counts in the freshness score. Samples follow the tick's own rule
+  (only while data is moving), so a drained corpus's idle time never becomes
+  the score.
 - The continuous jobs carry the CLI run id, so a restarted driver appends to
   the same ledger. Each pass takes its cycle number in the ledger before it
   writes. A pass that fails after writing is reported as a failure and never

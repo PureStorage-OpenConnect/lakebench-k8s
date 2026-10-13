@@ -16,8 +16,7 @@ adds `sanctions_match` and `pep_match`: 17 manifest types.
   Eight have none: `bipartite`, `cross_border_cycle`, `fan_in`, `fan_out`,
   `random`, `scatter_gather`, `synthetic_identity`, `tbml_repeated_invoice`.
   `benchmark/aml_queries.py` lists each with a one-line reason
-  (`UNMAPPED_TYPOLOGIES`), separating "planted, no detector scores it" from
-  "forgot to hook it up". Recall for an unmapped typology is untestable, not
+  (`UNMAPPED_TYPOLOGIES`). Recall for an unmapped typology is untestable, not
   zero.
 - `random` is a control: its hit rate is the chance floor
   ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)).
@@ -54,7 +53,7 @@ Planted payments:
   or the same name in another country. A loose screen loses precision.
 - Twenty ordinary external payees per list entry, with the same name shapes,
   one to three payments each and no party or account master record, keep
-  planted payments from standing out as "rare external payees". On a seed-43
+  planted payments from standing out as rare external payees. On a seed-43
   calibration corpus that heuristic reaches 3% precision.
 
 **Ground truth** is the manifest: one `sanctions_match` or `pep_match`
@@ -65,23 +64,21 @@ that party. `injection_parameters` holds `list_id`, `list_version`,
 
 Recall and precision are computed as for the behavioural rules.
 Transaction-level precision is weighted by payments: one heavily paid world
-entity whose name sits near a list entry (world persons carry a middle
-initial, list entries a full middle name) can dominate it, so read it beside
-the alert count.
+entity whose name sits near a list entry (world persons carry a middle initial,
+list entries a full middle name) can dominate it, so read it beside the alert
+count.
 
 **W7 corridors.** The high-risk corridor list W7 uses beside the FATF list
-(`synthetic_corridors.json`) is synthetic: the country pool the generator
-draws `corridor_high_risk` participants from, because no generator home
-country is on the June 2026 FATF lists. W7's recall on that typology is
-partly by construction: the rule uses the generator's corridor list, as a
-bank uses its own. Neither its
-recall nor its alert volume is comparable with 1.5.
+(`synthetic_corridors.json`) is synthetic: it is the country pool the generator draws
+`corridor_high_risk` participants from, since no generator home country is on
+the June 2026 FATF lists. W7's recall on that typology is partly by
+construction: the rule uses the generator's corridor list, as a bank uses its
+own. Neither its recall nor its alert volume is comparable with 1.5.
 
 ## 3.9 Planting shapes and baseline timing
 
 Every planting parameter is self-chosen unless a source is named. None is set
-from a detection rule's threshold; rule recall moves as a consequence and is
-reported, not targeted.
+from a detection rule's threshold; rule recall is reported, not targeted.
 
 | Typology | Shape | Why |
 |---|---|---|
@@ -104,8 +101,8 @@ variation below 0.5, and at least 15% above 1.0.
   calendar mass, rolled to the next business day); the rest stay random.
 - The cadence is spaced in calendar mass, not wall-clock time, so scheduled
   rows keep the corpus's day-of-week, salary-day and quarter-end shape, which
-  typology rows share. Even wall-clock spacing would put fewer rows on salary
-  days and more on Mondays, and planted rows would stand out by date.
+  typology rows share. Even wall-clock spacing would shift rows off salary days
+  onto Mondays and make planted rows stand out by date.
 - Only timing changes. Expected total sends, amounts (persona draws),
   counterparty draws (the same ring and extended-band draw as a random row),
   every typology's rows and the corpus row count are unchanged.
