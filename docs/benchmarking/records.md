@@ -54,7 +54,7 @@ The `io` block holds the storage traffic the engines reported for the run, deriv
 
 - `intervals`: one per benchmark query (any instrumented engine), one for datagen, and one per 15 s step of each Spark stage that gained bytes. Each has `source`, `stage`, `label` (`benchmark`, `pre_compaction` or `round_<n>`), the `query`, `start` and `end` (UTC, from the engine's clock; null when not recorded), `read_bytes` and `write_bytes`, the basis of each, and `complete`.
 - `null` bytes mean not measured; `0` means measured and zero.
-- `not_measured`: what has no figure and why. A Spark stage with no executor counters reads `executor_io_not_collected` (observability was off), a Spark stage's reads of an Iceberg table before Iceberg 1.12.0 `iceberg_reads_have_no_client_counter`, a query engine that reports no I/O at all `engine_not_instrumented` (Trino, DuckDB and Spark Thrift are instrumented), and a query record with no I/O block `io_not_recorded`.
+- `not_measured`: what has no figure and why. A Spark stage with no executor counters reads `executor_io_not_collected` (observability was off), a Spark stage's reads of an Iceberg table before Iceberg 1.12.0 `iceberg_reads_have_no_client_counter`, a query engine that reports no I/O `engine_not_instrumented` (Trino and DuckDB are instrumented; Spark Thrift is not), and a query record from before the block `io_not_recorded`.
 - `totals`: bytes per source, summed over its intervals.
 - `problems`: query samples whose report was missing, for example because the query had left the coordinator's history, and Spark stages whose write counters cover under 95% of the bytes that landed.
 

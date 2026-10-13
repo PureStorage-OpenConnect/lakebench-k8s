@@ -203,10 +203,12 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
     # Trino via system.runtime.tasks, DuckDB via the httpfs filesystem log,
     # Spark Thrift via the Spark REST SQL metrics. An engine with no io block
     # on any query is marked not measured.
+    # Engines that report their own per-query read bytes. Spark Thrift does not:
+    # its real read bytes are the executor s3 filesystem counter, which is not
+    # collected per query, so it is marked engine_not_instrumented.
     read_basis_for = {
         "trino": BASIS_TRINO_READ,
         "duckdb": "duckdb_filesystem_read",
-        "spark-thrift": "spark_thrift_input",
     }
     for label, group, bench in _benchmarks(record):
         engine = bench.get("engine") or "trino"

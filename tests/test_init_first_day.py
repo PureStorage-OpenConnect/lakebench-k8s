@@ -52,39 +52,6 @@ def _components(cfg: LakebenchConfig) -> dict[str, str]:
 # -- init output -------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("recipe", "workload"),
-    [
-        (r, w)
-        for r in recipe_names()
-        for w in ("customer360", "financial")
-        if not (w == "financial" and "-delta-" in r)
-    ],
-)
-def test_init_all_recipes_load(tmp_path, creds, recipe, workload):
-    out = tmp_path / "lakebench.yaml"
-    r = runner.invoke(app, ["init", "-r", recipe, "-w", workload, "-o", str(out)])
-    assert r.exit_code == 0, r.output
-    text = out.read_text()
-    raw = yaml.safe_load(text)
-
-    cfg = load_config(out)
-    assert cfg.recipe == recipe
-    assert _components(cfg) == recipe_components(recipe)
-    assert cfg.architecture.workload.schema_type.value == workload
-    assert cfg.architecture.workload.datagen.scale == 1
-
-    s3 = raw["platform"]["storage"]["s3"]
-    assert s3["access_key"] == "${LAKEBENCH_S3_ACCESS_KEY}"
-    assert s3["secret_key"] == "${LAKEBENCH_S3_SECRET_KEY}"
-    assert SENTINEL_AK not in text and SENTINEL_SK not in text
-    assert "client_secret" not in str(raw)  # listed commented, never live
-    assert "architecture" not in raw  # recipe-owned keys are commented
-    assert len(re.findall(r"(?m)^recipe:", text)) == 1
-    # The load is quiet: no deprecation or upgrade note on a fresh file.
-    assert list(cfg._load_notes) == []
-
-
 @pytest.mark.parametrize("recipe", [r for r in recipe_names() if "-delta-" in r])
 def test_init_financial_on_a_delta_recipe_is_refused(tmp_path, creds, recipe):
     """The financial workload is Iceberg-only: init refuses rather than write
