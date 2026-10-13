@@ -182,3 +182,47 @@ def test_partial_spark_storage_is_named_on_the_replay() -> None:
         "spark silver: write counters cover 70% of the 9.76 GiB that landed"
     ]
     assert "Partial: spark silver: write counters cover 70%" in render_replay(d)
+
+
+def _with_series(rec: dict) -> dict:
+    steps = 41  # 600 s at 15 s
+    flat = lambda v: [[k * 15.0, v] for k in range(steps)]  # noqa: E731
+    rec["platform_metrics"] = {
+        "series": {
+            "step_seconds": 15,
+            "start": rec["start_time"],
+            "cpu_cores": {"silver": flat(2.0), "engine": flat(1.0)},
+            "memory_bytes": {"silver": flat(2 * 1024**3)},
+            "network_rx_bytes_per_s": {"silver": flat(4_000_000)},
+            "network_tx_bytes_per_s": {"silver": flat(1_000_000)},
+            "pods": {"silver": flat(3), "engine": flat(2)},
+        }
+    }
+    return rec
+
+
+def test_platform_lanes_are_totals_over_the_pod_groups() -> None:
+    d = build_replay(_with_series(_record()))
+    lanes = d["lanes"]
+    assert lanes["compute"]["cpu"][0] == 3.0 and lanes["compute"]["mem"][0] == 2.0
+    assert lanes["network"]["rx"][0] == 4.0 and lanes["network"]["tx"][0] == 1.0
+    assert lanes["k8s"]["pods"][0] == 5
+    assert lanes["compute"]["shift"] == 0.0 and lanes["compute"]["step"] == 15.0
+    assert d["not_measured"] == []
+    html = render_replay(d)
+    for lane in ("compute", "network", "k8s"):
+        assert f'data-lane="{lane}"' in html
+    assert "not in the run record" not in html
+
+
+def test_without_a_series_the_platform_lanes_say_not_measured() -> None:
+    d = build_replay(_record())
+    assert d["lanes"] == {}
+    assert d["not_measured"] == ["Compute", "Network", "Kubernetes"]
+    assert "Not measured: Compute, Network, Kubernetes" in render_replay(d)
+
+
+def test_a_series_starting_after_the_run_is_shifted_onto_its_clock() -> None:
+    rec = _with_series(_record())
+    rec["platform_metrics"]["series"]["start"] = "2026-01-01T00:00:30+00:00"
+    assert build_replay(rec)["lanes"]["compute"]["shift"] == 30.0

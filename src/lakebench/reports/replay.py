@@ -92,6 +92,48 @@ def _profile_for(record: Mapping[str, Any]) -> dict[str, Any] | None:
     return _PROFILES.get((schema, mode))
 
 
+_LANE_LABELS = (("compute", "Compute"), ("network", "Network"), ("k8s", "Kubernetes"))
+_GIB = 1024**3
+_MB = 1e6
+
+
+def _total(series: Mapping[str, Any], family: str, scale: float) -> list[float]:
+    """The sum over pod groups of *family*, per step, divided by *scale*."""
+    groups = [g for g in (series.get(family) or {}).values() if isinstance(g, list)]
+    if not groups:
+        return []
+    n = max(len(g) for g in groups)
+    return [round(sum(g[k][1] for g in groups if k < len(g)) / scale, 3) for k in range(n)]
+
+
+def _lanes(record: Mapping[str, Any], t0: float) -> dict[str, Any]:
+    """The platform lanes (compute, network, pods) from the record's
+    ``platform_metrics.series``: totals over the pod groups per step. Absent
+    when the run recorded no series (observability off, or an older record)."""
+    series = (record.get("platform_metrics") or {}).get("series")
+    if not isinstance(series, Mapping):
+        return {}
+    start = _epoch(series.get("start"))
+    step = series.get("step_seconds")
+    if start is None or not isinstance(step, (int, float)) or step <= 0:
+        return {}
+    base = {"step": float(step), "shift": round(start - t0, 3)}
+    lanes: dict[str, Any] = {}
+    cpu, mem = _total(series, "cpu_cores", 1.0), _total(series, "memory_bytes", _GIB)
+    if cpu:
+        lanes["compute"] = {**base, "cpu": cpu, "mem": mem}
+    rx, tx = (
+        _total(series, "network_rx_bytes_per_s", _MB),
+        _total(series, "network_tx_bytes_per_s", _MB),
+    )
+    if rx or tx:
+        lanes["network"] = {**base, "rx": rx, "tx": tx}
+    pods = _total(series, "pods", 1.0)
+    if pods:
+        lanes["k8s"] = {**base, "pods": pods}
+    return lanes
+
+
 def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
     """The replay data block for *record*, or None when this record has no
     replay (a mode or workload without a profile, or no recorded timeline)."""
@@ -198,6 +240,8 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
         }
     )
 
+    lanes = _lanes(record, t0)
+
     return {
         "version": REPLAY_VERSION,
         "title": profile["title"],
@@ -213,7 +257,8 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
         "storage_problems": [
             str(x) for x in io.get("problems") or [] if str(x).startswith("spark ")
         ],
-        "not_measured": ["Compute", "Network", "Kubernetes"],
+        "lanes": lanes,
+        "not_measured": [label for key, label in _LANE_LABELS if key not in lanes],
     }
 
 
@@ -305,7 +350,7 @@ _JS = r"""
 (function(){
 var el=document.getElementById('lb-replay-data');if(!el)return;
 var D=JSON.parse(el.textContent),root=document.getElementById('lb-replay');
-var S=D.stages,J=D.jobs,T=D.duration,t=0,playing=false,speed=1,last=0,sel=null,lane='storage';
+var S=D.stages,J=D.jobs,T=D.duration,t=0,playing=false,speed=1,last=0,sel=null,lane=D.storage?'storage':(D.lanes.compute?'compute':(D.lanes.network?'network':(D.lanes.k8s?'k8s':'storage')));
 function $(s){return root.querySelector(s)}
 function svg(s){return '<svg viewBox="0 0 200 95" aria-hidden="true">'+s+'</svg>'}
 var ART=[
@@ -329,8 +374,8 @@ var RMAX=Math.max.apply(null,RATE.concat([1]));
 function plot(id,series,mx){
  var o='<rect width="600" height="80" fill="#f4f8f4"/>';
  S.forEach(function(s){if(s.start!=null&&s.key!=='datagen'){var x=5+590*s.start/T;o+='<line x1="'+x+'" x2="'+x+'" y1="4" y2="77" stroke="#a4b9a9" stroke-dasharray="3 4" opacity=".65"/>'}});
- series.forEach(function(sr){if(!sr.v)return;var n=sr.v.length,d='';
-  for(var i=0;i<n;i++){var x=5+590*i/n,x2=5+590*(i+1)/n,y=73-(sr.v[i]/mx)*61;d+=(i?'L':'M')+x.toFixed(1)+','+y.toFixed(1)+'L'+x2.toFixed(1)+','+y.toFixed(1)}
+ series.forEach(function(sr){if(!sr.v)return;var n=sr.v.length,d='',dt=sr.dt||T/n,sh=sr.shift||0;
+  for(var i=0;i<n;i++){var x=5+590*(sh+i*dt)/T,x2=5+590*(sh+(i+1)*dt)/T,y=73-(sr.v[i]/mx)*61;d+=(i?'L':'M')+x.toFixed(1)+','+y.toFixed(1)+'L'+x2.toFixed(1)+','+y.toFixed(1)}
   o+='<path d="'+d+'" fill="none" stroke="'+sr.c+'" stroke-width="2.5" stroke-linejoin="round"/>'});
  var cx=5+590*t/T;o+='<line x1="'+cx+'" x2="'+cx+'" y1="2" y2="78" stroke="#277353" stroke-width="2" stroke-dasharray="3 3"/>';
  $(id).innerHTML=o}
@@ -357,10 +402,25 @@ function draw(){
   $('[data-h="'+i+'"]').textContent=fb===null?'NR':fb===0?'Waiting':fb===1?'Complete':'Processing';
   $('[data-s="'+i+'"]').textContent=fb===null?'no window recorded':fb===0?'Awaiting upstream':fb===1?'Output available':Math.round(fb*100)+'% of '+b.name}
  var k=st?Math.min(st.read.length-1,Math.floor(t/st.step)):0;
- $('#rp-lname').textContent='Storage / S3';
- var spark=S.some(function(s){return s.key!=='datagen'&&s.key!=='query'&&s.start!=null&&t>=s.start&&t<s.end});
- $('#rp-lval').textContent=!st||spark?'NR':st.read[k].toFixed(1)+' MB/s read · '+st.write[k].toFixed(1)+' MB/s written';
- plot('#rp-lplot',st?[{v:st.read,c:'#37876d'},{v:st.write,c:'#be904a'}]:[],SMAX);
+ if(lane==='storage'){
+  $('#rp-lname').textContent='Storage / S3';
+  var spark=S.some(function(s){return s.key!=='datagen'&&s.key!=='query'&&s.start!=null&&t>=s.start&&t<s.end});
+  $('#rp-lval').textContent=!st||spark?'NR':st.read[k].toFixed(1)+' MB/s read · '+st.write[k].toFixed(1)+' MB/s written';
+  plot('#rp-lplot',st?[{v:st.read,c:'#37876d'},{v:st.write,c:'#be904a'}]:[],SMAX)}
+ else{
+  var L=D.lanes[lane],ix=function(a){return Math.max(0,Math.min(a.length-1,Math.floor((t-L.shift)/L.step)))};
+  if(lane==='compute'){
+   $('#rp-lname').textContent='Compute / CPU';
+   $('#rp-lval').textContent=L.cpu[ix(L.cpu)].toFixed(1)+' cores · '+(L.mem.length?L.mem[ix(L.mem)].toFixed(0):'NR')+' GiB';
+   plot('#rp-lplot',[{v:L.cpu,c:'#538da9',dt:L.step,shift:L.shift}],Math.max(1,Math.max.apply(null,L.cpu)))}
+  else if(lane==='network'){
+   $('#rp-lname').textContent='Pod network (includes shuffle)';
+   $('#rp-lval').textContent=(L.rx.length?L.rx[ix(L.rx)].toFixed(1):'NR')+' MB/s in · '+(L.tx.length?L.tx[ix(L.tx)].toFixed(1):'NR')+' MB/s out';
+   plot('#rp-lplot',[{v:L.rx,c:'#37876d',dt:L.step,shift:L.shift},{v:L.tx,c:'#be904a',dt:L.step,shift:L.shift}],Math.max(1,Math.max.apply(null,L.rx.concat(L.tx))))}
+  else{
+   $('#rp-lname').textContent='Pods running';
+   $('#rp-lval').textContent=L.pods[ix(L.pods)]+' pods';
+   plot('#rp-lplot',[{v:L.pods,c:'#899cad',dt:L.step,shift:L.shift}],Math.max(1,Math.max.apply(null,L.pods)))}}
  var kr=Math.min(N-1,Math.floor(t/T*N));
  $('#rp-evalue').textContent=num(RATE[kr])+' rows/s';
  plot('#rp-eplot',[{v:RATE,c:'#4b9d78'}],RMAX);
@@ -368,6 +428,7 @@ function draw(){
  $('[data-act=seek]').value=t}
 function tick(now){if(playing){t=Math.min(T,t+(now-last)/1000*speed*Math.max(1,T/60));if(t>=T){playing=false;$('[data-act=play]').textContent='▶ Play'}draw()}last=now;requestAnimationFrame(tick)}
 root.querySelectorAll('.step').forEach(function(c){c.onclick=function(){sel=+c.dataset.step;draw()};c.onkeydown=function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();sel=+c.dataset.step;draw()}}});
+root.querySelectorAll('[data-lane]').forEach(function(b){b.onclick=function(){lane=b.dataset.lane;root.querySelectorAll('[data-lane]').forEach(function(x){x.classList.toggle('on',x===b)});draw()}});
 $('[data-act=play]').onclick=function(e){if(t>=T)t=0;playing=!playing;last=performance.now();e.currentTarget.textContent=playing?'Ⅱ Pause':'▶ Play'};
 $('[data-act=speed]').onclick=function(e){speed=speed===1?2:speed===2?4:1;e.currentTarget.textContent=speed+'×'};
 $('[data-act=restart]').onclick=function(){t=0;sel=null;playing=false;$('[data-act=play]').textContent='▶ Play';draw()};
@@ -408,9 +469,20 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
     lanes = list(data["not_measured"])
     if not data["storage"]:
         lanes.insert(0, "Storage")
+    have = data.get("lanes") or {}
+    first = "storage" if data["storage"] else next((k for k, _ in _LANE_LABELS if k in have), "")
+    on = lambda k: ' class="on"' if k == first else ""  # noqa: E731
     nav = (
-        '<button type="button" class="on">Storage</button>' if data["storage"] else ""
-    ) + "".join(
+        f'<button type="button" data-lane="storage"{on("storage")}>Storage</button>'
+        if data["storage"]
+        else ""
+    )
+    nav += "".join(
+        f'<button type="button" data-lane="{k}"{on(k)}>{e(label)}</button>'
+        for k, label in _LANE_LABELS
+        if k in have
+    )
+    nav += "".join(
         f'<button type="button" disabled title="not in the run record">{e(n)}</button>'
         for n in lanes
     )

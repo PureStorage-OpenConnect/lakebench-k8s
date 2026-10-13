@@ -89,6 +89,9 @@ class PlatformMetrics:
     # Spark storage bytes over time (observability/spark_io.py); None when no
     # executor exporter was scraped.
     spark_io: dict[str, Any] | None = None
+    # CPU, memory, network and pod counts over time per pod group
+    # (observability/platform_series.py); None when no pod reported.
+    series: dict[str, Any] | None = None
 
     @property
     def duration_seconds(self) -> float:
@@ -119,6 +122,7 @@ class PlatformMetrics:
             "collection_error": self.collection_error,
             "query_version": self.query_version,
             **({"spark_io": self.spark_io} if self.spark_io is not None else {}),
+            **({"series": self.series} if self.series is not None else {}),
         }
 
 
@@ -226,6 +230,9 @@ class PlatformCollector:
             # Spark storage bytes over time (best-effort)
             self._collect_spark_io(client, metrics, failed, start_time, end_time)
 
+            # CPU, memory, network and pod counts over time (best-effort)
+            self._collect_series(client, metrics, failed, cpu_pods, mem_pods, start_time, end_time)
+
             # A pod with a series in one query but not the other (one that
             # lived under the 1m rate window has memory but no CPU rate) has
             # that value not collected; say how many.
@@ -311,6 +318,47 @@ class PlatformCollector:
         if results and results[0].get("value"):
             return float(results[0]["value"][1])
         return None
+
+    def _collect_series(
+        self,
+        client: Any,
+        metrics: PlatformMetrics,
+        failed: list[str],
+        cpu_pods: list[dict],
+        mem_pods: list[dict],
+        start_time: datetime,
+        end_time: datetime,
+    ) -> None:
+        """Sum the per-pod CPU, memory and network series per pod group."""
+        from lakebench.observability.platform_series import (
+            NETWORK_RX_QUERY,
+            NETWORK_TX_QUERY,
+            STEP_SECONDS,
+            build_series,
+        )
+
+        step = f"{STEP_SECONDS}s"
+        rx = self._query_family(
+            failed,
+            "network receive",
+            client,
+            NETWORK_RX_QUERY.format(ns=self.namespace),
+            start_time,
+            end_time,
+            step,
+        )
+        tx = self._query_family(
+            failed,
+            "network transmit",
+            client,
+            NETWORK_TX_QUERY.format(ns=self.namespace),
+            start_time,
+            end_time,
+            step,
+        )
+        metrics.series = build_series(
+            cpu_pods, mem_pods, rx, tx, start_time, end_time, step=STEP_SECONDS
+        )
 
     def _collect_spark_io(
         self,

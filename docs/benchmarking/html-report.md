@@ -34,7 +34,7 @@ The replay plays the recorded timeline back, with play and pause, 1x/2x/4x speed
 
 - **Workload**: the five stages with their recorded row counts (datagen, bronze, silver, gold) and the number of successful benchmark queries, and the Spark jobs with their recorded durations.
 - **Pipeline**: one bar per handoff, filling over the downstream stage's recorded window.
-- **Platform**: the storage lane from the record's [`io` block](records.md#storage-io), MB/s read and written. Compute, Network and Kubernetes are listed as not measured.
+- **Platform**: Storage, the lane from the record's [`io` block](records.md#storage-io), MB/s read and written; Compute (CPU cores and memory), Network (pod bytes in and out, which include executor shuffle, so they are not storage traffic) and Kubernetes (pods running), from the record's `platform_metrics.series`, summed over the pods in the namespace except the observability tooling every 15 s. A lane with no data is listed as not measured; without observability only Storage has data.
 - **Recorded** is a stage or job window, a row count, a byte count. **Derived** is the running count and the handoff bars, which grow over a recorded window because the record holds the window and the final figure, not the figure in between. Nothing is simulated.
 - The page embeds its data as one JSON block, checked against the stored record by a test. Where the record has no window (datagen) or no figure (Spark stage bytes), the replay says so rather than drawing a curve.
 

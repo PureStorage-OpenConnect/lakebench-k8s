@@ -109,7 +109,7 @@ Every `lakebench run` writes `lakebench-output/runs/run-<id>/metrics.json`. It h
 
 ### Platform metrics
 
-After a run, `PlatformCollector` queries the deployment's Prometheus (`http://lakebench-prometheus.<namespace>.svc:9090`) over the run window for CPU and memory per pod and Trino completed and failed queries. The report's Platform Metrics section shows them, or why they were not collected (observability off, Prometheus unreachable, kubelet role not bound, or no pod series).
+After a run, `PlatformCollector` queries the deployment's Prometheus (`http://lakebench-prometheus.<namespace>.svc:9090`) over the run window for CPU and memory per pod and Trino completed and failed queries. It also stores `platform_metrics.series`: CPU cores, memory bytes, pod network bytes per second (receive and transmit) and the number of pods running, summed per group of pods (each Spark stage, datagen, the query engine, the catalog, other) every 15 s. The deployment's own Prometheus, Grafana and Pushgateway pods are left out. Pod network includes executor-to-executor shuffle, so it is not storage traffic. The report's replay draws the lanes from it. The report's Platform Metrics section shows them, or why they were not collected (observability off, Prometheus unreachable, kubelet role not bound, or no pod series).
 
 ### Storage I/O
 
