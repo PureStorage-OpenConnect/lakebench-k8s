@@ -309,7 +309,11 @@ def _sustained(
         for i, name in enumerate(_HANDOFFS)
         if (balance_h.get(name) or {}).get("keeps_up") is False
     }
-    stage_key_for_stream = {"bronze-ingest": "bronze", "silver-stream": "silver", "gold-refresh": "gold"}
+    stage_key_for_stream = {
+        "bronze-ingest": "bronze",
+        "silver-stream": "silver",
+        "gold-refresh": "gold",
+    }
     bottleneck_keys = {stage_key_for_stream[s] for s in behind}
     stages = []
     for idx, (start, value, path, rows) in enumerate(spec):
@@ -489,9 +493,7 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
         {
             str(n.get("stage"))
             for n in io.get("not_measured") or []
-            if isinstance(n, Mapping)
-            and n.get("direction") == "read"
-            and n.get("stage") != "query"
+            if isinstance(n, Mapping) and n.get("direction") == "read" and n.get("stage") != "query"
         }
     )
 
@@ -514,9 +516,7 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
         "duration": duration,
         "stages": stages,
         "jobs": jobs,
-        "pair": [3, 4]
-        if sustained and profile.get("workload") == "financial"
-        else None,
+        "pair": [3, 4] if sustained and profile.get("workload") == "financial" else None,
         "storage": storage,
         # Only genuine gap: Iceberg table reads have no client byte counter.
         "storage_read_gap": read_gap,
@@ -782,7 +782,7 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
     if data.get("kind") == "sustained":
         execboxes = "".join(
             f'<div class="xbox" data-x="{i}" data-lagh="{i}">'
-            f'<b>{e(h["label"])}</b>'
+            f"<b>{e(h['label'])}</b>"
             f'<div class="track"><div class="fill" data-xf="{i}"></div></div>'
             f'<strong data-xv="{i}">not running</strong><span data-xs="{i}">no lag recorded yet</span></div>'
             for i, h in enumerate(data.get("handoffs") or [])
@@ -790,7 +790,7 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
     else:
         execboxes = "".join(
             f'<div class="xbox" data-x="{i}" data-lagh="-1">'
-            f'<b>{e(stages[i]["phase"])} → {e(stages[i + 1]["phase"])}</b>'
+            f"<b>{e(stages[i]['phase'])} → {e(stages[i + 1]['phase'])}</b>"
             f'<div class="track"><div class="fill" data-xf="{i}"></div></div>'
             f'<strong data-xv="{i}">not running</strong><span data-xs="{i}">no lag recorded yet</span></div>'
             for i in range(len(stages) - 1)
