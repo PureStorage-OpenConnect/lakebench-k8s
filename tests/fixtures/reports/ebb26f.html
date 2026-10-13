@@ -220,6 +220,21 @@
 
         
 
+        <style>
+.lb-tiles{margin-bottom:1.5rem}
+.lb-tiles .lb-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem}
+.lb-tiles .lb-tile{background:var(--card-bg);border-radius:.5rem;padding:1rem;box-shadow:0 1px 3px rgba(0,0,0,.1);border-top:3px solid var(--border)}
+.lb-tiles .lb-tile.recorded{border-top-color:var(--primary)}
+.lb-tiles .lb-tile.derived{border-top-color:var(--warning)}
+.lb-tiles .lb-tile.nr{border-top-color:var(--border);color:var(--text-muted)}
+.lb-tiles .lb-tile b{display:block;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted)}
+.lb-tiles .lb-tile strong{display:block;font-size:1.6rem;margin:.25rem 0;font-variant-numeric:tabular-nums}
+.lb-tiles .lb-tile small{display:block;font-size:.72rem;color:var(--text-muted)}
+.lb-tiles .lb-legend{font-size:.75rem;color:var(--text-muted);margin-top:.6rem}
+.lb-tiles .lb-legend i{display:inline-block;width:.7rem;height:.7rem;border-radius:2px;margin:0 .25rem 0 .75rem;vertical-align:-1px}
+@media(max-width:900px){.lb-tiles .lb-grid{grid-template-columns:repeat(2,1fr)}}
+</style><div class="lb-tiles"><div class="lb-grid"><div class="lb-tile recorded" title="pipeline_benchmark.scores.sustained_throughput_rps"><b>Throughput</b><strong><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.sustained_throughput_rps" data-lb-fmt=",.0f" data-lb-suffix=" rows/s">6,481 rows/s</span></strong><small>sustained offered load</small></div><div class="lb-tile recorded" title="pipeline_benchmark.scores.data_freshness_seconds"><b>Freshness</b><strong><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.data_freshness_seconds" data-lb-fmt=",.0f" data-lb-suffix=" s">202 s</span></strong><small>gold behind input</small></div><div class="lb-tile recorded" title="pipeline_benchmark.scores.in_stream_composite_qph"><b>Query rate</b><strong><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.in_stream_composite_qph" data-lb-fmt=",.1f">409.3</span></strong><small>QpH</small></div><div class="lb-tile recorded" title="pipeline_benchmark.scores.total_core_hours"><b>Compute</b><strong><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.total_core_hours" data-lb-fmt=".2f">54.00</span></strong><small>core-hours requested</small></div><div class="lb-tile recorded" title="pipeline_benchmark.scores.compute_efficiency_gb_per_core_hour"><b>Efficiency</b><strong><span data-lb-derived="total" data-lb-inputs="pipeline_benchmark.scores.compute_efficiency_gb_per_core_hour" data-lb-fmt=".2f">0.46</span></strong><small>stage-input GiB per core-hour</small></div><div class="lb-tile nr" title="io.totals"><b>Storage</b><strong>NR</strong><small>not measured: no Trino storage I/O in the run record</small></div><div class="lb-tile derived" title="verdict.gates"><b>Gates</b><strong>5 / 5</strong><small>all passed</small></div><div class="lb-tile recorded" title="experiment.support.state"><b>Support</b><strong>Unverified</strong><small>passed does not establish support</small></div></div><div class="lb-legend"><b>Evidence:</b><i style="background:var(--primary)"></i>Recorded: a stored value, shown as is.<i style="background:var(--warning)"></i>Derived: computed on this page from recorded fields.<i style="background:var(--border)"></i>NR: not measured. Hover a tile for its record field.</div></div>
+
         
         <section class="read-first front-matter" style="padding: 1rem 1.25rem; margin-bottom: 1rem; border-left: 3px solid var(--warning);">
             <div style="font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); margin-bottom: 0.5rem;">

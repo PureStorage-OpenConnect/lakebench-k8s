@@ -1849,6 +1849,7 @@ class ReportGenerator:
 
         _read_first_html = self._generate_read_first_panel(metrics, fm=fm)
         _tabs_html, _replay_html, _score_open, _score_close = self._generate_view_shell(metrics)
+        _tiles_html = self._generate_tiles(metrics)
 
         html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -2072,6 +2073,8 @@ class ReportGenerator:
 
         {_score_open}
 
+        {_tiles_html}
+
         {_read_first_html}
 
         {run_context_html}
@@ -2115,6 +2118,25 @@ class ReportGenerator:
 </html>"""
 
         return html
+
+    def _generate_tiles(self, metrics: PipelineMetrics) -> str:
+        """The scorecard's eight-tile grid (reports/tiles.py)."""
+        from lakebench.metrics.verdict import compute_verdict
+        from lakebench.reports.tiles import build_tiles, render_tiles
+
+        to_dict = getattr(metrics, "to_dict", None)
+        try:
+            record = to_dict() if callable(to_dict) else None
+            if not isinstance(record, dict):
+                return ""
+            try:
+                gates = dict(compute_verdict(metrics).gates)
+            except Exception:  # noqa: BLE001 - the gates tile then says NR
+                gates = None
+            mode = "continuous" if self._is_sustained(metrics) else "batch"
+            return render_tiles(build_tiles(record, mode=mode, gates=gates, metrics=metrics))
+        except Exception:  # noqa: BLE001 - a tile grid must never break the page
+            return ""
 
     def _generate_view_shell(self, metrics: PipelineMetrics) -> tuple[str, str, str, str]:
         """The Replay / Scorecard tab bar, the replay panel, and the opening

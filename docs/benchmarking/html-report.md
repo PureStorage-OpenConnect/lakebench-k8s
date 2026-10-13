@@ -38,6 +38,23 @@ The replay plays the recorded timeline back, with play and pause, 1x/2x/4x speed
 - **Recorded** is a stage or job window, a row count, a byte count. **Derived** is the running count and the handoff bars, which grow over a recorded window because the record holds the window and the final figure, not the figure in between. Nothing is simulated.
 - The page embeds its data as one JSON block, and a test compares it with the stored record. Where the record has no window (datagen) or no figure (Spark stage bytes), the replay says so rather than drawing a curve.
 
+## Scorecard tiles
+
+The Scorecard tab opens on eight tiles, then the front matter and the sections below. Each tile cites the record field it reads (hover it) and is coloured by evidence class: blue **recorded** (a stored value, shown as is), amber **derived** (computed on the page from recorded fields), grey **NR** (not measured, with the reason). A field the record does not hold is NR, never zero.
+
+| Tile | Batch | Continuous |
+|---|---|---|
+| 1 | Time to value (`scores.time_to_value_seconds`) | Throughput, rows/s (`scores.sustained_throughput_rps`) |
+| 2 | Throughput, GiB/s (`scores.pipeline_throughput_gb_per_second`) | Freshness (`scores.data_freshness_seconds`) |
+| 3 | Query rate (`scores.composite_qph`) | Query rate (`scores.in_stream_composite_qph`) |
+| 4 | Compute, core-hours (`scores.total_core_hours`) | same |
+| 5 | Efficiency (`scores.compute_efficiency_gb_per_core_hour`) | same |
+| 6 | Storage: Trino bytes read, from the queries' `io` fields; Spark stages are not measured | same |
+| 7 | Gates: passed over total (`verdict.gates`, recomputed as the page's verdict is) | same |
+| 8 | Support (`experiment.support.state`) | same |
+
+`scores` is `pipeline_benchmark.scores`, read as the run stored it, not recomputed. The Summary cards below remain for now.
+
 ## Summary cards
 
 | Mode | Cards |

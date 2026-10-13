@@ -567,6 +567,11 @@ class PipelineMetrics:
     # that show the strictest of stored and recomputed (reports/front_matter.py).
     # Never written: to_dict computes the verdict it saves. None on a fresh run.
     stored_verdict: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+    # The pipeline_benchmark.scores block as the loaded metrics.json stored it.
+    # to_dict recomputes scores from the run's measurements and can differ in
+    # the last digit, so a tile that cites a record field reads this instead
+    # (reports/tiles.py). Never written. None on a fresh run.
+    stored_scores: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
     # Physical over logical bytes per table, layer and in total, measured at
     # run end (metrics/storage_multiple.py). None when not measured.
