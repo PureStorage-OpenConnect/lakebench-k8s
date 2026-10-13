@@ -308,7 +308,16 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
         if name not in stage_names:
             continue
         measured = spark_stages.get(name)
-        reads = bool(measured) and not (iceberg and _reads_a_table(name, mode))
+        # A stage that reads an Iceberg table (silver/gold continuous, gold
+        # batch) only has read bytes when the s3 FileSystem counter was
+        # populated -- Iceberg exposes none before 1.12.0 (PR #17236), so the
+        # series is all zero there. Trust the data: reads are measured when the
+        # read series carries bytes, not from a version string.
+        iceberg_read = iceberg and _reads_a_table(name, mode)
+        has_read_bytes = bool(measured) and any(
+            v > 0 for _, v in (measured or {}).get("read") or []
+        )
+        reads = bool(measured) and (not iceberg_read or has_read_bytes)
         row = stage_rows.get(name) or {}
         total = driver.get(name)
         counted: list[dict[str, Any]] = []

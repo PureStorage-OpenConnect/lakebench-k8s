@@ -2,11 +2,15 @@
 
 The executors export two cumulative counters per pod (see
 ``modules/pipeline_engines/spark/jmx_exporter.py``): the bytes their tasks
-wrote (``executor.bytesWritten``) and the bytes the S3A client read
-(``executor.filesystem.s3a.read_bytes``). A pod's counter starts at zero with
-the pod, so the run's total is the sum over pods of each pod's last value, and
-the series is the same sum at each step with a finished pod keeping its last
-value.
+wrote (``executor.bytesWritten``) and the bytes the client read. Reads come
+under two Hadoop filesystem schemes: ``s3a`` for the stages that read raw
+files (bronze) and ``s3`` for the stages that read Iceberg tables through
+S3FileIO (silver, gold) -- S3FileIO counts under scheme ``s3``, not ``s3a``,
+and its counter is only correct from Iceberg 1.12.0 (PR #17236). A pod reads
+through one scheme, so summing both per pod does not double count. A pod's
+counter starts at zero with the pod, so the run's total is the sum over pods
+of each pod's last value, and the series is the same sum at each step with a
+finished pod keeping its last value.
 
 ``build_spark_io`` turns the per-pod Prometheus results into the record's
 ``platform_metrics.spark_io`` block. It is a pure function of those results.
@@ -26,7 +30,9 @@ WRITE_QUERY = (
     'namespace="{ns}"}})'
 )
 READ_QUERY = (
-    'sum by (pod) ({{__name__=~"metrics_lakebench_.+_executor_filesystem_s3a_read_bytes_value",'
+    # s3a (raw files, bronze) and s3 (Iceberg tables via S3FileIO, silver/gold).
+    # A pod reads through one scheme, so the per-pod sum does not double count.
+    'sum by (pod) ({{__name__=~"metrics_lakebench_.+_executor_filesystem_s3a?_read_bytes_value",'
     'namespace="{ns}"}})'
 )
 

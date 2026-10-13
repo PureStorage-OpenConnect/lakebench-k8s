@@ -126,7 +126,7 @@ data:
         metric_relabel_configs:
           - source_labels: [__name__]
             action: keep
-            regex: 'metrics_lakebench_.+_executor_(byteswritten_count|recordswritten_count|filesystem_s3a_(read|write)_bytes_value)'
+            regex: 'metrics_lakebench_.+_executor_(byteswritten_count|recordswritten_count|filesystem_s3a?_(read|write)_bytes_value)'
 
       # Kubelet cAdvisor: per-pod CPU and memory. Only reachable with the
       # ClusterRole below bound; without it this target reads up=0 and

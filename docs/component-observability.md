@@ -57,7 +57,7 @@ Prometheus runs with a scrape config that targets this deployment only:
 - Trino coordinator and workers in this namespace (JMX exporter on port 9090).
 - The kubelet cAdvisor endpoint on every node, filtered at relabel time to this namespace. The per-pod CPU, memory, network and filesystem families are kept; the rest is dropped.
 
-Spark jobs run with the Spark UI off, which also turns off Spark's Prometheus endpoint, so no Spark engine metrics (GC, shuffle, spill) are collected; executor and driver series come from cAdvisor. Each executor also runs the JMX exporter agent (`images.jmx_exporter`); the stack scrapes its task output bytes and S3A read bytes every 5 s (job `spark-executors`), and the run's end stores them in the record's `platform_metrics.spark_io`. Spark stages report rows, bytes and elapsed time through the Pushgateway and `metrics.json`.
+Spark jobs run with the Spark UI off, which also turns off Spark's Prometheus endpoint, so no Spark engine metrics (GC, shuffle, spill) are collected; executor and driver series come from cAdvisor. Each executor also runs the JMX exporter agent (`images.jmx_exporter`); the stack scrapes its task output bytes and filesystem read bytes (schemes `s3a` for raw files and Delta, `s3` for Iceberg tables via S3FileIO) every 5 s (job `spark-executors`), and the run's end stores them in the record's `platform_metrics.spark_io`. Iceberg read bytes are correct only from Iceberg 1.12.0 (the S3FileIO read counter was fixed in [PR #17236](https://github.com/apache/iceberg/pull/17236)). Spark stages report rows, bytes and elapsed time through the Pushgateway and `metrics.json`.
 
 ### Pushgateway
 

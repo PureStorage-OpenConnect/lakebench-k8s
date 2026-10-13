@@ -39,7 +39,9 @@ _SCRIPTS = {
 
 # Iceberg runtime per Spark major.minor. Mirrors _ICEBERG_RUNTIME_SUFFIX on the
 # Kubernetes path; kept separate so the local default can move independently.
-_ICEBERG_RUNTIME = "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.1"
+# 1.12.0 is the default: it is the first release whose S3FileIO read counter
+# is correct (PR #17236), so silver/gold Iceberg read bytes are measured.
+_ICEBERG_RUNTIME = "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.12.0"
 _HADOOP_AWS = "org.apache.hadoop:hadoop-aws:3.4.1"
 
 # Which bucket holds the Iceberg warehouse locally. A hadoop catalog has one
