@@ -590,9 +590,10 @@ var RMAX=Math.max.apply(null,RATE.concat([1]));
 function shade(){if(!D.window)return '';var a=5+590*D.window.start/T,b=5+590*D.window.end/T;return '<rect x="'+a.toFixed(1)+'" y="0" width="'+(b-a).toFixed(1)+'" height="80" fill="#e4f1e8"/>'}
 function plot(id,series,mx){
  var o='<rect width="600" height="80" fill="#f4f8f4"/>'+shade();
- S.forEach(function(s){if(s.start!=null&&s.key!=='datagen'){var x=5+590*s.start/T;o+='<line x1="'+x+'" x2="'+x+'" y1="4" y2="77" stroke="#a4b9a9" stroke-dasharray="3 4" opacity=".65"/>'}});
+ S.forEach(function(s){if(s.start!=null&&s.key!=='datagen'&&s.start<=t){var x=5+590*s.start/T;o+='<line x1="'+x+'" x2="'+x+'" y1="4" y2="77" stroke="#a4b9a9" stroke-dasharray="3 4" opacity=".65"/>'}});
  series.forEach(function(sr){if(!sr.v)return;var n=sr.v.length,d='',dt=sr.dt||T/n,sh=sr.shift||0;
-  for(var i=0;i<n;i++){var x=5+590*(sh+i*dt)/T,x2=5+590*(sh+(i+1)*dt)/T,y=73-(sr.v[i]/mx)*61;d+=(i?'L':'M')+x.toFixed(1)+','+y.toFixed(1)+'L'+x2.toFixed(1)+','+y.toFixed(1)}
+  for(var i=0;i<n&&sh+i*dt<=t;i++){var x=5+590*(sh+i*dt)/T,x2=5+590*Math.min(sh+(i+1)*dt,t)/T,y=73-(sr.v[i]/mx)*61;d+=(d?'L':'M')+x.toFixed(1)+','+y.toFixed(1)+'L'+x2.toFixed(1)+','+y.toFixed(1)}
+  if(!d)return;
   o+='<path d="'+d+'" fill="none" stroke="'+sr.c+'" stroke-width="2.5" stroke-linejoin="round"/>'});
  var cx=5+590*t/T;o+='<line x1="'+cx+'" x2="'+cx+'" y1="2" y2="78" stroke="#277353" stroke-width="2" stroke-dasharray="3 3"/>';
  $(id).innerHTML=o}
@@ -605,7 +606,7 @@ function lagBars(){D.handoffs.forEach(function(h,i){var v=lagAt(h);
  $('[data-s="'+i+'"]').textContent=h.keeps_up===false?'falls behind the arrival rate':h.keeps_up?'keeps up':''})}
 var LCOL=['#4b9d78','#be904a','#538da9'];
 function plotLag(){var o='<rect width="600" height="80" fill="#f4f8f4"/>'+shade(),cols=LCOL;
- D.lag.series.forEach(function(sr,k){var d='';sr.samples.forEach(function(p,i){var x=5+590*(D.lag.shift+p[0])/T,y=73-p[1]/LMAX*61;d+=(i?'L':'M')+x.toFixed(1)+','+y.toFixed(1)});
+ D.lag.series.forEach(function(sr,k){var d='';sr.samples.forEach(function(p){if(D.lag.shift+p[0]>t)return;var x=5+590*(D.lag.shift+p[0])/T,y=73-p[1]/LMAX*61;d+=(d?'L':'M')+x.toFixed(1)+','+y.toFixed(1)});if(!d)return;
   o+='<path d="'+d+'" fill="none" stroke="'+cols[k%3]+'" stroke-width="2.5" stroke-linejoin="round"/>'});
  var cx=5+590*t/T;o+='<line x1="'+cx+'" x2="'+cx+'" y1="2" y2="78" stroke="#277353" stroke-width="2" stroke-dasharray="3 3"/>';$('#rp-lplot').innerHTML=o}
 var st=D.storage,SMAX=st?Math.max(1,Math.max.apply(null,st.read.concat(st.write))):1;
