@@ -40,7 +40,7 @@ The replay plays the recorded timeline back, with play and pause, 1x/2x/4x speed
 
 ## Scorecard tiles
 
-The Scorecard tab opens on eight tiles, then the front matter and the sections below. Each tile cites the record field it reads (hover it) and is coloured by evidence class: blue **recorded** (a stored value, shown as is), amber **derived** (computed on the page from recorded fields), grey **NR** (not measured, with the reason). A field the record does not hold is NR, never zero.
+The Scorecard tab opens on eight tiles, then the front matter and the sections below. Each tile cites the record field it reads (hover it). A field the record does not hold shows NR with the reason, never zero.
 
 | Tile | Batch | Continuous |
 |---|---|---|
