@@ -216,7 +216,7 @@
       "from": "datagen_fleet.total_bytes_written 10648731085 / 2^30"
     },
     {
-      "text": "Not measured, Spark Thrift queries (before maintenance, benchmark): this query engine does not report storage I/O.",
+      "text": "Not measured, Spark Thrift queries (before maintenance, benchmark): this record predates the storage I/O report.",
       "from": "benchmark.engine spark-thrift; pre_compaction_benchmark present"
     }
   ]

@@ -93,9 +93,10 @@ def test_intervals_carry_each_steps_gain_and_sum_to_the_counters() -> None:
     assert gaps == {("gold", "read"): REASON_EXECUTOR_IO, ("gold", "write"): REASON_EXECUTOR_IO}
 
 
-def test_iceberg_table_reads_are_not_measured_never_zero() -> None:
-    """Silver reads raw Parquet in a batch run, so its S3A read counter counts;
-    a continuous silver reads the bronze table, which Iceberg reads bypass."""
+def test_iceberg_table_reads_are_measured_when_the_series_has_bytes() -> None:
+    """Silver reads raw Parquet in a batch run, and a sustained silver reads the
+    bronze Iceberg table: on Iceberg 1.12.0 the s3 read counter carries bytes,
+    so the read is measured. (The series not being empty is the signal.)"""
     batch = build_io(_record("iceberg", _block()))
     silver = [i for i in batch["intervals"] if i["source"] == "spark" and i["stage"] == "silver"]
     assert sum(i["read_bytes"] for i in silver) == 1000
@@ -103,6 +104,27 @@ def test_iceberg_table_reads_are_not_measured_never_zero() -> None:
     assert ("silver", "read") not in gaps
 
     rec = _record("iceberg", _block())
+    rec["pipeline_benchmark"]["pipeline_mode"] = "sustained"
+    cont = build_io(rec)
+    silver = [i for i in cont["intervals"] if i["source"] == "spark" and i["stage"] == "silver"]
+    assert sum(i["read_bytes"] for i in silver) == 1000  # the s3 read series carries bytes
+    gaps = {(n["stage"], n["direction"]): n["reason"] for n in cont["not_measured"]}
+    assert ("silver", "read") not in gaps
+
+
+def test_iceberg_table_reads_with_an_empty_series_stay_not_measured() -> None:
+    """Before Iceberg 1.12.0 the s3 read counter is all zero, so a sustained
+    Iceberg table read has no bytes and is marked not measured, never zero."""
+    write = [
+        _res("lb-bronze-v-exec-1", [(0, 0), (15, 1000), (30, 3000)]),
+        _res("lb-silver-b-exec-1", [(0, 0), (45, 500), (60, 800)]),
+    ]
+    read = [
+        _res("lb-bronze-v-exec-1", [(0, 0), (15, 4000), (30, 9000)]),
+        _res("lb-silver-b-exec-1", [(0, 0), (45, 0), (60, 0)]),  # Iceberg read: no counter
+    ]
+    block = build_spark_io(write, read, T0, T1)
+    rec = _record("iceberg", block)
     rec["pipeline_benchmark"]["pipeline_mode"] = "sustained"
     cont = build_io(rec)
     silver = [i for i in cont["intervals"] if i["source"] == "spark" and i["stage"] == "silver"]
