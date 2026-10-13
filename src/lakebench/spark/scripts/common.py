@@ -2513,6 +2513,27 @@ def ensure_namespaces(spark, catalog, tables):
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.{ns}")
 
 
+def create_namespace(spark, catalog, namespace, location):
+    """CREATE NAMESPACE IF NOT EXISTS with ``location``, or without one when
+    the catalog refuses it.
+
+    A Hive catalog takes the location and puts the layer's tables in its own
+    bucket. Polaris does not allow a namespace location by default ("Namespace
+    silver has a custom location, which is not enabled") and derives one from
+    the catalog's base location. The streaming scripts used to log that refusal
+    and go on, so the first table create then failed with NoSuchNamespace and
+    stopped the stream. Returns the location in effect, None when the namespace
+    was created without one. Raises when the namespace cannot be created at all.
+    """
+    try:
+        spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.{namespace} LOCATION '{location}'")
+        return location
+    except Exception as e:  # noqa: BLE001
+        log(f"[startup] {catalog}.{namespace} with location {location} refused: {one_line(e)}")
+    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.{namespace}")
+    return None
+
+
 _DDL_TABLE = re.compile(r"CREATE TABLE IF NOT EXISTS\s+[\w`]+\.([\w`]+)\.([\w`]+)", re.IGNORECASE)
 
 

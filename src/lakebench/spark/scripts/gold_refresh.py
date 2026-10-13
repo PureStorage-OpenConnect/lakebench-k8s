@@ -21,6 +21,7 @@ Environment variables (set by job.py):
 from common import (
     METADATA_DELETE_AFTER_COMMIT,
     METADATA_PREVIOUS_VERSIONS_MAX,
+    create_namespace,
     env,
     log,
     run_c360_gold_stream,
@@ -60,7 +61,7 @@ log(f"Trigger:      {trigger_interval}")
 log("Creating Iceberg namespace...")
 try:
     gold_warehouse = gold_uri + "warehouse/gold.db/"
-    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.gold LOCATION '{gold_warehouse}'")
+    create_namespace(spark, catalog, "gold", gold_warehouse)
     log(f"Created namespace {catalog}.gold")
 except Exception as e:
     log(f"Namespace creation note: {str(e)}")

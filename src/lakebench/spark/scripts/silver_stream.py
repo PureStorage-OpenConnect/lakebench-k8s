@@ -57,6 +57,7 @@ from common import (
     assert_progress,
     await_stream,
     check_bronze_fingerprint,
+    create_namespace,
     data_clock_date,
     emit_stream_scale_admission,
     ensure_column,
@@ -191,7 +192,7 @@ def main() -> None:
     log("Creating Iceberg namespace...")
     try:
         silver_warehouse = silver_uri + "warehouse/silver.db/"
-        spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.silver LOCATION '{silver_warehouse}'")
+        create_namespace(spark, catalog, "silver", silver_warehouse)
         log(f"Created namespace {catalog}.silver")
     except Exception as e:
         log(f"Namespace creation note: {str(e)}")
