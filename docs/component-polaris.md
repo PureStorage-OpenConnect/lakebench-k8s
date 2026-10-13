@@ -81,7 +81,7 @@ The defaults (1 CPU, 2Gi) handle pipelines up to ~1 TB. Load follows concurrent 
 - **Service** `lakebench-polaris` (ClusterIP): `lakebench-polaris.<namespace>.svc.cluster.local:8181`.
 - **Bootstrap Job** `lakebench-polaris-bootstrap`: runs once after the server is healthy and the REST API answers on 8181.
   1. Init container: `polaris-admin-tool bootstrap` creates the realm and root principal.
-  2. Main container: gets an OAuth2 token. It creates the principal roles, the catalog, and namespaces `default`, `bronze`, `silver`, `gold` via the REST API.
+  2. Main container: gets an OAuth2 token. It creates the catalog and namespaces `default`, `bronze`, `silver`, `gold` via the REST API, then grants `TABLE_READ_DATA` and `TABLE_WRITE_DATA` to the catalog's `catalog_admin` role. Polaris authorizes the Iceberg client's scan-metrics report with `TABLE_READ_DATA`; without the grant every Spark and Trino scan logs a 403 for it. The grant is idempotent, so a redeploy applies it to an existing catalog.
 - Metadata goes into a `polaris` database the deployer creates on the deployment's PostgreSQL.
 
 The engines are set up to match:

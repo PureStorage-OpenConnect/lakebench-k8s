@@ -2,6 +2,7 @@
 # Polaris Bootstrap Job
 # 1. Bootstraps realm + root principal (admin-tool, direct DB access)
 # 2. Creates catalog with FlashBlade S3 storage (curl, REST API)
+# 3. Grants the data privileges the Iceberg metrics reports need (curl, REST API)
 #
 # This Job is idempotent -- running it again is safe.
 # FlashBlade config: stsUnavailable=true, pathStyleAccess=true
@@ -178,5 +179,29 @@ spec:
               create_ns "bronze"  "s3://$BUCKET_BRONZE/bronze"
               create_ns "silver"  "s3://$BUCKET_SILVER/silver"
               create_ns "gold"    "s3://$BUCKET_GOLD/gold"
+
+              # Polaris authorizes the Iceberg client's scan-metrics report
+              # (REPORT_READ_METRICS) with TABLE_READ_DATA, and write reports
+              # with TABLE_WRITE_DATA. The catalog_admin role Polaris creates
+              # with a catalog holds neither, so every report was refused with
+              # a 403 that the Spark and Trino clients log as a warning.
+              # Granting them to catalog_admin (which service_admin, the role
+              # root acts as, already holds) is idempotent.
+              grant_data_privilege() {
+                local PRIV="$1"
+                GRANT_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT \
+                  "$POLARIS_URI/api/management/v1/catalogs/$CATALOG_NAME/catalog-roles/catalog_admin/grants" \
+                  -H "Authorization: Bearer $TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -d '{"grant": {"type": "catalog", "privilege": "'"$PRIV"'"}}' 2>/dev/null || echo "000")
+                if [ "$GRANT_CODE" = "200" ] || [ "$GRANT_CODE" = "201" ] || [ "$GRANT_CODE" = "204" ]; then
+                  echo "Granted $PRIV to catalog_admin"
+                else
+                  echo "WARNING: Granting $PRIV returned HTTP $GRANT_CODE"
+                fi
+              }
+
+              grant_data_privilege "TABLE_READ_DATA"
+              grant_data_privilege "TABLE_WRITE_DATA"
 
               echo "Polaris bootstrap complete"
