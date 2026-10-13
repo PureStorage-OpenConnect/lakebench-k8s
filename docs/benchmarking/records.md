@@ -11,7 +11,7 @@ Each run saves `lakebench-output/runs/run-<id>/metrics.json`:
   "run_id": "20260201-143052-a1b2c3",
   "maintenance_policy_id": "m2-2026-09-26",
   "provenance": {
-    "lakebench_version": "1.7.1",
+    "lakebench_version": "1.7.2",
     "git_sha": "<40-char commit, or null when unknown>",
     "git_dirty": false,
     "install": "checkout",
@@ -50,7 +50,7 @@ Each run saves `lakebench-output/runs/run-<id>/metrics.json`:
 
 ## Storage I/O
 
-The `io` block holds the storage traffic the engines reported for the run. It is derived from the rest of the record when the record is written, and a record from before the block has less in it. Storage is what the storage clients count; pod network bytes are a separate measurement and are not added to it.
+The `io` block holds the storage traffic the engines reported for the run, derived from the rest of the record when it is written; records from before 1.7.2 lack it. Bytes are what the storage clients count; pod network bytes are not added.
 
 - `intervals`: one per Trino benchmark query and one for datagen. Each has `source`, `stage`, `label` (`benchmark`, `pre_compaction` or `round_<n>`), the `query`, `start` and `end` (UTC, from the engine's clock; null when not recorded), `read_bytes` and `write_bytes`, the basis of each, and `complete`.
 - `null` bytes mean not measured; `0` means measured and zero.
@@ -60,19 +60,18 @@ The `io` block holds the storage traffic the engines reported for the run. It is
 
 Where the figures come from:
 
-- **Trino:** `physical_input_bytes` and `physical_written_bytes` from `system.runtime.tasks`, read once per query stream after its last query ends, so no timed query is affected. Summed over a query's tasks they equal its `physicalInputDataSize` and `physicalWrittenDataSize`. The decoded size, the output size and the exchange between Trino nodes are not storage and are not read.
+- **Trino:** `physical_input_bytes` and `physical_written_bytes` from `system.runtime.tasks`, read once per query stream after its last query ends, so no timed query is affected. Summed over a query's tasks they equal its `physicalInputDataSize` and `physicalWrittenDataSize`. Decoded size, output size and inter-node exchange are not storage and are not read.
 - **Datagen:** `datagen_fleet.total_bytes_written`. Single-run datagen records no start or end time, so its interval has no window and counts as unplaced in a time series.
 - **Not measured:** Spark reads and writes, and storage-side telemetry.
 
-`lakebench.metrics.io.bucket_series` spreads the intervals over fixed time buckets. Each interval's bytes are spread evenly over its own window, so a bucket is no finer than the queries that feed it. Bytes with no window, or outside the requested range, are reported as `unplaced`.
+`lakebench.metrics.io.bucket_series` spreads the intervals over fixed time buckets. Each interval's bytes are spread evenly over its window, so a bucket is no finer than the queries feeding it. Bytes with no window, or outside the requested range, are `unplaced`.
 
 ## Benchmark records
 
 `lakebench benchmark` saves its result under a new run id with `record_kind: "benchmark"` and `parent_run_id` (the run it measured).
 
-- A copy of that run's record: QpH, scores and query stage are new; pipeline stages, sizes and timings are the run's.
+- It copies the measured run's record: QpH, scores and query stage are new; pipeline stages, sizes and timings are the run's. In-stream rounds and the maintenance QpH pair are not copied.
 - `provenance.benchmark` names the code that ran it, and when.
-- In-stream rounds and the maintenance QpH pair are not copied.
 - The run's own record is never rewritten.
 - A benchmark record is never a deployment's "latest run" for `report`; read it by run id. When nothing is recorded: [cli-reference.md](../cli-reference.md#benchmark).
 
@@ -80,7 +79,7 @@ Where the figures come from:
 
 ## Report commands
 
-- Every `lakebench run` writes `lakebench-output/runs/run-<id>/report.html` once, at the end. That file is the shareable artifact. Layout: [HTML report layout](html-report.md).
+- Every `lakebench run` writes `lakebench-output/runs/run-<id>/report.html` once, at the end; that file is the shareable artifact. Layout: [HTML report layout](html-report.md).
 - `lakebench report` prints, without changing it, a per-stage table (elapsed, volume, throughput, executors) and the mode's scores (time to value and throughput for batch, data freshness and sustained throughput for continuous).
 - `lakebench report --render` writes a fresh copy, for example `lakebench-output/reports/report-20260201-143052-a1b2c3-<UTC>.html`, never overwriting the delivered file.
 - `lakebench report --format table|json|csv` prints the stage matrix.

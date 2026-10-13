@@ -37,10 +37,9 @@ Each round starts with one unmeasured warm-up pass (first touch of a snapshot). 
 
 ### Storage settle wait
 
-The object store keeps working off deletes and rewrites after maintenance SQL returns. Measured on an enterprise object store, Customer 360 scale 10: queries read 27-34% slow straight after compaction and recovered over about 35 minutes.
+The object store keeps working off deletes and rewrites after maintenance SQL returns. Measured on an enterprise object store at Customer 360 scale 10, queries read 27-34% slow straight after compaction and recovered over about 35 minutes.
 
-- Lakebench probes with a scan-class query every `interval_seconds` until consecutive probes agree within `tolerance_pct`, or `max_seconds` is reached.
-- `maintenance_settle` controls the wait. It adds to wall clock only.
+`maintenance_settle` controls the wait, which adds to wall clock only. Lakebench probes with a scan-class query every `interval_seconds` until consecutive probes agree within `tolerance_pct`, or `max_seconds` is reached.
 
 ```yaml
 architecture:
@@ -59,7 +58,7 @@ Ranges: [configuration.md](../configuration.md).
 **Continuous mode does not wait.** Maintenance and compaction run on timers during the stream (`architecture.pipeline.continuous.retention_interval`, `compaction_interval`).
 
 - AML in-window compaction skips tables a stream rewrites every batch or [tick](../glossary.md#tick) (gold, and silver's entities, accounts, entity_profiles and silver_batch_versions): a rewrite committed under their MERGE fails it.
-- Rounds just after maintenance can read slow; `in_stream_composite_qph` (a median) and `qph_degradation_pct` include them. The median limits the effect when only a few rounds land in a settling window.
+- Rounds just after maintenance can read slow and are included in `in_stream_composite_qph` (a median, which limits the effect) and `qph_degradation_pct`.
 
 ## Effective maintenance
 
@@ -84,7 +83,7 @@ Ranges: [configuration.md](../configuration.md).
 - `effective_maintenance.detail.operations.compaction`: `{"operation": "trino_optimize", "params": {"file_size_threshold": "128MB"}}`, or `iceberg_rewrite_data_files`, or `mixed` (list in `operations`) when calls fell back to the other engine.
 - In the exp2 id: `compaction=ran(trino_optimize:128MB)` or `compaction=ran(mixed(iceberg_rewrite_data_files+trino_optimize:128MB))`. Older records derive it from query engine and table format.
 
-**Compaction is per table.** Compaction runs per table; large partitioned tables are chunked. A table is compacted only when every statement for it succeeded. Partly compacted: `compaction=ran` in the id (`failed` only when nothing succeeded), `compaction=partial` in `detail_id`.
+**Compaction is per table.** Large partitioned tables are chunked, and a table counts as compacted only when every statement for it succeeded. Partly compacted: `compaction=ran` in the id (`failed` only when nothing succeeded), `compaction=partial` in `detail_id`.
 
 ## Lakebench caps
 
@@ -96,4 +95,4 @@ Ranges: [configuration.md](../configuration.md).
   - the trickle line when the trickle held intake ([continuous.md](continuous.md#trickle-bound-throughput))
 - `limits.bound_kinds`: the same without counts, trickle excepted.
 - A number measured under a binding cap is a property of the cap, not the infrastructure.
-- `limits.headroom_pct` (batch, diagnostic): each stage's headroom against the per-job timeout, and the benchmark's against its per-query timeout. See [aml-scoring.md](../aml-scoring.md#where-gold-finalize-spends-its-time).
+- `limits.headroom_pct` (batch, diagnostic): each stage's headroom against the per-job timeout, and the benchmark's against its per-query timeout. See [AML spec 8.6](../benchmarks/aml/gold-timing.md#86-gold-finalize-timing).

@@ -18,7 +18,7 @@ The 8 Customer 360 queries. The AML set is in [Query Reference](../benchmarks/am
 
 ## Modes
 
-The three modes follow TPC methodology.
+The modes follow TPC methodology.
 
 | Mode | What runs | Formula |
 |---|---|---|
@@ -39,7 +39,7 @@ Example: 8 queries in 40 s give (8 / 40) x 3600 = 720 QpH.
 - Each round's `spread`: `qph_low` and `qph_high` (slowest and fastest round the samples allow) and `samples_per_query` (smallest count over successful queries). The scorecard repeats them as `benchmark_samples_per_query` and `qph_spread`.
 - Older records without `samples` read as one sample.
 - Cost: each round takes three times as long, plus warm-up (Customer 360 scale 100: ~8 to ~24 minutes). Below scale 50 the pre-maintenance round adds about 2 x 2 x one round.
-- Continuous rounds take one sample per query: gold changes under the round, and the rounds are the repeats.
+- Continuous rounds take one sample per query: gold changes under the round, so the rounds are the repeats.
 
 ## Cache modes
 

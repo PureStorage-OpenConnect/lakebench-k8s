@@ -24,11 +24,11 @@ A one-line banner shows pipeline mode, Customer 360 scale factor, the recipe (`c
 
 `lakebench report` prints the same front matter before its scores; `run` prints it after saving (not for `--local`).
 
-The delivered `report.html` predates any look naming the run, so it reads "development"; `lakebench report --render` afterwards reads the look.
+The delivered `report.html` is written before any look can name the run, so it reads "development"; `lakebench report --render` afterwards reads the look.
 
 ## Views
 
-A batch run of Customer 360 or AML opens on two tabs: **Workload replay** and **Scorecard**. The Scorecard is the page described below. A run with no replay (continuous mode, for now) shows the Scorecard alone.
+A batch run of Customer 360 or AML opens on two tabs: **Workload replay** and **Scorecard**. The Scorecard is the page described below. A run with no replay (continuous mode) shows the Scorecard alone.
 
 The replay plays the recorded timeline back, with play and pause, 1x/2x/4x speed, restart, a scrubber and a click on any stage:
 
@@ -36,7 +36,7 @@ The replay plays the recorded timeline back, with play and pause, 1x/2x/4x speed
 - **Pipeline**: one bar per handoff, filling over the downstream stage's recorded window.
 - **Platform**: the storage lane from the record's [`io` block](records.md#storage-io), MB/s read and written. Compute, Network and Kubernetes are listed as not measured.
 - **Recorded** is a stage or job window, a row count, a byte count. **Derived** is the running count and the handoff bars, which grow over a recorded window because the record holds the window and the final figure, not the figure in between. Nothing is simulated.
-- The page embeds its data as one JSON block, and a test compares it with the stored record. Where the record has no window (datagen) or no figure (Spark stage bytes), the replay says so rather than drawing a curve.
+- The page embeds its data as one JSON block, checked against the stored record by a test. Where the record has no window (datagen) or no figure (Spark stage bytes), the replay says so rather than drawing a curve.
 
 ## Scorecard tiles
 
@@ -53,7 +53,7 @@ The Scorecard tab opens on eight tiles, then the front matter and the sections b
 | 7 | Gates: passed over total (`verdict.gates`, recomputed as the page's verdict is) | same |
 | 8 | Support (`experiment.support.state`) | same |
 
-`scores` is `pipeline_benchmark.scores`, read as the run stored it, not recomputed. The Summary cards below remain for now.
+`scores` is `pipeline_benchmark.scores`, read as the run stored it, not recomputed. The Summary cards below the tiles remain.
 
 ## Summary cards
 
@@ -112,7 +112,7 @@ A reconciliation checks, and sizes any unexplained difference in:
 Detection table:
 
 - Recall reads "uncalibrated, in-sample" unless a completed registered look names the run. Random-control chance sits beside it.
-- Continuous: recall over covered instances with coverage beside it, and chance and off-target over them too ([aml-scoring.md](../aml-scoring.md#continuous-recall-over-covered-instances)); otherwise why recall was not scored. Never plain "recall".
+- Continuous: recall over covered instances with coverage beside it, and chance and off-target over them too ([AML spec 8.4](../benchmarks/aml/scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)); otherwise why recall was not scored. Never plain "recall".
 - Total alerts and off-target rate cover only rules that ran, labelled BOUNDED BY when a rule was skipped on a cap. Funnel totals carry the same label. Counts after the per-customer cap (escalated, alert cases, SARs filed) carry that cap when it held alerts back.
 - A per-reason-code table when recorded; otherwise the producer's status or "reason codes not recorded".
 - Leakage reads "not measured in this run": the AML fidelity gate (`scripts/aml_gate.py`) runs outside `lakebench run`.
@@ -130,17 +130,16 @@ The `c360_correctness` checks ([gating rules](scorecard.md#customer-360-expected
 
 ## Storage I/O
 
-The bytes the engines reported reading from and writing to storage, from the record's [`io` block](records.md#storage-io). It sits before Storage multiple.
+Bytes the engines reported reading from and writing to storage, from the record's [`io` block](records.md#storage-io); it sits before Storage multiple.
 
-- A table with one row per source and round: Trino queries (the benchmark, the round before maintenance, each in-stream round) and datagen. Read and written bytes, the window the bytes fall in (UTC, the engine's clock), and the basis of each figure.
-- Each total names its record field, so the number on the page is checkable against `metrics.json`.
-- A rate chart, MB/s read and written per time bucket. Each interval's bytes are spread evenly over its own window, so a bucket is no finer than the queries feeding it. Bytes with no recorded window (datagen) are listed under the chart as not on it.
+- A table with one row per source and round: Trino queries (the benchmark, the round before maintenance, each in-stream round) and datagen. Each row gives read and written bytes, the window (UTC, the engine's clock) and the basis of each figure; each total names its record field, so it can be checked against `metrics.json`.
+- A rate chart of MB/s read and written per time bucket. Each interval's bytes are spread evenly over its window, so a bucket is no finer than the queries feeding it. Bytes with no recorded window (datagen) are listed under the chart as not on it.
 - "Not measured" is stated, never shown as zero: Spark stages (executor I/O is not collected), a query engine other than Trino, and a Trino round whose record predates the block. "n/a" marks a direction a source does not have (datagen reads nothing). A figure that was measured as zero reads `0.00 MiB`.
 - Pod network traffic and storage-array telemetry are not part of it, and bytes from different sources are not added together.
 
 ## Storage multiple
 
-Physical bytes over logical bytes, per table, per layer and in total, measured once at run end: after the post-maintenance round (batch), or after the streams stop (continuous; AML after the gold-refresh [drain](../glossary.md#drain), stream stop and score job). It is a condition of the maintenance policy stated with it, not a system score (`storage_multiple_total` is diagnostic).
+Physical bytes over logical bytes, per table, per layer and in total, measured once at run end: after the post-maintenance round (batch), or after the streams stop (continuous; AML after the gold-refresh [drain](../glossary.md#drain), stream stop and score job). It is a condition of the maintenance policy stated with it, not a system score; `storage_multiple_total` is diagnostic.
 
 - **Physical**: object bytes under each table's location, one listing per bucket. **Logical**: current snapshot data files (Iceberg `$files`, Delta `DESCRIBE DETAIL`).
 - Physical splits into current data, retained-snapshot data, metadata and other. When orphan removal ran, the unreferenced share is labelled as bounded by its 24 h 10 min floor.

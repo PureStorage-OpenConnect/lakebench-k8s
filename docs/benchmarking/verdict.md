@@ -4,7 +4,7 @@ Reference: what a PASSED verdict asserts, the continuous gate, what happens afte
 
 ## What a PASSED verdict asserts
 
-The verdict (`verdict.status`, `verdict.gates`) is decided from the saved record, so `run` and `report` agree. A failed or interrupted run did not pass. Besides every stage succeeding and no query failing, PASSED shows:
+The verdict (`verdict.status`, `verdict.gates`) is decided from the saved record, so `run` and `report` agree. A failed or interrupted run did not pass. Besides every stage succeeding and no query failing, PASSED requires:
 
 - **Rows in every layer** (`layer_rows`).
   - Batch: the last bronze-verify, silver-build and gold-finalize job each recorded more than 0 output rows. An unread driver log counts as 0; a missing stage job fails.
@@ -31,11 +31,11 @@ A continuous run passes only on continuous processing inside the window. With go
 - silver committed fewer than 2 micro-batches with rows after bronze's first write in the window (a pre-window backlog does not count);
 - gold refreshed on new silver data fewer than 2 times after that write (a `(silver idle)` cycle, one that read no silver, or one that read no more silver rows than the last does not count);
 - gold freshness was not measured inside the window;
-- a stream's driver log could not be read;
+- a stream's driver log could not be read.
 
-Balance is advisory. When a stage's lag, sampled once per batch, rose by more than one cadence across the second half, `run` prints `balance (advisory): ...` naming the stage and executor setting ([continuous-tuning.md](continuous-tuning.md)), the Balance card reads "not balanced", and the run is not failed on it. With under three samples there, the end lag must be no larger than the first half's peak, or within two cadences. Unmeasurable balance reads "not measured". Datagen to bronze is not judged under `--skip-generate` or with `max_files_per_trigger` set.
+Balance is advisory, not a gate. When a stage's lag, sampled once per batch, rose by more than one cadence across the second half, `run` prints `balance (advisory): ...` naming the stage and executor setting ([continuous-tuning.md](continuous-tuning.md)), the Balance card reads "not balanced", and the run is not failed on it. With under three samples there, the end lag must be no larger than the first half's peak, or within two cadences. Unmeasurable balance reads "not measured". Datagen to bronze is not judged under `--skip-generate` or with `max_files_per_trigger` set.
 
-Corpus out after half the window: the run passes (`window_arrival_fraction` shows it), and freshness skips gold cycles after silver stopped growing.
+If the corpus runs out after half the window, the run passes (`window_arrival_fraction` shows it) and freshness skips gold cycles after silver stopped growing.
 
 - Submission failures (such as a truncated Maven download): printed, journaled, `streaming[].submission_failures`. RUNNING time: `running_at`.
 - `continuous.balance`: `balanced`, `measured`, `bottleneck`, `lever`, and per handoff (`datagen->bronze`, `bronze->silver`, `silver->gold`): `samples`, `first_half_max_s`, `end_s`, `cadence_s`, `second_half_growth_s`, `allowance_s`, `keeps_up`, `busy_share`, and `not_judged` with a reason. `trend_samples` keeps the per-batch lag samples.
@@ -49,7 +49,7 @@ Corpus out after half the window: the run passes (`window_arrival_fraction` show
 
 ## Requested and effective values
 
-`experiment.requested_effective` keeps both for each decision Lakebench or a Spark job makes, each `{requested, effective, source, stage}`:
+`experiment.requested_effective` keeps both for each decision Lakebench or a Spark job makes, as `{requested, effective, source, stage}`:
 
 | Key | Requested | Effective |
 |---|---|---|
@@ -60,6 +60,6 @@ Corpus out after half the window: the run passes (`window_arrival_fraction` show
 
 - Only an executor override that ran with fewer executors is a mismatch.
 - An unmet request is a qualifier (`verdict.qualifiers.requested_effective`) and a report warning, such as "gold_strategy: requested two_phase_agg, ran simple_agg (auto)".
-- Incremental gold a job chose automatically is labelled even under `auto` (it aggregates part of silver; gold jobs no longer make that choice). Incremental gold for a multi-cycle cycle is by design and is not.
+- Incremental gold a job chose automatically is labelled even under `auto` (it aggregates part of silver; current gold jobs no longer make that choice). Incremental gold for a multi-cycle cycle is by design and is not.
 - Mismatches are decided at read; `experiment.requested_effective_mismatches` keeps the run's list.
 - A mismatch never fails a run or enters the experiment identity. Other caps are in `experiment.limits` and `limits.bound`.
