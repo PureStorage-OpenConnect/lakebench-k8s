@@ -397,6 +397,11 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
         "subtitle": profile["subtitle"],
         "mode": (record.get("pipeline_benchmark") or {}).get("pipeline_mode"),
         "kind": profile["kind"],
+        "window": (
+            {"start": stages[0]["start"], "end": stages[0]["end"]}
+            if sustained and stages[0]["start"] is not None
+            else None
+        ),
         "handoffs": handoffs,
         "lag": lag,
         "run_id": record.get("run_id"),
@@ -494,6 +499,9 @@ _CSS = """
 #lb-replay .job span.fail{color:#b3261e}
 #lb-replay .controls .lb-unit button{background:transparent;color:#fff;border:1px solid #6fbb89;padding:6px 12px;font-size:14px}
 #lb-replay .controls .lb-unit button.on{background:#d4f4dd;border-color:#d4f4dd;color:#1d5439}
+#lb-replay .legend{display:flex;gap:12px;font-size:12px;color:#57715e;min-height:0}
+#lb-replay .legend:empty{display:none}
+#lb-replay .legend i{display:inline-block;width:10px;height:3px;margin-right:5px;vertical-align:middle;border-radius:2px}
 #lb-replay .note{padding:2px 14px 8px;font-size:11px;color:#859187}
 
 """
@@ -524,8 +532,9 @@ function state(s){var f=frac(s);return f===null?null:f===0?'waiting':f===1?'done
 function rate(x){var r=0;S.forEach(function(s){if(s.key!=='query'&&s.rows!==false&&!s.steps&&s.value!=null&&s.start!=null&&s.end>s.start&&x>=s.start&&x<s.end)r+=s.value/(s.end-s.start)});return r}
 var RATE=[],N=240;for(var i=0;i<N;i++)RATE.push(rate((i+.5)/N*T));
 var RMAX=Math.max.apply(null,RATE.concat([1]));
+function shade(){if(!D.window)return '';var a=5+590*D.window.start/T,b=5+590*D.window.end/T;return '<rect x="'+a.toFixed(1)+'" y="0" width="'+(b-a).toFixed(1)+'" height="80" fill="#e4f1e8"/>'}
 function plot(id,series,mx){
- var o='<rect width="600" height="80" fill="#f4f8f4"/>';
+ var o='<rect width="600" height="80" fill="#f4f8f4"/>'+shade();
  S.forEach(function(s){if(s.start!=null&&s.key!=='datagen'){var x=5+590*s.start/T;o+='<line x1="'+x+'" x2="'+x+'" y1="4" y2="77" stroke="#a4b9a9" stroke-dasharray="3 4" opacity=".65"/>'}});
  series.forEach(function(sr){if(!sr.v)return;var n=sr.v.length,d='',dt=sr.dt||T/n,sh=sr.shift||0;
   for(var i=0;i<n;i++){var x=5+590*(sh+i*dt)/T,x2=5+590*(sh+(i+1)*dt)/T,y=73-(sr.v[i]/mx)*61;d+=(i?'L':'M')+x.toFixed(1)+','+y.toFixed(1)+'L'+x2.toFixed(1)+','+y.toFixed(1)}
@@ -539,7 +548,8 @@ function lagBars(){D.handoffs.forEach(function(h,i){var v=lagAt(h);
  $('[data-f="'+i+'"]').style.width=(v===null?0:Math.min(100,v/LMAX*100))+'%';
  $('[data-h="'+i+'"]').textContent=v===null?'Waiting':fmtLag(v)+' behind';
  $('[data-s="'+i+'"]').textContent=h.keeps_up===false?'falls behind the arrival rate':h.keeps_up?'keeps up':''})}
-function plotLag(){var o='<rect width="600" height="80" fill="#f4f8f4"/>',cols=['#4b9d78','#be904a','#538da9'];
+var LCOL=['#4b9d78','#be904a','#538da9'];
+function plotLag(){var o='<rect width="600" height="80" fill="#f4f8f4"/>'+shade(),cols=LCOL;
  D.lag.series.forEach(function(sr,k){var d='';sr.samples.forEach(function(p,i){var x=5+590*(D.lag.shift+p[0])/T,y=73-p[1]/LMAX*61;d+=(i?'L':'M')+x.toFixed(1)+','+y.toFixed(1)});
   o+='<path d="'+d+'" fill="none" stroke="'+cols[k%3]+'" stroke-width="2.5" stroke-linejoin="round"/>'});
  var cx=5+590*t/T;o+='<line x1="'+cx+'" x2="'+cx+'" y1="2" y2="78" stroke="#277353" stroke-width="2" stroke-dasharray="3 3"/>';$('#rp-lplot').innerHTML=o}
@@ -569,8 +579,9 @@ function draw(){
  if(lane==='lag'){
   $('#rp-lname').textContent='Lag behind upstream';
   $('#rp-lval').textContent=D.handoffs.map(function(h){var v=lagAt(h);return v===null?'-':fmtLag(v)}).join(' · ');
-  plotLag()}
+  plotLag();$('#rp-legend').innerHTML=D.handoffs.map(function(h,k){return '<span><i style="background:'+LCOL[k%3]+'"></i>'+h.label+'</span>'}).join('')}
  else if(lane==='storage'){
+  $('#rp-legend').innerHTML='';
   $('#rp-lname').textContent='Storage / S3';
   var spark=S.some(function(s){return s.key!=='datagen'&&s.key!=='query'&&s.start!=null&&t>=s.start&&t<s.end});
   $('#rp-lval').textContent=!st||spark?'NR':st.read[k].toFixed(1)+' MB/s read · '+st.write[k].toFixed(1)+' MB/s written';
@@ -578,14 +589,17 @@ function draw(){
  else{
   var L=D.lanes[lane],ix=function(a){return Math.max(0,Math.min(a.length-1,Math.floor((t-L.shift)/L.step)))};
   if(lane==='compute'){
+   $('#rp-legend').innerHTML='';
    $('#rp-lname').textContent='Compute / CPU';
    $('#rp-lval').textContent=L.cpu[ix(L.cpu)].toFixed(1)+' cores · '+(L.mem.length?L.mem[ix(L.mem)].toFixed(0):'NR')+' GiB';
    plot('#rp-lplot',[{v:L.cpu,c:'#538da9',dt:L.step,shift:L.shift}],Math.max(1,Math.max.apply(null,L.cpu)))}
   else if(lane==='network'){
+   $('#rp-legend').innerHTML='';
    $('#rp-lname').textContent='Pod network (includes shuffle)';
    $('#rp-lval').textContent=(L.rx.length?L.rx[ix(L.rx)].toFixed(1):'NR')+' MB/s in · '+(L.tx.length?L.tx[ix(L.tx)].toFixed(1):'NR')+' MB/s out';
    plot('#rp-lplot',[{v:L.rx,c:'#37876d',dt:L.step,shift:L.shift},{v:L.tx,c:'#be904a',dt:L.step,shift:L.shift}],Math.max(1,Math.max.apply(null,L.rx.concat(L.tx))))}
   else{
+   $('#rp-legend').innerHTML='';
    $('#rp-lname').textContent='Pods running';
    $('#rp-lval').textContent=L.pods[ix(L.pods)]+' pods';
    plot('#rp-lplot',[{v:L.pods,c:'#899cad',dt:L.step,shift:L.shift}],Math.max(1,Math.max.apply(null,L.pods)))}}
@@ -674,6 +688,13 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
     gaps = sorted(set(data["storage_gaps"]) | set(data["storage_unplaced"]))
     unmeasured = [*lanes, *(f"{g} storage" for g in gaps)]
     note = "Not measured: " + ", ".join(unmeasured) + "."
+    win = data.get("window")
+    if win:
+        mm = lambda x: f"{int(x) // 60}:{int(x) % 60:02d}"  # noqa: E731
+        note += (
+            f" Shaded: the measured window, {mm(win['start'])} to {mm(win['end'])};"
+            " the rest is drain and maintenance."
+        )
     problems = data.get("storage_problems") or []
     if problems:
         note += " Partial: " + "; ".join(problems) + "."
@@ -708,7 +729,8 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         f'<div class="platform"><div class="platformnav">{nav}</div>'
         '<div class="traces"><div class="graph"><div class="charttitle">'
         '<b id="rp-lname">Storage / S3</b><strong id="rp-lval">-</strong></div>'
-        '<svg id="rp-lplot" viewBox="0 0 600 80" preserveAspectRatio="none"></svg></div>'
+        '<svg id="rp-lplot" viewBox="0 0 600 80" preserveAspectRatio="none"></svg>'
+        '<div class="legend" id="rp-legend"></div></div>'
         '<div class="graph"><div class="charttitle"><b>Rows per second</b>'
         '<strong id="rp-evalue">-</strong></div>'
         '<svg id="rp-eplot" viewBox="0 0 600 80" preserveAspectRatio="none"></svg></div>'

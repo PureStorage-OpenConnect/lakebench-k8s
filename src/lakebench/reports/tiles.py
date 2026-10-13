@@ -362,7 +362,7 @@ _CSS = """
 .lb-tiles .lb-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
 .lb-tiles .lb-tile{background:var(--card-bg);border:1px solid var(--border);border-radius:10px;padding:18px;min-height:110px}
 .lb-tiles .lb-tile b{display:block;font-size:13px;font-weight:600;color:#5f7767}
-.lb-tiles .lb-tile strong{display:block;font-size:32px;letter-spacing:-1px;margin-top:7px;font-variant-numeric:tabular-nums}
+.lb-tiles .lb-tile strong{display:block;font-size:clamp(22px,2.3vw,32px);white-space:nowrap;letter-spacing:-1px;margin-top:7px;font-variant-numeric:tabular-nums}
 .lb-tiles .lb-tile small{display:block;font-size:12px;color:#7c8e81;margin-top:2px}
 .lb-tiles .lb-tile.nr strong{color:#9aa89d}
 @media(max-width:900px){.lb-tiles .lb-grid{grid-template-columns:repeat(2,1fr)}}
