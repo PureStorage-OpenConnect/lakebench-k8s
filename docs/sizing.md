@@ -1,22 +1,10 @@
 # Sizing
 
-Reference: the minimum cluster per workload, mode and scale, and how
-`lakebench` checks that a cluster has room.
+Reference: the minimum cluster per workload, mode and scale, and how `lakebench` checks that a cluster has room.
 
-The minimum depends on the workload, the pipeline mode and the scale factor.
-The table is for `hive-iceberg-spark-trino`. It comes from
-`lakebench.config.sizing.plan_requirements`, which also drives
-`lakebench config show`, `lakebench config recommend` and the `run` capacity
-preflight. It needs no cluster.
+The table is for `hive-iceberg-spark-trino`. It comes from `lakebench.config.sizing.plan_requirements`, which also drives `lakebench config show`, `lakebench config recommend` and the `run` capacity preflight, and needs no cluster. On a real cluster the preflight first sizes datagen and Trino against that cluster, so its datagen figure can differ from the default-parallelism column.
 
-On a real cluster the preflight first sizes datagen and Trino against that
-cluster, as `run` does. Its datagen figure can therefore differ from the
-default-parallelism column.
-
-A continuous row is the cluster that carries the scale's offered load
-balanced (see [Running Pipelines](running-pipelines.md)). A smaller cluster
-runs with fewer executors and a "cannot balance" warning naming the stage,
-and that run fails the balance check. Use the figure, or lower the scale.
+A continuous row is the cluster that carries the scale's offered load balanced (see [Running Pipelines](running-pipelines.md)). A smaller cluster runs with fewer executors and a "cannot balance" warning naming the stage, and the run reports it as not balanced. Use the figure, or lower the scale.
 
 <!-- BEGIN GENERATED: sizing-detail -->
 <!-- Generated from the code by `python3.11 scripts/gen_sizing_tables.py`; do not edit by hand. -->
@@ -40,9 +28,7 @@ and that run fails the balance check. Use the figure, or lower the scale.
 
 <!-- END GENERATED: sizing-detail -->
 
-For your own config, `lakebench config recommend lakebench.yaml` prints the
-largest scale the cluster holds. `lakebench config show lakebench.yaml`
-prints the request at the configured scale.
+`lakebench config recommend lakebench.yaml` prints the largest scale the cluster holds; `lakebench config show lakebench.yaml` prints the request at the configured scale.
 
 ## Reading the table
 
@@ -74,8 +60,7 @@ prints the request at the configured scale.
     between them as the autosizer budgets it
   - the deployment's dependency server (`lb-deps`, 1 core and 2 GiB)
 
-  Other recipes change this line. `lakebench config show` prints it for
-  your config.
+  Other recipes change this line; `lakebench config show` prints it for your config.
 - **Scratch PVC** is the Spark scratch request when
   `platform.storage.scratch` is enabled: the largest batch stage's total.
   - At scale 100 that is silver-build, 18 executors of 300 Gi (5,400 Gi), for
@@ -94,8 +79,7 @@ prints the request at the configured scale.
 
 ## Continuous sizing
 
-Continuous sizes bronze-ingest and silver-stream to carry the scale's
-offered load with 20% headroom. At AML scale 10, silver-stream gets about 19
+Bronze-ingest and silver-stream are sized to carry the scale's offered load with 20% headroom. At AML scale 10, silver-stream gets about 19
 executors x 4 cores (see [Running Pipelines](running-pipelines.md)).
 gold-refresh is sized from its profile: AML 12 x 4 at scale 10, growing with
 scale to the 28-executor cap near scale 23.
@@ -107,8 +91,7 @@ On a smaller cluster:
 - Every stage that wants an executor gets one. Each further executor goes to
   the stage holding the smallest share of what it needs, because the
   pipeline runs at the pace of its slowest stage.
-- A capped stage cannot carry the offered load, so the run fails the balance
-  check.
+- A capped stage cannot carry the offered load, so the run reports it as not balanced.
 - The capacity preflight passes such a cluster with a WARNING naming the
   capped stages, as long as the capped request plus Trino, Hive/Postgres and
   datagen fits. It fails only when even that does not fit, or when a single
@@ -129,14 +112,12 @@ To run the streams at full size:
 2. Start the streams with `lakebench run --skip-generate` within an hour of
    generation finishing.
 
-A finished datagen Job is not counted, but Kubernetes deletes it after
-3,600 s, and an absent Job is counted as still running.
+A finished datagen Job is not counted, but Kubernetes deletes it after 3,600 s, and an absent Job is counted as still running.
 `lakebench config recommend` prints the largest scale for both ways.
 
 ## The capacity check
 
-The prerequisite phase of `lakebench run` compares the minimum against what
-the cluster can still take:
+The prerequisite phase of `lakebench run` compares the minimum against what the cluster can still take:
 
 - **Capacity counted:** the allocatable capacity of the schedulable nodes,
   minus what pods in other namespaces already request. Schedulable means

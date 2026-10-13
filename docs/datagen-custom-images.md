@@ -3,36 +3,23 @@
 Reference: building, testing and configuring a custom data generator image, and how its corpora are identified.
 
 - The generator runs as a container image on Kubernetes.
-- Default image: `docker.io/sillidata/lb-datagen:latest`, built from
-  `datagen_rs/` (Rust). It floats: the corpus can change when a new image is
-  pushed, so set `images.datagen` to a versioned tag such as `1.7.1` to fix it. Tag-pinned; set `images.datagen` with a
-  `@sha256:...` suffix to pin a run to a specific digest.
+- Default image: `docker.io/sillidata/lb-datagen:latest`, built from `datagen_rs/` (Rust). It floats: the corpus can change when a new image is pushed. Set `images.datagen` to a versioned tag such as `1.7.1`, or add a `@sha256:...` suffix, to pin a run.
 - It produces the Customer360 schema ([Customer 360 data model](benchmarks/c360/data-model.md#21-bronze-columns-41-arrow-schema-customer360_schema))
   and the Financial `pacs.008` schema, chosen by `--schema`.
 
 ## Why Customize
 
-- **Add columns** (for example geographic coordinates, product SKUs,
-  demographic fields).
-- **Change distributions**: the customer-ID Zipf parameters, interaction type
-  weights, or the transaction-amount log-normal parameters.
-- **Use a different data domain**: replace Customer360 with IoT sensor data,
-  financial transactions or clickstream events.
-- **Change the codec or file sizing**: set `DG_COMPRESSION` in the pod env,
-  tune the binary's `--file-size-mb`, or update the codec-conditional
-  `bytes_per_row` tables in `datagen_rs/src/writer.rs`.
-- **Add post-processing**: custom corruption patterns, quality flags or
-  realism features (the 7 realism features are in
-  `datagen_rs/src/customer360_realism.rs`).
+- **Add columns**, such as geographic coordinates or product SKUs.
+- **Change distributions**: the customer-ID Zipf parameters, interaction type weights, or the transaction-amount log-normal parameters.
+- **Use a different data domain**, such as IoT sensor data or clickstream events.
+- **Change the codec or file sizing**: set `DG_COMPRESSION` in the pod env, tune the binary's `--file-size-mb`, or update the codec-conditional `bytes_per_row` tables in `datagen_rs/src/writer.rs`.
+- **Add post-processing**: custom corruption patterns, quality flags or realism features (the 7 realism features are in `datagen_rs/src/customer360_realism.rs`).
 
 ## Prerequisites
 
 - **podman** (recommended on RHEL/OpenShift) or **docker**.
-- Access to a container registry (Docker Hub, private, or the OpenShift
-  internal registry), with credentials configured (`podman login` or
-  `docker login`).
-- A Rust toolchain only to run `cargo test` before building. The Dockerfile
-  compiles the binary from source in a multi-stage build.
+- A container registry (Docker Hub, private, or the OpenShift internal registry) and a login (`podman login` or `docker login`).
+- A Rust toolchain only to run `cargo test` before building; the Dockerfile compiles the binary.
 
 ## Build and Push
 
@@ -66,9 +53,7 @@ images:
   pull_policy: Always  # Forces Kubernetes to pull the image again
 ```
 
-- Set `pull_policy: Always` after pushing a new image under an existing tag.
-  Without it, a node may use its cached image.
-- Prefer a new, immutable tag per build.
+- Set `pull_policy: Always` after pushing a new image under an existing tag, or a node may use its cached image. A new, immutable tag per build is better.
 
 **AML comparability.**
 
@@ -147,8 +132,7 @@ DG_LOCAL_DIR=/tmp/lb-datagen cargo run --release --bin generate -- \
   --threads 1
 ```
 
-This writes one 64 MB file, enough to check schema changes, column types and
-corruption patterns.
+This writes one 64 MB file, enough to check schema, column types and corruption patterns.
 
 The financial schema also needs the held-out hash file, which a pod gets from
 the `lakebench-heldout-hashes` ConfigMap. Locally, point `LB_HELDOUT_HASHES` at

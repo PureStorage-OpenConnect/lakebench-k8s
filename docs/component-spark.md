@@ -1,33 +1,29 @@
 # Spark
 
-Reference: configure and size the Apache Spark pipeline engine: Spark Operator, config keys, job profiles, executor scaling, scratch storage, RBAC and OpenShift SCC.
+Reference: Spark pipeline engine: Spark Operator, config keys, job profiles, executor scaling, scratch storage, RBAC and OpenShift SCC.
 
 ## What it does
 
-Spark is the compute engine for the medallion pipeline in every recipe ([Recipes](recipes.md)). Lakebench submits `SparkApplication` resources through the Kubeflow Spark Operator v2.x. Spark runs PySpark scripts:
+Spark runs the medallion pipeline in every recipe ([Recipes](recipes.md)). Lakebench submits PySpark scripts as `SparkApplication` resources through the Kubeflow Spark Operator v2.x:
 
 - **Batch mode:** `bronze-verify`, `silver-build`, `gold-finalize` run one after another.
 - **Continuous mode:** `bronze-ingest`, `silver-stream`, `gold-refresh` run at the same time as structured streaming jobs with configurable trigger intervals.
 
 ### Script ConfigMaps
 
-Pipeline scripts are deployed as ConfigMaps (one per role), projected together at `/opt/spark/scripts` in every Spark pod. `run` validates them before submitting jobs and refuses to start if a listed file is missing or a map exceeds the ~840KB ConfigMap limit. `destroy` deletes all the maps.
+Pipeline scripts are deployed as ConfigMaps (one per role), projected together at `/opt/spark/scripts` in every Spark pod. `run` refuses to start if a listed file is missing or a map exceeds the ~840KB ConfigMap limit. `destroy` deletes all the maps.
 
 ## Spark Operator
 
-Lakebench requires **Kubeflow Spark Operator v2.x** (default: [version matrix](compatibility-matrix.md#component-version-matrix)). The v1.x line breaks volume injection and is not supported.
+Lakebench requires **Kubeflow Spark Operator v2.x** (default: [version matrix](compatibility-matrix.md#component-version-matrix)). v1.x does not inject volumes from `spec.volumes` into pods and is not supported. The operator version is unrelated to the Spark runtime version.
 
-- v1.x does not inject volumes from `spec.volumes` into pods.
-- The operator version is not the Spark runtime version.
-- `mainApplicationFile` uses `local://` URIs, so scripts must be in the container filesystem.
-
-`lakebench deploy` checks the operator. It never installs the operator; a missing one fails the deploy.
+`lakebench deploy` checks for the operator and fails if it is missing; it never installs it.
 
 - `deploy` adds the deployment's namespace to the operator's watch list (`spark.jobNamespaces`) and `destroy` removes it, both under the `lakebench-cluster-lock` lease in `lakebench-system`. Do not edit `spark.jobNamespaces` by hand.
 - An installed operator keeps its version whatever the config says.
 - `operator.install: true` is refused by the commands that change data; `destroy`, `status` and `admin` load it as false.
 
-A cluster admin installs the shared operator once with Lakebench, not raw Helm:
+A cluster admin installs the shared operator once:
 
 ```bash
 lakebench admin install --component spark-operator lakebench.yaml \
@@ -66,7 +62,7 @@ The Spark version parsed from the tag also picks:
 | 3.5.x | 1.12.262 | 24g |
 | 4.0.x, 4.1.x | 1.12.720 | 32g |
 
-Spark 4 drivers get 32g: `hadoop-aws:3.4.1` pulls a 558MB AWS SDK v2 bundle (280MB SDK v1 on 3.5.x), and the driver's netty file server serves those jars to executors.
+Spark 4 drivers get 32g because `hadoop-aws:3.4.1` pulls a 558MB AWS SDK v2 bundle (280MB SDK v1 on 3.5.x) that the driver's file server sends to executors.
 
 `lb-deps` resolves the runtime and Hadoop AWS jars and serves them by URL. Example for a Java 11 Spark 3.5 image such as `apache/spark:3.5.4-python3` on Hive: it gets `iceberg-spark-runtime-3.5_2.12:1.10.1` and `hadoop-aws:3.3.4`. Other Spark minors: [which runtime jar](compatibility-matrix.md#which-runtime-jar-gets-requested).
 
@@ -135,7 +131,7 @@ Two keys a user may set (`USER_OVERRIDABLE_SPARK_KEYS`): Lakebench sets `spark.d
 
 ## Job Profiles
 
-The built-in profiles set per-executor sizing, proven at 1TB+ scale. Reducing these values causes OOM kills or "No space left on device" failures.
+The built-in profiles set per-executor sizing proven at 1TB+ scale. Smaller values cause OOM kills or "No space left on device" failures.
 
 ### Batch Jobs
 
@@ -201,7 +197,7 @@ When enabled, each executor gets a dynamically provisioned PVC at `/tmp/spark-lo
 - **No per-scale need** (c360 bronze-verify, 50Gi, and the streaming jobs): `scratch_size`. A widened streaming executor's PVC grows with its cores.
 - To change scratch, change the executor count (`platform.compute.spark.<stage>_executors`). There is no size field.
 - `metrics.json` records the size per job as `config_snapshot.scratch.size_per_job`.
-- The StorageClass must use `repl=1`: `repl=2+` doubles storage with no benefit for recomputable shuffle data.
+- The StorageClass must use `repl=1`; replication only doubles storage for recomputable shuffle data.
 - `lakebench deploy` only checks that the StorageClass exists. A cluster admin creates it once with `lakebench admin install --component scratch-storage-class`.
 
 ## RBAC

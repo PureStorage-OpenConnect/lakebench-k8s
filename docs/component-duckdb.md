@@ -1,10 +1,10 @@
 # DuckDB
 
-Reference: configure the single-pod DuckDB query engine: config keys, query translation, limits and deploy behaviour.
+Reference: single-pod DuckDB query engine: config keys, query translation, limits and deploy behaviour.
 
 ## What it does
 
-DuckDB is a single-pod query engine. It runs the benchmark query suite against Iceberg tables without a distributed query cluster. Use it for small runs, development, and where Trino workers are impractical.
+DuckDB runs the benchmark query suite against Iceberg tables in one pod, without a distributed query cluster. Use it for small runs and development.
 
 - Set `architecture.query_engine.type: duckdb`.
 - DuckDB reads Iceberg only. DuckDB with Delta is rejected at config load: its delta extension ignores DuckDB's S3 settings and cannot reach non-AWS S3.
@@ -15,8 +15,6 @@ DuckDB is a single-pod query engine. It runs the benchmark query suite against I
 `images.duckdb` sets the pod image; `duckdb.version` pins DuckDB. Defaults: [version matrix](compatibility-matrix.md#component-version-matrix).
 
 ## Configuration keys
-
-Defaults from `DuckDBConfig` in `config/schema.py`.
 
 | Key | Default | Effect |
 |---|---|---|
@@ -58,7 +56,7 @@ At large scale Trino is much faster through distributed execution.
 
 - **Single pod.** No horizontal scaling.
 - **Serial queries.** Throughput mode (concurrent streams) is not practical.
-- **No cache.** At large scale, re-reading metadata adds latency against Trino's cached metadata.
+- **No cache.** At large scale, re-reading metadata adds latency.
 - **No Iceberg maintenance.** DuckDB is read-only. `expire_snapshots`, `remove_orphan_files` and compaction never run on a DuckDB recipe; the run's maintenance record marks them `not_supported`. Table health probing still works.
 
 ## Deploy and destroy
@@ -68,14 +66,12 @@ At large scale Trino is much faster through distributed execution.
 - **Deployment** `lakebench-duckdb` (1 replica). The main container sleeps and serves as the query target.
 - **Service** `lakebench-duckdb` (headless), for pod discovery.
 
-No coordinator/worker split, no JDBC port, no persistent state.
-
 Extensions and wheel:
 
 - The DuckDB wheel and the `httpfs`, `iceberg` and `avro` extensions are part of the deployment's dependency set. Deploy resolves them once onto the `lb-deps` server.
 - The `lb-deps-fetch` init container copies them, checking every file's sha256 (`pip install --no-index --require-hashes`, and `lb_deps.py fetch` for the extensions).
 - Queries run with `autoinstall_known_extensions=false`, so a missing extension fails instead of downloading.
-- The pod needs no internet access; only the deploy-time resolve does, or a mirror (`platform.deps`).
+- The pod needs no internet access; only the deploy-time resolve does (or a mirror, `platform.deps`).
 
 Probes:
 

@@ -4,10 +4,10 @@ Reference: configure the Hive Metastore catalog: Stackable operator, config keys
 
 ## What it does
 
-Hive Metastore (HMS) is the metadata catalog for Iceberg and Delta tables. It tracks table schemas, partition layouts and data file locations, so Spark and Trino find tables without managing metadata themselves.
+Hive Metastore (HMS) is the metadata catalog for Iceberg and Delta tables: schemas, partition layouts and data file locations.
 
 - HMS stores its catalog in PostgreSQL and references data files in the S3-compatible store (FlashBlade, MinIO or AWS S3).
-- Lakebench deploys it through the **Stackable Hive Operator** as a `HiveCluster` resource. The operator handles the image, S3 credential injection and PostgreSQL connectivity.
+- Lakebench deploys it as a `HiveCluster` through the **Stackable Hive Operator**, which handles the image, S3 credential injection and PostgreSQL connectivity.
 - Hive is the catalog when `architecture.catalog.type` is `hive` or unset. `lakebench init` writes a Polaris recipe instead.
 - Recipes: `hive-iceberg-spark-trino` (`recipe: default`), `hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none`, `hive-delta-spark-trino`, `hive-delta-spark-thrift`, `hive-delta-spark-none` ([Recipes](recipes.md)).
 
@@ -36,13 +36,11 @@ architecture:
 - An SDP already installed in any namespace is left as it is. A partial install from an interrupted run is completed at the installed version.
 - `lakebench deploy` never installs the operators. It checks for the `hiveclusters.hive.stackable.tech` and `secretclasses.secrets.stackable.tech` CRDs and that their operators run. If either is missing, the Hive step fails with the `admin install` command.
 - `operator.install: true` is refused by the commands that change data; `destroy`, `status` and `admin` load it as false.
-- Lakebench does not automate an SDP upgrade: helm does not update the CRDs the charts ship in `crds/`.
+- SDP upgrades are not automated: helm does not update the CRDs the charts ship in `crds/`.
 - The resource is API `hive.stackable.tech/v1alpha1`, kind `HiveCluster`. S3 is set through `spec.clusterConfig.s3` and credentials through `secretClass`.
 - The raw `apache/hive:3.1.3` image does not work: it has no hadoop-aws jars for S3A (`S3AFileSystem not found`). It fails when Iceberg creates a namespace with an S3 location.
 
 ## Configuration keys
-
-Defaults from `HiveConfig` and `HiveResourcesConfig` in `config/schema.py`.
 
 | Key | Default | Effect |
 |---|---|---|

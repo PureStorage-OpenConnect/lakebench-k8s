@@ -2,9 +2,7 @@
 
 Guide: fill the bronze bucket with synthetic data for the pipeline.
 
-`lakebench generate` submits a Kubernetes Indexed Job. Its pods run in
-parallel and write Parquet files straight to S3. Every flag and exit code is
-in [CLI Reference](cli-reference.md#generate).
+`lakebench generate` submits a Kubernetes Indexed Job whose pods write Parquet files straight to S3 in parallel. Flags and exit codes: [CLI Reference](cli-reference.md#generate).
 
 ## Basic usage
 
@@ -13,11 +11,9 @@ lakebench generate my-config.yaml                    # prompts, submits, waits
 lakebench generate my-config.yaml --timeout 14400    # longer wait for large scales
 ```
 
-- The command asks for confirmation first. Pass `--yes` in scripts and CI.
-- It waits for the Job and shows a progress bar of pod completions and
-  elapsed time.
-- `--timeout 0` (the default) computes the wait from scale, parallelism and
-  a conservative per-pod throughput.
+- The command asks for confirmation first; pass `--yes` in scripts and CI.
+- It waits for the Job with a progress bar of pod completions.
+- `--timeout 0` (the default) computes the wait from scale, parallelism and a conservative per-pod throughput.
 - On a continuous config, `generate` writes until the datagen lead plus the
   window has passed, as a continuous run's datagen does.
 
@@ -71,12 +67,6 @@ Lakebench cap):
   starts: a datagen pod would need more than 16 GiB.
 - The run's support state records the band.
 
-## Batch and continuous modes
-
-Lakebench supports batch and continuous pipeline modes. See
-[Running pipelines](running-pipelines.md) for mode details and
-configuration.
-
 ## How it works
 
 `lakebench generate` creates a Kubernetes
@@ -101,9 +91,7 @@ change data.
 
 ### Delivery mode vs pipeline mode
 
-Two independent fields both use the values `batch` and `continuous`. Seed
-sets content, delivery mode sets how files land in S3, pipeline mode sets the
-stage graph. Neither mode field constrains the other.
+Two independent fields both use the values `batch` and `continuous`. Delivery mode sets how files land in S3; pipeline mode sets the stage graph ([Running pipelines](running-pipelines.md)). Neither constrains the other.
 
 | Concern | Config field | Type | What it controls |
 |---|---|---|---|
@@ -114,23 +102,10 @@ stage graph. Neither mode field constrains the other.
 - Pod CPU and memory are sized by scale, not by delivery mode.
 - `datagen.mode: batch` with `pipeline.mode: continuous` is valid. Datagen
   still writes for the whole window; each file lands in one PUT.
-- `streaming` is not a mode name. The continuous pipeline uses Spark
-  Structured Streaming internally, but the name you set is `continuous`.
+- `streaming` is not a mode name; the continuous pipeline's name is `continuous`.
+- `auto` moved from `batch` (scale <= 10) to `continuous` at every scale on 2026-09-28. If a run depends on bursty uploads (bandwidth ceilings, RSS profile), set `mode: batch`. `continuous` overlaps generation with upload; `batch` uploads each file once written. No speed difference is published, so choose from file count and network profile.
 
-On 2026-09-28 the `auto` default moved from `batch` (at scale <= 10) to
-`continuous` at every scale. If a run depended on bursty uploads (bandwidth
-ceilings, RSS profile), set `mode: batch`. `continuous` overlaps generation
-with upload; `batch` uploads each file once it is written. No measurement of
-the speed difference is published yet, so choose from file count and network
-profile rather than taking the default.
-
-`deploy/datagen.py` turns `datagen.mode` into a `--delivery-mode` argument on
-the datagen container (see `templates/datagen/job.yaml.j2`). You do not set
-it; it shows in rendered Job manifests, which helps when troubleshooting.
-The entrypoint accepts `auto`, `batch` and `continuous`, maps `auto` to
-`continuous`, and passes the result to the Rust binary, which accepts only
-`batch` or `continuous`. A rendered manifest can be replayed by hand through
-the entrypoint.
+`deploy/datagen.py` turns `datagen.mode` into a `--delivery-mode` argument on the datagen container (`templates/datagen/job.yaml.j2`); it shows in rendered Job manifests. The entrypoint maps `auto` to `continuous` and passes `batch` or `continuous` to the Rust binary.
 
 ### Per-pod resources
 

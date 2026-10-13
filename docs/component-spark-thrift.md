@@ -1,6 +1,6 @@
 # Spark Thrift Server
 
-Reference: configure and size the Spark Thrift Server query engine: config keys, limits and deploy behaviour.
+Reference: Spark Thrift Server query engine: config keys, limits and deploy behaviour.
 
 ## What it does
 
@@ -17,7 +17,7 @@ The server uses `images.spark`, shared with the pipeline jobs: changing it chang
 
 ## Configuration keys
 
-Defaults from `SparkThriftConfig` in `config/schema.py`; the Delta and financial values are set by `config/autosizer.py` on fields left unset.
+The Delta and financial values are set by the autosizer on fields left unset.
 
 | Key | Default | Effect |
 |---|---|---|

@@ -1,14 +1,10 @@
 # Development Guide
 
-Reference: the code map, test tooling, CI, extension points and why the code is built as it is.
-
-Setup, test tiers, pull requests and review are in
-[CONTRIBUTING.md](../CONTRIBUTING.md).
+Reference: the code map, test tooling, CI, extension points and why the code is built as it is. Setup, test tiers, pull requests and review: [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Architecture map
 
-The source lives under `src/lakebench/`. Each subdirectory is one module with
-one responsibility:
+The source lives under `src/lakebench/`, one responsibility per subdirectory:
 
 ```
 src/lakebench/
@@ -29,7 +25,7 @@ src/lakebench/
     query_engines/  trino/, spark_thrift/, duckdb/ -- deployers + executors
     pipeline_engines/ spark/ -- job manager, monitor, operator, RBAC
     table_formats/  iceberg/, delta/ -- maintenance SQL builders
-  observability/ Platform and S3 metrics collection for the observability stack
+  observability/ Platform metrics collection and the per-deployment Prometheus, Grafana and Pushgateway deployer
   reports/      HTML report generation from benchmark results
   runtime/      Runtime abstraction: Kubernetes, or podman/docker for local runs
   s3/           S3 client (boto3 wrapper with FlashBlade compatibility)
@@ -205,9 +201,7 @@ def test_gate(load_script):
 
 ### The Spark tier and its jars
 
-`pytest tests/spark` needs pyspark (4.0.1 or 4.1.1), pyarrow and Java 17. A
-test that imports pyspark, Delta or py4j goes under `tests/spark`: the unit
-suite has no pyspark and would skip it.
+`pytest tests/spark` needs pyspark (4.0.1 or 4.1.1), pyarrow and Java 17. A test that imports pyspark, Delta or py4j goes under `tests/spark`; the unit suite has no pyspark.
 
 Iceberg and Delta tests read the jars from `LB_SPARK_TEST_JARS`, a
 comma-separated list of jar files for the installed Spark line:
@@ -217,11 +211,7 @@ comma-separated list of jar files for the installed Spark line:
 | pyspark 4.0.1 | `iceberg-spark-runtime-4.0_2.13-1.11.0.jar`, `delta-spark_2.13-4.0.0.jar`, `delta-storage-4.0.0.jar` |
 | pyspark 4.1.1 | `iceberg-spark-runtime-4.1_2.13-1.11.0.jar`, `delta-spark_4.1_2.13-4.1.0.jar`, `delta-storage-4.1.0.jar` |
 
-- These match the product defaults in `modules/pipeline_engines/spark/job.py`.
-- Keep `tests/spark/jars.lock.json` equal to them by hand. After a default
-  changes, `python scripts/fetch_test_jars.py --update-lock` rebuilds the
-  lock. It confirms each coordinate by its POM and checks the bytes against
-  Central's `.sha1`.
+- `tests/spark/jars.lock.json` pins these jars; keep it in step with the defaults in `modules/pipeline_engines/spark/job.py` by hand. `python scripts/fetch_test_jars.py --update-lock` rebuilds the lock. It confirms each coordinate by its POM and checks the bytes against Central's `.sha1`.
 - `scripts/fetch_test_jars.py` downloads the pinned jars, checks their sha256
   and caches them in `~/.cache/lakebench-test-jars`. `--print-env` prints the
   variable:
@@ -282,8 +272,7 @@ today's render must match them exactly.
 PYTHONPATH=src python3.11 -m tests.fixtures.report_goldens 5105a0
 ```
 
-A second agent reviews the golden diff (`git show -- tests/fixtures/reports`)
-against the record before the change is ready.
+Review the golden diff (`git show -- tests/fixtures/reports`) against the record before the change is ready.
 
 ## What CI Runs
 
@@ -322,7 +311,7 @@ needs is owned by the workload and passes its correctness contract.
    format needs one.
 3. A correctness contract: checks that fail the run on wrong or degenerate
    output, and a statement of what correct means that a reviewer can check
-(for Customer 360 the owner approves its meaning before it gates, D6).
+(for Customer 360, its meaning is approved before it gates).
 4. A query set with its own `query_set_id`, and any workload scores, declared
    so the collector and report render them without guessing.
 5. A declaration of which formats, engines and modes it is compatible with.
@@ -380,18 +369,10 @@ and labelled in the evidence; it is never discovered as a failed job and never
 presented as comparable. Upstream limitations that change behaviour are
 recorded in `RECIPE_NOTES` and in the evidence.
 
-- **Supported**: correct and release-validated for this workload x
-  architecture x mode.
-- **Unverified**: structurally valid and ran correctly, but not
-  release-validated as supported.
-- **Unsupported**: known unable to preserve workload semantics, or known
-  broken. Refused.
-
 Unverified experiments may be reported and compared when their correctness
 checks pass. Their support status must be visible in the evidence and in
 comparison output, and they must not be presented as proof that the
-combination is supported. This keeps Lakebench usable for exploring a
-combination before it is supported.
+combination is supported.
 
 Support is independent of comparability, which has two levels:
 
@@ -399,9 +380,7 @@ Support is independent of comparability, which has two levels:
 - **Like-for-like**: comparable, and the relevant execution conditions
   (for example the effective maintenance policy) also match.
 
-An unverified run can therefore be unverified, comparable and not
-like-for-like at once. That is legitimate evidence when Lakebench states
-exactly which it is.
+An unverified run can be comparable and not like-for-like at once; that is legitimate evidence when Lakebench states which it is.
 
 ## Adding a recipe
 
@@ -429,14 +408,9 @@ is listed ([why](#versions-and-artifacts)).
 
 ## Adding a workload
 
-The [extension rules](#adding-a-workload-design-rules) list the five parts
-a workload brings: a generator schema with a seed policy and dimensions,
-stage scripts per mode, a correctness contract, a query set with its own
-`query_set_id`, and a compatibility declaration. A change to synthetic data
-also needs a reference detector and a leakage check.
+A workload brings the five parts in the [extension rules](#adding-a-workload-design-rules). A change to synthetic data also needs a reference detector and a leakage check.
 
-Its benchmark specification describes what the code does, section by section,
-with a source pointer for each statement:
+Its benchmark specification describes what the code does, with a source pointer for each statement:
 
 1. Purpose and scope: the business process modelled, what is measured about
    an architecture, and what is not claimed.
@@ -459,17 +433,6 @@ with a source pointer for each statement:
 10. Comparability: when two runs are comparable and when like-for-like.
 11. Supported compositions, with support state and known exclusions.
 12. Known limitations.
-
-## Adding a query or a metric
-
-- A query belongs to a workload's set in `src/lakebench/benchmark/queries.py`.
-  Changing one changes the set's `query_set_id`, and QpH across ids is
-  refused ([design rules](#adding-a-query-design-rules)).
-- A metric is defined once, with unit, direction and meaning, in the metric
-  registry (`src/lakebench/metrics/metric_registry.py`, which the collector
-  reads; [design rules](#adding-a-metric-design-rules)).
-- Changing what a published metric means is a product decision, not a
-  refactor.
 
 ## The datagen metrics line
 
@@ -528,7 +491,7 @@ maintainer-only and not shipped with the package).
   old module. A re-export at the old path does not help: the patch replaces
   the name on the old module object, where the moved code no longer looks.
 - A change that adds a cluster-scoped mutation (the Spark Operator's watch
-  list, a Prometheus selector, any shared object) needs a removal path
+  list, the kubelet-metrics ClusterRole binding, any shared object) needs a removal path
   symmetric to the add. Both must be safe under concurrent deploys: take the
   `lakebench-cluster-lock` lease (`deploy/cluster_lock.py`) and
   read-modify-write under it.
@@ -877,7 +840,5 @@ Each chunk's `WHERE` (statement form:
 
 ## Further reading
 
-- [Architecture](architecture.md): system layers, deploy order and the Spark
-  executor profiles.
-- [Operators and catalogs](recipes.md#choosing-a-catalog): the Spark Operator and
-  the metastores in depth.
+- [Architecture](architecture.md): system layers and component topology.
+- [Choosing a catalog](recipes.md#choosing-a-catalog), [Spark](component-spark.md) and [Hive Metastore](component-hive.md): the catalogs and the Spark Operator.

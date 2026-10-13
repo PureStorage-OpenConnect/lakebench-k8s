@@ -1,6 +1,6 @@
 # Polaris
 
-Reference: configure the Apache Polaris REST catalog: config keys, version limits, sizing and deploy behaviour.
+Reference: Apache Polaris REST catalog: config keys, version limits, sizing and deploy behaviour.
 
 ## What it does
 
@@ -9,8 +9,8 @@ Reference: configure the Apache Polaris REST catalog: config keys, version limit
 - `lakebench init` writes the Polaris recipe `polaris-iceberg-spark-trino` by default.
 - In an existing config, set `recipe: polaris-iceberg-spark-trino`. Setting only `architecture.catalog.type: polaris` under a `hive-*` recipe is refused at load.
 - `lakebench deploy` deploys Polaris and `lakebench destroy` removes it. No Hive Metastore is deployed.
-- Commands, stages, table names and benchmark queries are the same as with Hive. Spark registers tables through the Polaris REST API instead of the Hive Thrift protocol. Trino queries through the same REST endpoint.
-- Polaris serves only catalog metadata. It processes no query data.
+- Commands, stages, table names and benchmark queries match Hive. Spark and Trino use the Polaris REST API instead of the Hive Thrift protocol.
+- Polaris serves only catalog metadata and processes no query data.
 - Recipes: `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none` ([Recipes](recipes.md)).
 
 ## Version and image
@@ -22,7 +22,7 @@ Reference: configure the Apache Polaris REST catalog: config keys, version limit
 | Apache Polaris | 1.3.0-incubating | 1.8.0 | 1.1.0 and 1.2.0 attempt STS even when told not to. |
 | Trino | 454 | 483 | 454 added `iceberg.rest-catalog.oauth2.scope`. |
 
-Polaris 1.6.0, 1.7.0 and 1.8.0 work. Each ran the full AML continuous pipeline on a cluster (Spark, Trino 483 and the Polaris REST catalog) and passed. 1.8.0 is the default. Releases from 1.3.0 to 1.5.x are accepted but not tested. 1.1.0 and 1.2.0 are not supported.
+1.6.0, 1.7.0 and 1.8.0 each passed the full AML continuous pipeline on a cluster (Spark, Trino 483, Polaris REST catalog). 1.8.0 is the default. 1.3.0 to 1.5.x are accepted but not tested; 1.1.0 and 1.2.0 are not supported.
 
 - **Polaris 1.8 and the schema.** 1.8.0 stopped creating its JDBC schema during `bootstrap`. `deploy` creates `polaris_schema` (`CREATE SCHEMA IF NOT EXISTS`, owned by the `polaris` role) before it bootstraps, which is also safe on 1.6.0 and 1.7.0. A JDBC URL that sets `currentSchema` would point Polaris at a different schema from 1.8 on; Lakebench's URL does not.
 - **Polaris 1.3.0.** In 1.1.0 and 1.2.0, `TaskFileIOSupplier` tries STS credential subscoping even when told not to ([apache/polaris#379](https://github.com/apache/polaris/issues/379)). Server-side S3 operations then fail on non-AWS storage. 1.3.0 and later contain the fix ([PR #400](https://github.com/apache/polaris/pull/400)).
@@ -66,7 +66,7 @@ architecture:
 
 ## Sizing
 
-The defaults (1 CPU, 2Gi) handle pipelines up to ~1 TB. Needs grow with concurrent catalog operations (table commits from many Spark executors), not data volume.
+The defaults (1 CPU, 2Gi) handle pipelines up to ~1 TB. Load follows concurrent catalog operations (table commits from many Spark executors), not data volume.
 
 | Scale factor | CPU | Memory |
 |---|---|---|
