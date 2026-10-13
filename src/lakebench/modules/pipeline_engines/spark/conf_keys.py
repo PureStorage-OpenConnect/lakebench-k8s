@@ -130,12 +130,9 @@ LAKEBENCH_OWNED_SPARK_KEYS: frozenset[str] = frozenset(
         "spark.ui.retainedJobs",
         "spark.ui.retainedDeadExecutors",
         "spark.scheduler.listenerbus.eventqueue.appStatus.capacity",
-        "spark.ui.prometheus.enabled",
         "spark.metrics.namespace",
-        "spark.metrics.conf.*.sink.prometheusServlet.class",
-        "spark.metrics.conf.*.sink.prometheusServlet.path",
-        "spark.metrics.conf.master.sink.prometheusServlet.path",
-        "spark.metrics.conf.applications.sink.prometheusServlet.path",
+        "spark.metrics.conf.*.sink.jmx.class",
+        "spark.executor.metrics.fileSystemSchemes",
     }
 )
 

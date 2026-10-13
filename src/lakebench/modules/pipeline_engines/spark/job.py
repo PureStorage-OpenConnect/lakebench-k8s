@@ -2808,10 +2808,10 @@ class SparkJobManager:
         # OOM.  Combined with flush throttling and retained state caps,
         # this keeps the driver responsive at scale 100+.
         #
-        # Tradeoff: disables Spark UI and PrometheusServlet (they share
-        # the same Jetty server).  Prometheus scraping of Spark metrics
-        # is lost.  Observability layer still collects Trino/PodMonitor
-        # metrics.  Re-enable when SPARK-43523 is fixed upstream.
+        # Tradeoff: disables the Spark UI and its PrometheusServlet (they
+        # share one Jetty server), so nothing is scraped from the driver.
+        # The executors' storage counters reach Prometheus by the JMX
+        # exporter agent instead (spark/jmx_exporter.py).
         spark_conf.update(
             {
                 "spark.ui.enabled": "false",
@@ -2831,21 +2831,6 @@ class SparkJobManager:
             # the store must hold a whole rule's. Completed entities only: the
             # live-task flush above is unchanged.
             spark_conf.update({"spark.ui.retainedJobs": "1000", "spark.ui.retainedStages": "1000"})
-
-        # Prometheus metrics (for observability layer)
-        if cfg.observability.enabled:
-            spark_conf.update(
-                {
-                    "spark.ui.prometheus.enabled": "true",
-                    "spark.metrics.namespace": "lakebench",
-                    # PrometheusServlet sink -- exposes metrics at driver
-                    # and executor scrape endpoints for Prometheus collection
-                    "spark.metrics.conf.*.sink.prometheusServlet.class": "org.apache.spark.metrics.sink.PrometheusServlet",
-                    "spark.metrics.conf.*.sink.prometheusServlet.path": "/metrics/prometheus",
-                    "spark.metrics.conf.master.sink.prometheusServlet.path": "/metrics/master/prometheus",
-                    "spark.metrics.conf.applications.sink.prometheusServlet.path": "/metrics/applications/prometheus",
-                }
-            )
 
         # Add extra configuration
         if extra_conf:
@@ -2965,6 +2950,18 @@ class SparkJobManager:
             spark_conf["spark.executor.extraJavaOptions"] = (
                 spark_conf.get("spark.executor.extraJavaOptions", "") + _ts_opts
             ).strip()
+
+        # Storage-byte counters from the executors, scraped by the
+        # deployment's Prometheus (appended after the truststore options).
+        if cfg.observability.enabled:
+            from lakebench.modules.pipeline_engines.spark import jmx_exporter
+
+            jmx_exporter.wire(
+                spark_conf,
+                executor_pod_template,
+                image=cfg.images.jmx_exporter,
+                pull_policy=cfg.images.pull_policy.value,
+            )
 
         # The reference detector trains on the driver only; executors do not
         # need the packages. Driver-side only.

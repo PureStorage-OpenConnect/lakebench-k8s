@@ -52,17 +52,19 @@ Each run saves `lakebench-output/runs/run-<id>/metrics.json`:
 
 The `io` block holds the storage traffic the engines reported for the run, derived from the rest of the record when it is written; records from before 1.7.2 lack it. Bytes are what the storage clients count; pod network bytes are not added.
 
-- `intervals`: one per Trino benchmark query and one for datagen. Each has `source`, `stage`, `label` (`benchmark`, `pre_compaction` or `round_<n>`), the `query`, `start` and `end` (UTC, from the engine's clock; null when not recorded), `read_bytes` and `write_bytes`, the basis of each, and `complete`.
+- `intervals`: one per Trino benchmark query, one for datagen, and one per 15 s step of each Spark stage that gained bytes. Each has `source`, `stage`, `label` (`benchmark`, `pre_compaction` or `round_<n>`), the `query`, `start` and `end` (UTC, from the engine's clock; null when not recorded), `read_bytes` and `write_bytes`, the basis of each, and `complete`.
 - `null` bytes mean not measured; `0` means measured and zero.
-- `not_measured`: what has no figure and why. Spark stages read `executor_io_not_collected`, a query engine other than Trino `engine_not_instrumented`, and a Trino record from before the block `io_not_recorded`.
+- `not_measured`: what has no figure and why. A Spark stage with no executor counters reads `executor_io_not_collected` (observability was off), a Spark stage's reads of an Iceberg table `iceberg_reads_have_no_client_counter`, a query engine other than Trino `engine_not_instrumented`, and a Trino record from before the block `io_not_recorded`.
 - `totals`: bytes per source, summed over its intervals.
-- `problems`: query samples whose report was missing, for example because the query had left the coordinator's history.
+- `problems`: query samples whose report was missing, for example because the query had left the coordinator's history, and Spark stages whose write counters cover under 95% of the bytes that landed.
 
 Where the figures come from:
 
 - **Trino:** `physical_input_bytes` and `physical_written_bytes` from `system.runtime.tasks`, read once per query stream after its last query ends, so no timed query is affected. Summed over a query's tasks they equal its `physicalInputDataSize` and `physicalWrittenDataSize`. Decoded size, output size and inter-node exchange are not storage and are not read.
 - **Datagen:** `datagen_fleet.total_bytes_written`. Single-run datagen records no start or end time, so its interval has no window and counts as unplaced in a time series.
-- **Not measured:** Spark reads and writes, and storage-side telemetry.
+- **Spark:** the executors' exporter counters, read from Prometheus after the run (`platform_metrics.spark_io`, cumulative bytes per pod summed per stage every 15 s). Writes are `executor.bytesWritten`, task output bytes; reads are `executor.filesystem.s3a.read_bytes`, so raw files and Delta tables, not Iceberg tables. Silver reads raw Parquet in a batch run and bronze's table in a continuous one; gold reads the silver table. Streaming checkpoint and state bytes are in neither counter. Only with `observability.enabled`.
+- **Spark write bytes are partial.** The task output counter moves when a task finishes, so a stage shows its bytes at the end, not as a rate. The executors are deleted when their job ends and the last increments can be lost: in two Customer 360 runs (scale 1) the counters held 87% and 70% of the silver bytes that landed, and reads were within 0.3%. The record compares each stage with the bytes that landed and flags a shortfall in `problems`; the interval is marked `complete: false`.
+- **Not measured:** Iceberg table reads, driver-side I/O, and storage-side telemetry.
 
 `lakebench.metrics.io.bucket_series` spreads the intervals over fixed time buckets. Each interval's bytes are spread evenly over its window, so a bucket is no finer than the queries feeding it. Bytes with no window, or outside the requested range, are `unplaced`.
 

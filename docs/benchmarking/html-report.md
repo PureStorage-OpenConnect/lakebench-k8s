@@ -134,7 +134,7 @@ Bytes the engines reported reading from and writing to storage, from the record'
 
 - A table with one row per source and round: Trino queries (the benchmark, the round before maintenance, each in-stream round) and datagen. Each row gives read and written bytes, the window (UTC, the engine's clock) and the basis of each figure; each total names its record field, so it can be checked against `metrics.json`.
 - A rate chart of MB/s read and written per time bucket. Each interval's bytes are spread evenly over its window, so a bucket is no finer than the queries feeding it. Bytes with no recorded window (datagen) are listed under the chart as not on it.
-- "Not measured" is stated, never shown as zero: Spark stages (executor I/O is not collected), a query engine other than Trino, and a Trino round whose record predates the block. "n/a" marks a direction a source does not have (datagen reads nothing). A figure that was measured as zero reads `0.00 MiB`.
+- "Not measured" is stated, never shown as zero: Spark stages without observability, Spark's Iceberg table reads (no client counter), a query engine other than Trino, and a Trino round whose record predates the block. "n/a" marks a direction a source does not have (datagen reads nothing). A figure that was measured as zero reads `0.00 MiB`.
 - Pod network traffic and storage-array telemetry are not part of it, and bytes from different sources are not added together.
 
 ## Storage multiple

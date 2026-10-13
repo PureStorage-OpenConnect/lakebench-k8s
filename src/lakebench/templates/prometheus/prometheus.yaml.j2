@@ -103,6 +103,31 @@ data:
           - source_labels: [__meta_kubernetes_namespace]
             target_label: namespace
 
+      # Spark executors: the JMX exporter agent on 9404 (task output bytes and
+      # S3A read bytes). Executors are deleted when their job ends and the
+      # task output counter moves only when a task finishes, so the last
+      # increments can be lost; the record says how much (io coverage).
+      - job_name: spark-executors
+        scrape_interval: 5s
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces: {names: ['{{ namespace }}']}
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_spark_role]
+            action: keep
+            regex: executor
+          - source_labels: [__meta_kubernetes_pod_ip]
+            target_label: __address__
+            replacement: '${1}:9404'
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+        metric_relabel_configs:
+          - source_labels: [__name__]
+            action: keep
+            regex: 'metrics_lakebench_.+_executor_(byteswritten_count|recordswritten_count|filesystem_s3a_(read|write)_bytes_value)'
+
       # Kubelet cAdvisor: per-pod CPU and memory. Only reachable with the
       # ClusterRole below bound; without it this target reads up=0 and
       # platform CPU and memory in the report read ``not collected``.

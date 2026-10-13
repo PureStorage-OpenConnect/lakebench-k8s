@@ -14,6 +14,11 @@ What a figure means:
   Delta tables, so only one of them is ever used for writes.
 - Storage is what the storage clients report. Pod network bytes are a
   separate measurement and are not derived from or added to these.
+- Spark writes are the executors' task output bytes; Spark reads are the S3A
+  client's read bytes, which cover raw Parquet and Delta and not Iceberg table
+  reads. Streaming checkpoint and state bytes are in neither. Both come from
+  the executors' exporter counters (``observability/spark_io.py``) and exist
+  only when observability was on.
 - Trino bytes are ``physicalInputDataSize`` and ``physicalWrittenDataSize``
   (not the decoded, output or exchange sizes).
 """
@@ -29,14 +34,29 @@ IO_VERSION = 1
 BASIS_TRINO_READ = "trino_physical_input"
 BASIS_TRINO_WRITE = "trino_physical_written"
 BASIS_DATAGEN = "datagen_fleet"
+BASIS_SPARK_WRITE = "executor_task_output"
+BASIS_SPARK_READ = "executor_s3a_read"
 BASIS_NOT_MEASURED = "not_measured"
 
 #: Why a stage has no figure, as recorded in ``io.not_measured``.
 REASON_EXECUTOR_IO = "executor_io_not_collected"
 REASON_ENGINE = "engine_not_instrumented"
 REASON_NOT_RECORDED = "io_not_recorded"
+#: Iceberg table reads go through S3FileIO, which has no client-side byte counter.
+REASON_ICEBERG_READS = "iceberg_reads_have_no_client_counter"
 
 _SPARK_STAGES = ("bronze", "silver", "gold")
+_GIB = 1024**3
+#: A Spark stage's write counters under this share of the bytes that landed
+#: are flagged: the executors exit before their last increments are scraped.
+COVERAGE_FLOOR = 0.95
+
+
+def _reads_a_table(stage: str, mode: str) -> bool:
+    """Whether *stage* reads a lakehouse table (not raw files). Bronze reads
+    raw files; batch silver reads bronze's raw Parquet and batch gold reads
+    the silver table; continuous silver and gold read tables."""
+    return stage == "gold" or (stage == "silver" and mode != "batch")
 
 
 def _iso(epoch: Any) -> str | None:
@@ -76,6 +96,42 @@ def _benchmarks(record: Mapping[str, Any]) -> list[tuple[str, str, Mapping[str, 
 def _sum(intervals: list[dict[str, Any]], source: str, key: str) -> int | None:
     vals = [i[key] for i in intervals if i["source"] == source and i.get(key) is not None]
     return int(sum(vals)) if vals else None
+
+
+def _spark_intervals(
+    stage: str, series: Mapping[str, Any], block: Mapping[str, Any], reads: bool
+) -> list[dict[str, Any]]:
+    """One interval per scrape step of a Spark stage, with the bytes the
+    executors' counters gained over that step. A step with no gain adds none."""
+    start = _parse(str(block["start"])).timestamp()
+    write, read = series.get("write") or [], series.get("read") or []
+    out: list[dict[str, Any]] = []
+    for k in range(1, len(write)):
+        w = max(0.0, write[k][1] - write[k - 1][1])
+        r = max(0.0, read[k][1] - read[k - 1][1]) if reads and k < len(read) else None
+        if not w and not r:
+            continue
+        out.append(
+            {
+                "source": "spark",
+                "stage": stage,
+                "label": stage,
+                "query": None,
+                "start": _iso(start + write[k - 1][0]),
+                "end": _iso(start + write[k][0]),
+                "clock": "host",
+                "read_bytes": int(r) if r is not None else None,
+                "write_bytes": int(w),
+                "read_basis": BASIS_SPARK_READ if reads else None,
+                "write_basis": BASIS_SPARK_WRITE,
+                "complete": True,
+                "paths": {
+                    "read": f"platform_metrics.spark_io.stages.{stage}.read" if reads else None,
+                    "write": f"platform_metrics.spark_io.stages.{stage}.write",
+                },
+            }
+        )
+    return out
 
 
 def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -181,17 +237,43 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
     stage_names = {
         s.get("stage_name") for s in (record.get("pipeline_benchmark") or {}).get("stages") or []
     }
+    spark_io = (record.get("platform_metrics") or {}).get("spark_io")
+    spark_stages = (spark_io or {}).get("stages") or {}
+    iceberg = str((record.get("config_snapshot") or {}).get("table_format") or "") == "iceberg"
+    mode = str((record.get("pipeline_benchmark") or {}).get("pipeline_mode") or "batch")
+    stage_rows = {
+        s.get("stage_name"): s
+        for s in (record.get("pipeline_benchmark") or {}).get("stages") or []
+        if isinstance(s, Mapping)
+    }
     for name in _SPARK_STAGES:
-        if name in stage_names:
-            for direction in ("read", "write"):
-                not_measured.append(
-                    {
-                        "source": "spark",
-                        "stage": name,
-                        "direction": direction,
-                        "reason": REASON_EXECUTOR_IO,
-                    }
+        if name not in stage_names:
+            continue
+        measured = spark_stages.get(name)
+        reads = bool(measured) and not (iceberg and _reads_a_table(name, mode))
+        if measured:
+            counted = _spark_intervals(name, measured, spark_io or {}, reads)
+            landed = float((stage_rows.get(name) or {}).get("output_size_gb") or 0) * _GIB
+            wrote = sum(i["write_bytes"] for i in counted)
+            if landed > 0 and wrote < COVERAGE_FLOOR * landed:
+                for i in counted:
+                    i["complete"] = False
+                problems.append(
+                    f"spark {name}: write counters cover {wrote / landed:.0%} of the "
+                    f"{landed / _GIB:.2f} GiB that landed"
                 )
+            intervals.extend(counted)
+        for direction in ("read", "write"):
+            if measured and (direction == "write" or reads):
+                continue
+            not_measured.append(
+                {
+                    "source": "spark",
+                    "stage": name,
+                    "direction": direction,
+                    "reason": REASON_ICEBERG_READS if measured else REASON_EXECUTOR_IO,
+                }
+            )
 
     if not intervals and not not_measured:
         return None

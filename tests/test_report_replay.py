@@ -169,3 +169,16 @@ def test_golden_replay_block_matches_its_record(run_id: str) -> None:
             assert s["start"] is None
     assert [j["name"] for j in data["jobs"]] == [j["job_name"] for j in record["jobs"]]
     assert data["duration"] == pytest.approx(_ts(record["end_time"]) - t0)
+
+
+def test_partial_spark_storage_is_named_on_the_replay() -> None:
+    rec = _record()
+    rec["io"]["problems"] = [
+        "spark silver: write counters cover 70% of the 9.76 GiB that landed",
+        "trino: 1 query sample(s) had no I/O report",
+    ]
+    d = build_replay(rec)
+    assert d["storage_problems"] == [
+        "spark silver: write counters cover 70% of the 9.76 GiB that landed"
+    ]
+    assert "Partial: spark silver: write counters cover 70%" in render_replay(d)

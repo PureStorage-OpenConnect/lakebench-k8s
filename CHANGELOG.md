@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Storage I/O section in the report.** Trino read and written bytes per round, datagen's total, a MB/s chart from the queries' time windows, and an explicit list of what was not measured. See [HTML report](docs/benchmarking/html-report.md#storage-io).
 - **Workload replay tab in the report.** A batch run opens on a replay of its recorded stage and job windows, row counts and storage rate, beside the Scorecard tab. See [HTML report](docs/benchmarking/html-report.md#views).
 - **Datagen's window is recorded.** A run that generates its own corpus stores the datagen stage's start and end, so the report's replay and storage lane place it. Time to value does not count it and is unchanged.
+- **Spark storage bytes in the report, with observability on.** Each Spark executor runs the JMX exporter agent; the deployment's Prometheus scrapes its task output and S3A read bytes, and the run's end stores them in `platform_metrics.spark_io`. The `io` block and the replay's storage lane show them. Writes are task output bytes and are partial (the record flags coverage under 95% of the bytes that landed); Iceberg table reads are not measured. The unused Spark PrometheusServlet settings are removed.
 - **Scorecard tiles in the report.** Eight tiles open the Scorecard tab, each citing its record field and marked recorded, derived or NR (not measured). See [HTML report](docs/benchmarking/html-report.md#scorecard-tiles).
 
 ### Changed

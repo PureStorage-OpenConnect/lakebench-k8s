@@ -57,7 +57,7 @@ Prometheus runs with a scrape config that targets this deployment only:
 - Trino coordinator and workers in this namespace (JMX exporter on port 9090).
 - The kubelet cAdvisor endpoint on every node, filtered at relabel time to this namespace. The per-pod CPU, memory, network and filesystem families are kept; the rest is dropped.
 
-Spark jobs run with the Spark UI off, which also turns off Spark's Prometheus endpoint, so no Spark engine metrics (GC, shuffle, spill, S3A I/O) are collected; executor and driver series come from cAdvisor only. Spark stages report rows, bytes and elapsed time through the Pushgateway and `metrics.json`.
+Spark jobs run with the Spark UI off, which also turns off Spark's Prometheus endpoint, so no Spark engine metrics (GC, shuffle, spill) are collected; executor and driver series come from cAdvisor. Each executor also runs the JMX exporter agent (`images.jmx_exporter`); the stack scrapes its task output bytes and S3A read bytes every 5 s (job `spark-executors`), and the run's end stores them in the record's `platform_metrics.spark_io`. Spark stages report rows, bytes and elapsed time through the Pushgateway and `metrics.json`.
 
 ### Pushgateway
 
@@ -113,7 +113,7 @@ After a run, `PlatformCollector` queries the deployment's Prometheus (`http://la
 
 ### Storage I/O
 
-S3 request counts and latency are recorded as `null` (not collected). Storage bytes read and written come from the engines and are recorded in the run record's `io` block: Trino benchmark queries and the datagen total. Spark stages are not measured. See [Run records](benchmarking/records.md#storage-io).
+S3 request counts and latency are recorded as `null` (not collected). Storage bytes read and written come from the engines and are recorded in the run record's `io` block: Trino benchmark queries and the datagen total. Spark stages come from the executors' counters, with the limits in [Run records](benchmarking/records.md#storage-io).
 
 ## Reports
 

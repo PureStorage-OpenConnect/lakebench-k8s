@@ -210,6 +210,9 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
         "storage": storage,
         "storage_unplaced": [i.get("source") for i in not_placed],
         "storage_gaps": gaps,
+        "storage_problems": [
+            str(x) for x in io.get("problems") or [] if str(x).startswith("spark ")
+        ],
         "not_measured": ["Compute", "Network", "Kubernetes"],
     }
 
@@ -412,11 +415,11 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         for n in lanes
     )
     gaps = sorted(set(data["storage_gaps"]) | set(data["storage_unplaced"]))
-    spark = any(g.startswith("spark") for g in gaps)
-    other = [g for g in gaps if not g.startswith("spark")]
-    note = "Not measured: " + ", ".join(
-        [*lanes, *(["Spark storage"] if spark else []), *(f"{g} storage" for g in other)]
-    )
+    unmeasured = [*lanes, *(f"{g} storage" for g in gaps)]
+    note = "Not measured: " + ", ".join(unmeasured) + "."
+    problems = data.get("storage_problems") or []
+    if problems:
+        note += " Partial: " + "; ".join(problems) + "."
     switch = unit_switch(pace.unit_label) if pace is not None and pace.alt_value else ""
     pace_html = ""
     if pace is not None and pace.evidence != "nr":

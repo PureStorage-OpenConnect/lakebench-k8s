@@ -86,6 +86,9 @@ class PlatformMetrics:
     # (pod, container) once. Records without it summed the pod-level total,
     # the pause container and any duplicate scrape into each pod.
     query_version: int = POD_QUERY_VERSION
+    # Spark storage bytes over time (observability/spark_io.py); None when no
+    # executor exporter was scraped.
+    spark_io: dict[str, Any] | None = None
 
     @property
     def duration_seconds(self) -> float:
@@ -115,6 +118,7 @@ class PlatformMetrics:
             "engine": self.engine.to_dict() if self.engine.has_data else None,
             "collection_error": self.collection_error,
             "query_version": self.query_version,
+            **({"spark_io": self.spark_io} if self.spark_io is not None else {}),
         }
 
 
@@ -219,6 +223,9 @@ class PlatformCollector:
             # Engine-level Tier 2 metrics (best-effort)
             self._collect_engine_metrics(client, metrics, start_time, end_time)
 
+            # Spark storage bytes over time (best-effort)
+            self._collect_spark_io(client, metrics, failed, start_time, end_time)
+
             # A pod with a series in one query but not the other (one that
             # lived under the 1m rate window has memory but no CPU rate) has
             # that value not collected; say how many.
@@ -304,6 +311,43 @@ class PlatformCollector:
         if results and results[0].get("value"):
             return float(results[0]["value"][1])
         return None
+
+    def _collect_spark_io(
+        self,
+        client: Any,
+        metrics: PlatformMetrics,
+        failed: list[str],
+        start_time: datetime,
+        end_time: datetime,
+    ) -> None:
+        """Read the executors' storage counters over the run window."""
+        from lakebench.observability.spark_io import (
+            READ_QUERY,
+            STEP_SECONDS,
+            WRITE_QUERY,
+            build_spark_io,
+        )
+
+        step = f"{STEP_SECONDS}s"
+        write = self._query_family(
+            failed,
+            "Spark write bytes",
+            client,
+            WRITE_QUERY.format(ns=self.namespace),
+            start_time,
+            end_time,
+            step,
+        )
+        read = self._query_family(
+            failed,
+            "Spark read bytes",
+            client,
+            READ_QUERY.format(ns=self.namespace),
+            start_time,
+            end_time,
+            step,
+        )
+        metrics.spark_io = build_spark_io(write, read, start_time, end_time, step=STEP_SECONDS)
 
     def _collect_engine_metrics(
         self,
