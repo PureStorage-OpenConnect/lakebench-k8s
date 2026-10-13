@@ -3,7 +3,8 @@ and the default-recipe deprecation.
 
 The first-day config holds a unique name, the recipe once, the workload and
 scale, the endpoint and the two S3 credentials as ``${VAR}`` references, in
-no more than 12 non-comment lines. A component written against its recipe
+no more than 12 non-comment lines, followed by every other key commented at
+its default. A component written against its recipe
 is refused at load, naming both keys; before v1.7 the written value won
 silently, so ``init --recipe polaris-*`` deployed Hive. A config with no
 recipe, or ``recipe: default``, still resolves as before, with a note.
@@ -77,7 +78,7 @@ def test_init_all_recipes_load(tmp_path, creds, recipe, workload):
     assert s3["access_key"] == "${LAKEBENCH_S3_ACCESS_KEY}"
     assert s3["secret_key"] == "${LAKEBENCH_S3_SECRET_KEY}"
     assert SENTINEL_AK not in text and SENTINEL_SK not in text
-    assert "client_secret" not in text
+    assert "client_secret" not in str(raw)  # listed commented, never live
     assert "architecture" not in raw  # recipe-owned keys are commented
     assert len(re.findall(r"(?m)^recipe:", text)) == 1
     # The load is quiet: no deprecation or upgrade note on a fresh file.
@@ -94,16 +95,104 @@ def test_init_financial_on_a_delta_recipe_is_refused(tmp_path, creds, recipe):
     assert not out.exists()
 
 
+_RECIPE_LINES = (
+    "architecture:",
+    "  catalog:",
+    "    type: polaris",
+    "  table_format:",
+    "    type: iceberg",
+    "  pipeline_engine: spark",
+    "  query_engine:",
+    "    type: trino",
+)
+
+
+def _uncomment(text: str, only: tuple[str, ...] | None = None) -> str:
+    """Remove the leading '# ' from template lines: all of them, or only those
+    whose YAML is in *only*. The four header lines are prose and stay."""
+    lines = text.splitlines()
+    out = lines[:4]
+    for ln in lines[4:]:
+        if ln.startswith("# ") and (only is None or ln[2:] in only):
+            ln = ln[2:]
+        out.append(ln)
+    return "\n".join(out) + "\n"
+
+
 def test_uncommented_component_block_still_loads(tmp_path, creds):
     """A user who uncomments the recipe's own values gets no conflict."""
-    text = first_day_config(name="unc-t")
-    text = "\n".join(
-        ln[2:] if ln.startswith("# architecture:") or ln.startswith("#   ") else ln
-        for ln in text.splitlines()
-    )
     p = tmp_path / "c.yaml"
-    p.write_text(text)
+    p.write_text(_uncomment(first_day_config(name="unc-t"), only=_RECIPE_LINES))
     assert load_config(p).architecture.catalog.type.value == "polaris"
+
+
+def test_the_live_lines_stay_within_the_first_day_budget():
+    from lakebench.cli._init import LINE_BUDGET
+
+    text = first_day_config(name="live-t", namespace="ns-t", endpoint="http://s3:80")
+    live = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    assert len(live) <= LINE_BUDGET + 2  # a namespace adds two lines
+    assert "architecture" not in yaml.safe_load(text)
+
+
+@pytest.mark.parametrize(
+    ("recipe", "workload"),
+    [
+        ("polaris-iceberg-spark-trino", "financial"),
+        ("hive-iceberg-spark-trino", "customer360"),
+        ("hive-delta-spark-thrift", "customer360"),
+    ],
+)
+def test_uncommenting_every_key_loads_and_covers_the_schema(recipe, workload):
+    """The file is the full reference: every key of the schema is in it exactly
+    once, and the defaults it prints are values the schema accepts."""
+    from lakebench.cli._init import _schema_leaves, config_problem
+
+    text = first_day_config(name="all-t", recipe=recipe, workload=workload, endpoint="http://s3:80")
+    full = _uncomment(text)
+    assert config_problem(full, "LAKEBENCH_S3") is None
+
+    expected = [path for path, _ in _schema_leaves()]
+    flat: list[str] = []
+
+    def walk(node, prefix):
+        for key, value in node.items():
+            path = f"{prefix}{key}"
+            if isinstance(value, dict) and path not in expected:
+                walk(value, f"{path}.")
+            else:
+                flat.append(path)
+
+    walk(yaml.safe_load(full), "")
+    assert sorted(flat) == sorted(expected)
+    assert len(set(flat)) == len(flat)
+
+
+def test_one_key_uncommented_with_its_blocks_sets_only_that_key(tmp_path, creds):
+    text = first_day_config(name="one-t")
+    lines = text.splitlines()
+    wanted = ("architecture:", "  pipeline:", "    continuous:")
+    out = lines[:4]
+    for ln in lines[4:]:
+        body = ln[2:] if ln.startswith("# ") else ln
+        if ln.startswith("# ") and (
+            body in wanted or body.strip().startswith("silver_write_mode:")
+        ):
+            ln = body.replace("merge_on_read", "copy_on_write")
+        out.append(ln)
+    p = tmp_path / "one.yaml"
+    p.write_text("\n".join(out) + "\n")
+    cfg = load_config(p)
+    assert cfg.architecture.pipeline.sustained.silver_write_mode.value == "copy_on_write"
+    assert cfg.architecture.pipeline.sustained.run_duration == 1800  # untouched
+
+
+def test_derived_and_auto_sized_defaults_do_not_pin_a_value():
+    text = first_day_config(name="drv-t", endpoint="http://s3:80")
+    assert "bronze: drv-t-bronze" in text
+    assert "bronze: lakebench-bronze" not in text
+    assert "unset = auto" in text
+    assert not re.search(r"(?m)^#\s+pattern:", text)  # a deprecated key is not offered
 
 
 def test_default_name_is_unique_and_fits_hive(tmp_path):

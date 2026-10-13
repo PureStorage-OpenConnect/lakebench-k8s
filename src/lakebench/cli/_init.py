@@ -1,13 +1,17 @@
-"""``lakebench init``: write a first-day config.
+"""``lakebench init``: write a config with every key in it.
 
-The file is built from a small dict and written by a short emitter that
-keeps comments, so it holds only what a first run needs: a unique name, the
-recipe written once, the workload and scale, the S3 endpoint and the two
-credentials as ``${VAR}`` references. The components the recipe sets are
-written commented. No plaintext secret is ever written, and no Polaris
-client secret is written: deploy generates one for a new Polaris and keeps
-it in the deployment's namespace. Before anything is written the text is
-validated in-process, so ``init`` never leaves a file that does not load.
+The live lines are what a first run needs: a unique name, the recipe written
+once, the workload and scale, the S3 endpoint and the two credentials as
+``${VAR}`` references. Every other key of the schema follows in schema order,
+commented at its default with its type, range and a one-line description, so
+the file is the full reference for the deployment. A commented line is the
+YAML line with a leading ``# ``: remove that prefix, and the prefix of the
+block lines above the key, to set it. The components the recipe sets are in
+the same tree with the recipe's own values. No plaintext secret is ever
+written, and no Polaris client secret is written: deploy generates one for a
+new Polaris and keeps it in the deployment's namespace. Before anything is
+written the text is validated in-process, so ``init`` never leaves a file
+that does not load.
 
 The guided wizard (``init_wizard.py``) is removed. ``--interactive``, ``-i``
 and ``--advanced`` print one line saying so and write the default config;
@@ -17,8 +21,12 @@ values.
 
 from __future__ import annotations
 
+import enum
+import json
 import re
 import secrets
+import types
+import typing
 import warnings
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
@@ -167,6 +175,190 @@ def first_day_dict(
     }
 
 
+#: Schema paths shown under the key a config writes: the workload block is
+#: written at the top level, and ``pipeline.continuous`` is the canonical
+#: spelling of the ``sustained`` field.
+_DISPLAY_RENAMES = (
+    ("architecture.workload.", "workload."),
+    ("architecture.pipeline.sustained.", "architecture.pipeline.continuous."),
+)
+_DESCRIPTION_CHARS = 150
+#: Keys whose schema default is a floor, not what a run uses: unset, the run
+#: sizes them. The note keeps an uncommented line from pinning the floor.
+_AUTO_SIZED = {
+    "workload.datagen.parallelism": "unset = auto, sized from scale and cluster",
+    "workload.datagen.cpu": "unset = auto, sized from scale and cluster",
+    "workload.datagen.memory": "unset = auto, sized from workload, scale and cpu",
+}
+
+
+def _display(path: str) -> str:
+    for old, new in _DISPLAY_RENAMES:
+        if path.startswith(old):
+            return new + path[len(old) :]
+    return path
+
+
+def _block_model(annotation: Any) -> Any:
+    """The model class when *annotation* is a nested config block, else None."""
+    from pydantic import BaseModel
+
+    args = typing.get_args(annotation) or (annotation,)
+    models = [a for a in args if isinstance(a, type) and issubclass(a, BaseModel)]
+    if models and typing.get_origin(annotation) not in (dict, list):
+        return models[0]
+    return None
+
+
+def _schema_leaves() -> list[tuple[str, Any]]:
+    """``(displayed path, FieldInfo)`` of every key, in schema order."""
+    from lakebench.config.schema import LakebenchConfig
+
+    out: list[tuple[str, Any]] = []
+
+    def walk(model: Any, prefix: str) -> None:
+        for name, field in model.model_fields.items():
+            key = f"{prefix}{field.alias or name}"
+            block = _block_model(field.annotation)
+            if block is not None:
+                walk(block, f"{key}.")
+            elif not (field.description or "").lstrip("*").startswith("Deprecated"):
+                out.append((_display(key), field))
+
+    walk(LakebenchConfig, "")
+    return out
+
+
+def _type_text(annotation: Any) -> str:
+    origin = typing.get_origin(annotation)
+    if origin in (typing.Union, types.UnionType):
+        args = typing.get_args(annotation)
+        parts = [_type_text(a) for a in args if a is not type(None)]
+        return " or ".join(parts) + (" or null" if type(None) in args else "")
+    if origin is typing.Literal:
+        return "one of " + ", ".join(str(v) for v in typing.get_args(annotation))
+    if origin is dict:
+        return "mapping"
+    if origin is list:
+        return "list"
+    if isinstance(annotation, type) and issubclass(annotation, enum.Enum):
+        return "one of " + ", ".join(str(m.value) for m in annotation)
+    names = {str: "string", int: "integer", float: "number", bool: "boolean"}
+    return names.get(annotation, getattr(annotation, "__name__", str(annotation)))
+
+
+def _range_text(field: Any) -> str:
+    bounds: dict[str, Any] = {}
+    for item in field.metadata:
+        for attr in ("ge", "gt", "le", "lt"):
+            if getattr(item, attr, None) is not None:
+                bounds[attr] = getattr(item, attr)
+    low, high = bounds.get("ge", bounds.get("gt")), bounds.get("le", bounds.get("lt"))
+    if low is not None and high is not None:
+        return f"{low}-{high}"
+    if low is not None:
+        return f">= {low}" if "ge" in bounds else f"> {low}"
+    if high is not None:
+        return f"<= {high}" if "le" in bounds else f"< {high}"
+    return ""
+
+
+def _default_text(field: Any) -> str:
+    """The field's default as a YAML flow value."""
+    if field.default_factory is not None:
+        value = field.default_factory()
+    else:
+        value = field.default
+    if isinstance(value, enum.Enum):
+        value = value.value
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if value is None or value is Ellipsis or type(value).__name__ == "PydanticUndefinedType":
+        return "null"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    return _scalar(value)
+
+
+def _first_sentence(description: str | None) -> str:
+    text = " ".join((description or "").split())
+    if not text:
+        return ""
+    text = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
+    if len(text) > _DESCRIPTION_CHARS:
+        text = text[: _DESCRIPTION_CHARS - 3].rstrip() + "..."
+    return text
+
+
+def _template_tree(
+    active: dict[str, Any],
+    comments: dict[str, str],
+    owned: dict[str, str],
+    derived: dict[str, str],
+) -> dict[str, Any]:
+    """Every schema key as a nested dict: a leaf is ``(path, text, note)``
+    with *text* its live value or its default."""
+    tree: dict[str, Any] = {}
+    seen: set[str] = set()
+    for path, field in _schema_leaves():
+        parts = path.split(".")
+        node = tree
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        if path in active:
+            seen.add(path)
+            node[parts[-1]] = (path, _scalar(active[path]), comments.get(path, ""), "")
+            continue
+        if path in owned:
+            description = "Set by the recipe; if written out, it must agree with it."
+            node[parts[-1]] = (path, owned[path], "", description)
+            continue
+        note = _type_text(field.annotation)
+        bounds = _range_text(field)
+        if bounds:
+            note = f"{note}, {bounds}"
+        if path in _AUTO_SIZED:
+            note = f"{note}; {_AUTO_SIZED[path]}"
+        text = derived.get(path) or _default_text(field)
+        node[parts[-1]] = (path, text, note, _first_sentence(field.description))
+    missing = set(active) - seen
+    if missing:
+        raise ValueError(f"init writes keys the schema does not have: {sorted(missing)}")
+    return tree
+
+
+def _template_lines(tree: dict[str, Any], active_paths: set[str]) -> list[str]:
+    """The tree as lines: live where it holds a written key, else commented.
+
+    A commented line is the YAML line with a leading ``# ``. A description is
+    an indented comment above its key.
+    """
+    lines: list[str] = []
+
+    def live(path: str) -> bool:
+        return path in active_paths or any(a.startswith(f"{path}.") for a in active_paths)
+
+    def walk(node: dict[str, Any], depth: int, prefix: str) -> None:
+        pad = "  " * depth
+        for key, child in node.items():
+            path = f"{prefix}{key}"
+            if isinstance(child, dict):
+                header = f"{pad}{key}:"
+                lines.append(header if live(path) else f"# {header}")
+                walk(child, depth + 1, f"{path}.")
+                continue
+            _, text, note, description = child
+            if description:
+                lines.append(f"# {pad}# {description}")
+            line = f"{pad}{key}: {text}"
+            if note:
+                line = f"{line}  # {note}"
+            lines.append(line if path in active_paths else f"# {line}")
+
+    walk(tree, 0, "")
+    return lines
+
+
 def first_day_config(
     *,
     name: str,
@@ -180,7 +372,7 @@ def first_day_config(
     """The text of the config ``init`` writes."""
     from lakebench.config.recipes import recipe_components
 
-    tree = first_day_dict(
+    first_day = first_day_dict(
         name=name,
         recipe=recipe,
         workload=workload,
@@ -189,23 +381,36 @@ def first_day_config(
         credentials_env=credentials_env,
         namespace=namespace,
     )
+    active: dict[str, Any] = {}
+
+    def flatten(node: dict[str, Any], prefix: str) -> None:
+        for key, value in node.items():
+            if isinstance(value, dict):
+                flatten(value, f"{prefix}{key}.")
+            else:
+                active[f"{prefix}{key}"] = value
+
+    flatten(first_day, "")
     comments = {"workload.datagen.scale": _SCALE_COMMENT.get(workload, "")}
     comments = {k: v for k, v in comments.items() if v}
     if not endpoint:
         comments["platform.storage.s3.endpoint"] = "set this, e.g. http://your-s3:80"
+    owned = {
+        path: str(value) for path, value in recipe_components(recipe).items() if path not in active
+    }
+    owned = {path: (_scalar(value) if value else '""') for path, value in owned.items()}
+    # Defaults that follow the deployment name, written with the name filled in.
+    derived = {
+        f"platform.storage.s3.buckets.{layer}": _scalar(f"{name}-{layer}")
+        for layer in ("bronze", "silver", "gold")
+    }
+    tree = _template_tree(active, comments, owned, derived)
     lines = [
-        "# Written by `lakebench init`. Every key is in docs/configuration.md;",
-        "# `lakebench config recipes` lists the recipes.",
-        *emit(tree, comments),
-    ]
-    components = recipe_components(recipe)
-    lines += [
-        "# Set by the recipe. Written out, each must agree with it:",
-        "# architecture:",
-        f"#   catalog: {{type: {components['architecture.catalog.type']}}}",
-        f"#   table_format: {{type: {components['architecture.table_format.type']}}}",
-        f"#   pipeline_engine: {components['architecture.pipeline_engine']}",
-        f"#   query_engine: {{type: {components['architecture.query_engine.type']}}}",
+        "# Written by `lakebench init`. The lines without a leading '# ' are what a first run needs.",
+        "# Every other key follows in schema order at its default, with its type and range.",
+        "# To set one, remove the '# ' from its line and from the block lines above it.",
+        "# `lakebench config recipes` lists the recipes; docs/configuration.md describes each key.",
+        *_template_lines(tree, set(active)),
     ]
     return "\n".join(lines) + "\n"
 
@@ -380,13 +585,16 @@ def init(
         typer.Option("--advanced", hidden=True, help="Removed: init no longer has a wizard"),
     ] = False,
 ) -> None:
-    """Write a starter configuration file.
+    """Write a configuration file with every key in it.
 
     The file names the deployment (lb-<user>-<4 hex> unless --name is
     given), the recipe (polaris-iceberg-spark-trino unless --recipe is
     given), the workload, the scale (1), the S3 endpoint and the two S3
     credentials as ${VAR} references: export LAKEBENCH_S3_ACCESS_KEY and
     LAKEBENCH_S3_SECRET_KEY, or pick the names with --credentials-env.
+    Every other key follows in schema order, commented at its default with
+    its type, range and a one-line description; remove the leading '# ' from
+    a key and from the block lines above it to set it.
     The choices are printed on stderr.
 
     Use 'lakebench config recommend' for cluster sizing guidance.
