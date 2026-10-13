@@ -36,6 +36,11 @@ BASIS_TRINO_WRITE = "trino_physical_written"
 BASIS_DATAGEN = "datagen_fleet"
 BASIS_SPARK_WRITE = "executor_task_output"
 BASIS_SPARK_READ = "executor_s3a_read"
+#: The driver's total of the stage's task output bytes: every task, so the
+#: whole stage. Placed over the stage window when the executors' counters
+#: are absent; the part those counters did not see is placed at the stage end.
+BASIS_SPARK_DRIVER = "driver_task_output"
+BASIS_SPARK_UNSEEN = "driver_task_output_unseen_by_executors"
 BASIS_NOT_MEASURED = "not_measured"
 
 #: Why a stage has no figure, as recorded in ``io.not_measured``.
@@ -46,6 +51,10 @@ REASON_NOT_RECORDED = "io_not_recorded"
 REASON_ICEBERG_READS = "iceberg_reads_have_no_client_counter"
 
 _SPARK_STAGES = ("bronze", "silver", "gold")
+#: How far back from a stage's end the part of its writes the executors did not
+#: see is placed (the scrape step).
+_UNSEEN_SECONDS = 15.0
+_JOB_STAGE = {"bronze-verify": "bronze", "silver-build": "silver", "gold-finalize": "gold"}
 _GIB = 1024**3
 #: A Spark stage's write counters under this share of the bytes that landed
 #: are flagged: the executors exit before their last increments are scraped.
@@ -132,6 +141,54 @@ def _spark_intervals(
             }
         )
     return out
+
+
+def _driver_writes(record: Mapping[str, Any]) -> dict[str, int]:
+    """Stage -> the driver's complete total of task output bytes, from the
+    job's ``extra_metrics`` (``output_bytes_written`` with
+    ``output_bytes_complete: true``). A total the driver marked possibly low
+    is not used."""
+    out: dict[str, int] = {}
+    for j in record.get("jobs") or []:
+        if not isinstance(j, Mapping):
+            continue
+        stage = _JOB_STAGE.get(str(j.get("job_type")))
+        extra = j.get("extra_metrics") or {}
+        if not stage or str(extra.get("output_bytes_complete")) != "true":
+            continue
+        try:
+            out[stage] = out.get(stage, 0) + int(extra["output_bytes_written"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _interval(
+    stage: str,
+    start: str | None,
+    end: str | None,
+    *,
+    read: int | None,
+    write: int,
+    write_basis: str,
+    read_basis: str | None,
+    paths: Mapping[str, str | None],
+) -> dict[str, Any]:
+    return {
+        "source": "spark",
+        "stage": stage,
+        "label": stage,
+        "query": None,
+        "start": start,
+        "end": end,
+        "clock": "host",
+        "read_bytes": read,
+        "write_bytes": write,
+        "read_basis": read_basis,
+        "write_basis": write_basis,
+        "complete": True,
+        "paths": dict(paths),
+    }
 
 
 def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -246,15 +303,49 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
         for s in (record.get("pipeline_benchmark") or {}).get("stages") or []
         if isinstance(s, Mapping)
     }
+    driver = _driver_writes(record)
     for name in _SPARK_STAGES:
         if name not in stage_names:
             continue
         measured = spark_stages.get(name)
         reads = bool(measured) and not (iceberg and _reads_a_table(name, mode))
+        row = stage_rows.get(name) or {}
+        total = driver.get(name)
+        counted: list[dict[str, Any]] = []
         if measured:
             counted = _spark_intervals(name, measured, spark_io or {}, reads)
-            landed = float((stage_rows.get(name) or {}).get("output_size_gb") or 0) * _GIB
-            wrote = sum(i["write_bytes"] for i in counted)
+        wrote = sum(i["write_bytes"] for i in counted)
+        if total is not None:
+            # The driver's total is the whole stage's. The executors' counters
+            # time what they saw; the rest is placed at the stage end.
+            if wrote > total * 1.01:
+                problems.append(
+                    f"spark {name}: the executors' counters ({wrote:,} B) exceed the "
+                    f"driver's total ({total:,} B)"
+                )
+            unseen = max(0, total - wrote)
+            if unseen or not counted:
+                end, start = row.get("end_time"), row.get("start_time")
+                if counted and end and start:
+                    lo = max(_parse(start).timestamp(), _parse(end).timestamp() - _UNSEEN_SECONDS)
+                    start = _iso(lo)
+                counted.append(
+                    _interval(
+                        name,
+                        start,
+                        end,
+                        read=None,
+                        write=unseen if counted else total,
+                        write_basis=BASIS_SPARK_UNSEEN if counted else BASIS_SPARK_DRIVER,
+                        read_basis=None,
+                        paths={
+                            "read": None,
+                            "write": "jobs[*].extra_metrics.output_bytes_written",
+                        },
+                    )
+                )
+        elif measured:
+            landed = float(row.get("output_size_gb") or 0) * _GIB
             if landed > 0 and wrote < COVERAGE_FLOOR * landed:
                 for i in counted:
                     i["complete"] = False
@@ -262,9 +353,11 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
                     f"spark {name}: write counters cover {wrote / landed:.0%} of the "
                     f"{landed / _GIB:.2f} GiB that landed"
                 )
-            intervals.extend(counted)
+        intervals.extend(counted)
         for direction in ("read", "write"):
-            if measured and (direction == "write" or reads):
+            if direction == "write" and (measured or total is not None):
+                continue
+            if direction == "read" and reads:
                 continue
             not_measured.append(
                 {

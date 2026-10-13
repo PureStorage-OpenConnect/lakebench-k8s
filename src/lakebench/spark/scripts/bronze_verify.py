@@ -25,6 +25,7 @@ from common import (
     clear_unregistered_table_dirs,
     env,
     log,
+    log_driver_output_bytes,
     managed_table_location,
     path_size_gb,
     pipeline_catalog,
@@ -315,6 +316,7 @@ def main() -> None:
     log(f"estimated_rows: {row_count}")
     log(f"output_rows: {row_count}")
     log(f"elapsed_seconds: {total_time:.1f}")
+    log_driver_output_bytes()
     log("=" * 60)
 
     spark.stop()

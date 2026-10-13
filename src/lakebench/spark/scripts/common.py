@@ -1008,6 +1008,7 @@ def log_job_metrics(job, *, input_size_gb, input_rows, output_rows, elapsed_seco
     log(f"input_rows: {int(input_rows)}")
     log(f"output_rows: {int(output_rows)}")
     log(f"elapsed_seconds: {elapsed_seconds:.1f}")
+    log_driver_output_bytes()
     for key, value in extra.items():
         if isinstance(value, bool):
             log(f"{key}: {'true' if value else 'false'}")
@@ -3047,6 +3048,80 @@ def _jobs_evicted_since(jobs, mark_ms):
         comp is not None and comp < mark_ms and status not in ("RUNNING", "UNKNOWN")
         for _id, status, comp, _group in jobs
     )
+
+
+def driver_output_bytes(spark=None, *, wait_s=1.0):
+    """``(bytes, complete)``: the bytes the application's tasks wrote, summed
+    from the driver's status store, or None when it cannot be read.
+
+    Every task reports its output to the driver, so unlike the executors'
+    own counters (an executor can exit before its last increments are
+    scraped) this total is the whole job's. Read through the same status
+    store calls as ``rule_stage_profile`` (checked on Spark 4.0.1 and 4.1.1)
+    and only after the job's work: a few py4j calls and a short listener
+    drain, no work inside a timed stage.
+
+    ``complete`` is false when the figure may be low: the listener queue
+    had not drained or dropped events, or the store no longer holds every
+    job or stage the application ran (it keeps the newest few). A stage
+    attempt that was retried counts its last attempt only.
+    """
+    try:
+        if spark is None:
+            from pyspark.sql import SparkSession
+
+            spark = SparkSession.getActiveSession()
+        if spark is None:
+            return None
+        sc = spark.sparkContext
+        jsc = sc._jsc.sc()
+        complete = True
+        try:
+            jsc.listenerBus().waitUntilEmpty(int(wait_s * 1000))
+        except Exception:  # noqa: BLE001 -- TimeoutException, or no such call
+            complete = False
+        if _status_events_dropped(jsc) > 0:
+            complete = False
+        store = jsc.statusStore()
+        tracker = sc.statusTracker()
+        jobs = list(_store_jobs(store))
+        if len(jobs) < int(jsc.dagScheduler().numTotalJobs()):
+            complete = False  # the store dropped completed jobs
+        stage_ids = set()
+        for job_id, _status, _comp, _group in jobs:
+            info = tracker.getJobInfo(job_id)
+            if info is None:
+                complete = False
+                continue
+            stage_ids.update(int(x) for x in info.stageIds)
+        total = 0
+        for sid in sorted(stage_ids):
+            try:
+                sd = store.lastStageAttempt(sid)
+            except Exception as e:  # noqa: BLE001
+                if "NoSuchElementException" not in str(e):
+                    raise
+                complete = False  # dropped from the store
+                continue
+            if sd.status().toString() in ("SKIPPED", "PENDING"):
+                continue
+            total += int(sd.outputBytes())
+        return total, complete
+    except Exception as e:  # noqa: BLE001 -- a measurement, never the job's result
+        log(f"[output-bytes] unavailable reason={one_line(f'{type(e).__name__}: {e}')}")
+        return None
+
+
+def log_driver_output_bytes(spark=None):
+    """Emit ``output_bytes_written`` and ``output_bytes_complete`` inside the
+    ``=== JOB METRICS ===`` block, from ``driver_output_bytes``. Nothing is
+    emitted when the store cannot be read."""
+    got = driver_output_bytes(spark)
+    if got is None:
+        return
+    total, complete = got
+    log(f"output_bytes_written: {total}")
+    log(f"output_bytes_complete: {'true' if complete else 'false'}")
 
 
 def rule_profile_mark(spark):

@@ -11,7 +11,9 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from lakebench.metrics.io import (
+    BASIS_SPARK_DRIVER,
     BASIS_SPARK_READ,
+    BASIS_SPARK_UNSEEN,
     BASIS_SPARK_WRITE,
     REASON_EXECUTOR_IO,
     REASON_ICEBERG_READS,
@@ -167,3 +169,61 @@ def test_zero_gain_steps_add_no_interval(pods: int) -> None:
         return
     io = build_io(_record("delta", out))
     assert not [i for i in io["intervals"] if i["source"] == "spark"]
+
+
+def _with_driver(rec: dict, stage_job: dict[str, tuple[int, str]]) -> dict:
+    """*rec* with the stage windows and the jobs' driver totals."""
+    t0 = T0
+    for k, s in enumerate(rec["pipeline_benchmark"]["stages"]):
+        s["start_time"] = (t0 + timedelta(seconds=20 * k)).isoformat()
+        s["end_time"] = (t0 + timedelta(seconds=20 * k + 18)).isoformat()
+    names = {"bronze": "bronze-verify", "silver": "silver-build", "gold": "gold-finalize"}
+    rec["jobs"] = [
+        {
+            "job_type": names[stage],
+            "extra_metrics": {
+                "output_bytes_written": str(total),
+                "output_bytes_complete": complete,
+            },
+        }
+        for stage, (total, complete) in stage_job.items()
+    ]
+    return rec
+
+
+def test_the_drivers_total_makes_the_stage_exact_and_places_what_executors_missed() -> None:
+    rec = _with_driver(_record("delta", _block()), {"silver": (2000, "true")})
+    io = build_io(rec)
+    silver = [i for i in io["intervals"] if i["source"] == "spark" and i["stage"] == "silver"]
+    assert sum(i["write_bytes"] for i in silver) == 2000
+    counted = [i for i in silver if i["write_basis"] == BASIS_SPARK_WRITE]
+    unseen = [i for i in silver if i["write_basis"] == BASIS_SPARK_UNSEEN]
+    assert sum(i["write_bytes"] for i in counted) == 800
+    assert [i["write_bytes"] for i in unseen] == [1200]
+    # placed in the last seconds of the stage window, not spread over the run
+    assert unseen[0]["end"] == rec["pipeline_benchmark"]["stages"][1]["end_time"]
+    assert not any("spark silver" in p for p in io["problems"])
+
+
+def test_with_observability_off_the_drivers_total_still_gives_the_writes() -> None:
+    rec = _with_driver(_record("delta", None), {"silver": (5000, "true")})
+    io = build_io(rec)
+    silver = [i for i in io["intervals"] if i["source"] == "spark" and i["stage"] == "silver"]
+    assert len(silver) == 1 and silver[0]["write_bytes"] == 5000
+    assert silver[0]["write_basis"] == BASIS_SPARK_DRIVER
+    assert silver[0]["read_bytes"] is None
+    gaps = {(n["stage"], n["direction"]) for n in io["not_measured"]}
+    assert ("silver", "write") not in gaps and ("silver", "read") in gaps
+
+
+def test_a_total_the_driver_marked_possibly_low_is_not_used() -> None:
+    rec = _with_driver(_record("delta", None), {"silver": (5000, "false")})
+    io = build_io(rec)
+    assert not [i for i in io["intervals"] if i["source"] == "spark"]
+    assert ("silver", "write") in {(n["stage"], n["direction"]) for n in io["not_measured"]}
+
+
+def test_executor_counters_above_the_drivers_total_are_a_problem() -> None:
+    rec = _with_driver(_record("delta", _block()), {"silver": (300, "true")})
+    io = build_io(rec)
+    assert any("spark silver" in p and "exceed" in p for p in io["problems"])

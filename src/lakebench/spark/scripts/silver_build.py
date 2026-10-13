@@ -28,6 +28,7 @@ from common import (
     ensure_column,
     env,
     log,
+    log_driver_output_bytes,
     one_line,
     path_size_gb_strict,
     resolve_data_clock,
@@ -726,6 +727,7 @@ if silver_count is None:
 else:
     log(f"output_rows: {silver_count}")
 log(f"elapsed_seconds: {total_time:.1f}")
+log_driver_output_bytes()
 log("=" * 60)
 # A4 (silver-plan): an unknown output_rows is a real silent-corruption
 # surface (a zero-write cycle was masked by cumulative counts), so the run
