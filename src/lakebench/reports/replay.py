@@ -268,6 +268,25 @@ def _sustained(
     ]
     if c360:
         steps = []
+    # Recorded moments the stage did something: the focus follows them. The
+    # first non-zero lag of a handoff is when work first waited at it; gold ticks
+    # and query rounds are the recorded completions.
+    first_sample: list[float | None] = []
+    for name in _HANDOFFS:
+        raw = ((cont.get("balance") or {}).get("handoffs") or {}).get(name) or {}
+        pts = [
+            float(a)
+            for a, b in raw.get("samples") or []
+            if isinstance(a, (int, float)) and isinstance(b, (int, float)) and b > 0
+        ]
+        first_sample.append(w0 + min(pts) if pts and w0 is not None else None)
+    events: list[list[float]] = [
+        [w0] if w0 is not None else [],
+        [first_sample[0]] if first_sample[0] is not None else [],
+        [first_sample[1]] if first_sample[1] is not None else [],
+        ([first_sample[2]] if first_sample[2] is not None else []) + [r[0] for r in steps],
+        [r[0] for r in round_steps] if c360 else [],
+    ]
     stages = []
     for idx, (start, value, path, rows) in enumerate(spec):
         placed = start is not None and w1 is not None
@@ -284,6 +303,7 @@ def _sustained(
                 "path": path if value is not None else None,
                 "window": "recorded" if placed else None,
                 "ends": None,
+                "events": sorted(events[idx]),
                 "steps": (
                     steps
                     if idx == 3 and steps
@@ -611,13 +631,16 @@ function plotLag(){var o='<rect width="600" height="80" fill="#f4f8f4"/>'+shade(
  var cx=5+590*t/T;o+='<line x1="'+cx+'" x2="'+cx+'" y1="2" y2="78" stroke="#277353" stroke-width="2" stroke-dasharray="3 3"/>';$('#rp-lplot').innerHTML=o}
 var st=D.storage,SMAX=st?Math.max(1,Math.max.apply(null,st.read.concat(st.write))):1;
 function draw(){
- var cur=null,doneAll=t>=T;
+ var cur=null,doneAll=t>=T,lastStarted=null,lastEv=-1,evAt=-1;
  S.forEach(function(s,i){
+  if(s.start!=null&&s.start<=t)lastStarted=i;
+  (s.events||[]).forEach(function(e){if(e<=t&&e>=evAt){evAt=e;lastEv=i}});
   var c=root.querySelector('[data-step="'+i+'"]'),v=stageValue(s),stt=state(s);
   if(stt==='running')cur=i;
   c.querySelector('.value strong').textContent=v==null?'NR':num(v);
   c.classList.toggle('done',stt==='done')});
- var focus=sel!==null?sel:(cur!==null?cur:(doneAll?S.length-1:0));
+ var auto=D.kind==='sustained'?(lastEv>=0?lastEv:0):(lastStarted!==null?lastStarted:0);
+ var focus=sel!==null?sel:auto;
  S.forEach(function(s,i){root.querySelector('[data-step="'+i+'"]').classList.toggle('current',i===focus)});
  var f=S[focus],ff=frac(f);
  $('#rp-phase').textContent=f.phase+' · '+f.name;

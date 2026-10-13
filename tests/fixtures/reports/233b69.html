@@ -355,13 +355,16 @@ function plotLag(){var o='<rect width="600" height="80" fill="#f4f8f4"/>'+shade(
  var cx=5+590*t/T;o+='<line x1="'+cx+'" x2="'+cx+'" y1="2" y2="78" stroke="#277353" stroke-width="2" stroke-dasharray="3 3"/>';$('#rp-lplot').innerHTML=o}
 var st=D.storage,SMAX=st?Math.max(1,Math.max.apply(null,st.read.concat(st.write))):1;
 function draw(){
- var cur=null,doneAll=t>=T;
+ var cur=null,doneAll=t>=T,lastStarted=null,lastEv=-1,evAt=-1;
  S.forEach(function(s,i){
+  if(s.start!=null&&s.start<=t)lastStarted=i;
+  (s.events||[]).forEach(function(e){if(e<=t&&e>=evAt){evAt=e;lastEv=i}});
   var c=root.querySelector('[data-step="'+i+'"]'),v=stageValue(s),stt=state(s);
   if(stt==='running')cur=i;
   c.querySelector('.value strong').textContent=v==null?'NR':num(v);
   c.classList.toggle('done',stt==='done')});
- var focus=sel!==null?sel:(cur!==null?cur:(doneAll?S.length-1:0));
+ var auto=D.kind==='sustained'?(lastEv>=0?lastEv:0):(lastStarted!==null?lastStarted:0);
+ var focus=sel!==null?sel:auto;
  S.forEach(function(s,i){root.querySelector('[data-step="'+i+'"]').classList.toggle('current',i===focus)});
  var f=S[focus],ff=frac(f);
  $('#rp-phase').textContent=f.phase+' · '+f.name;

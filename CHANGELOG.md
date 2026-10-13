@@ -49,6 +49,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - **Dashboard variable `namespace` is gone**, now that each Grafana sees only its own deployment. `run_id` still picks among the runs that landed in this namespace.
+- **The replay's large card follows the record.** A batch run keeps the latest started stage large through the gap before the next, instead of snapping back to Generate. A sustained run moves it with the latest recorded event (run start, first lag at each handoff, gold ticks, query rounds) instead of parking on the last running stage. A click still pins a card.
 - **The Grafana dashboard covers resources and Trino, not only batch pushes.** New rows: CPU, memory and network by component (datagen, each Spark stage, Trino, Polaris, Postgres), Spark executors running by stage, and Trino queries, tasks, JVM heap and GC. These come from cAdvisor and the JMX exporter, so a continuous run shows them; the datagen and stage rows still read Pushgateway series.
 - **`admin doctor` observability check** reads whether the kubelet-metrics ClusterRole is present; a fresh cluster surfaces the admin step without failing deploys.
 - **`destroy` no longer prints auto-sizing warnings.** It sized the config on the way in and logged "cannot balance" for a teardown that applies no sizing. The "cannot balance" text now says the run "will report it as not balanced", matching the advisory check.
