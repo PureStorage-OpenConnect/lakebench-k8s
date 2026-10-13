@@ -284,6 +284,7 @@ _CSS = """
 #lb-replay button{cursor:pointer}
 #lb-replay button:disabled{cursor:default;opacity:.55}
 #lb-replay .headline{margin-bottom:8px}
+#lb-replay .headline-right strong span{font-size:inherit;color:inherit}
 #lb-replay .canvas{display:block;background:#fff;border:1px solid #dce6dd;border-radius:12px;overflow:hidden}
 #lb-replay .runsteps{min-height:300px}
 #lb-replay .platform{flex:none;height:auto}
@@ -374,9 +375,10 @@ def _json_for_script(data: Mapping[str, Any]) -> str:
     return json.dumps(data, separators=(",", ":")).replace("</", "<\\/")
 
 
-def render_replay(data: Mapping[str, Any]) -> str:
+def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
     """The replay tab's panel: v28's markup and styles, the data block and
-    the player."""
+    the player. *pace* is the scorecard's Pace tile; its figure leads the
+    headline and follows the same Count / Bytes switch."""
     e = escape
     stages = data["stages"]
     steps = "".join(
@@ -408,11 +410,23 @@ def render_replay(data: Mapping[str, Any]) -> str:
     )
     gaps = sorted(set(data["storage_gaps"]) | set(data["storage_unplaced"]))
     note = "Not measured: " + ", ".join([*lanes, *(f"storage {g}" for g in gaps)])
+    pace_html = ""
+    if pace is not None and pace.evidence != "nr":
+        alt = (
+            f'<strong data-unit="bytes" hidden>{pace.alt_value}</strong>' if pace.alt_value else ""
+        )
+        count_hidden = ' data-unit="count"' if pace.alt_value else ""
+        pace_html = (
+            f'<div class="mini"><strong{count_hidden}>{pace.value}</strong>{alt}'
+            f"<span>{e(pace.sub.split(' in ')[0].split(' ', 1)[-1])} per second</span></div>"
+        )
     return (
         f"<style>{_CSS}</style>"
         '<div id="lb-replay"><div class="headline"><div>'
         f'<div class="eyebrow">{e(data["subtitle"])}</div><h1>{e(data["title"])}</h1></div>'
-        '<div class="headline-right"><div class="mini">'
+        '<div class="headline-right">'
+        f"{pace_html}"
+        '<div class="mini">'
         f"<strong>{int(data['duration']) // 60}:{int(data['duration']) % 60:02d}</strong>"
         "<span>run length</span></div></div></div>"
         '<div class="canvas"><div class="layer-head">01 / Workload</div>'

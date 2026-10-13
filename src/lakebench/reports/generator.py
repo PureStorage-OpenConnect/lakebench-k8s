@@ -2138,6 +2138,18 @@ class ReportGenerator:
         except Exception:  # noqa: BLE001 - a tile grid must never break the page
             return ""
 
+    def _pace_tile(self, metrics: PipelineMetrics) -> Any:
+        """The scorecard's Pace tile, for the replay headline."""
+        from lakebench.reports.tiles import build_tiles
+
+        try:
+            record = metrics.to_dict()
+            mode = "continuous" if self._is_sustained(metrics) else "batch"
+            tiles = build_tiles(record, mode=mode, gates=None, metrics=metrics)
+            return next((t for t in tiles if t.label == "Pace"), None)
+        except Exception:  # noqa: BLE001 - the headline is optional
+            return None
+
     def _generate_view_shell(self, metrics: PipelineMetrics) -> tuple[str, str, str, str]:
         """The Replay / Scorecard tab bar, the replay panel, and the opening
         and closing tags of the Scorecard panel. A record with no replay
@@ -2152,6 +2164,7 @@ class ReportGenerator:
             data = None
         if data is None:
             return "", "", "", ""
+        pace = self._pace_tile(metrics)
         tabs = (
             '<nav class="lb-tabs" role="tablist">'
             '<button type="button" role="tab" data-view="replay">Workload replay</button>'
@@ -2173,7 +2186,7 @@ class ReportGenerator:
         )
         return (
             tabs,
-            f'<div id="lb-view-replay">{render_replay(data)}</div>',
+            f'<div id="lb-view-replay">{render_replay(data, pace)}</div>',
             '<div id="lb-view-scorecard">',
             "</div>" + script,
         )

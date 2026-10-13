@@ -44,7 +44,7 @@ The Scorecard tab opens on eight tiles, then the front matter and the sections b
 
 | Tile | Batch | Continuous |
 |---|---|---|
-| 1 | Pace, rows/s: bronze `stages[].output_rows` over `scores.time_to_value_seconds` (derived) | Pace, rows/s (`scores.sustained_throughput_rps`), and whether the pipeline kept pace (`scores.pipeline_saturated`) |
+| 1 | Pace: the workload's unit of operation per second to gold ready. Customer 360 counts interactions cleaned (silver `output_rows`), AML transactions screened (gold `input_rows`), over `scores.time_to_value_seconds` (derived). A Count / Bytes switch on the tile shows the same stage's `input_size_gb` per second, stepping KiB to TiB | Pace, rows/s entering bronze (`scores.sustained_throughput_rps`), and whether the pipeline kept pace (`scores.pipeline_saturated`) |
 | 2 | Time to value (`scores.time_to_value_seconds`) | Freshness (`scores.data_freshness_seconds`) |
 | 3 | Query rate (`scores.composite_qph`) | Query rate (`scores.in_stream_composite_qph`) |
 | 4 | Compute, core-hours (`scores.total_core_hours`) | same |

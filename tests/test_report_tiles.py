@@ -27,7 +27,11 @@ _GIB = 1024**3
 def _record() -> dict:
     return {
         "pipeline_benchmark": {
-            "stages": [{"stage_name": "bronze", "output_rows": 2478560}],
+            "stages": [
+                {"stage_name": "bronze", "output_rows": 2478560},
+                {"stage_name": "silver", "output_rows": 2428561, "input_size_gb": 9.5},
+                {"stage_name": "gold", "input_rows": 2428561, "input_size_gb": 9.0},
+            ],
             "scores": {
                 "time_to_value_seconds": 152.13,
                 "pipeline_saturated": False,
@@ -67,8 +71,10 @@ def test_batch_tiles_cite_the_records_fields() -> None:
         "Support",
     ]
     assert "152 s" in t["Time to value"].value
-    assert "16,292 rows/s" in t["Pace"].value and t["Pace"].evidence == EVIDENCE_DERIVED
-    assert "2,478,560 rows" in t["Pace"].sub
+    assert "15,964 interactions/s" in t["Pace"].value
+    assert t["Pace"].evidence == EVIDENCE_DERIVED
+    assert "2,428,561 interactions cleaned in 152 s" in t["Pace"].sub
+    assert "MiB/s" in t["Pace"].alt_value  # 9.5 GiB over 152 s is 64 MiB/s
     assert t["Time to value"].source == "pipeline_benchmark.scores.time_to_value_seconds"
     assert "936.2" in t["Query rate"].value and "3 samples per query" in t["Query rate"].sub
     assert t["Time to value"].evidence == EVIDENCE_RECORDED
@@ -80,7 +86,7 @@ def test_batch_tiles_cite_the_records_fields() -> None:
 def test_continuous_tiles_swap_the_lead_and_the_query_rate_field() -> None:
     t = _by_label(build_tiles(_record(), mode="continuous", gates={"a": "PASS"}))
     assert list(t)[:3] == ["Pace", "Freshness", "Query rate"]
-    assert "1,033 rows/s" in t["Pace"].value and "kept pace" in t["Pace"].sub
+    assert "1,033 interactions/s" in t["Pace"].value and "kept pace" in t["Pace"].sub
     assert "260.0" in t["Query rate"].value
     assert t["Query rate"].source.endswith("in_stream_composite_qph")
 
@@ -139,3 +145,28 @@ def test_golden_tiles_match_the_stored_record(run_id: str) -> None:
         assert "Query rate|NR|" in grid
     else:
         assert f"{sc[key]:,.1f}" in grid
+
+
+def test_aml_pace_counts_transactions_screened_by_gold() -> None:
+    rec = _record()
+    rec["config_snapshot"] = {"workload_schema": "financial"}
+    t = _by_label(build_tiles(rec, mode="batch", gates={"a": "PASS"}))["Pace"]
+    assert "15,964 transactions/s" in t.value
+    assert "transactions screened" in t.sub
+    assert t.source.startswith("pipeline_benchmark.stages[2].input_rows")
+    assert "gold input bytes" in t.alt_sub
+
+
+def test_pace_without_its_stage_is_nr_not_zero() -> None:
+    rec = _record()
+    rec["pipeline_benchmark"]["stages"] = []
+    t = _by_label(build_tiles(rec, mode="batch", gates=None))["Pace"]
+    assert t.evidence == EVIDENCE_NR and t.value == "NR"
+
+
+def test_the_bytes_view_steps_its_unit_with_the_size() -> None:
+    from lakebench.reports import derived as dv
+
+    assert "TiB/s" in dv._fmt(2048.0, dv.AUTO_GIB, "/s")
+    assert "GiB/s" in dv._fmt(2.0, dv.AUTO_GIB, "/s")
+    assert "MiB/s" in dv._fmt(0.5, dv.AUTO_GIB, "/s")

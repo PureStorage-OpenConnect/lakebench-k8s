@@ -205,6 +205,19 @@ def recompute(record: Any, span: DerivedSpan) -> float:
 
 
 def formatted(value: float, fmt: str, suffix: str) -> str:
+    if fmt == "auto-gib":
+        # Stated again here on purpose: the page's ladder is checked against
+        # this one, not against itself.
+        for factor, unit in (
+            (1024.0, "TiB"),
+            (1.0, "GiB"),
+            (1 / 1024, "MiB"),
+            (1 / 1024**2, "KiB"),
+        ):
+            if value >= factor or unit == "KiB":
+                n = value / factor
+                digits = ",.0f" if n >= 100 else ".1f" if n >= 10 else ".2f"
+                return f"{format(n, digits)} {unit}{suffix}"
     if fmt.endswith("d"):
         return format(int(round(value)), fmt) + suffix
     return format(value, fmt) + suffix

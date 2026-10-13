@@ -33,6 +33,8 @@ class Tile:
     sub: str  # plain text under the value
     evidence: str
     source: str  # the record field(s) the tile reads
+    alt_value: str = ""  # the same figure in the other unit (bytes), when it has one
+    alt_sub: str = ""
 
 
 def _num(record: Mapping[str, Any], *keys: str) -> float | None:
@@ -145,35 +147,52 @@ def _support_tile(record: Mapping[str, Any]) -> Tile:
     )
 
 
+# The workload's unit of operation, the stage that does the work on it and the
+# record field that counts it: Customer 360 cleans interaction events (silver's
+# output rows), AML screens payment transactions (the rows gold's detection
+# took in). The bytes view reads that same stage's recorded input size.
+_PACE = {
+    "customer360": ("silver", "output_rows", "interactions cleaned", "interactions"),
+    "financial": ("gold", "input_rows", "transactions screened", "transactions"),
+}
+
+
 def _pace_batch(record: Mapping[str, Any]) -> Tile:
-    """Rows through the pipeline per second: the rows bronze took in over the
-    time to value (first stage start to last stage end)."""
+    """Units of operation per second from the first stage's start to gold
+    ready (``time_to_value_seconds``), and the bytes per second behind them."""
+    schema = str((record.get("config_snapshot") or {}).get("workload_schema") or "customer360")
+    stage_name, field, did, noun = _PACE.get(schema, _PACE["customer360"])
     stages = [
         s
         for s in (record.get("pipeline_benchmark") or {}).get("stages") or []
         if isinstance(s, Mapping)
     ]
-    idx = next((i for i, s in enumerate(stages) if s.get("stage_name") == "bronze"), None)
-    rows = _num(stages[idx], "output_rows") if idx is not None else None
+    idx = next((i for i, s in enumerate(stages) if s.get("stage_name") == stage_name), None)
+    count = _num(stages[idx], field) if idx is not None else None
+    gib = _num(stages[idx], "input_size_gb") if idx is not None else None
     ttv = _num(record, "pipeline_benchmark", "scores", "time_to_value_seconds")
-    rows_path = dv.path("pipeline_benchmark", "stages", idx or 0, "output_rows")
+    count_path = dv.path("pipeline_benchmark", "stages", idx or 0, field)
+    gib_path = dv.path("pipeline_benchmark", "stages", idx or 0, "input_size_gb")
     ttv_path = "pipeline_benchmark.scores.time_to_value_seconds"
-    paths = f"{rows_path} / {ttv_path}"
-    if rows is None or not ttv:
-        return _nr("Pace", "no bronze rows or time to value in the run record", paths)
+    paths = f"{count_path} / {ttv_path}"
+    if count is None or not ttv:
+        return _nr("Pace", f"no {noun} count or time to value in the run record", paths)
+    value = dv.ratio(
+        count, ttv, a_path=count_path, b_path=ttv_path, fmt=",.0f", suffix=f" {noun}/s"
+    )
+    alt = ""
+    alt_sub = ""
+    if gib is not None:
+        alt = dv.ratio(gib, ttv, a_path=gib_path, b_path=ttv_path, fmt=dv.AUTO_GIB, suffix="/s")
+        alt_sub = f"{stage_name} input bytes in {ttv:,.0f} s"
     return Tile(
         "Pace",
-        dv.ratio(
-            rows,
-            ttv,
-            a_path=rows_path,
-            b_path=ttv_path,
-            fmt=",.0f",
-            suffix=" rows/s",
-        ),
-        f"{rows:,.0f} rows through the pipeline in {ttv:,.0f} s",
+        value,
+        f"{count:,.0f} {did} in {ttv:,.0f} s",
         EVIDENCE_DERIVED,
         paths,
+        alt,
+        alt_sub,
     )
 
 
@@ -184,14 +203,20 @@ def _pace_continuous(record: Mapping[str, Any]) -> Tile:
     rps = _num(record, "pipeline_benchmark", "scores", "sustained_throughput_rps")
     if rps is None:
         return _nr("Pace", "not in the run record", path)
-    saturated = (record.get("pipeline_benchmark") or {}).get("scores", {}).get("pipeline_saturated")
-    kept = {
-        True: "offered load; the pipeline fell behind it",
-        False: "offered load; the pipeline kept pace",
-    }.get(saturated, "offered load")
+    schema = str((record.get("config_snapshot") or {}).get("workload_schema") or "customer360")
+    noun = _PACE.get(schema, _PACE["customer360"])[3]
+    saturated = ((record.get("pipeline_benchmark") or {}).get("scores") or {}).get(
+        "pipeline_saturated"
+    )
+    if saturated is True:
+        kept = "offered load; the pipeline fell behind it"
+    elif saturated is False:
+        kept = "offered load; the pipeline kept pace"
+    else:
+        kept = "offered load"
     return Tile(
         "Pace",
-        dv.total(rps, paths=path, fmt=",.0f", suffix=" rows/s"),
+        dv.total(rps, paths=path, fmt=",.0f", suffix=f" {noun}/s"),
         kept,
         EVIDENCE_RECORDED,
         path,
@@ -278,15 +303,52 @@ _CSS = """
 .lb-tiles .lb-tile strong{display:block;font-size:32px;letter-spacing:-1px;margin-top:7px;font-variant-numeric:tabular-nums}
 .lb-tiles .lb-tile small{display:block;font-size:12px;color:#7c8e81;margin-top:2px}
 .lb-tiles .lb-tile.nr strong{color:#9aa89d}
+.lb-tiles .lb-tile{position:relative}
+.lb-tiles .lb-unit{position:absolute;top:12px;right:12px;display:flex;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.lb-tiles .lb-unit button{border:0;background:#fff;color:#66776c;font:inherit;font-size:11px;padding:2px 8px;cursor:pointer}
+.lb-tiles .lb-unit button.on{background:#e3f3e9;color:#1d6548;font-weight:700}
 @media(max-width:900px){.lb-tiles .lb-grid{grid-template-columns:repeat(2,1fr)}}
 """
 
 
+_SCRIPT = (
+    "<script>(function(){var u='count';function set(n){u=n;document.querySelectorAll("
+    "'[data-unit]').forEach(function(e){e.hidden=e.dataset.unit!==u});document."
+    "querySelectorAll('.lb-unit button').forEach(function(b){b.className="
+    "b.dataset.set===u?'on':''})}document.querySelectorAll('.lb-unit button').forEach("
+    "function(b){b.onclick=function(){set(b.dataset.set)}})})();</script>"
+)
+
+
 def render_tiles(tiles: list[Tile]) -> str:
-    """The tile grid. A tile's record field is its hover text."""
-    cells = "".join(
-        f'<div class="lb-tile {t.evidence}" title="{escape(t.source, quote=True)}">'
-        f"<b>{escape(t.label)}</b><strong>{t.value}</strong><small>{escape(t.sub)}</small></div>"
-        for t in tiles
+    """The tile grid. A tile's record field is its hover text. A tile with a
+    second unit carries a Count / Bytes switch that flips every such figure
+    on the page together."""
+
+    def cell(t: Tile) -> str:
+        if t.alt_value:
+            value = (
+                f'<span data-unit="count">{t.value}</span>'
+                f'<span data-unit="bytes" hidden>{t.alt_value}</span>'
+            )
+            sub = (
+                f'<span data-unit="count">{escape(t.sub)}</span>'
+                f'<span data-unit="bytes" hidden>{escape(t.alt_sub)}</span>'
+            )
+            pill = (
+                '<span class="lb-unit"><button type="button" data-set="count" class="on">'
+                'Count</button><button type="button" data-set="bytes">Bytes</button></span>'
+            )
+        else:
+            value, sub, pill = t.value, escape(t.sub), ""
+        return (
+            f'<div class="lb-tile {t.evidence}" title="{escape(t.source, quote=True)}">'
+            f"{pill}<b>{escape(t.label)}</b><strong>{value}</strong><small>{sub}</small></div>"
+        )
+
+    cells = "".join(cell(t) for t in tiles)
+    script = _SCRIPT if any(t.alt_value for t in tiles) else ""
+    return (
+        f'<style>{_CSS}</style><div class="lb-tiles"><div class="lb-grid">{cells}</div></div>'
+        f"{script}"
     )
-    return f'<style>{_CSS}</style><div class="lb-tiles"><div class="lb-grid">{cells}</div></div>'
