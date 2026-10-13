@@ -1113,9 +1113,10 @@ The limits on Spark, Iceberg, Delta, Hive and Polaris versions are in
 [Getting Started, step 1](getting-started.md#1-generate-a-configuration-file)
 for what it writes and [CLI Reference](cli-reference.md#init) for the flags.
 The lines a first run needs are live; every other key follows in schema order,
-commented at its default with its type, range and a one-line description.
-Remove the leading `# ` from a key, and from the block lines above it, to set
-it. The full description of each key is on this page.
+in sections opened by a banner, commented at its default with a description
+above it (lines starting `##` are prose, lines starting `# ` are keys left at
+their defaults). Remove the leading `# ` from a key, and from the block lines
+above it, to set it. The full description of each key is on this page.
 
 ### Converting an older config
 

@@ -108,48 +108,63 @@ chose on stderr.
   PREFIX` picks other variable names. `--access-key` and `--secret-key` are
   refused.
 
-The file has two kinds of line. The lines without a leading `# ` are what a
-first run needs. Every other key of the schema follows in schema order,
-commented at its default, with its type, its range and a one-line description
-above it. That is about 390 lines; this is an excerpt:
+The file has three kinds of line, told apart by how they start:
+
+- A line with no `#` in front is set for this deployment.
+- A line starting `## ` is prose: a section banner or the description of the
+  key below it.
+- A line starting `# ` is a key left at its default, with its type or range
+  after it where that says something.
+
+Every key of the schema is in the file, in schema order, in sections opened by
+a banner, with a blank line between keys. That is about 660 lines; this is an
+excerpt:
 
 ```yaml
+## Written by `lakebench init`.
+##
+## Lines that start with '##' are descriptions. Lines with no '#' in front are set
+## for this deployment. Every other key is listed at its default, commented out
+## with '# ': remove the '# ' from the key, and from the block lines above it,
+## to set it. docs/configuration.md describes each key in full, and
+## `lakebench config recipes` lists the recipes.
+
+## Unique deployment name.
 name: my-first-lakehouse
+
+## Recipe shorthand (e.g., `hive-iceberg-spark-trino`).
 recipe: polaris-iceberg-spark-trino
+
+## ============================================================================
+## IMAGES
+## ============================================================================
 # images:
-#   # Data generator image.
-#   datagen: "docker.io/sillidata/lb-datagen:latest"  # string
-#   # Spark runtime image.
-#   spark: "apache/spark:4.1.3-python3"  # string
+##  Data generator image.
+#   datagen: "docker.io/sillidata/lb-datagen:latest"
+
+##  Spark runtime image.
+#   spark: "apache/spark:4.1.3-python3"
+
 # ...
-platform:
-#   kubernetes:
-# ...
+
+## ---- platform.storage ------------------------------------------------------
   storage:
     s3:
+##      S3-compatible endpoint URL (e.g., `http://minio:9000` or
+##      `https://s3.example.com:443`).
       endpoint: "http://your-s3-endpoint:80"
-#       # AWS region.
-#       region: us-east-1  # string
-#       # Path-style access (`true` for FlashBlade/MinIO, `false` for AWS S3).
-#       path_style: true  # boolean
-      access_key: "${LAKEBENCH_S3_ACCESS_KEY}"
-      secret_key: "${LAKEBENCH_S3_SECRET_KEY}"
-#       # Path to a PEM CA certificate bundle for HTTPS endpoints with self-signed or private CAs.
-# ...
-workload:
-  schema: customer360
-  datagen:
-    scale: 1  # 1 is about 10 GB of bronze
-# ...
+
+##      AWS region.
+#       region: us-east-1
 ```
 
-- To set a key, remove the `# ` from its line and from the lines above it that
-  name its blocks. A commented line is the YAML line with `# ` in front, so
+- To set a key, remove the `# ` from its line and from the block lines above
+  it. A key left at its default is the YAML line with `# ` in front, so
   nothing else changes.
 - Keys that follow the deployment name, such as the bucket names, are written
   with the name filled in. Keys the run sizes when they are unset, such as the
-  datagen `parallelism`, `cpu` and `memory`, say so on the line; leave them
-  commented to keep the automatic sizing.
+  datagen `parallelism`, `cpu` and `memory`, say so in their description;
+  leave them commented to keep the automatic sizing.
 - The configuration page describes every key in full.
 - The recipe sets the catalog, table format, pipeline engine and query
   engine. A component with a different value (say `catalog.type: hive`

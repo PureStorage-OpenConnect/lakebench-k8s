@@ -182,13 +182,17 @@ _DISPLAY_RENAMES = (
     ("architecture.workload.", "workload."),
     ("architecture.pipeline.sustained.", "architecture.pipeline.continuous."),
 )
-_DESCRIPTION_CHARS = 150
+_DESCRIPTION_CHARS = 300
+_WRAP = 78
+#: Types the default value already shows, so the line says nothing about them.
+_OBVIOUS_TYPES = {"string", "boolean", "integer", "number"}
 #: Keys whose schema default is a floor, not what a run uses: unset, the run
-#: sizes them. The note keeps an uncommented line from pinning the floor.
+#: sizes them. The sentence is added to the description so an uncommented line
+#: is not taken to be the automatic value.
 _AUTO_SIZED = {
-    "workload.datagen.parallelism": "unset = auto, sized from scale and cluster",
-    "workload.datagen.cpu": "unset = auto, sized from scale and cluster",
-    "workload.datagen.memory": "unset = auto, sized from workload, scale and cpu",
+    "workload.datagen.parallelism": "Unset, it is sized from the scale and the cluster.",
+    "workload.datagen.cpu": "Unset, it is sized from the scale and the cluster.",
+    "workload.datagen.memory": "Unset, it is sized from the workload, the scale and the cpu.",
 }
 
 
@@ -286,7 +290,7 @@ def _first_sentence(description: str | None) -> str:
         return ""
     text = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
     if len(text) > _DESCRIPTION_CHARS:
-        text = text[: _DESCRIPTION_CHARS - 3].rstrip() + "..."
+        text = text[:_DESCRIPTION_CHARS].rsplit(" ", 1)[0].rstrip(",;:") + " ..."
     return text
 
 
@@ -307,7 +311,8 @@ def _template_tree(
             node = node.setdefault(part, {})
         if path in active:
             seen.add(path)
-            node[parts[-1]] = (path, _scalar(active[path]), comments.get(path, ""), "")
+            description = _first_sentence(field.description)
+            node[parts[-1]] = (path, _scalar(active[path]), comments.get(path, ""), description)
             continue
         if path in owned:
             description = "Set by the recipe; if written out, it must agree with it."
@@ -317,45 +322,79 @@ def _template_tree(
         bounds = _range_text(field)
         if bounds:
             note = f"{note}, {bounds}"
+        elif note in _OBVIOUS_TYPES:
+            note = ""  # the value shows it
+        description = _first_sentence(field.description)
         if path in _AUTO_SIZED:
-            note = f"{note}; {_AUTO_SIZED[path]}"
+            description = f"{description} {_AUTO_SIZED[path]}".strip()
         text = derived.get(path) or _default_text(field)
-        node[parts[-1]] = (path, text, note, _first_sentence(field.description))
+        node[parts[-1]] = (path, text, note, description)
     missing = set(active) - seen
     if missing:
         raise ValueError(f"init writes keys the schema does not have: {sorted(missing)}")
     return tree
 
 
-def _template_lines(tree: dict[str, Any], active_paths: set[str]) -> list[str]:
-    """The tree as lines: live where it holds a written key, else commented.
+def _banner(label: str, heavy: bool) -> list[str]:
+    """A section marker made of prose lines (``##``)."""
+    if heavy:
+        rule = "## " + "=" * (_WRAP - 2)
+        return [rule, f"## {label}", rule]
+    return [f"## ---- {label} ".ljust(_WRAP + 1, "-")]
 
-    A commented line is the YAML line with a leading ``# ``. A description is
-    an indented comment above its key.
+
+def _template_lines(tree: dict[str, Any], active_paths: set[str]) -> list[str]:
+    """The tree as lines.
+
+    Three kinds of line, told apart by their start: ``##`` is prose (a banner
+    or a description), ``# `` is a key left at its default (the YAML line with
+    ``# `` in front), and anything else is live. A blank line separates one
+    key from the next, and the top two levels of the tree open with a banner.
     """
+    import textwrap
+
     lines: list[str] = []
 
     def live(path: str) -> bool:
         return path in active_paths or any(a.startswith(f"{path}.") for a in active_paths)
+
+    def blank() -> None:
+        if lines and lines[-1] != "":
+            lines.append("")
 
     def walk(node: dict[str, Any], depth: int, prefix: str) -> None:
         pad = "  " * depth
         for key, child in node.items():
             path = f"{prefix}{key}"
             if isinstance(child, dict):
+                if depth <= 1:
+                    blank()
+                    lines.extend(_banner(key.upper() if depth == 0 else path, depth == 0))
                 header = f"{pad}{key}:"
                 lines.append(header if live(path) else f"# {header}")
                 walk(child, depth + 1, f"{path}.")
                 continue
             _, text, note, description = child
+            lead = "##" + (pad or " ")
             if description:
-                lines.append(f"# {pad}# {description}")
+                lines.extend(
+                    textwrap.wrap(
+                        description,
+                        width=_WRAP,
+                        initial_indent=lead,
+                        subsequent_indent=lead,
+                        break_on_hyphens=False,
+                    )
+                )
             line = f"{pad}{key}: {text}"
             if note:
                 line = f"{line}  # {note}"
             lines.append(line if path in active_paths else f"# {line}")
+            blank()
 
     walk(tree, 0, "")
+    while lines and lines[-1] == "":
+        lines.pop()
     return lines
 
 
@@ -406,10 +445,14 @@ def first_day_config(
     }
     tree = _template_tree(active, comments, owned, derived)
     lines = [
-        "# Written by `lakebench init`. The lines without a leading '# ' are what a first run needs.",
-        "# Every other key follows in schema order at its default, with its type and range.",
-        "# To set one, remove the '# ' from its line and from the block lines above it.",
-        "# `lakebench config recipes` lists the recipes; docs/configuration.md describes each key.",
+        "## Written by `lakebench init`.",
+        "##",
+        "## Lines that start with '##' are descriptions. Lines with no '#' in front are set",
+        "## for this deployment. Every other key is listed at its default, commented out",
+        "## with '# ': remove the '# ' from the key, and from the block lines above it,",
+        "## to set it. docs/configuration.md describes each key in full, and",
+        "## `lakebench config recipes` lists the recipes.",
+        "",
         *_template_lines(tree, set(active)),
     ]
     return "\n".join(lines) + "\n"

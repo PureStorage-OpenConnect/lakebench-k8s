@@ -108,11 +108,10 @@ _RECIPE_LINES = (
 
 
 def _uncomment(text: str, only: tuple[str, ...] | None = None) -> str:
-    """Remove the leading '# ' from template lines: all of them, or only those
-    whose YAML is in *only*. The four header lines are prose and stay."""
-    lines = text.splitlines()
-    out = lines[:4]
-    for ln in lines[4:]:
+    """Remove the leading '# ' from keys left at their default: all of them, or
+    only those whose YAML is in *only*. Prose lines start with '##' and stay."""
+    out = []
+    for ln in text.splitlines():
         if ln.startswith("# ") and (only is None or ln[2:] in only):
             ln = ln[2:]
         out.append(ln)
@@ -170,10 +169,9 @@ def test_uncommenting_every_key_loads_and_covers_the_schema(recipe, workload):
 
 def test_one_key_uncommented_with_its_blocks_sets_only_that_key(tmp_path, creds):
     text = first_day_config(name="one-t")
-    lines = text.splitlines()
     wanted = ("architecture:", "  pipeline:", "    continuous:")
-    out = lines[:4]
-    for ln in lines[4:]:
+    out = []
+    for ln in text.splitlines():
         body = ln[2:] if ln.startswith("# ") else ln
         if ln.startswith("# ") and (
             body in wanted or body.strip().startswith("silver_write_mode:")
@@ -187,11 +185,26 @@ def test_one_key_uncommented_with_its_blocks_sets_only_that_key(tmp_path, creds)
     assert cfg.architecture.pipeline.sustained.run_duration == 1800  # untouched
 
 
+def test_the_three_kinds_of_line_are_told_apart_by_their_start():
+    text = first_day_config(name="kinds-t", endpoint="http://s3:80")
+    for ln in text.splitlines():
+        if not ln.strip():
+            continue
+        if ln.startswith("##"):
+            continue  # prose: a banner or a description
+        if ln.startswith("# "):
+            body = ln[2:]
+            assert re.match(r"\s*[A-Za-z0-9_]+:", body), ln  # a key left at its default
+        else:
+            assert not ln.lstrip().startswith("#"), ln  # live
+    assert text.count("## ====") >= 6  # a heavy banner opens every top-level block
+
+
 def test_derived_and_auto_sized_defaults_do_not_pin_a_value():
     text = first_day_config(name="drv-t", endpoint="http://s3:80")
     assert "bronze: drv-t-bronze" in text
     assert "bronze: lakebench-bronze" not in text
-    assert "unset = auto" in text
+    assert "Unset, it is sized from the scale and the cluster." in text
     assert not re.search(r"(?m)^#\s+pattern:", text)  # a deprecated key is not offered
 
 
