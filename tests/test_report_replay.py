@@ -125,7 +125,7 @@ def test_no_io_means_no_storage_lane() -> None:
 
 @pytest.mark.parametrize(
     ("mode", "schema"),
-    [("continuous", "customer360"), ("sustained", "customer360"), ("batch", "unknown")],
+    [("continuous", "customer360"), ("sustained", "unknown"), ("batch", "unknown")],
 )
 def test_no_profile_no_replay(mode: str, schema: str) -> None:
     assert build_replay(_record(mode, schema)) is None
@@ -293,3 +293,31 @@ def test_sustained_pace_is_payments_screened_over_the_window() -> None:
     rec["continuous"]["time_travel"] = {}
     nr = next(t for t in build_tiles(rec, mode="sustained", gates=None) if t.label == "Pace")
     assert nr.evidence == "nr"
+
+
+def test_sustained_customer360_counts_cleaned_interactions_and_queries() -> None:
+    rec = _record("sustained", "customer360")
+    rec["pipeline_benchmark"]["stages"] = [
+        {"stage_name": "bronze", "output_rows": 500},
+        {"stage_name": "silver", "input_rows": 500, "output_rows": 480},
+    ]
+    rec["pipeline_benchmark"]["scores"] = {"released_rows": 510}
+    rec["continuous"] = {
+        "window": {"start": "2026-01-01T00:01:00Z", "end": "2026-01-01T00:09:00Z", "seconds": 480},
+        "streams": {"silver-stream": {"running_at": "2026-01-01T00:00:55+00:00"}},
+        "freshness": {"cycles": 12},
+    }
+    rec["benchmark_rounds"] = [
+        {"ended_at": "2026-01-01T00:04:00Z", "queries": [{"success": True}, {"success": False}]},
+        {"ended_at": "2026-01-01T00:07:00Z", "queries": [{"success": True}, {"success": True}]},
+    ]
+    data = build_replay(rec)
+    assert data is not None and data["title"] == "C360 / Continuous"
+    by = {s["key"]: s for s in data["stages"]}
+    assert by["silver"]["value"] == 480 and by["silver"]["path"].endswith("silver].output_rows")
+    assert by["gold"]["value"] == 12 and by["gold"]["path"] == "continuous.freshness.cycles"
+    assert by["query"]["steps"] == [[240.0, 1.0], [420.0, 3.0]] and by["query"]["value"] == 3.0
+    from lakebench.reports.tiles import build_tiles
+
+    pace = next(t for t in build_tiles(rec, mode="sustained", gates=None) if t.label == "Pace")
+    assert "interactions/s" in pace.value and "480 interactions cleaned in 480 s" in pace.sub

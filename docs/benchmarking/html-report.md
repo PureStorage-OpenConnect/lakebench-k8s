@@ -28,14 +28,14 @@ The delivered `report.html` is written before any look can name the run, so it r
 
 ## Views
 
-A batch run of Customer 360 or AML, and a sustained AML run, opens on two tabs: **Workload replay** and **Scorecard**. The Scorecard is the page described below. A run with no replay (Customer 360 continuous) shows the Scorecard alone.
+A batch or sustained run of Customer 360 or AML opens on two tabs: **Workload replay** and **Scorecard**. The Scorecard is the page described below. A record with no replay profile or no recorded timeline shows the Scorecard alone.
 
 The replay plays the recorded timeline back, with play and pause, 1x/2x/4x speed, restart, a scrubber and a click on any stage:
 
 - **Workload**: the five stages with their recorded row counts (datagen, bronze, silver, gold) and the number of successful benchmark queries, and the Spark jobs with their recorded durations.
 - **Pipeline**: one bar per handoff, filling over the downstream stage's recorded window.
 - **Platform**: Storage, the lane from the record's [`io` block](records.md#storage-io), MB/s read and written; Compute (CPU cores and memory), Network (pod bytes in and out, which include executor shuffle, so they are not storage traffic) and Kubernetes (pods running), from the record's `platform_metrics.series`, summed over the pods in the namespace except the observability tooling every 15 s. A lane with no data is listed as not measured; without observability only Storage has data.
-- **Sustained AML** replays the measured window (`continuous.window`). Each stream card goes live at its recorded `running_at`. The Monitor card steps up at each evaluation cycle's recorded `completed_at` to the payments that cycle screened (the pinned `silver.transactions` snapshot's `total_records`); cycles the time-travel check did not verify do not step it. The Pipeline bars are the recorded lag of each handoff (`continuous.balance.handoffs.*.samples`, every 30 s), and the Platform panel's **Lag** button charts the same samples. A record without the samples shows no lag, and one without time-travel ticks shows NR on Monitor.
+- **Sustained runs** replay the measured window (`continuous.window`). Each stream card goes live at its recorded `running_at`. The Monitor card steps up at each evaluation cycle's recorded `completed_at` to the payments that cycle screened (the pinned `silver.transactions` snapshot's `total_records`); cycles the time-travel check did not verify do not step it. The Pipeline bars are the recorded lag of each handoff (`continuous.balance.handoffs.*.samples`, every 30 s), and the Platform panel's **Lag** button charts the same samples. A record without the samples shows no lag, and one without time-travel ticks shows NR on Monitor. Customer 360 has no evaluation cycles: its Assemble card counts the gold refreshes (`continuous.freshness.cycles`) and its Query card steps at each in-stream benchmark round's `ended_at` (`benchmark_rounds`).
 - **Recorded** is a stage or job window, a row count, a byte count. **Derived** is the running count and the handoff bars, which grow over a recorded window because the record holds the window and the final figure, not the figure in between. Nothing is simulated.
 - The page embeds its data as one JSON block, checked against the stored record by a test. Where the record has no window (datagen) or no figure (Spark stage bytes), the replay says so rather than drawing a curve.
 
@@ -45,7 +45,7 @@ The Scorecard tab opens on eight tiles, then the sections below; the run record 
 
 | Tile | Batch | Continuous |
 |---|---|---|
-| 1 | Pace: the workload's unit of operation per second to gold ready. Customer 360 counts interactions cleaned (silver `output_rows`), AML payments screened (gold `input_rows`), over `scores.time_to_value_seconds` (derived). A Count / Bytes switch on the tile shows the same stage's `input_size_gb` per second, stepping KiB to TiB | AML: payments screened per second, the rows in `silver.transactions` at the last verified evaluation cycle (`continuous.time_travel.ticks[*].total_records`) over `continuous.window.seconds`; NR when no cycle was verified. Customer 360: Pace, rows/s entering bronze (`scores.sustained_throughput_rps`), and whether the pipeline kept pace (`scores.pipeline_saturated`) |
+| 1 | Pace: the workload's unit of operation per second to gold ready. Customer 360 counts interactions cleaned (silver `output_rows`), AML payments screened (gold `input_rows`), over `scores.time_to_value_seconds` (derived). A Count / Bytes switch on the tile shows the same stage's `input_size_gb` per second, stepping KiB to TiB | AML: payments screened per second, the rows in `silver.transactions` at the last verified evaluation cycle (`continuous.time_travel.ticks[*].total_records`) over `continuous.window.seconds`; NR when no cycle was verified. Customer 360: interactions cleaned per second, silver `output_rows` over `continuous.window.seconds`, and whether the pipeline kept pace (`scores.pipeline_saturated`); a record without the window keeps rows/s entering bronze (`scores.sustained_throughput_rps`) |
 | 2 | Time to value (`scores.time_to_value_seconds`) | Freshness (`scores.data_freshness_seconds`) |
 | 3 | Query rate (`scores.composite_qph`) | Query rate (`scores.in_stream_composite_qph`) |
 | 4 | Compute, core-hours (`scores.total_core_hours`) | same |
@@ -54,18 +54,20 @@ The Scorecard tab opens on eight tiles, then the sections below; the run record 
 | 7 | Gates: passed over total (`verdict.gates`, recomputed as the page's verdict is) | same |
 | 8 | Support (`experiment.support.state`) | same |
 
-`scores` is `pipeline_benchmark.scores`, read as the run stored it, not recomputed. The Summary cards below the tiles remain.
+`scores` is `pipeline_benchmark.scores`, read as the run stored it, not recomputed. The tiles carry the guards the old score cards had: the qualifiers under the figure (`n=1`, `unverified`, `BOUNDED BY`, runs, samples and rounds), the direction (higher or lower is better), the QpH spread and the stopped-maintenance warning. A run that did not pass shows `-` on the five score tiles (Pace, Time to value or Freshness, Query rate, Compute, Efficiency) with the reason; Storage, Gates and Support still show.
 
-## Summary cards
+## Run notes
 
-| Mode | Cards |
+What has no tile sits under the grid:
+
+| Mode | Notes |
 |---|---|
-| Batch | Time-to-Value, Data Processed (GB), Pipeline Throughput (GB/s), QpH, Job Status (pass/fail count) |
-| Continuous | Data Freshness, Balance, Continuous Throughput (rows/s), Compute Efficiency (GB/core-hour), In-Stream QpH (median), Total CPU-hours |
+| Batch | Pipeline Throughput (GiB/s over stage inputs, with the bronze corpus size), Scale Ratio, total time and jobs passed |
+| Continuous | Balance, duration, stage inputs processed and average stage-input throughput |
 
 - Balance reads balanced, not balanced or not measured. It names the bottleneck, each handoff's second-half lag growth against its allowance and, when datagen fell short, the MB/s offered against what the stages were sized for.
-- Throughput and efficiency use stage inputs; the card shows the bronze corpus size beside that total (continuous: the bronze bucket at run end, landing files and table together).
-- Not PASSED: no headline number; the page leads with the first actionable reason and failed jobs' errors, and cards read "-".
+- Throughput and efficiency use stage inputs; the note shows the bronze corpus size beside that total (continuous: the bronze bucket at run end, landing files and table together).
+- Not PASSED: no headline number; the page leads with the first actionable reason and failed jobs' errors, and the score tiles read "-".
 - The QpH tag counts runs separately from repetition: `n=1 run, 3 samples/query` (batch), `n=1 run, 4 rounds` (continuous). Samples and rounds are never counted as runs.
 
 ## Sections

@@ -13,7 +13,7 @@ continuous sets differ in the first two and in the query-rate field.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from html import escape
 from typing import Any
 
@@ -36,6 +36,7 @@ class Tile:
     alt_value: str = ""  # the same figure in the other unit (bytes), when it has one
     alt_sub: str = ""
     unit_label: str = ""  # what the count view counts ("Interactions"), for the switch
+    guard: str = ""  # HTML under the figure: qualifiers (n=1, bounded by) and direction
 
 
 def _num(record: Mapping[str, Any], *keys: str) -> float | None:
@@ -241,6 +242,41 @@ def _pace_offered(record: Mapping[str, Any]) -> Tile:
     )
 
 
+def _pace_cleaned(record: Mapping[str, Any], secs: Any) -> Tile:
+    """Customer 360: interactions cleaned (silver's output rows) per second
+    over the measured window. Records without a window or the stage count
+    keep the offered-load figure."""
+    stages = [
+        s
+        for s in (record.get("pipeline_benchmark") or {}).get("stages") or []
+        if isinstance(s, Mapping)
+    ]
+    idx = next((i for i, s in enumerate(stages) if s.get("stage_name") == "silver"), None)
+    count = _num(stages[idx], "output_rows") if idx is not None else None
+    if count is None or not isinstance(secs, (int, float)) or secs <= 0:
+        return _pace_offered(record)
+    a_path = dv.path("pipeline_benchmark", "stages", idx or 0, "output_rows")
+    b_path = "continuous.window.seconds"
+    saturated = ((record.get("pipeline_benchmark") or {}).get("scores") or {}).get(
+        "pipeline_saturated"
+    )
+    kept = (
+        ""
+        if saturated is None
+        else "; the pipeline fell behind the load"
+        if saturated
+        else "; the pipeline kept pace"
+    )
+    return Tile(
+        "Pace",
+        dv.ratio(count, secs, a_path=a_path, b_path=b_path, fmt=",.0f", suffix=" interactions/s"),
+        f"{count:,.0f} interactions cleaned in {secs:,.0f} s{kept}",
+        EVIDENCE_DERIVED,
+        f"{a_path} / {b_path}",
+        unit_label="Interactions",
+    )
+
+
 def _pace_continuous(record: Mapping[str, Any]) -> Tile:
     """Payments screened per second over the measured window: the rows in the
     transactions table at the last verified evaluation cycle, over the window.
@@ -251,6 +287,8 @@ def _pace_continuous(record: Mapping[str, Any]) -> Tile:
     path = "continuous.time_travel.ticks[*].total_records / continuous.window.seconds"
     screened = screened_by_cycle(record)
     schema = str((record.get("config_snapshot") or {}).get("workload_schema") or "customer360")
+    if schema == "customer360":
+        return _pace_cleaned(record, secs)
     if schema != "financial":
         return _pace_offered(record)
     if not screened or not isinstance(secs, (int, float)) or secs <= 0:
@@ -291,6 +329,8 @@ def build_tiles(
     mode: str,
     gates: Mapping[str, str] | None,
     metrics: Any = None,
+    guards: Mapping[str, str] | None = None,
+    not_shown: Mapping[str, str] | None = None,
 ) -> list[Tile]:
     """The eight tiles of a run record. *gates* is the verdict's gate
     outcomes (recomputed, as the page's verdict is). *metrics* is the loaded
@@ -332,7 +372,7 @@ def build_tiles(
             ),
         ]
         qph_key = "in_stream_composite_qph"
-    return [
+    tiles = [
         *lead,
         _scalar(record, "Query rate", (*sc, qph_key), fmt=",.1f", suffix="", sub=qph_sub),
         _scalar(
@@ -355,6 +395,24 @@ def build_tiles(
         _gates_tile(record, gates),
         _support_tile(record),
     ]
+    out: list[Tile] = []
+    for tile in tiles:
+        why = (not_shown or {}).get(tile.label)
+        if why:
+            # The summary's guard: the figure is withheld, with its reason
+            # (a run that did not pass, bytes never priced, no round run).
+            dash = "-" if "did not pass" in why else "NR"
+            tile = Tile(
+                tile.label,
+                dash,
+                f"not shown: {why}" if dash == "-" else f"not measured: {why}",
+                EVIDENCE_NR,
+                tile.source,
+            )
+        elif tile.evidence != EVIDENCE_NR and (guards or {}).get(tile.label):
+            tile = replace(tile, guard=(guards or {})[tile.label])
+        out.append(tile)
+    return out
 
 
 _CSS = """
@@ -364,6 +422,8 @@ _CSS = """
 .lb-tiles .lb-tile b{display:block;font-size:13px;font-weight:600;color:#5f7767}
 .lb-tiles .lb-tile strong{display:block;font-size:clamp(22px,2.3vw,32px);white-space:nowrap;letter-spacing:-1px;margin-top:7px;font-variant-numeric:tabular-nums}
 .lb-tiles .lb-tile small{display:block;font-size:12px;color:#7c8e81;margin-top:2px}
+.lb-tiles .lb-guard{font-size:12px;color:#6a7d70;margin-top:6px;line-height:1.4}
+.lb-tiles .lb-guard .qual{font-size:12px!important;margin:0 .5em 0 0!important;font-weight:700}
 .lb-tiles .lb-tile.nr strong{color:#9aa89d}
 @media(max-width:900px){.lb-tiles .lb-grid{grid-template-columns:repeat(2,1fr)}}
 """
@@ -412,9 +472,10 @@ def render_tiles(tiles: list[Tile]) -> str:
             )
         else:
             value, sub = t.value, escape(t.sub)
+        guard = f'<div class="lb-guard">{t.guard}</div>' if t.guard else ""
         return (
             f'<div class="lb-tile {t.evidence}" title="{escape(t.source, quote=True)}">'
-            f"<b>{escape(t.label)}</b><strong>{value}</strong><small>{sub}</small></div>"
+            f"<b>{escape(t.label)}</b><strong>{value}</strong><small>{sub}</small>{guard}</div>"
         )
 
     cells = "".join(cell(t) for t in tiles)

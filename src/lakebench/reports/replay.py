@@ -71,8 +71,31 @@ _PROFILES: dict[tuple[str, str], dict[str, Any]] = {
         # it screened.
         "fields": {"gold": "input_rows"},
     },
+    ("customer360", "sustained"): {
+        "kind": "sustained",
+        "workload": "customer360",
+        "title": "C360 / Continuous",
+        "subtitle": "Customer 360",
+        "phases": _PHASES,
+        "names": ("Customer data", "Ingest", "Conform", "Customer 360", "Customer view"),
+        "impl": (
+            "Datagen → S3",
+            "Spark · Bronze stream",
+            "Spark · Silver stream",
+            "Spark · Gold refresh",
+            "Benchmark rounds → Trino",
+        ),
+        "labels": (
+            "Rows released",
+            "Rows ingested",
+            "Interactions cleaned",
+            "Refresh cycles",
+            "Queries completed",
+        ),
+    },
     ("financial", "sustained"): {
         "kind": "sustained",
+        "workload": "financial",
         "title": "AML / Continuous",
         "subtitle": "Financial · Transaction monitoring",
         "phases": ("Generate", "Ingest", "Prepare", "Monitor", "Detect"),
@@ -192,6 +215,24 @@ def _sustained(
         if o is not None and c in screened
     ]
     steps.sort()
+    c360 = profile.get("workload") == "customer360"
+    rounds = [
+        r
+        for r in record.get("benchmark_rounds") or []
+        if isinstance(r, Mapping) and r.get("ended_at")
+    ]
+    round_steps: list[list[float]] = []
+    done = 0
+    for r in sorted(rounds, key=lambda r: str(r.get("ended_at"))):
+        at = _offset(r.get("ended_at"), t0)
+        if at is None:
+            continue
+        done += sum(
+            1 for q in r.get("queries") or [] if isinstance(q, Mapping) and q.get("success")
+        )
+        round_steps.append([at, float(done)])
+    cycles = (cont.get("freshness") or {}).get("cycles")
+    silver_field = "output_rows" if c360 else "input_rows"
     spec = [  # start, value, path, counts rows
         (w0, scores.get("released_rows"), "pipeline_benchmark.scores.released_rows", True),
         (
@@ -202,23 +243,31 @@ def _sustained(
         ),
         (
             running["silver-stream"],
-            (by_name.get("silver") or {}).get("input_rows"),
-            "pipeline_benchmark.stages[silver].input_rows",
+            (by_name.get("silver") or {}).get(silver_field),
+            f"pipeline_benchmark.stages[silver].{silver_field}",
             True,
         ),
         (
             running["gold-refresh"],
-            steps[-1][1] if steps else None,
-            "continuous.time_travel.ticks[*].total_records",
-            True,
+            cycles if c360 else (steps[-1][1] if steps else None),
+            "continuous.freshness.cycles"
+            if c360
+            else "continuous.time_travel.ticks[*].total_records",
+            not c360,
         ),
         (
             w0,
-            scores.get("time_to_detect_alerts"),
-            "pipeline_benchmark.scores.time_to_detect_alerts",
+            round_steps[-1][1]
+            if c360 and round_steps
+            else (None if c360 else scores.get("time_to_detect_alerts")),
+            "benchmark_rounds[*].queries[*].success"
+            if c360
+            else "pipeline_benchmark.scores.time_to_detect_alerts",
             False,
         ),
     ]
+    if c360:
+        steps = []
     stages = []
     for idx, (start, value, path, rows) in enumerate(spec):
         placed = start is not None and w1 is not None
@@ -235,7 +284,13 @@ def _sustained(
                 "path": path if value is not None else None,
                 "window": "recorded" if placed else None,
                 "ends": None,
-                "steps": steps if idx == 3 and steps else None,
+                "steps": (
+                    steps
+                    if idx == 3 and steps
+                    else round_steps
+                    if idx == 4 and c360 and round_steps
+                    else None
+                ),
                 "rows": rows,
             }
         )

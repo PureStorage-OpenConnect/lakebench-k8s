@@ -315,12 +315,14 @@ def test_report_labels_intake_cards_only():
     assert caps_bound_from(m) == []  # the trickle does not bound every number
     assert len(trickle_caps_from(m)) == 1
     gen = ReportGenerator(output_dir="/nonexistent")
-    html = gen._generate_sustained_summary(m)
-    by_label = _cards(html)
-    assert "BOUNDED BY" in by_label["Continuous Throughput"]
-    assert "BOUNDED BY" in by_label["Compute Efficiency"]
-    assert "BOUNDED BY" not in by_label["In-Stream QpH"]
-    assert "BOUNDED BY" not in by_label["Data Freshness"]
+    parts = gen._generate_sustained_summary(m)
+    # The tiles carry the qualifiers: the trickle bounds the intake figures,
+    # not the query rate or freshness.
+    assert "BOUNDED BY" in parts.guards["Pace"]
+    assert "BOUNDED BY" in parts.guards["Efficiency"]
+    assert "BOUNDED BY" not in parts.guards["Query rate"]
+    assert "BOUNDED BY" not in parts.guards["Freshness"]
+    html = parts.html
     avg = re.search(
         r"Avg stage-input throughput:(.*?)</span>\s*</span>|Avg stage-input throughput:(.*?)\n",
         html,

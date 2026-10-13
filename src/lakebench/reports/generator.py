@@ -20,6 +20,7 @@ backward compatibility and only shifts the default scratch directory.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import escape as _html_escape
 from pathlib import Path
@@ -56,6 +57,17 @@ def _format_duration_ms(ms: float | None) -> str:
 # Above this the batch corpus holds more data than the scale asks for; the
 # ratio shows amber, not "Complete".
 SCALE_RATIO_HIGH = 1.05
+
+
+@dataclass
+class _SummaryParts:
+    """What the scorecard's summary contributes: the run notes that have no
+    tile, the guards (qualifiers and direction hints) each score tile
+    carries, and the tiles that must read not-measured, with the reason."""
+
+    html: str
+    guards: dict[str, str] = field(default_factory=dict)
+    not_shown: dict[str, str] = field(default_factory=dict)
 
 
 def _scale_warning(ratio: float) -> str:
@@ -1800,7 +1812,7 @@ class ReportGenerator:
         benchmark_html = self._generate_benchmark_section(metrics)
         benchmark_rounds_html = self._generate_benchmark_rounds_section(metrics)
         pipeline_bench_html = self._generate_pipeline_benchmark_section(metrics)
-        summary_html = self._generate_summary(metrics)
+        summary_html = self._generate_summary(metrics).html
         config_html = (
             self._generate_storage_io_section(metrics)
             + self._generate_storage_multiple_section(metrics)
@@ -2140,7 +2152,17 @@ class ReportGenerator:
             except Exception:  # noqa: BLE001 - the gates tile then says NR
                 gates = None
             mode = "continuous" if self._is_sustained(metrics) else "batch"
-            return render_tiles(build_tiles(record, mode=mode, gates=gates, metrics=metrics))
+            parts = self._generate_summary(metrics)
+            return render_tiles(
+                build_tiles(
+                    record,
+                    mode=mode,
+                    gates=gates,
+                    metrics=metrics,
+                    guards=parts.guards,
+                    not_shown=parts.not_shown,
+                )
+            )
         except Exception:  # noqa: BLE001 - a tile grid must never break the page
             return ""
 
@@ -2151,8 +2173,12 @@ class ReportGenerator:
         try:
             record = metrics.to_dict()
             mode = "continuous" if self._is_sustained(metrics) else "batch"
-            tiles = build_tiles(record, mode=mode, gates=None, metrics=metrics)
-            return next((t for t in tiles if t.label == "Pace"), None)
+            parts = self._generate_summary(metrics)
+            tiles = build_tiles(
+                record, mode=mode, gates=None, metrics=metrics, not_shown=parts.not_shown
+            )
+            tile = next((t for t in tiles if t.label == "Pace"), None)
+            return None if tile is None or tile.evidence == "nr" else tile
         except Exception:  # noqa: BLE001 - the headline is optional
             return None
 
@@ -2200,7 +2226,7 @@ class ReportGenerator:
     def _generate_summary(
         self,
         metrics: PipelineMetrics,
-    ) -> str:
+    ) -> _SummaryParts:
         """Generate summary cards HTML.
 
         Sustained mode shows streaming-specific KPIs.
@@ -2215,24 +2241,14 @@ class ReportGenerator:
             return self._generate_sustained_summary(metrics)
         return self._generate_batch_summary(metrics)
 
-    _BATCH_CARDS = (
-        "Time to Value",
-        "Pipeline Throughput",
-        "Compute Efficiency",
-        "QpH",
-        "Scale Ratio",
-    )
-    _CONTINUOUS_CARDS = (
-        "Data Freshness",
-        "Continuous Throughput",
-        "Compute Efficiency",
-        "In-Stream QpH",
-        "Total CPU-hours",
-    )
+    # The score tiles of the grid (reports/tiles.py): a run that did not
+    # pass shows none of them.
+    _BATCH_CARDS = ("Pace", "Time to value", "Query rate", "Compute", "Efficiency")
+    _CONTINUOUS_CARDS = ("Pace", "Freshness", "Query rate", "Compute", "Efficiency")
 
     def _generate_failed_summary(
         self, metrics: PipelineMetrics, status: str, reasons: list[str]
-    ) -> str:
+    ) -> _SummaryParts:
         """The headline for a run that did not pass: the first verdict
         reason, each failed job's error, and the score cards with no
         number, so a failed run's partial figures are not read as results."""
@@ -2261,26 +2277,16 @@ class ReportGenerator:
             else ""
         )
         labels = self._CONTINUOUS_CARDS if self._is_sustained(metrics) else self._BATCH_CARDS
-        cards = "".join(
-            f"""
-            <div class="card">
-                <div class="card-label">{label}</div>
-                <div class="card-value">-</div>
-                <div class="card-hint">not shown: the run did not pass</div>
-            </div>"""
-            for label in labels
-        )
-        return f"""
+        html = f"""
         <section class="failed-headline" style="border-left: 3px solid var(--danger);">
             <h2 style="color: var(--danger);">Run {e(status)}: {e(first)}</h2>
             {errors_html}
             {others_html}
         </section>
-        <div class="cards">{cards}
-        </div>
         """
+        return _SummaryParts(html, {}, dict.fromkeys(labels, "the run did not pass"))
 
-    def _generate_sustained_summary(self, metrics: PipelineMetrics) -> str:
+    def _generate_sustained_summary(self, metrics: PipelineMetrics) -> _SummaryParts:
         """Generate summary cards for sustained/streaming mode.
 
         Five primary cards (the scores users compare across runs) plus a
@@ -2335,7 +2341,7 @@ class ReportGenerator:
         avg_throughput = pb.pipeline_throughput_gb_per_second if pb else 0.0
         duration_m = int(total_time // 60)
         duration_s = int(total_time % 60)
-        freshness_display = (
+        (
             format_measurement(
                 f"{freshness_val:.1f}s",
                 "",
@@ -2349,7 +2355,7 @@ class ReportGenerator:
         if freshness_val is None:
             freshness_hint = "insufficient gold cycles to measure"
         qph_raw = f"{qph:,.1f}" if qph is not None else "N/A"
-        qph_display = format_measurement(
+        format_measurement(
             qph_raw,
             "",
             caps_bound=caps_bound if qph is not None else None,
@@ -2381,7 +2387,7 @@ class ReportGenerator:
         # measured, never 0.
         bytes_unmeasured = pb is None or (data_gb == 0 and throughput > 0)
         _unmeasured = _no_pb if pb is None else "not measured (no datagen fleet record)"
-        efficiency_value = (
+        (
             _unmeasured
             if bytes_unmeasured
             else format_measurement(
@@ -2405,7 +2411,7 @@ class ReportGenerator:
                 caps_bound=intake_caps if avg_throughput > 0 else None,
             )
         )
-        throughput_display = format_measurement(
+        format_measurement(
             throughput_raw,
             "",
             caps_bound=intake_caps if throughput > 0 else None,
@@ -2483,38 +2489,52 @@ class ReportGenerator:
         )
         efficiency_hint2 = _direction_hint("compute_efficiency_gb_per_core_hour", _cont)
 
-        return f"""
-        <div class="cards">
-            <div class="card">
-                <div class="card-label">Data Freshness</div>
-                <div class="card-value">{freshness_display}</div>
-                <div class="card-hint">{freshness_hint}</div>
-                <div class="card-hint2">{freshness_hint2}</div>
-            </div>{balance_card}
-            <div class="card">
-                <div class="card-label">Continuous Throughput</div>
-                <div class="card-value">{throughput_display}</div>
-                <div class="card-hint">rows entering bronze per second</div>
-                <div class="card-hint2">{throughput_hint2}</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">{efficiency_value}</div>
-                <div class="card-hint">stage-input GiB per core-hour requested</div>
-                <div class="card-hint2">{efficiency_hint2}</div>
-            </div>
-            <div class="card">
-                <div class="card-label">In-Stream QpH</div>
-                <div class="card-value">{qph_display}</div>
-                <div class="card-hint">{qph_note or direction_hint("in_stream_composite_qph", "sustained")}</div>
-                <div class="card-hint2">{qph_hint2}</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Total CPU-hours</div>
-                <div class="card-value">{_no_pb if pb is None else f"{core_hours:.1f}"}</div>
-                <div class="card-hint">total compute across all stages</div>
-                <div class="card-hint2">{cpu_hint2}</div>
-            </div>
+        qual = lambda **kw: format_measurement("", "", **kw)  # noqa: E731
+        guards = {
+            "Pace": qual(
+                caps_bound=intake_caps if throughput > 0 else None,
+                n_runs=1 if throughput > 0 else None,
+                support_state=support_state if throughput > 0 else None,
+            )
+            + f"<div>{throughput_hint2}</div>",
+            "Freshness": qual(
+                caps_bound=caps_bound + trigger_caps_from(metrics),
+                n_runs=1,
+                support_state=support_state,
+            )
+            + f"<div>{freshness_hint}</div><div>{freshness_hint2}</div>"
+            if freshness_val is not None
+            else "",
+            "Query rate": (
+                qual(
+                    caps_bound=caps_bound,
+                    n_runs=_runs_of(metrics),
+                    samples=qph_samples,
+                    rounds=qph_rounds,
+                    rounds_html=qph_rounds_html,
+                    support_state=support_state,
+                )
+                + f"<div>{qph_note}</div><div>{qph_hint2}</div>"
+                if qph is not None
+                else ""
+            ),
+            "Compute": f"<div>{cpu_hint2}</div>",
+            "Efficiency": (
+                qual(caps_bound=intake_caps) if efficiency > 0 and not bytes_unmeasured else ""
+            )
+            + f"<div>{efficiency_hint2}</div>",
+        }
+        not_shown: dict[str, str] = {}
+        if pb is None:
+            not_shown = dict.fromkeys(("Pace", "Freshness", "Compute", "Efficiency"), _no_pb)
+        if freshness_val is None:
+            not_shown["Freshness"] = freshness_hint
+        if qph is None:
+            not_shown["Query rate"] = _no_qph
+        if bytes_unmeasured:
+            not_shown["Efficiency"] = _unmeasured
+        notes = f"""
+        <div class="cards">{balance_card}
         </div>
         <div style="display: flex; gap: 2rem; color: var(--text-muted); font-size: 0.8rem; margin-bottom: 1.5rem;">
             <span>Duration: {duration_m}m {duration_s}s</span>
@@ -2522,8 +2542,9 @@ class ReportGenerator:
             <span>Avg stage-input throughput: {avg_throughput_text}</span>
         </div>
         """
+        return _SummaryParts(notes, guards, not_shown)
 
-    def _generate_batch_summary(self, metrics: PipelineMetrics) -> str:
+    def _generate_batch_summary(self, metrics: PipelineMetrics) -> _SummaryParts:
         """Generate summary cards for batch mode.
 
         Five primary cards (the scores users compare across runs) plus a
@@ -2552,7 +2573,8 @@ class ReportGenerator:
             # Fallback for old metrics without pipeline_benchmark
             total_input = sum(j.input_size_gb for j in metrics.jobs)
             qph_card = self._generate_qph_card(metrics)
-            return f"""
+            return _SummaryParts(
+                f"""
             <div class="cards">
                 <div class="card">
                     <div class="card-label">Total Time</div>
@@ -2572,7 +2594,10 @@ class ReportGenerator:
                 </div>
                 {qph_card}
             </div>
-            """
+            """,
+                {},
+                {},
+            )
 
         # QpH from pipeline benchmark or standalone benchmark
         qph = pb.query_benchmark.qph if pb.query_benchmark else 0.0
@@ -2598,7 +2623,7 @@ class ReportGenerator:
         )
         throughput_hint2 = _direction_hint("pipeline_throughput_gb_per_second", "batch")
         efficiency_hint2 = _direction_hint("compute_efficiency_gb_per_core_hour", "batch")
-        qph_display = format_measurement(
+        format_measurement(
             f"{qph:,.1f}" if qph > 0 else "N/A",
             "",
             caps_bound=caps_bound if qph > 0 else None,
@@ -2614,14 +2639,32 @@ class ReportGenerator:
             support_state=support_state if pb.pipeline_throughput_gb_per_second > 0 else None,
         )
 
-        return f"""
+        qual = lambda **kw: format_measurement("", "", **kw)  # noqa: E731
+        has_bytes = pb.pipeline_throughput_gb_per_second > 0
+        guards = {
+            "Pace": qual(
+                caps_bound=caps_bound if has_bytes else None,
+                n_runs=1 if has_bytes else None,
+                support_state=support_state if has_bytes else None,
+            )
+            + f"<div>{throughput_hint2}</div>",
+            "Time to value": f"<div>{ttv_hint2}</div>",
+            "Query rate": (
+                qual(
+                    caps_bound=caps_bound,
+                    n_runs=_runs_of(metrics),
+                    samples=qph_samples,
+                    support_state=support_state,
+                )
+                + f"<div>{qph_hint2}</div>{_qph_stop_warning(metrics)}{qph_spread_html}"
+                if qph > 0
+                else ""
+            ),
+            "Efficiency": f"<div>{efficiency_hint2}</div>",
+        }
+        not_shown = {} if qph > 0 else {"Query rate": "no query benchmark in the run record"}
+        notes = f"""
         <div class="cards">
-            <div class="card">
-                <div class="card-label">Time to Value</div>
-                <div class="card-value">{ttv:.1f}s</div>
-                <div class="card-hint">wall-clock to queryable gold</div>
-                <div class="card-hint2">{ttv_hint2}</div>
-            </div>
             <div class="card">
                 <div class="card-label">Pipeline Throughput</div>
                 <div class="card-value">{pipeline_throughput_display}</div>
@@ -2629,20 +2672,6 @@ class ReportGenerator:
                     {_stage_inputs_note(metrics)}
                 </div>
                 <div class="card-hint">stage inputs processed per second (bronze, silver and gold reads)</div>
-                <div class="card-hint2">{throughput_hint2}</div>
-            </div>
-            <div class="card">
-                <div class="card-label">Compute Efficiency</div>
-                <div class="card-value">{pb.compute_efficiency_gb_per_core_hour:.2f} GiB/core-hr</div>
-                <div class="card-hint">stage-input GiB per core-hour requested</div>
-                <div class="card-hint2">{efficiency_hint2}</div>
-            </div>
-            <div class="card">
-                <div class="card-label">QpH</div>
-                <div class="card-value">{qph_display}{_qph_stop_warning(metrics)}</div>
-                <div class="card-hint">queries per hour -- {direction_hint("composite_qph", "batch")}</div>
-                <div class="card-hint2">{qph_hint2}</div>
-                {qph_spread_html}
             </div>
             <div class="card">
                 <div class="card-label">Scale Ratio</div>
@@ -2656,6 +2685,7 @@ class ReportGenerator:
             <span>Jobs: {jobs_passed_html}</span>
         </div>
         """
+        return _SummaryParts(notes, guards, not_shown)
 
     def _generate_jobs_table(
         self,

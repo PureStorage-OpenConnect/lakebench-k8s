@@ -94,8 +94,9 @@ def test_r6_failed_run_headline_is_the_verdict_reason():
     head = _section(text, f"Run FAILED: {first}", "Bottleneck Identification")
     assert "Job timed out after 1800s" in gold["error_message"]
     assert "lakebench-gold-finalize" in head and "Job timed out after 1800s" in head
-    for label in ("Time to Value", "Pipeline Throughput", "QpH", "Scale Ratio"):
-        assert f"{label} - not shown: the run did not pass" in head
+    # The score tiles carry no figure of a run that did not pass.
+    for label in ("Pace", "Time to value", "Query rate", "Compute", "Efficiency"):
+        assert f"{label} - not shown: the run did not pass" in text
     # The read-first panel's headline is the same reason.
     assert f"Headline: {first}" in text
     assert f"{scores['time_to_value_seconds']:.1f}s" not in text
@@ -106,7 +107,7 @@ def test_r6_failed_run_headline_is_the_verdict_reason():
 def test_r6_passed_run_keeps_its_numbers():
     ttv = load_record("5105a0")["pipeline_benchmark"]["scores"]["time_to_value_seconds"]
     text = _text("5105a0")
-    assert f"Time to Value {ttv:.1f}s" in text
+    assert f"Time to value {ttv:,.0f} s" in text
     assert "not shown: the run did not pass" not in text
 
 

@@ -137,6 +137,11 @@ def test_golden_tiles_match_the_stored_record(run_id: str) -> None:
     text = re.sub(r"\|+", "|", re.sub(r"<[^>]+>", "|", page_text(golden_path(run_id).read_text())))
     sc = load_record(run_id)["pipeline_benchmark"]["scores"]
     grid = text[text.index("lb-grid") :]
+    if "failed-headline" in golden_path(run_id).read_text():
+        # A run that did not pass shows no score figure, only the reason.
+        assert grid.count("not shown: the run did not pass") == 5
+        assert f"{sc['total_core_hours']:.2f}" not in grid
+        return
     assert f"{sc['total_core_hours']:.2f}" in grid
     assert f"{sc['compute_efficiency_gb_per_core_hour']:.2f}" in grid
     key = "composite_qph" if "time_to_value_seconds" in sc else "in_stream_composite_qph"
