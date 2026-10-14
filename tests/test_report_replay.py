@@ -330,3 +330,11 @@ def test_replay_cards_show_compact_counts_with_the_exact_count_on_hover() -> Non
     assert "function compact(" in html
     assert "big.textContent=v==null?'NR':compact(v)" in html
     assert "big.title=v==null?'':num(v)" in html
+
+
+def test_replay_speed_is_a_multiple_of_real_time_and_says_so() -> None:
+    html = render_replay(build_replay(_record()))
+    assert "t+Math.max(0,now-last)/1000*speed)" in html
+    assert "var STEPS=[1,5,30,60]" in html
+    assert "× real time" in html
+    assert "The charts hold one point per" in html
