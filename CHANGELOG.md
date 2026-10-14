@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **The report's workload cards show compact counts.** `250,411,875` reads `250.4M` and `6,100,143` reads `6.1M`; the exact count is the hover title on the number and stays in the run record.
 
+## [Unreleased]
+
+### Changed
+
+- **The report's replay speed is a multiple of real time.** The buttons read `1×`, `5×`, `30×` and `60× real time`, and a run opens at the step nearest one that plays it in about a minute; before, `1×` stretched the whole run to about a minute whatever its length, so a 30 minute run played at 30 times real time under a `1×` label. The timeline's tooltip names how many seconds of the run each chart point holds.
+
 ## [1.7.4] - 2026-10-13
 
 ### Changed

@@ -754,13 +754,19 @@ function draw(){
  plot('#rp-eplot',[{v:RATE,c:'#4b9d78'}],RMAX);
  $('[data-act=clock]').textContent=fmtT(t)+' / '+fmtT(T);
  $('[data-act=seek]').value=t}
-function tick(now){if(playing){t=Math.max(0,Math.min(T,t+Math.max(0,now-last)/1000*speed*Math.max(1,T/60)));if(t>=T){playing=false;$('[data-act=play]').textContent='▶ Play'}draw()}last=now;requestAnimationFrame(tick)}
+function tick(now){if(playing){t=Math.max(0,Math.min(T,t+Math.max(0,now-last)/1000*speed));if(t>=T){playing=false;$('[data-act=play]').textContent='▶ Play'}draw()}last=now;requestAnimationFrame(tick)}
 root.querySelectorAll('.step').forEach(function(c){c.onclick=function(){sel=+c.dataset.step;draw()};c.onkeydown=function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();sel=+c.dataset.step;draw()}}});
 root.querySelectorAll('[data-lane]').forEach(function(b){b.onclick=function(){lane=b.dataset.lane;root.querySelectorAll('[data-lane]').forEach(function(x){x.classList.toggle('on',x===b)});draw()}});
 $('[data-act=play]').onclick=function(e){if(t>=T)t=0;playing=!playing;last=performance.now();e.currentTarget.textContent=playing?'Ⅱ Pause':'▶ Play'};
-$('[data-act=speed]').onclick=function(e){speed=speed===1?2:speed===2?4:1;e.currentTarget.textContent=speed+'×'};
+// Speed is a multiple of real time. The run opens at the step nearest
+// the one that plays the whole run in about a minute.
+var STEPS=[1,5,30,60],si=0,want=Math.max(1,T/60);
+STEPS.forEach(function(v,i){if(Math.abs(Math.log(v/want))<Math.abs(Math.log(STEPS[si]/want)))si=i});
+function setSpeed(){speed=STEPS[si];$('[data-act=speed]').textContent=speed+'× real time'}
+setSpeed();
+$('[data-act=speed]').onclick=function(){si=(si+1)%STEPS.length;setSpeed()};
 $('[data-act=restart]').onclick=function(){t=0;sel=null;playing=false;$('[data-act=play]').textContent='▶ Play';draw()};
-var sk=$('[data-act=seek]');sk.max=T;sk.oninput=function(e){t=+e.target.value;draw()};
+var sk=$('[data-act=seek]');sk.max=T;sk.title='The charts hold one point per '+Math.max(1,Math.ceil(T/N))+' s of the run';sk.oninput=function(e){t=+e.target.value;draw()};
 draw();requestAnimationFrame(tick);
 })();
 """
@@ -885,7 +891,7 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         "</div></div>"
         f'<div class="note">{e(note)}</div>'
         '<div class="controls"><button type="button" data-act="play">▶ Play</button>'
-        '<button type="button" data-act="speed">1×</button>'
+        '<button type="button" data-act="speed">1× real time</button>'
         '<button type="button" data-act="restart">↺ Restart</button>'
         f"{switch}"
         '<input type="range" min="0" max="0" value="0" step="1" data-act="seek" '
