@@ -4,13 +4,7 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
-
-### Changed
-
-- **The report's workload cards show compact counts.** `250,411,875` reads `250.4M` and `6,100,143` reads `6.1M`; the exact count is the hover title on the number and stays in the run record.
-
-## [Unreleased]
+## [1.7.5] - 2026-10-13
 
 ### Changed
 
@@ -20,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The report's workload cards show compact counts.** `250,411,875` reads `250.4M` and `6,100,143` reads `6.1M`; the exact count is the hover title on the number and stays in the run record.
 - **The end-of-run summary and `lakebench report` print the front matter as a label and value table instead of a box.** Long values wrap under their column and nothing is drawn at a fixed width, so a narrow terminal no longer breaks the frame; the `...` progress prefix is cyan instead of blue.
 
 ## [1.7.3] - 2026-10-13
