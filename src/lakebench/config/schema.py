@@ -1412,7 +1412,10 @@ class SustainedConfig(ConfigModel):
             "`streaming-max-rows-per-micro-batch`), so one micro-batch cannot swallow the "
             "whole backlog and run past the window. A batch always takes the next whole data "
             "file, then stops once the cap would be exceeded. `null` lifts the cap (each "
-            "trigger takes every unprocessed bronze snapshot)."
+            "trigger takes every unprocessed bronze snapshot). For a financial continuous run "
+            "that leaves this unset, auto-sizing raises the cap to what the silver executors "
+            "can hold in memory at the scale (always at least this default), so a larger batch "
+            "amortizes the world-sized dimension MERGE; an explicit value is used as given."
         ),
     )
     silver_write_mode: SilverWriteMode = Field(

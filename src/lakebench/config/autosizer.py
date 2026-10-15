@@ -452,11 +452,23 @@ def resolve_auto_sizing(
         _apply_cluster_scaling(config, cluster_capacity, effective_mode, guidance, changes)
 
     if is_continuous(config):
+        from lakebench.config.sizing import derive_silver_max_rows_per_trigger
         from lakebench.modules.pipeline_engines.spark.job import (
             _streaming_concurrent_budget,
             fit_executor_cores,
             unbalanced_stages,
         )
+
+        # Silver's per-trigger row cap: a larger batch amortizes the
+        # world-sized dimension MERGE, up to what the silver-stream executors
+        # can hold. Derived from the memory envelope for financial continuous,
+        # floored at the schema default so a defaulted run never shrinks; a
+        # user-set value wins. None for non-financial / batch (keep default).
+        derived_cap = derive_silver_max_rows_per_trigger(config)
+        if derived_cap is not None and _set_if_default(
+            config.architecture.pipeline.sustained, "silver_max_rows_per_trigger", derived_cap
+        ):
+            changes.append(f"silver_max_rows_per_trigger={derived_cap:,}")
 
         budget = None
         if cluster_capacity is not None:

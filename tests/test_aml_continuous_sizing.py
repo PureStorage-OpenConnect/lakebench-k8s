@@ -137,6 +137,145 @@ def test_counts_scale_and_respect_the_cap():
         assert silver <= _MAX_EXECUTORS_SAFE and gold <= _MAX_EXECUTORS_SAFE
 
 
+def test_silver_cap_memory_ceiling_floors_at_the_schema_default():
+    """The memory-ceiling bound never drops below the schema default, so a run
+    left at the default is never silently re-capped, and the floor constant
+    tracks the schema field default (the "moves no existing run" guarantee)."""
+    from lakebench.config.schema import SustainedConfig
+    from lakebench.config.sizing import (
+        SILVER_CAP_FLOOR,
+        _financial_silver_cap_memory_ceiling,
+    )
+
+    assert SILVER_CAP_FLOOR == SustainedConfig.model_fields["silver_max_rows_per_trigger"].default
+    for scale in (0.1, 1, 10, 48, 100, 1000):
+        assert _financial_silver_cap_memory_ceiling(scale) >= SILVER_CAP_FLOOR
+
+
+def test_silver_cap_memory_ceiling_rises_with_scale_and_clears_the_measured_point():
+    """From scale 10 up, more executors hold a bigger batch, so the ceiling is
+    non-decreasing; and at scale 48 it stays above the one on-cluster point
+    that ran without OOM (60M rows at 32g), so the backstop never forbids a
+    known-safe cap. Below scale 10 executor count is flat at the base while
+    bytes/row still rises, so the ceiling dips slightly there -- not the regime
+    a cap raise targets."""
+    from lakebench.config.sizing import _financial_silver_cap_memory_ceiling as ceiling
+
+    # Scale 10 and up: executor count drives the ceiling, so it only rises.
+    scales = [10, 24, 48, 100, 500, 1000]
+    ceilings = [ceiling(s) for s in scales]
+    assert ceilings == sorted(ceilings)
+    assert ceiling(48) >= 60_000_000
+
+
+def test_financial_bronze_bytes_per_row_matches_the_measured_band():
+    """Rows and bronze bytes are both linear in scale, so bytes/row is near
+    constant: the measured 8.47/9.36 GiB-per-unit corpus over 26.7M rows/unit,
+    read with the binary GiB convention the scale module uses."""
+    from lakebench.config.sizing import _financial_bronze_bytes_per_row as bpr
+
+    assert bpr(1) == pytest.approx(341, abs=2)
+    assert bpr(10) == pytest.approx(377, abs=2)
+    # Flat outside the two measured points and monotone between them.
+    assert bpr(0.5) == pytest.approx(bpr(1), abs=1)
+    assert bpr(100) == pytest.approx(bpr(10), abs=1)
+    assert bpr(1) <= bpr(5) <= bpr(10)
+
+
+def _resolved_silver_cap(schema: str, scale: float, mode: str = "sustained", cap=...):
+    """``silver_max_rows_per_trigger`` after ``resolve_auto_sizing``; *cap*
+    left as ``...`` means the user did not set one."""
+    from lakebench.config.autosizer import resolve_auto_sizing
+
+    cfg = _config(schema, scale)
+    cfg.architecture.pipeline.mode = mode
+    if cap is not ...:
+        cfg.architecture.pipeline.sustained.silver_max_rows_per_trigger = cap
+    resolve_auto_sizing(cfg)
+    return cfg.architecture.pipeline.sustained.silver_max_rows_per_trigger
+
+
+def test_autosizer_derives_the_silver_cap_for_financial_continuous():
+    """A defaulted financial continuous run gets the memory-ceiling cap, above
+    the 20M floor, so it rises with the executor envelope."""
+    from lakebench.config.sizing import _financial_silver_cap_memory_ceiling
+
+    for scale in (10, 48, 100):
+        assert _resolved_silver_cap("financial", scale) == _financial_silver_cap_memory_ceiling(
+            scale
+        )
+        assert _resolved_silver_cap("financial", scale) > 20_000_000
+
+
+def test_autosizer_keeps_an_explicit_silver_cap():
+    """An explicitly configured cap always wins over the derivation."""
+    assert _resolved_silver_cap("financial", 48, cap=80_000_000) == 80_000_000
+    # Even an explicit value below the derived ceiling is honoured.
+    assert _resolved_silver_cap("financial", 48, cap=5_000_000) == 5_000_000
+
+
+def test_autosizer_leaves_the_silver_cap_at_default_off_the_financial_path():
+    """customer360 continuous and batch financial keep the flat 20M default:
+    only financial continuous has the world-sized MERGE the derivation targets,
+    so no other run's recorded cap moves."""
+    assert _resolved_silver_cap("customer360", 48) == 20_000_000
+    assert _resolved_silver_cap("financial", 48, mode="batch") == 20_000_000
+
+
+def _advisories(schema: str, scale: float, mode: str = "sustained", dur: int = 1800, cap=...):
+    from lakebench.config.autosizer import resolve_auto_sizing
+    from lakebench.config.sizing import _silver_cap_advisories
+
+    cfg = _config(schema, scale)
+    cfg.architecture.pipeline.mode = mode
+    cfg.architecture.pipeline.sustained.run_duration = dur
+    if cap is not ...:
+        cfg.architecture.pipeline.sustained.silver_max_rows_per_trigger = cap
+    resolve_auto_sizing(cfg)
+    return _silver_cap_advisories(cfg)
+
+
+def test_silver_cap_advisory_describes_a_raised_cap():
+    """A financial continuous run whose cap was raised gets an advisory naming
+    the derived cap and the amortize-vs-commit-cadence trade-off."""
+    from lakebench.config.sizing import _financial_silver_cap_memory_ceiling
+
+    adv = _advisories("financial", 48)
+    assert any("rows per micro-batch" in a for a in adv)
+    # The advisory prints the actual derived cap value, formatted with commas.
+    derived = f"{_financial_silver_cap_memory_ceiling(48):,}"
+    assert any(derived in a for a in adv)
+
+
+def test_silver_cap_advisory_warns_only_on_a_short_window():
+    """The window/commit confirmation line fires below the 1800 s default, not
+    at or above it; it never claims an estimated commit count (no in-repo
+    batch-duration model)."""
+    short = _advisories("financial", 48, dur=900)
+    default = _advisories("financial", 48, dur=1800)
+    assert any("2 silver commits" in a for a in short)
+    assert not any("silver commits" in a for a in default)
+    for a in short + default:
+        assert "estimated" not in a.lower()
+
+
+def test_silver_cap_advisory_silent_off_the_financial_path_and_at_the_floor():
+    """No advisory for customer360, batch, or a cap left at/below the floor:
+    the advisory only speaks when the cap was actually raised."""
+    assert _advisories("customer360", 48) == []
+    assert _advisories("financial", 48, mode="batch") == []
+    assert _advisories("financial", 48, cap=20_000_000) == []
+    assert _advisories("financial", 48, cap=5_000_000) == []
+
+
+def test_silver_cap_advisory_does_not_trip_the_datagen_queue_tag():
+    """The '(datagen pods queue)' tag in recommend fires on a warning starting
+    'datagen:'; the silver-cap advisory must not start that way, or a raised-cap
+    financial run would be mislabelled as queuing datagen pods."""
+    for a in _advisories("financial", 48, dur=900):
+        assert not a.startswith("datagen:")
+
+
 def _budget_cores(cfg, cores):
     from lakebench.config.autosizer import _parse_cpu_millicores
 
