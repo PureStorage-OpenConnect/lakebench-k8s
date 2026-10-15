@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [1.7.6]
 
+### Added
+
+- **`silver_reuse_bronze_projection` (continuous AML, off by default) reads the party, account and country columns the entity and account dimensions need from one shared projection of a micro-batch's bronze rows, rather than scanning the bronze slice once per dimension.** Off by default, so a default run scans per dimension exactly as before and its results and memory are unchanged; the dimension rows are identical with it on, and it trades a cached projection for the repeated scans when the per-batch bronze read dominates.
+
 ### Breaking
 
 - **A financial continuous run that does not set `silver_max_rows_per_trigger` now derives it from the silver executors' memory envelope instead of the flat 20,000,000 default, so a larger micro-batch amortizes the world-sized dimension MERGE.** The derived cap is the largest batch the silver-stream executors can hold (about 60,000,000 rows at scale 10 and 89,000,000 at scale 48 and above, scaling with the executors the stage deploys up to the 28-executor cap), never below the 20,000,000 default; so every defaulted financial continuous run's silver cap rises and its recorded throughput, pace and freshness move. An explicitly configured `silver_max_rows_per_trigger` (including `null` to lift the cap) is used unchanged, and customer360 and batch runs keep the 20,000,000 default, so their recorded numbers do not move. A larger batch commits less often; `recommend` warns to confirm a window shorter than 1800 s still holds the two silver commits the continuous gate needs.

@@ -1430,6 +1430,18 @@ class SustainedConfig(ConfigModel):
             "tables (transactions, edges, pairs) are unaffected."
         ),
     )
+    silver_reuse_bronze_projection: bool = Field(
+        default=False,
+        description=(
+            "Continuous AML only. When true, a silver micro-batch reads the party, account and "
+            "country columns it needs for the entities and accounts dimensions from one shared "
+            "projection of the batch's bronze rows, instead of scanning and parsing the bronze "
+            "slice once per dimension. Off by default: a default run scans per dimension, exactly "
+            "as before, so its results and memory are unchanged. The dimension rows are identical "
+            "either way; reuse trades a cached projection for the repeated scans, which pays when "
+            "the per-batch bronze read dominates."
+        ),
+    )
     bronze_target_file_size_mb: int = Field(
         default=512,
         ge=32,

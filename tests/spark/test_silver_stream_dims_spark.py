@@ -75,6 +75,27 @@ def _check_dims(spark) -> None:
     accts_fanout = {r["iban"]: r for r in spark.table("lh.silver.accts_fanout").collect()}
     assert {k: tuple(v) for k, v in ents_fanout.items()} == {k: tuple(v) for k, v in ents.items()}
     assert {k: tuple(v) for k, v in accts_fanout.items()} == {k: tuple(v) for k, v in accts.items()}
+
+    # Reusing one shared bronze projection across the dimensions
+    # (silver_reuse_bronze_projection) must produce byte-identical rows to the
+    # per-dimension scan path above: same entities, same accounts.
+    reuse_was = ss.SILVER_REUSE_PROJECTION
+    ss.SILVER_REUSE_PROJECTION = True
+    ss.SILVER_ENTITIES = "silver.ents_reuse"
+    ss.SILVER_ACCOUNTS = "silver.accts_reuse"
+    try:
+        for name, ddl in (
+            ("silver.ents_reuse", sb.DDL_ENTITIES),
+            ("silver.accts_reuse", sb.DDL_ACCOUNTS),
+        ):
+            spark.sql(f"CREATE TABLE lh.{name} ({ddl.split('(', 1)[1]}")
+        assert ss.append_new_dimensions(spark, bronze, txns, kyc, n_txns=100) == (2, 2)
+    finally:
+        ss.SILVER_REUSE_PROJECTION = reuse_was
+    ents_reuse = {r["name"]: r for r in spark.table("lh.silver.ents_reuse").collect()}
+    accts_reuse = {r["iban"]: r for r in spark.table("lh.silver.accts_reuse").collect()}
+    assert {k: tuple(v) for k, v in ents_reuse.items()} == {k: tuple(v) for k, v in ents.items()}
+    assert {k: tuple(v) for k, v in accts_reuse.items()} == {k: tuple(v) for k, v in accts.items()}
     print("OK dims")
 
 

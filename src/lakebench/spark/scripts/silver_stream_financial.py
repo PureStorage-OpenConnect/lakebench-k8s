@@ -136,6 +136,7 @@ from silver_build_financial import (
     DDL_TXNS,
     KYC_ACCOUNT_COLUMNS,
     KYC_ENTITY_COLUMNS,
+    _party_account_long,
     _read_reference,
     build_accounts,
     build_edges,
@@ -160,6 +161,11 @@ SILVER_MAX_ROWS = int(env("LB_FINANCIAL_SILVER_MAX_ROWS", "0"))
 # merge_on_read). Applied at bootstrap by apply_silver_write_mode; the DDL
 # default is copy-on-write, so an unset value leaves tables as created.
 SILVER_WRITE_MODE = env("LB_FINANCIAL_SILVER_WRITE_MODE", "merge_on_read")
+# Off by default: when set, a micro-batch reads the party/account/country
+# columns the entity and account dimensions need from one shared bronze
+# projection instead of scanning the batch's bronze once per dimension.
+# Results are identical; see append_new_dimensions.
+SILVER_REUSE_PROJECTION = env("LB_FINANCIAL_SILVER_REUSE_PROJECTION", "0") == "1"
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
@@ -680,8 +686,19 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None, n_txns=0) 
     from pyspark.sql import Window
     from pyspark.sql.functions import col, row_number
 
-    ents = build_entities(txns.drop("_batch_id", "_stream_id"), batch_df, kyc)
-    accts = build_accounts(batch_df, kyc)
+    # Optionally read the party/account/country columns both dimensions need
+    # from one shared, cached projection of the batch's bronze, instead of
+    # scanning and parsing the bronze slice once inside build_entities'
+    # _entity_countries lookup and again inside build_accounts. Off by default
+    # (LB_FINANCIAL_SILVER_REUSE_PROJECTION): the dimension rows are identical
+    # either way; this trades the cached projection for the repeated scans.
+    # Cached and partitioned like the dimension frames below, and freed in the
+    # finally so it does not outlive the batch.
+    long = None
+    if SILVER_REUSE_PROJECTION:
+        long = _party_account_long(batch_df).coalesce(_dim_partitions(n_txns)).cache()
+    ents = build_entities(txns.drop("_batch_id", "_stream_id"), batch_df, kyc, long=long)
+    accts = build_accounts(batch_df, kyc, long=long)
     # Partition the cached dimension frames by the batch's size, not to a
     # fixed single partition. A small batch keeps one partition (its handful
     # of dimension rows belong in one file, not sprayed across an empty
@@ -884,6 +901,8 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None, n_txns=0) 
     finally:
         ents.unpersist(blocking=False)
         accts.unpersist(blocking=False)
+        if long is not None:
+            long.unpersist(blocking=False)
 
 
 def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int, check_replay: bool) -> None:

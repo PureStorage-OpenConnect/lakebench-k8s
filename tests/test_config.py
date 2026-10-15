@@ -40,6 +40,22 @@ class TestSilverWriteMode:
         assert sustained.silver_write_mode.value == "merge_on_read"
 
 
+class TestSilverReuseBronzeProjection:
+    """Tests for silver_reuse_bronze_projection on SustainedConfig."""
+
+    def test_default_is_off(self):
+        """Off by default, so a default run scans per dimension exactly as before."""
+        config = LakebenchConfig(name="test", architecture={"processing": {"sustained": {}}})
+        assert config.architecture.pipeline.sustained.silver_reuse_bronze_projection is False
+
+    def test_explicit_true_round_trips(self):
+        config = LakebenchConfig(
+            name="test",
+            architecture={"processing": {"sustained": {"silver_reuse_bronze_projection": True}}},
+        )
+        assert config.architecture.pipeline.sustained.silver_reuse_bronze_projection is True
+
+
 class TestSustainedBenchmarkConfig:
     """Tests for benchmark_interval and benchmark_warmup on SustainedConfig."""
 

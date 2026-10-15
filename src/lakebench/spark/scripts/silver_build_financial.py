@@ -515,7 +515,37 @@ def build_transactions(bronze):
     )
 
 
-def _entity_countries(bronze, with_iban=False):
+def _party_account_long(bronze):
+    """One row per payment side: the entity, its country, and its account
+    columns, debtor and creditor sides unioned.
+
+    This is the shared source ``_entity_countries`` and ``build_accounts`` can
+    read instead of each scanning bronze (see ``silver_reuse_bronze_projection``
+    / ``append_new_dimensions``). Every column is the exact expression those
+    two functions select today, so reading from this frame produces the same
+    rows as scanning bronze directly. No filter is applied here (the two
+    consumers group or filter differently); the projection is theirs to use.
+    """
+
+    def _side(side):
+        return bronze.select(
+            _entity_id_from(
+                col(f"{side}.nm"),
+                col(f"{side}.ctry_of_res"),
+                col(f"{side}.pstl_adr.twn_nm"),
+                col(f"{side}.id.lei"),
+            ).alias("entity_id"),
+            col(f"{side}.ctry_of_res").alias("country"),
+            col(f"{side}_acct.iban").alias("iban"),
+            col(f"{side}_agt.bicfi").alias("bank_bic"),
+            col(f"{side}_acct.ccy").alias("currency"),
+            to_date(col("cre_dt_tm")).alias("opened_date"),
+        )
+
+    return _side("dbtr").unionByName(_side("cdtr"))
+
+
+def _entity_countries(bronze, with_iban=False, long=None):
     """entity_id -> country of residence, from both sides of every payment.
 
     silver.transactions does not store the parties' countries (they only feed
@@ -527,29 +557,39 @@ def _entity_countries(bronze, with_iban=False):
     ``with_iban`` also returns the IBAN the entity's payments use (smallest if
     several; the datagen gives each entity one), which is the key to its KYC
     file. Same pass, so KYC costs no extra bronze scan.
+
+    ``long`` is an optional pre-built :func:`_party_account_long` projection to
+    group instead of scanning *bronze* again; ``None`` builds the per-side
+    projection here, as before. The grouped result is identical either way
+    (the columns are the same expressions).
     """
     from pyspark.sql.functions import min as _min
 
-    sides = []
-    for side in ("dbtr", "cdtr"):
-        cols = [
-            _entity_id_from(
-                col(f"{side}.nm"),
-                col(f"{side}.ctry_of_res"),
-                col(f"{side}.pstl_adr.twn_nm"),
-                col(f"{side}.id.lei"),
-            ).alias("entity_id"),
-            col(f"{side}.ctry_of_res").alias("country"),
-        ]
-        if with_iban:
-            cols.append(col(f"{side}_acct.iban").alias("iban"))
-        sides.append(bronze.select(*cols))
+    if long is None:
+        sides = []
+        for side in ("dbtr", "cdtr"):
+            cols = [
+                _entity_id_from(
+                    col(f"{side}.nm"),
+                    col(f"{side}.ctry_of_res"),
+                    col(f"{side}.pstl_adr.twn_nm"),
+                    col(f"{side}.id.lei"),
+                ).alias("entity_id"),
+                col(f"{side}.ctry_of_res").alias("country"),
+            ]
+            if with_iban:
+                cols.append(col(f"{side}_acct.iban").alias("iban"))
+            sides.append(bronze.select(*cols))
+        src = sides[0].unionByName(sides[1])
+    else:
+        keep = ["entity_id", "country"] + (["iban"] if with_iban else [])
+        src = long.select(*keep)
     aggs = [_min("country").alias("country")]
     if with_iban:
         aggs.append(_min("iban").alias("iban"))
     # min() skips NULLs, so an entity with no country (or IBAN) on any row
     # gets NULL, the same as a missing row on the left join below.
-    return sides[0].unionByName(sides[1]).groupBy("entity_id").agg(*aggs)
+    return src.groupBy("entity_id").agg(*aggs)
 
 
 def build_kyc(party, account):
@@ -583,7 +623,7 @@ def build_kyc(party, account):
     return acct.join(prt, "_dg_id", "inner").drop("_dg_id")
 
 
-def build_entities(txns_df, bronze=None, kyc=None):
+def build_entities(txns_df, bronze=None, kyc=None, long=None):
     """Distinct entity dimension from originator+beneficiary sides.
 
     Determinism note: `dropDuplicates(["entity_id"])` picks arbitrarily on
@@ -591,6 +631,10 @@ def build_entities(txns_df, bronze=None, kyc=None):
     contract when two txns for the same entity_id have different reported
     names (spelling drift, casing). Fix: group by entity_id and take the
     lexically-smallest name / country deterministically.
+
+    ``long`` is an optional pre-built :func:`_party_account_long` projection
+    forwarded to :func:`_entity_countries` so the country/iban lookup reads it
+    instead of scanning *bronze* again; ``None`` scans bronze, as before.
     """
     orig = txns_df.select(
         col("originator_id").alias("entity_id"),
@@ -614,7 +658,9 @@ def build_entities(txns_df, bronze=None, kyc=None):
     # "ran, 0 alerts" (2026-09-24 audit).
     use_kyc = kyc is not None and bronze is not None
     if bronze is not None:
-        picked = picked.join(_entity_countries(bronze, with_iban=use_kyc), "entity_id", "left")
+        picked = picked.join(
+            _entity_countries(bronze, with_iban=use_kyc, long=long), "entity_id", "left"
+        )
     else:
         picked = picked.withColumn("country", lit(None).cast("string"))
     if use_kyc:
@@ -657,7 +703,7 @@ def build_entities(txns_df, bronze=None, kyc=None):
     )
 
 
-def build_accounts(bronze, kyc=None):
+def build_accounts(bronze, kyc=None, long=None):
     """Distinct IBAN -> holder_entity from the pacs.008 payload.
 
     Fixes holder-assignment non-determinism and the follow-up cross-side blending
@@ -671,7 +717,21 @@ def build_accounts(bronze, kyc=None):
     This still doesn't tell us WHICH entity really holds the account --
     pacs.008 does not carry that -- but at least the assignment is stable
     and internally consistent.
+
+    ``long`` is an optional pre-built :func:`_party_account_long` projection to
+    read instead of scanning *bronze* again; ``None`` builds the per-side
+    projection here, as before. The frames are the same rows: the long form's
+    ``entity_id`` is this function's ``holder_entity_id`` (same expression),
+    and it carries the same iban/bic/currency/opened_date columns.
     """
+    if long is not None:
+        all_sides = long.select(
+            col("iban"),
+            col("entity_id").alias("holder_entity_id"),
+            col("bank_bic"),
+            col("currency"),
+            col("opened_date"),
+        )
     dbtr = bronze.select(
         col("dbtr_acct.iban").alias("iban"),
         _entity_id_from(
@@ -711,9 +771,9 @@ def build_accounts(bronze, kyc=None):
         col("bank_bic").asc_nulls_last(),
         col("opened_date").asc_nulls_last(),
     )
+    sides = all_sides if long is not None else dbtr.unionByName(cdtr)
     all_accts = (
-        dbtr.unionByName(cdtr)
-        .filter(col("iban").isNotNull())
+        sides.filter(col("iban").isNotNull())
         .withColumn("_rn", row_number().over(_winner_window))
         .filter(col("_rn") == 1)
         .drop("_rn")
