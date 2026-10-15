@@ -24,6 +24,7 @@ from lakebench.metrics.collector import (
     build_config_snapshot,
 )
 from lakebench.metrics.continuous_window import (
+    CAPPED_CONSUMED_RATIO,
     arrival_seconds,
     balance,
     classify_submission_failure,
@@ -69,6 +70,17 @@ def back_to_back_silver(durations: list[float]) -> str:
         out.append(_line(t, f"Batch {i}: transforming 52,000 rows"))
         out.append(_line(t + d, f"Batch {i}: committed to ice.silver.t in {d:.1f}s"))
         t += d
+    return "\n".join(out) + "\n"
+
+
+def back_to_back_capped_silver(cap: int, count: int, seconds: float = 30.0) -> str:
+    """Silver batches that each read a *cap*-row slice (its row cap) and start
+    as the previous one commits, so the handoff lag stays near one batch."""
+    out, t = [], 0.0
+    for i in range(count):
+        out.append(_line(t, f"Batch {i}: transforming {cap:,} rows"))
+        out.append(_line(t + seconds, f"Batch {i}: committed to ice.silver.t in {seconds:.1f}s"))
+        t += seconds
     return "\n".join(out) + "\n"
 
 
@@ -1345,6 +1357,102 @@ def test_balance_advice_names_the_lever_that_helps(logs, shape, ran, lever):
     got = balance(events, W0, W1, shape=shape, ran=ran, intervals={"gold-refresh": None})
     assert not got["balanced"]
     assert got["lever"] == lever, got["bottleneck"]
+
+
+# A row cap (silver_max_rows_per_trigger) bounds a micro-batch's size, not its
+# rate: silver reads back-to-back capped slices so its lag stays near one batch
+# while the unread bronze backlog grows. The AML continuous ramps hit this at
+# scale 48 (bronze committed 600M-1.2B rows, silver read ~124M), and the
+# lag-only balance read keeps_up true. These pin bronze->silver to rows
+# consumed over rows committed when silver is capped.
+_CAP = 20_000
+# Bronze commits 520k rows across the window. Silver, capped at _CAP rows,
+# runs slow (100 s) batches back to back for the whole window: its last start
+# stays recent so the lag trend is flat (the lag read passes it), yet it reads
+# only 6 * _CAP = 120k rows, under a quarter of what bronze committed.
+_CAPPED_BEHIND = {
+    "bronze-ingest": bronze_log([(t, 26_000) for t in range(0, 600, 30)]),
+    "silver-stream": back_to_back_capped_silver(_CAP, count=6, seconds=100.0),
+}
+# Same cap, but silver keeps pace: bronze commits a _CAP slice every 30 s and
+# silver reads one every 30 s, so it consumes every committed row.
+_CAPPED_KEPT_UP = {
+    "bronze-ingest": bronze_log([(t, _CAP) for t in range(0, 600, 30)]),
+    "silver-stream": back_to_back_capped_silver(_CAP, count=20, seconds=30.0),
+}
+
+
+def _window_rows(logs: dict[str, str]) -> dict[str, int | None]:
+    """Each stage's window_input_rows, the row source production feeds to
+    ``balance`` as ``window_rows`` (not a hand-fed count)."""
+    return {
+        job: window_stats(parse_events(log, job), job, W0, W1)["window_input_rows"]
+        for job, log in logs.items()
+    }
+
+
+def test_a_row_capped_silver_behind_in_rows_is_not_balanced():
+    """With silver's intake row-capped, its lag stays near one batch while the
+    backlog grows, so the lag read says keeps_up; rows consumed over rows
+    committed catches it and the bottleneck names silver and the cap."""
+    events = {job: parse_events(log, job) for job, log in _CAPPED_BEHIND.items()}
+    rows = _window_rows(_CAPPED_BEHIND)
+    # The lag read alone would pass it: that is the bug these guard.
+    lag_only = balance(events, W0, W1, intervals={"silver-stream": None})
+    assert lag_only["handoffs"]["bronze->silver"]["keeps_up"] is True
+    got = balance(
+        events,
+        W0,
+        W1,
+        intervals={"silver-stream": None},
+        capped_stages={"silver-stream": _CAP},
+        window_rows=rows,
+    )
+    h = got["handoffs"]["bronze->silver"]
+    assert h["keeps_up"] is False
+    assert h["consumed_ratio"] == pytest.approx(
+        rows["silver-stream"] / rows["bronze-ingest"], abs=1e-4
+    )
+    assert h["row_cap"] == _CAP
+    assert got["balanced"] is False
+    assert got["lever"] == "platform.compute.spark.silver_executors"
+    assert "silver-stream fell behind bronze-ingest" in got["bottleneck"]
+    assert f"{_CAP:,}-row" in got["bottleneck"]
+
+
+def test_a_row_capped_silver_that_keeps_pace_is_balanced():
+    """The rows read keeps the cap honest both ways: a capped silver that reads
+    every committed row is balanced, not failed for carrying the cap."""
+    events = {job: parse_events(log, job) for job, log in _CAPPED_KEPT_UP.items()}
+    got = balance(
+        events,
+        W0,
+        W1,
+        intervals={"silver-stream": None},
+        capped_stages={"silver-stream": _CAP},
+        window_rows=_window_rows(_CAPPED_KEPT_UP),
+    )
+    h = got["handoffs"]["bronze->silver"]
+    assert h["keeps_up"] is True
+    assert h["consumed_ratio"] >= CAPPED_CONSUMED_RATIO
+    assert got["balanced"] is True
+
+
+def test_a_row_cap_with_rows_unmeasured_falls_back_to_the_lag_read():
+    """When a row count is missing the rows rule cannot run, so the handoff
+    keeps its lag verdict rather than silently failing or passing."""
+    events = {job: parse_events(log, job) for job, log in _CAPPED_BEHIND.items()}
+    got = balance(
+        events,
+        W0,
+        W1,
+        intervals={"silver-stream": None},
+        capped_stages={"silver-stream": _CAP},
+        window_rows={"bronze-ingest": None, "silver-stream": None},
+    )
+    h = got["handoffs"]["bronze->silver"]
+    assert "consumed_ratio" not in h
+    assert h["keeps_up"] is True
 
 
 # ------------------------------------------------- metrics honesty (1.7.1)

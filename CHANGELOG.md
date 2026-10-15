@@ -4,6 +4,12 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.6]
+
+### Breaking
+
+- **A continuous run judges the bronze to silver handoff by rows consumed over rows committed inside the window, not by lag, whenever silver's row cap is set.** The cap (`silver_max_rows_per_trigger`, default 20,000,000) is on by default, so this changes the recorded `continuous.balance` verdict for a default continuous run: the cap bounds a micro-batch's size, not its rate, so the handoff lag stayed near one batch while the unread backlog grew and the verdict read "balanced" for a silver that consumed a fraction of the committed rows. Silver now reads "not balanced" when it consumed fewer rows than bronze committed (less a one-batch allowance for the write-time versus commit-time skew at the window's edges), and the `continuous.balance` record carries `consumed_ratio` and `row_cap` for the handoff. Balance is advisory and does not change whether a run passes. Runs with the cap lifted (`silver_max_rows_per_trigger: null`) keep the lag verdict.
+
 ## [1.7.5] - 2026-10-13
 
 ### Changed

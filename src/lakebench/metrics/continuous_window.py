@@ -596,6 +596,13 @@ HANDOFFS = (
 )
 #: Seconds between the lag samples a run records.
 LAG_SAMPLE_SECONDS = 30.0
+#: A stage whose intake is row-capped keeps up only when it consumed at least
+#: this share of the rows its upstream committed inside the window, less one
+#: capped batch for the window-edge clock skew (see ``balance``). A row cap
+#: bounds a micro-batch's size, not its rate, so the handoff lag stays near one
+#: batch while the unread backlog grows: rows consumed / rows committed is the
+#: signal the cap does not distort.
+CAPPED_CONSUMED_RATIO = 0.99
 
 
 def _epoch(at: datetime) -> float:
@@ -758,6 +765,8 @@ def balance(
     ran: dict[str, int] | None = None,
     intervals: dict[str, float | None] | None = None,
     unjudged: dict[str, str] | None = None,
+    capped_stages: dict[str, int] | None = None,
+    window_rows: dict[str, int | None] | None = None,
     step_s: float = LAG_SAMPLE_SECONDS,
 ) -> dict[str, Any]:
     """Whether every stage kept up inside the window [*start*, *end*].
@@ -780,6 +789,21 @@ def balance(
     *unjudged* maps a handoff to why its lag says nothing about the stage
     (a corpus written before the run, an intake cap): it is recorded, not
     judged.
+
+    *capped_stages* maps a consuming stage to its per-trigger row cap when one
+    is set (silver's ``silver_max_rows_per_trigger``). A row cap bounds a
+    micro-batch's size, not its rate, so the handoff lag sits near one batch
+    while the unread backlog grows and reads as keeping up when it is not. For
+    such a handoff the pass rule is instead rows consumed by the stage inside
+    the window over rows its upstream committed inside it
+    (*window_rows*, each stage's ``window_input_rows``), which the cap does not
+    distort: it keeps up when that share is at least ``CAPPED_CONSUMED_RATIO``,
+    allowing a shortfall of one capped batch. The two counts are clocked
+    differently at the window's edges (bronze counts a batch by its write,
+    the consumer by its commit), so a consumer keeping pace can trail by the
+    batch in flight at each boundary; the one-batch allowance forgives exactly
+    that. The lag fields are still recorded for the handoff, as evidence, not
+    as the verdict.
     """
     span = (end - start).total_seconds()
     offsets: list[float] = []
@@ -812,6 +836,22 @@ def balance(
         late = [(t, lag) for t, lag in _phase_samples(events_by_job, name) if mid <= t <= end]
         growth = _growth(late, (end - mid).total_seconds()) if len(late) >= 3 else None
         kept = growth <= cadence if growth is not None else at_end <= max(first_max, allow)
+        # A row-capped consuming stage is judged by rows, not lag: the cap
+        # holds the lag near one batch while a backlog grows unseen. Falls back
+        # to the lag verdict when either row count is missing (unmeasured).
+        cap = (capped_stages or {}).get(stage)
+        upstream_rows = (window_rows or {}).get(upstream)
+        stage_rows = (window_rows or {}).get(stage)
+        consumed_ratio = None
+        if cap and upstream_rows is not None and stage_rows is not None and upstream_rows > 0:
+            consumed_ratio = stage_rows / upstream_rows
+            # The two counts are clocked differently at the window's edges:
+            # bronze counts a batch by its write, silver by its commit, so a
+            # silver keeping pace can still trail by up to the batch in flight
+            # at each boundary. Forgive one capped batch's worth of rows before
+            # calling it behind, so the default cap does not read a keeping-pace
+            # silver as a backlog.
+            kept = stage_rows >= CAPPED_CONSUMED_RATIO * upstream_rows - cap
         handoffs[name] = {
             "stage": stage,
             "upstream": upstream,
@@ -827,6 +867,14 @@ def balance(
             "trend_samples": [
                 [round((t - start).total_seconds(), 1), round(lag, 1)] for t, lag in late
             ],
+            # Set only for a row-capped handoff: rows the stage consumed inside
+            # the window over rows its upstream committed inside it, and the cap
+            # that made lag the wrong signal.
+            **(
+                {"consumed_ratio": round(consumed_ratio, 4), "row_cap": cap}
+                if consumed_ratio is not None
+                else {}
+            ),
             "keeps_up": kept or name in (unjudged or {}),
             **({"not_judged": (unjudged or {})[name]} if name in (unjudged or {}) else {}),
             "busy_share": round(_busy_share(events_by_job.get(stage) or [], stage, start, end), 3),
@@ -834,14 +882,20 @@ def balance(
     behind = [h for h in handoffs.values() if not h["keeps_up"]]
     lever: str | None = None
     if behind:
-        worst = max(
-            behind,
-            key=lambda h: (
+
+        def _severity(h: dict[str, Any]) -> tuple[int, float]:
+            # A row-capped stage fell behind by rows, not lag, so its lag
+            # fields understate it: rank it first, by how little it consumed.
+            if "consumed_ratio" in h:
+                return (1, 1.0 - h["consumed_ratio"])
+            lag = (
                 h["second_half_growth_s"]
                 if h["second_half_growth_s"] is not None
                 else h["end_s"] - h["first_half_max_s"]
-            ),
-        )
+            )
+            return (0, lag)
+
+        worst = max(behind, key=_severity)
         stage = worst["stage"]
         knob = _EXECUTOR_KNOB[stage]
         need = ((shape or {}).get(stage) or {}).get("balance_need")
@@ -886,16 +940,23 @@ def balance(
             sized = f" (has {have}, the offered load needs ~{need})"
         else:
             sized = ""
-        rose = (
-            f"its lag grew {worst['second_half_growth_s']:.0f}s across the window's second "
-            f"half (one cadence is {worst['cadence_s']:.0f}s); {worst['end_s']:.0f}s at the "
-            "window's end"
-            if worst["second_half_growth_s"] is not None
-            else (
+        if "consumed_ratio" in worst:
+            rose = (
+                f"it read {worst['consumed_ratio']:.0%} of the rows its upstream committed "
+                f"inside the window (its {worst['row_cap']:,}-row per-trigger cap bounds batch "
+                "size, not rate, so its lag stayed flat while the backlog grew)"
+            )
+        elif worst["second_half_growth_s"] is not None:
+            rose = (
+                f"its lag grew {worst['second_half_growth_s']:.0f}s across the window's second "
+                f"half (one cadence is {worst['cadence_s']:.0f}s); {worst['end_s']:.0f}s at the "
+                "window's end"
+            )
+        else:
+            rose = (
                 f"its lag rose to {worst['end_s']:.0f}s at the window's end from at most "
                 f"{worst['first_half_max_s']:.0f}s in the first half"
             )
-        )
         line = (
             f"not balanced: {stage} fell behind {worst['upstream']}: {rose}, busy "
             f"{worst['busy_share']:.0%}; {advice}{sized} or lower the scale"
