@@ -864,21 +864,31 @@ def _financial_bronze_bytes_per_row(scale: float) -> float:
 
 
 def _financial_silver_cap_memory_ceiling(config: LakebenchConfig) -> int:
-    """Largest silver row cap the silver-stream executors can hold in memory,
-    from the per-executor heap and the executor count the financial
-    silver-stream stage actually deploys for *config*.
+    """Largest silver row cap the silver-stream executors can hold in memory.
 
     Financial-only by construction (it reads financial corpus sizes and the
     financial silver-stream profile); the caller gates on the financial schema.
 
-    The aggregate batch-usable heap is ``deployed_executors x executor_memory x
+    The aggregate batch-usable heap is ``executors x executor_memory x
     SILVER_BATCH_HEAP_FRACTION``; dividing by the measured bronze bytes per row
-    times :data:`SILVER_BATCH_MEMORY_INFLATION` gives a row count. The executor
-    count is the one the stage deploys (``streaming_executor_count``: the
-    scale's offered-load need within the 28-executor cap), NOT the profile base,
-    because the batch is spread across the executors that actually run. The
-    fractions set the per-executor row load (see their calibration note); the
-    executor count sets the total. Returns at least :data:`SILVER_CAP_FLOOR`.
+    times :data:`SILVER_BATCH_MEMORY_INFLATION` gives a row count.
+
+    The heap and count are read from the BASE silver-stream profile (4 cores /
+    32g, ``streaming_executor_count`` within the 28-executor cap), which is a
+    deliberately conservative PROXY, not the geometry that deploys. At scale
+    >= ~24 the stage reshapes to larger executors (16 cores / 128g) and the
+    cluster concurrent budget then cuts the count to share the cluster, so the
+    run holds the cap on fewer but much larger (128g) executors. A 128g
+    executor's safe row load is about 4x the 32g calibration point, so sizing
+    against the base 32g geometry leaves the real deployment with headroom (at
+    scale 48 the derived cap is ~8.9-12.8M rows on each deployed 128g executor,
+    under the ~16M a 128g executor allows). The one case this does not cover is
+    a cluster so small the budget starves silver to a single executor; the full
+    cap on one executor can then exceed its memory. That starvation only happens
+    on clusters too small to run the AML workload, and it predates this
+    derivation (the old flat default had the same shape); closing it would mean
+    clamping the per-trigger rows by the post-budget count at submit, a separate
+    change. Returns at least :data:`SILVER_CAP_FLOOR`.
     """
     from lakebench.config.schema import parse_spark_memory
     from lakebench.modules.pipeline_engines.spark.job import (

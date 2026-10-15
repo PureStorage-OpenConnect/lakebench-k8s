@@ -161,13 +161,16 @@ def test_silver_cap_memory_ceiling_floors_at_the_schema_default():
 
 
 def test_silver_cap_implies_a_safe_per_executor_load():
-    """The ceiling is divided across the executors the stage actually deploys,
-    and the per-executor row load it implies stays below the one on-cluster
-    point that ran without OOM (a 113.3M-row batch on 28 executors at 32g, i.e.
-    ~4.05M rows per executor). Because that load is set by the heap fractions,
-    not the executor count, it is uniform across scale, so one measured point
-    bounds every scale. A margin is kept for run-to-run noise and the
-    unmeasured true peak."""
+    """The ceiling is sized against the BASE silver-stream geometry (4 cores /
+    32g, the ``streaming_executor_count`` within the 28 cap) as a conservative
+    proxy: the per-executor row load it implies on that 32g geometry stays below
+    the one on-cluster point that ran without OOM (a 113.3M-row batch on 28
+    executors at 32g, ~4.05M rows per executor). The stage actually reshapes to
+    larger 128g executors at scale, where that same cap is well under the ~4x
+    higher load a 128g executor allows, so the base-geometry sizing is
+    conservative. The implied load is set by the heap fractions, not the count,
+    so it is uniform across scale and one measured point bounds every scale. A
+    margin is kept for run-to-run noise and the unmeasured true peak."""
     from lakebench.config.sizing import _financial_silver_cap_memory_ceiling as ceiling
     from lakebench.modules.pipeline_engines.spark.job import (
         _resolve_job_profile,
