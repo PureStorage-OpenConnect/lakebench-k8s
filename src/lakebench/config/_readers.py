@@ -212,6 +212,9 @@ READERS: dict[str, str] = {
     "architecture.pipeline.sustained.silver_write_mode": (
         "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_env_vars"
     ),
+    "architecture.pipeline.sustained.silver_reuse_bronze_projection": (
+        "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_env_vars"
+    ),
     "architecture.pipeline.sustained.bronze_target_file_size_mb": (
         "lakebench.modules.pipeline_engines.spark.job:SparkJobManager._build_env_vars"
     ),

@@ -1412,7 +1412,10 @@ class SustainedConfig(ConfigModel):
             "`streaming-max-rows-per-micro-batch`), so one micro-batch cannot swallow the "
             "whole backlog and run past the window. A batch always takes the next whole data "
             "file, then stops once the cap would be exceeded. `null` lifts the cap (each "
-            "trigger takes every unprocessed bronze snapshot)."
+            "trigger takes every unprocessed bronze snapshot). For a financial continuous run "
+            "that leaves this unset, auto-sizing raises the cap to what the silver executors "
+            "can hold in memory at the scale (always at least this default), so a larger batch "
+            "amortizes the world-sized dimension MERGE; an explicit value is used as given."
         ),
     )
     silver_write_mode: SilverWriteMode = Field(
@@ -1425,6 +1428,18 @@ class SustainedConfig(ConfigModel):
             "readers merge the deletes and maintenance compacts them. `copy_on_write` rewrites the "
             "touched data files instead, so the write cost tracks table size. Append-only silver "
             "tables (transactions, edges, pairs) are unaffected."
+        ),
+    )
+    silver_reuse_bronze_projection: bool = Field(
+        default=False,
+        description=(
+            "Continuous AML only. When true, a silver micro-batch reads the party, account and "
+            "country columns it needs for the entities and accounts dimensions from one shared "
+            "projection of the batch's bronze rows, instead of scanning and parsing the bronze "
+            "slice once per dimension. Off by default: a default run scans per dimension, exactly "
+            "as before, so its results and memory are unchanged. The dimension rows are identical "
+            "either way; reuse trades a cached projection for the repeated scans, which pays when "
+            "the per-batch bronze read dominates."
         ),
     )
     bronze_target_file_size_mb: int = Field(

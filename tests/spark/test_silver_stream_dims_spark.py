@@ -47,6 +47,55 @@ def _check_dims(spark) -> None:
     assert ents["BOB"]["country"] == "GB" and ents["BOB"]["is_customer"] is False
     accts = {r["iban"]: r for r in spark.table("lh.silver.accts").collect()}
     assert accts["US01"]["home_fi"] == "MERIUS2L" and accts["US01"]["is_customer"] is True
+
+    # The per-batch dimension frames are partitioned by batch size: a small
+    # batch stays at one partition, a large one fans out. _dim_partitions is
+    # the pure selector.
+    assert ss._dim_partitions(0) == 1
+    assert ss._dim_partitions(5_000) == 1
+    assert ss._dim_partitions(ss._DIM_ROWS_PER_PARTITION + 1) == 2
+    assert ss._dim_partitions(60_000_000) == 60
+
+    # The k > 1 partitioning path is semantically inert: append the same batch
+    # into a second pair of tables with a large n_txns (so _dim_partitions
+    # returns k > 1) and assert the rows are identical to the single-partition
+    # append above. This fixture is small, so coalesce(k) clamps back to the
+    # frame's one or two partitions -- it exercises the k > 1 call, not a real
+    # multi-partition fan-out (that is measured on cluster), which is enough:
+    # coalesce changes partitioning only, never row content.
+    ss.SILVER_ENTITIES = "silver.ents_fanout"
+    ss.SILVER_ACCOUNTS = "silver.accts_fanout"
+    for name, ddl in (
+        ("silver.ents_fanout", sb.DDL_ENTITIES),
+        ("silver.accts_fanout", sb.DDL_ACCOUNTS),
+    ):
+        spark.sql(f"CREATE TABLE lh.{name} ({ddl.split('(', 1)[1]}")
+    assert ss.append_new_dimensions(spark, bronze, txns, kyc, n_txns=10_000_000) == (2, 2)
+    ents_fanout = {r["name"]: r for r in spark.table("lh.silver.ents_fanout").collect()}
+    accts_fanout = {r["iban"]: r for r in spark.table("lh.silver.accts_fanout").collect()}
+    assert {k: tuple(v) for k, v in ents_fanout.items()} == {k: tuple(v) for k, v in ents.items()}
+    assert {k: tuple(v) for k, v in accts_fanout.items()} == {k: tuple(v) for k, v in accts.items()}
+
+    # Reusing one shared bronze projection across the dimensions
+    # (silver_reuse_bronze_projection) must produce byte-identical rows to the
+    # per-dimension scan path above: same entities, same accounts.
+    reuse_was = ss.SILVER_REUSE_PROJECTION
+    ss.SILVER_REUSE_PROJECTION = True
+    ss.SILVER_ENTITIES = "silver.ents_reuse"
+    ss.SILVER_ACCOUNTS = "silver.accts_reuse"
+    try:
+        for name, ddl in (
+            ("silver.ents_reuse", sb.DDL_ENTITIES),
+            ("silver.accts_reuse", sb.DDL_ACCOUNTS),
+        ):
+            spark.sql(f"CREATE TABLE lh.{name} ({ddl.split('(', 1)[1]}")
+        assert ss.append_new_dimensions(spark, bronze, txns, kyc, n_txns=100) == (2, 2)
+    finally:
+        ss.SILVER_REUSE_PROJECTION = reuse_was
+    ents_reuse = {r["name"]: r for r in spark.table("lh.silver.ents_reuse").collect()}
+    accts_reuse = {r["iban"]: r for r in spark.table("lh.silver.accts_reuse").collect()}
+    assert {k: tuple(v) for k, v in ents_reuse.items()} == {k: tuple(v) for k, v in ents.items()}
+    assert {k: tuple(v) for k, v in accts_reuse.items()} == {k: tuple(v) for k, v in accts.items()}
     print("OK dims")
 
 

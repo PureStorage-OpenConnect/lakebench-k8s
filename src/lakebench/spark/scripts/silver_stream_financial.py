@@ -136,6 +136,7 @@ from silver_build_financial import (
     DDL_TXNS,
     KYC_ACCOUNT_COLUMNS,
     KYC_ENTITY_COLUMNS,
+    _party_account_long,
     _read_reference,
     build_accounts,
     build_edges,
@@ -160,6 +161,11 @@ SILVER_MAX_ROWS = int(env("LB_FINANCIAL_SILVER_MAX_ROWS", "0"))
 # merge_on_read). Applied at bootstrap by apply_silver_write_mode; the DDL
 # default is copy-on-write, so an unset value leaves tables as created.
 SILVER_WRITE_MODE = env("LB_FINANCIAL_SILVER_WRITE_MODE", "merge_on_read")
+# Off by default: when set, a micro-batch reads the party/account/country
+# columns the entity and account dimensions need from one shared bronze
+# projection instead of scanning the batch's bronze once per dimension.
+# Results are identical; see append_new_dimensions.
+SILVER_REUSE_PROJECTION = env("LB_FINANCIAL_SILVER_REUSE_PROJECTION", "0") == "1"
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
@@ -195,6 +201,30 @@ _KYC_LOADED_AT = 0.0
 _ENTITIES_MERGE_VIEW = "_silver_stream_dim_merge_entities"
 _ACCOUNTS_MERGE_VIEW = "_silver_stream_dim_merge_accounts"
 _BALANCES_MERGE_VIEW = "_d_full_balances"
+
+# Target rows per partition when caching the per-batch entity and account
+# dimension frames (see append_new_dimensions). A small batch keeps one
+# partition (its few-thousand dimension rows belong in one file, not spread
+# across an empty shuffle); a large batch, where a 20M+ row slice introduces
+# millions of dimension rows, is split so the cache and its downstream
+# anti-join and MERGE-source build run across tasks instead of funnelling
+# through one. Derived from the batch's txn count, already known in
+# _merge_batch, so it costs no extra Spark action.
+_DIM_ROWS_PER_PARTITION = 1_000_000
+
+
+def _dim_partitions(n_txns: int) -> int:
+    """Partitions for a per-batch dimension frame built from *n_txns* rows.
+
+    At least 1; at most one partition per ``_DIM_ROWS_PER_PARTITION`` rows of
+    the batch (entities and accounts are each bounded by ~2x the txn count, so
+    the txn count is a safe upper proxy for the dimension row count). The cap
+    keeps a small batch at a single partition, preserving the one-small-file
+    behaviour the dimensions relied on, while a large batch fans out.
+    """
+    if n_txns <= 0:
+        return 1
+    return max(1, -(-int(n_txns) // _DIM_ROWS_PER_PARTITION))
 
 
 def _kyc(spark):
@@ -584,7 +614,7 @@ def _sanitize_view_suffix(stream_id):
     return f"_{safe}"
 
 
-def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[int, int]:
+def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None, n_txns=0) -> tuple[int, int]:
     """Merge this batch's entities and accounts into the silver dimensions.
 
     E1: replaces the previous first-seen-wins append with per-table MERGE
@@ -656,13 +686,32 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[i
     from pyspark.sql import Window
     from pyspark.sql.functions import col, row_number
 
-    ents = build_entities(txns.drop("_batch_id", "_stream_id"), batch_df, kyc)
-    accts = build_accounts(batch_df, kyc)
-    # One small file per source per batch, not one per shuffle partition:
-    # the dimensions are dozens to thousands of rows per micro-batch and a
-    # 200-partition shuffle would produce as many empty files.
-    ents = ents.repartition(1).cache()
-    accts = accts.repartition(1).cache()
+    # Optionally read the party/account/country columns both dimensions need
+    # from one shared, cached projection of the batch's bronze, instead of
+    # scanning and parsing the bronze slice once inside build_entities'
+    # _entity_countries lookup and again inside build_accounts. Off by default
+    # (LB_FINANCIAL_SILVER_REUSE_PROJECTION): the dimension rows are identical
+    # either way; this trades the cached projection for the repeated scans.
+    # Cached and partitioned like the dimension frames below, and freed in the
+    # finally so it does not outlive the batch.
+    long = None
+    if SILVER_REUSE_PROJECTION:
+        long = _party_account_long(batch_df).coalesce(_dim_partitions(n_txns)).cache()
+    ents = build_entities(txns.drop("_batch_id", "_stream_id"), batch_df, kyc, long=long)
+    accts = build_accounts(batch_df, kyc, long=long)
+    # Partition the cached dimension frames by the batch's size, not to a
+    # fixed single partition. A small batch keeps one partition (its handful
+    # of dimension rows belong in one file, not sprayed across an empty
+    # 200-way shuffle -- the original reason this was repartition(1)); a large
+    # batch, whose 20M+ row slice introduces millions of dimension rows, fans
+    # out so the cache materialisation, the anti-join count and the MERGE
+    # source build run across tasks instead of funnelling through one (that
+    # funnel was the per-batch serial cost at scale). coalesce, not
+    # repartition: the frames arrive already shuffled by build_*'s group-by,
+    # so narrowing the partition count needs no second shuffle.
+    _k = _dim_partitions(n_txns)
+    ents = ents.coalesce(_k).cache()
+    accts = accts.coalesce(_k).cache()
     try:
         n_ents_total = ents.count()
         n_accts_total = accts.count()
@@ -702,17 +751,31 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[i
         ent_elapsed_ms = 0
         if n_ents_total:
             t0 = time.time()
+            # Skip the UPDATE for a matched row the merge would leave
+            # byte-identical: most batches re-observe a party whose name and
+            # country have already converged, so the UPDATE is a no-op that
+            # merge-on-read still records as a position delete. The guard is
+            # each UPDATE target's own expression wrapped in IS DISTINCT FROM
+            # (null-safe, so a NULL -> value convergence still fires), so a row
+            # updates iff at least one column would actually change. Content is
+            # unchanged; only the write and its delete files shrink.
+            country_sql = "coalesce(least(t.country, s.country), t.country, s.country)"
             with materialised_source(spark, ents, ent_view) as src_view:
                 spark.sql(
                     f"""
                     MERGE INTO {CATALOG}.{SILVER_ENTITIES} t
                     USING {src_view} s
                     ON t.entity_id = s.entity_id
-                    WHEN MATCHED THEN UPDATE SET
+                    WHEN MATCHED AND (
+                        {merged_name_sql} IS DISTINCT FROM t.name
+                        OR {entity_type_expr} IS DISTINCT FROM t.entity_type
+                        OR {merged_name_sql} IS DISTINCT FROM t.legal_name
+                        OR {country_sql} IS DISTINCT FROM t.country
+                    ) THEN UPDATE SET
                         name = {merged_name_sql},
                         entity_type = {entity_type_expr},
                         legal_name = {merged_name_sql},
-                        country = coalesce(least(t.country, s.country), t.country, s.country)
+                        country = {country_sql}
                     WHEN NOT MATCHED THEN INSERT *
                     """
                 )
@@ -776,12 +839,24 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[i
                     )
             if n_accts_total > n_new_accts:
                 with materialised_source(spark, winners, acct_view_upd) as src_view:
+                    # ``s`` is the resolved winner (the row_number-1 min tuple
+                    # over target + batch candidates), so updating a column to
+                    # ``s.col`` is safe; skip the write when the winner already
+                    # equals the stored row so an unchanged iban writes no
+                    # position delete. Null-safe, so a NULL -> value still
+                    # fires. The winner is identical with or without the guard,
+                    # so content does not move.
                     spark.sql(
                         f"""
                         MERGE INTO {CATALOG}.{SILVER_ACCOUNTS} t
                         USING {src_view} s
                         ON t.iban = s.iban
-                        WHEN MATCHED THEN UPDATE SET
+                        WHEN MATCHED AND (
+                            s.holder_entity_id IS DISTINCT FROM t.holder_entity_id
+                            OR s.bank_bic IS DISTINCT FROM t.bank_bic
+                            OR s.currency IS DISTINCT FROM t.currency
+                            OR s.opened_date IS DISTINCT FROM t.opened_date
+                        ) THEN UPDATE SET
                             holder_entity_id = s.holder_entity_id,
                             bank_bic = s.bank_bic,
                             currency = s.currency,
@@ -826,6 +901,8 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[i
     finally:
         ents.unpersist(blocking=False)
         accts.unpersist(blocking=False)
+        if long is not None:
+            long.unpersist(blocking=False)
 
 
 def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int, check_replay: bool) -> None:
@@ -1206,7 +1283,9 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
         log(f"[batch {batch_id}] appended edges idempotently (source txns: {n_txns})")
 
         # PHASE 3: dimensions this batch introduces (entities, accounts).
-        n_e, n_a = append_new_dimensions(spark, batch_df, tagged_txns, _kyc(spark), stream_id=sid)
+        n_e, n_a = append_new_dimensions(
+            spark, batch_df, tagged_txns, _kyc(spark), stream_id=sid, n_txns=n_txns
+        )
         log(f"[batch {batch_id}] appended {n_e} new entities, {n_a} new accounts")
 
         # PHASE 4 (D-full-simple): silver.account_statements per-batch MERGE and

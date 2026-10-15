@@ -344,7 +344,7 @@ def recommend_impl(
             text = "[yellow]OK, streams capped[/yellow]"
         else:
             text = "[green]OK[/green]"
-        if v.warnings and v.status == "fits":
+        if v.status == "fits" and any(w.startswith("datagen:") for w in v.warnings):
             text += " [dim](datagen pods queue)[/dim]"
         return text
 

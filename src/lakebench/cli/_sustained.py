@@ -4367,6 +4367,7 @@ def _run_sustained(
         from lakebench.metrics.continuous_window import balance as _balance
 
         _snapshot = getattr(collector.current_run, "config_snapshot", None) or {}
+        _silver_row_cap = cfg.architecture.pipeline.sustained.silver_max_rows_per_trigger
         balance_record = _balance(
             {name: parse_events(driver_logs.get(name), name) for _, name in submitted},
             window_start,
@@ -4378,6 +4379,15 @@ def _run_sustained(
                 else None
             ),
             intervals=_stage_intervals(cfg),
+            # Silver's per-trigger row cap bounds a micro-batch's size, not its
+            # rate, so its handoff lag stays near one batch while a backlog
+            # grows: judge bronze->silver by rows consumed over rows committed
+            # instead. window_rows is each stage's window_input_rows.
+            capped_stages=({"silver-stream": _silver_row_cap} if _silver_row_cap else None),
+            window_rows={
+                name: (stats or {}).get("window_input_rows")
+                for name, stats in window_stats_by_job.items()
+            },
             # Datagen to bronze shows the stage only when this run's datagen
             # writes while bronze takes files without a cap.
             unjudged=(

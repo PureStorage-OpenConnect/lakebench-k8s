@@ -3561,6 +3561,15 @@ class SparkJobManager:
                                 "name": "LB_FINANCIAL_SILVER_WRITE_MODE",
                                 "value": sustained.silver_write_mode.value,
                             },
+                            # Off by default: 1 reuses one shared bronze
+                            # projection across the entity and account
+                            # dimensions instead of scanning the batch's bronze
+                            # once per dimension. Results are identical; this
+                            # trades a cached projection for the repeated scans.
+                            {
+                                "name": "LB_FINANCIAL_SILVER_REUSE_PROJECTION",
+                                "value": "1" if sustained.silver_reuse_bronze_projection else "0",
+                            },
                         ]
                     )
                 elif job_type == JobType.GOLD_REFRESH:

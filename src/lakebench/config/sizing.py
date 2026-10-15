@@ -713,6 +713,7 @@ def check_capacity(
         )
 
     warnings: list[str] = []
+    warnings.extend(_silver_cap_advisories(resolved))
     if not shortfalls:
         if dg is not None and (plan.full.cpu_cores > avail_cores or plan.full.memory_gb > avail_gb):
             room_cpu = avail_cores - co.cpu_cores
@@ -770,6 +771,7 @@ def check_capacity(
                 (
                     f"streams capped to fit the cluster: {', '.join(capped.capped)}",
                     *(f"cannot balance: {m}" for m in _unbalanced(resolved, capped.budget)),
+                    *warnings,
                 ),
                 capped=tuple(capped.capped),
                 capped_request=Resources(capped.cpu_cores, capped.memory_gb),
@@ -795,6 +797,185 @@ def largest_fitting_scale(fits: Callable[[int], bool], *, upper: int) -> int:
             break
         best = scale
     return best
+
+
+# ---------------------------------------------------------------------------
+# Silver micro-batch row cap (silver_max_rows_per_trigger)
+# ---------------------------------------------------------------------------
+# The cap bounds how many bronze rows one silver micro-batch reads. A larger
+# cap amortizes silver's per-batch fixed cost (the whole-table dimension
+# MERGEs, which scale with the party population, not the batch) over more rows,
+# so throughput rises with the cap until either an executor runs out of memory
+# holding the batch or the batch grows so long the measurement window no longer
+# holds enough silver commits to judge the run. The derived default is the
+# smaller of those two bounds, never below the schema default (so a run that
+# ran at the default never moves), and an explicitly configured value always
+# wins over the derivation.
+#
+# Only AML/financial continuous has the world-sized MERGE that makes a bigger
+# batch pay; customer360's silver batches never approached the 20M default
+# (its continuous silver commits are far smaller), so the derivation is
+# financial-only and customer360 keeps the flat schema default.
+
+#: The schema default and the floor of any derived cap: a derived value never
+#: drops below it, so a run left at the default is never silently re-capped.
+#: Must equal ``SustainedConfig.silver_max_rows_per_trigger``'s field default.
+SILVER_CAP_FLOOR = 20_000_000
+
+#: Fraction of an executor's heap a micro-batch's in-flight data may occupy.
+#: The rest holds the JVM, the Iceberg/S3 client, broadcast metadata and the
+#: dimension-MERGE shuffle buffers. A memory-accounting margin, deliberately
+#: conservative; not a measured per-row figure.
+SILVER_BATCH_HEAP_FRACTION = 0.35
+
+#: How much larger the batch's in-memory footprint is than the raw pacs.008
+#: Parquet bytes it is read from: the flattened silver projection, the cached
+#: ``tagged_txns`` frame, and the shuffle copies the dimension MERGE builds all
+#: exist at once. Raising it lowers the derived cap (safer).
+#:
+#: ``HEAP_FRACTION / INFLATION`` sets the per-executor row load the ceiling
+#: implies (``heap * HEAP_FRACTION / (bytes_per_row * INFLATION)``), independent
+#: of the executor count. Calibrated against an on-cluster observation: a
+#: 113.3M-row silver micro-batch at scale 48 sealed on 28 executors (32g heap)
+#: with no OOM, i.e. ~4.05M rows per executor was safe on that one run (a
+#: mid-batch container working-set sample, not a true peak). These values put
+#: the ceiling at ~3.2M rows per executor, a ~1.27x margin under that point for
+#: run-to-run noise and the unmeasured peak. Not a derived memory model.
+SILVER_BATCH_MEMORY_INFLATION = 10.0
+
+
+def _financial_bronze_bytes_per_row(scale: float) -> float:
+    """Pacs.008 bytes per bronze row at *scale*, from measured corpus size.
+
+    From :mod:`lakebench.config.scale`'s measured AML figures:
+    ``approx_bronze_gb`` (bronze-verify read 8.47 GB at scale 1, 9.36 GB/unit
+    at scale 10) over ``approx_rows`` (26.7M rows/scale). ``approx_bronze_gb``
+    is binary GiB in this codebase (``ScaleDimensions.approx_bronze_tb`` divides
+    it by 1024), so the conversion to bytes uses 1024**3 to match. About
+    341 B/row at scale 1 rising to ~377 B/row at scale 10; the scale-10 value
+    holds above.
+    """
+    from lakebench.config.scale import get_dimensions
+
+    dims = get_dimensions("financial", scale)
+    if dims.approx_rows <= 0:
+        return 0.0
+    return dims.approx_bronze_gb * (1024**3) / dims.approx_rows
+
+
+def _financial_silver_cap_memory_ceiling(config: LakebenchConfig) -> int:
+    """Largest silver row cap the silver-stream executors can hold in memory.
+
+    Financial-only by construction (it reads financial corpus sizes and the
+    financial silver-stream profile); the caller gates on the financial schema.
+
+    The aggregate batch-usable heap is ``executors x executor_memory x
+    SILVER_BATCH_HEAP_FRACTION``; dividing by the measured bronze bytes per row
+    times :data:`SILVER_BATCH_MEMORY_INFLATION` gives a row count.
+
+    The heap and count are read from the BASE silver-stream profile (4 cores /
+    32g, ``streaming_executor_count`` within the 28-executor cap), a
+    deliberately conservative PROXY, not the geometry that deploys: to fit the
+    node the stage reshapes to larger executors (measured 8 cores / 64g at
+    scale 48 on an 11-node cluster), and the cluster concurrent budget trims the
+    count a little to share the cluster (26 -> 25 there). A 64g executor's safe
+    row load is about twice the 32g calibration point, so sizing against the
+    base 32g geometry is conservative: at scale 48 the derived cap lands at
+    ~3.6M rows on each deployed 64g executor, measured at ~68% of the 80 GiB
+    executor limit with no OOM, against the ~4.3M rows at 86% that the 32g
+    calibration saw. The one case this does not cover is a cluster so small the
+    budget starves silver to a single executor; the full cap on one executor
+    can then exceed its memory. That starvation only happens on clusters too
+    small to run the AML workload, and it predates this derivation (the old
+    flat default had the same shape); closing it would mean clamping the
+    per-trigger rows by the post-budget count at submit, a separate change.
+    Returns at least :data:`SILVER_CAP_FLOOR`.
+    """
+    from lakebench.config.schema import parse_spark_memory
+    from lakebench.modules.pipeline_engines.spark.job import (
+        _resolve_job_profile,
+        streaming_executor_count,
+    )
+
+    profile = _resolve_job_profile("silver-stream", "financial")
+    if profile is None:  # pragma: no cover -- silver-stream is always defined
+        return SILVER_CAP_FLOOR
+    scale = config.architecture.workload.datagen.scale
+    execs = streaming_executor_count("silver-stream", profile, config, scale=scale)
+    heap_bytes = parse_spark_memory(str(profile["executor_memory"]))
+    bytes_per_row = _financial_bronze_bytes_per_row(scale)
+    if bytes_per_row <= 0:  # pragma: no cover -- scale is always >= MIN_SCALE
+        return SILVER_CAP_FLOOR
+    usable_bytes = execs * heap_bytes * SILVER_BATCH_HEAP_FRACTION
+    rows = usable_bytes / (bytes_per_row * SILVER_BATCH_MEMORY_INFLATION)
+    return max(SILVER_CAP_FLOOR, int(rows))
+
+
+def derive_silver_max_rows_per_trigger(config: LakebenchConfig) -> int | None:
+    """The silver micro-batch row cap to use when the user did not set one, or
+    ``None`` to keep the schema default.
+
+    Only AML/financial continuous has the world-sized dimension MERGE that
+    makes a larger batch pay, and only there did batches approach the default
+    cap; customer360's continuous silver commits never did, so the derivation
+    is financial-only and every other config keeps the flat schema default
+    (returns ``None``). The value is :func:`_financial_silver_cap_memory_ceiling`
+    -- the largest batch the silver-stream executors can hold -- never below
+    :data:`SILVER_CAP_FLOOR`, so a run that would have used the default is
+    never re-capped below it.
+
+    Whether the measurement window holds enough silver commits for that cap is
+    not enforced here (it depends on batch duration, which the repo has no
+    validated model for); ``check_capacity`` surfaces it as an advisory.
+    """
+    from lakebench.config.autosizer import is_continuous
+
+    if not is_continuous(config):
+        return None
+    if config.architecture.workload.schema_type.value != "financial":
+        return None
+    return _financial_silver_cap_memory_ceiling(config)
+
+
+def _silver_cap_advisories(config: LakebenchConfig) -> list[str]:
+    """Advisory lines about the silver row cap for ``check_capacity`` to show.
+
+    Only for financial continuous, and only when the cap is above the schema
+    default (the derivation raised it, or the user set a larger value): a
+    larger micro-batch amortizes the dimension MERGE but takes longer to
+    commit, and the continuous gate needs at least
+    :data:`~lakebench.metrics.continuous_window.MIN_WINDOW_COMMITS` silver
+    commits inside the window. The repo has no validated batch-duration model,
+    so this names the trade-off and the short-window risk rather than
+    estimating a commit count.
+    """
+    from lakebench.config.autosizer import is_continuous
+
+    if not is_continuous(config):
+        return []
+    if config.architecture.workload.schema_type.value != "financial":
+        return []
+    sustained = config.architecture.pipeline.sustained
+    cap = sustained.silver_max_rows_per_trigger
+    if cap is None or cap <= SILVER_CAP_FLOOR:
+        return []
+    advisories = [
+        f"silver reads up to {cap:,} rows per micro-batch (sized to the silver "
+        "executors' memory); a larger batch amortizes the dimension MERGE but "
+        "commits less often"
+    ]
+    # A short window with a large batch risks too few silver commits for the
+    # continuous gate. The 1800 s default comfortably holds several commits at
+    # the sized cap on the runs measured so far; flag only windows shorter than
+    # that (900 s is the documented UAT floor), where the margin is thin and
+    # worth confirming on cluster.
+    if sustained.run_duration < 1800:
+        advisories.append(
+            f"confirm the {sustained.run_duration} s window holds at least "
+            "2 silver commits at this cap, or the continuous gate fails; raise "
+            "run_duration or set a smaller silver_max_rows_per_trigger if not"
+        )
+    return advisories
 
 
 # ---------------------------------------------------------------------------

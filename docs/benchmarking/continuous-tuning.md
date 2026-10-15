@@ -16,7 +16,7 @@ Settings: [running-pipelines.md](../running-pipelines.md#continuous-configuratio
 | Symptom | What to do |
 |---|---|
 | Bronze falls behind datagen | Raise `bronze_executors`. Bronze is I/O-bound (Parquet reads from S3). A configured `datagen.parallelism` or `cpu` can offer more than the stages were sized for; unset them. |
-| Silver falls behind bronze | Raise `silver_executors`. Silver applies 5 column transforms per micro-batch, CPU-bound at large batches. AML silver is merge-on-read by default, so added executors scale throughput; if a run forces `silver_write_mode: copy_on_write`, executors can sit idle while whole-table MERGE rewrites dominate. |
+| Silver falls behind bronze | Raise `silver_executors` first. Silver applies 5 column transforms per micro-batch, CPU-bound at large batches. AML silver is merge-on-read by default, so added executors scale throughput; if a run forces `silver_write_mode: copy_on_write`, executors can sit idle while whole-table MERGE rewrites dominate. Part of an AML batch is the dimension MERGE and sequential steps, whose cost tracks the party population rather than the batch and does not fall with more cores; a larger `silver_max_rows_per_trigger` amortizes that fixed cost over more rows. |
 | Gold falls behind silver | Raise `gold_executors`. AML gold re-runs each rule over the new rows' days plus that rule's window. |
 | AML gold slow from TM | The TM operations pass runs inside a gold tick over the whole corpus, so its cost grows with the run. Raise `workload.tm_operations.continuous_interval_seconds`. The tick timing line's `tm=` and the balance line show its share. |
 
@@ -33,6 +33,8 @@ Each setting is used as set. The balance line names the one to change (`continuo
 | `workload.datagen.parallelism`, `cpu` | the offered load | to offer more or less than the scale's load |
 | `architecture.pipeline.continuous.{bronze,silver}_trigger_interval`, `gold_refresh_interval` | a stage's cadence (0 s: back to back) | a timer only adds waiting; leave at 0 s to measure capacity |
 | `architecture.pipeline.continuous.silver_write_mode` | the Iceberg write mode of the update-heavy silver tables (AML) | the default `merge_on_read` bounds each per-batch MERGE's write to the rows it changes, so adding `silver_executors` scales throughput. `copy_on_write` rewrites whole dimension tables per MERGE, so silver's cost tracks table size and executors sit idle. Moves recorded results |
+| `architecture.pipeline.continuous.silver_max_rows_per_trigger` | the rows a silver micro-batch reads from bronze | a bigger batch amortizes silver's per-batch fixed cost (the world-sized dimension MERGE) over more rows, raising throughput. For financial continuous this is auto-sized from the silver memory envelope when unset (about 60M rows at scale 10, 89M at scale 48 and up); set it explicitly to override, or `null` to lift the cap. A bigger batch commits less often, so a short window may hold too few silver commits for the gate. Moves recorded results |
+| `architecture.pipeline.continuous.silver_reuse_bronze_projection` | whether a silver batch reads one shared bronze projection across the entity and account dimensions, instead of scanning bronze once per dimension (AML) | off by default; turn on when the per-batch bronze read dominates. The dimension rows are identical either way |
 | scale | offered load and corpus | no lever above helps |
 
 ### Example: not balanced
