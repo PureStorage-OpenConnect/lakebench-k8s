@@ -702,17 +702,31 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[i
         ent_elapsed_ms = 0
         if n_ents_total:
             t0 = time.time()
+            # Skip the UPDATE for a matched row the merge would leave
+            # byte-identical: most batches re-observe a party whose name and
+            # country have already converged, so the UPDATE is a no-op that
+            # merge-on-read still records as a position delete. The guard is
+            # each UPDATE target's own expression wrapped in IS DISTINCT FROM
+            # (null-safe, so a NULL -> value convergence still fires), so a row
+            # updates iff at least one column would actually change. Content is
+            # unchanged; only the write and its delete files shrink.
+            country_sql = "coalesce(least(t.country, s.country), t.country, s.country)"
             with materialised_source(spark, ents, ent_view) as src_view:
                 spark.sql(
                     f"""
                     MERGE INTO {CATALOG}.{SILVER_ENTITIES} t
                     USING {src_view} s
                     ON t.entity_id = s.entity_id
-                    WHEN MATCHED THEN UPDATE SET
+                    WHEN MATCHED AND (
+                        {merged_name_sql} IS DISTINCT FROM t.name
+                        OR {entity_type_expr} IS DISTINCT FROM t.entity_type
+                        OR {merged_name_sql} IS DISTINCT FROM t.legal_name
+                        OR {country_sql} IS DISTINCT FROM t.country
+                    ) THEN UPDATE SET
                         name = {merged_name_sql},
                         entity_type = {entity_type_expr},
                         legal_name = {merged_name_sql},
-                        country = coalesce(least(t.country, s.country), t.country, s.country)
+                        country = {country_sql}
                     WHEN NOT MATCHED THEN INSERT *
                     """
                 )
@@ -776,12 +790,24 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[i
                     )
             if n_accts_total > n_new_accts:
                 with materialised_source(spark, winners, acct_view_upd) as src_view:
+                    # ``s`` is the resolved winner (the row_number-1 min tuple
+                    # over target + batch candidates), so updating a column to
+                    # ``s.col`` is safe; skip the write when the winner already
+                    # equals the stored row so an unchanged iban writes no
+                    # position delete. Null-safe, so a NULL -> value still
+                    # fires. The winner is identical with or without the guard,
+                    # so content does not move.
                     spark.sql(
                         f"""
                         MERGE INTO {CATALOG}.{SILVER_ACCOUNTS} t
                         USING {src_view} s
                         ON t.iban = s.iban
-                        WHEN MATCHED THEN UPDATE SET
+                        WHEN MATCHED AND (
+                            s.holder_entity_id IS DISTINCT FROM t.holder_entity_id
+                            OR s.bank_bic IS DISTINCT FROM t.bank_bic
+                            OR s.currency IS DISTINCT FROM t.currency
+                            OR s.opened_date IS DISTINCT FROM t.opened_date
+                        ) THEN UPDATE SET
                             holder_entity_id = s.holder_entity_id,
                             bank_bic = s.bank_bic,
                             currency = s.currency,
