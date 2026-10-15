@@ -831,9 +831,17 @@ SILVER_BATCH_HEAP_FRACTION = 0.35
 #: How much larger the batch's in-memory footprint is than the raw pacs.008
 #: Parquet bytes it is read from: the flattened silver projection, the cached
 #: ``tagged_txns`` frame, and the shuffle copies the dimension MERGE builds all
-#: exist at once. A conservative multiplier over the on-disk size; not measured
-#: per batch. Raising it lowers the derived cap (safer).
-SILVER_BATCH_MEMORY_INFLATION = 6.0
+#: exist at once. Raising it lowers the derived cap (safer).
+#:
+#: ``HEAP_FRACTION / INFLATION`` sets the per-executor row load the ceiling
+#: implies (``heap * HEAP_FRACTION / (bytes_per_row * INFLATION)``), independent
+#: of the executor count. Calibrated against an on-cluster observation: a
+#: 113.3M-row silver micro-batch at scale 48 sealed on 28 executors (32g heap)
+#: with no OOM, i.e. ~4.05M rows per executor was safe on that one run (a
+#: mid-batch container working-set sample, not a true peak). These values put
+#: the ceiling at ~3.2M rows per executor, a ~1.27x margin under that point for
+#: run-to-run noise and the unmeasured peak. Not a derived memory model.
+SILVER_BATCH_MEMORY_INFLATION = 10.0
 
 
 def _financial_bronze_bytes_per_row(scale: float) -> float:
@@ -855,33 +863,34 @@ def _financial_bronze_bytes_per_row(scale: float) -> float:
     return dims.approx_bronze_gb * (1024**3) / dims.approx_rows
 
 
-def _financial_silver_cap_memory_ceiling(scale: float) -> int:
-    """Largest silver row cap the silver-stream executors can hold in memory
-    at *scale*, from the executor count and per-executor heap the financial
-    silver-stream profile asks for.
+def _financial_silver_cap_memory_ceiling(config: LakebenchConfig) -> int:
+    """Largest silver row cap the silver-stream executors can hold in memory,
+    from the per-executor heap and the executor count the financial
+    silver-stream stage actually deploys for *config*.
 
     Financial-only by construction (it reads financial corpus sizes and the
-    financial silver-stream profile); the caller must gate on the financial
-    schema, since the scale argument carries no schema to self-check.
+    financial silver-stream profile); the caller gates on the financial schema.
 
-    The aggregate batch-usable heap is ``executor_count(scale) x
-    executor_memory x SILVER_BATCH_HEAP_FRACTION``; dividing by the measured
-    bronze bytes per row times :data:`SILVER_BATCH_MEMORY_INFLATION` gives a
-    row count. This is an OOM backstop built from the executor profile and the
-    measured corpus size; the two fractions are conservative memory-accounting
-    margins, stated as such, not a measured rows-per-executor figure. Returns
-    at least :data:`SILVER_CAP_FLOOR`.
+    The aggregate batch-usable heap is ``deployed_executors x executor_memory x
+    SILVER_BATCH_HEAP_FRACTION``; dividing by the measured bronze bytes per row
+    times :data:`SILVER_BATCH_MEMORY_INFLATION` gives a row count. The executor
+    count is the one the stage deploys (``streaming_executor_count``: the
+    scale's offered-load need within the 28-executor cap), NOT the profile base,
+    because the batch is spread across the executors that actually run. The
+    fractions set the per-executor row load (see their calibration note); the
+    executor count sets the total. Returns at least :data:`SILVER_CAP_FLOOR`.
     """
     from lakebench.config.schema import parse_spark_memory
     from lakebench.modules.pipeline_engines.spark.job import (
         _resolve_job_profile,
-        executor_count,
+        streaming_executor_count,
     )
 
     profile = _resolve_job_profile("silver-stream", "financial")
     if profile is None:  # pragma: no cover -- silver-stream is always defined
         return SILVER_CAP_FLOOR
-    execs = executor_count(profile, scale)
+    scale = config.architecture.workload.datagen.scale
+    execs = streaming_executor_count("silver-stream", profile, config, scale=scale)
     heap_bytes = parse_spark_memory(str(profile["executor_memory"]))
     bytes_per_row = _financial_bronze_bytes_per_row(scale)
     if bytes_per_row <= 0:  # pragma: no cover -- scale is always >= MIN_SCALE
@@ -914,8 +923,7 @@ def derive_silver_max_rows_per_trigger(config: LakebenchConfig) -> int | None:
         return None
     if config.architecture.workload.schema_type.value != "financial":
         return None
-    scale = config.architecture.workload.datagen.scale
-    return _financial_silver_cap_memory_ceiling(scale)
+    return _financial_silver_cap_memory_ceiling(config)
 
 
 def _silver_cap_advisories(config: LakebenchConfig) -> list[str]:

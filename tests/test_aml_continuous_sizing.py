@@ -137,6 +137,12 @@ def test_counts_scale_and_respect_the_cap():
         assert silver <= _MAX_EXECUTORS_SAFE and gold <= _MAX_EXECUTORS_SAFE
 
 
+def _continuous_financial(scale: float):
+    cfg = _config("financial", scale)
+    cfg.architecture.pipeline.mode = "continuous"
+    return cfg
+
+
 def test_silver_cap_memory_ceiling_floors_at_the_schema_default():
     """The memory-ceiling bound never drops below the schema default, so a run
     left at the default is never silently re-capped, and the floor constant
@@ -149,23 +155,36 @@ def test_silver_cap_memory_ceiling_floors_at_the_schema_default():
 
     assert SILVER_CAP_FLOOR == SustainedConfig.model_fields["silver_max_rows_per_trigger"].default
     for scale in (0.1, 1, 10, 48, 100, 1000):
-        assert _financial_silver_cap_memory_ceiling(scale) >= SILVER_CAP_FLOOR
+        assert (
+            _financial_silver_cap_memory_ceiling(_continuous_financial(scale)) >= SILVER_CAP_FLOOR
+        )
 
 
-def test_silver_cap_memory_ceiling_rises_with_scale_and_clears_the_measured_point():
-    """From scale 10 up, more executors hold a bigger batch, so the ceiling is
-    non-decreasing; and at scale 48 it stays above the one on-cluster point
-    that ran without OOM (60M rows at 32g), so the backstop never forbids a
-    known-safe cap. Below scale 10 executor count is flat at the base while
-    bytes/row still rises, so the ceiling dips slightly there -- not the regime
-    a cap raise targets."""
+def test_silver_cap_implies_a_safe_per_executor_load():
+    """The ceiling is divided across the executors the stage actually deploys,
+    and the per-executor row load it implies stays below the one on-cluster
+    point that ran without OOM (a 113.3M-row batch on 28 executors at 32g, i.e.
+    ~4.05M rows per executor). Because that load is set by the heap fractions,
+    not the executor count, it is uniform across scale, so one measured point
+    bounds every scale. A margin is kept for run-to-run noise and the
+    unmeasured true peak."""
     from lakebench.config.sizing import _financial_silver_cap_memory_ceiling as ceiling
+    from lakebench.modules.pipeline_engines.spark.job import (
+        _resolve_job_profile,
+        streaming_executor_count,
+    )
 
-    # Scale 10 and up: executor count drives the ceiling, so it only rises.
-    scales = [10, 24, 48, 100, 500, 1000]
-    ceilings = [ceiling(s) for s in scales]
-    assert ceilings == sorted(ceilings)
-    assert ceiling(48) >= 60_000_000
+    profile = _resolve_job_profile("silver-stream", "financial")
+    proven_safe_rows_per_exec = 113_304_204 / 28
+    loads = []
+    for scale in (10, 48, 100, 300):
+        cfg = _continuous_financial(scale)
+        execs = streaming_executor_count("silver-stream", profile, cfg, scale=scale)
+        loads.append(ceiling(cfg) / execs)
+    # Uniform per-executor load across scale (set by the fractions, not count).
+    assert max(loads) - min(loads) < 1.0
+    # Safely under the proven-safe point, with margin (not fit to it).
+    assert loads[0] < proven_safe_rows_per_exec * 0.85
 
 
 def test_financial_bronze_bytes_per_row_matches_the_measured_band():
@@ -202,7 +221,7 @@ def test_autosizer_derives_the_silver_cap_for_financial_continuous():
 
     for scale in (10, 48, 100):
         assert _resolved_silver_cap("financial", scale) == _financial_silver_cap_memory_ceiling(
-            scale
+            _continuous_financial(scale)
         )
         assert _resolved_silver_cap("financial", scale) > 20_000_000
 
@@ -243,7 +262,7 @@ def test_silver_cap_advisory_describes_a_raised_cap():
     adv = _advisories("financial", 48)
     assert any("rows per micro-batch" in a for a in adv)
     # The advisory prints the actual derived cap value, formatted with commas.
-    derived = f"{_financial_silver_cap_memory_ceiling(48):,}"
+    derived = f"{_financial_silver_cap_memory_ceiling(_continuous_financial(48)):,}"
     assert any(derived in a for a in adv)
 
 
