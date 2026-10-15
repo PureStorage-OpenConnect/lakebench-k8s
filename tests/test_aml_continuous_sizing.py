@@ -166,9 +166,10 @@ def test_silver_cap_implies_a_safe_per_executor_load():
     proxy: the per-executor row load it implies on that 32g geometry stays below
     the one on-cluster point that ran without OOM (a 113.3M-row batch on 28
     executors at 32g, ~4.05M rows per executor). The stage actually reshapes to
-    larger 128g executors at scale, where that same cap is well under the ~4x
-    higher load a 128g executor allows, so the base-geometry sizing is
-    conservative. The implied load is set by the heap fractions, not the count,
+    larger 64g executors at scale (measured 8 cores / 64g), where that same cap
+    is well under the ~2x higher load a 64g executor allows, so the
+    base-geometry sizing is conservative. The implied load is set by the heap
+    fractions, not the count,
     so it is uniform across scale and one measured point bounds every scale. A
     margin is kept for run-to-run noise and the unmeasured true peak."""
     from lakebench.config.sizing import _financial_silver_cap_memory_ceiling as ceiling
