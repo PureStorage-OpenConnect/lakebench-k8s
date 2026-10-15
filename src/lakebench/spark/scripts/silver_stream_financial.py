@@ -196,6 +196,30 @@ _ENTITIES_MERGE_VIEW = "_silver_stream_dim_merge_entities"
 _ACCOUNTS_MERGE_VIEW = "_silver_stream_dim_merge_accounts"
 _BALANCES_MERGE_VIEW = "_d_full_balances"
 
+# Target rows per partition when caching the per-batch entity and account
+# dimension frames (see append_new_dimensions). A small batch keeps one
+# partition (its few-thousand dimension rows belong in one file, not spread
+# across an empty shuffle); a large batch, where a 20M+ row slice introduces
+# millions of dimension rows, is split so the cache and its downstream
+# anti-join and MERGE-source build run across tasks instead of funnelling
+# through one. Derived from the batch's txn count, already known in
+# _merge_batch, so it costs no extra Spark action.
+_DIM_ROWS_PER_PARTITION = 1_000_000
+
+
+def _dim_partitions(n_txns: int) -> int:
+    """Partitions for a per-batch dimension frame built from *n_txns* rows.
+
+    At least 1; at most one partition per ``_DIM_ROWS_PER_PARTITION`` rows of
+    the batch (entities and accounts are each bounded by ~2x the txn count, so
+    the txn count is a safe upper proxy for the dimension row count). The cap
+    keeps a small batch at a single partition, preserving the one-small-file
+    behaviour the dimensions relied on, while a large batch fans out.
+    """
+    if n_txns <= 0:
+        return 1
+    return max(1, -(-int(n_txns) // _DIM_ROWS_PER_PARTITION))
+
 
 def _kyc(spark):
     """The KYC-by-IBAN frame. Loaded on the first call and re-read when
@@ -584,7 +608,7 @@ def _sanitize_view_suffix(stream_id):
     return f"_{safe}"
 
 
-def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[int, int]:
+def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None, n_txns=0) -> tuple[int, int]:
     """Merge this batch's entities and accounts into the silver dimensions.
 
     E1: replaces the previous first-seen-wins append with per-table MERGE
@@ -658,11 +682,19 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[i
 
     ents = build_entities(txns.drop("_batch_id", "_stream_id"), batch_df, kyc)
     accts = build_accounts(batch_df, kyc)
-    # One small file per source per batch, not one per shuffle partition:
-    # the dimensions are dozens to thousands of rows per micro-batch and a
-    # 200-partition shuffle would produce as many empty files.
-    ents = ents.repartition(1).cache()
-    accts = accts.repartition(1).cache()
+    # Partition the cached dimension frames by the batch's size, not to a
+    # fixed single partition. A small batch keeps one partition (its handful
+    # of dimension rows belong in one file, not sprayed across an empty
+    # 200-way shuffle -- the original reason this was repartition(1)); a large
+    # batch, whose 20M+ row slice introduces millions of dimension rows, fans
+    # out so the cache materialisation, the anti-join count and the MERGE
+    # source build run across tasks instead of funnelling through one (that
+    # funnel was the per-batch serial cost at scale). coalesce, not
+    # repartition: the frames arrive already shuffled by build_*'s group-by,
+    # so narrowing the partition count needs no second shuffle.
+    _k = _dim_partitions(n_txns)
+    ents = ents.coalesce(_k).cache()
+    accts = accts.coalesce(_k).cache()
     try:
         n_ents_total = ents.count()
         n_accts_total = accts.count()
@@ -1232,7 +1264,9 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
         log(f"[batch {batch_id}] appended edges idempotently (source txns: {n_txns})")
 
         # PHASE 3: dimensions this batch introduces (entities, accounts).
-        n_e, n_a = append_new_dimensions(spark, batch_df, tagged_txns, _kyc(spark), stream_id=sid)
+        n_e, n_a = append_new_dimensions(
+            spark, batch_df, tagged_txns, _kyc(spark), stream_id=sid, n_txns=n_txns
+        )
         log(f"[batch {batch_id}] appended {n_e} new entities, {n_a} new accounts")
 
         # PHASE 4 (D-full-simple): silver.account_statements per-batch MERGE and
