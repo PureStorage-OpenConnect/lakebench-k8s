@@ -574,6 +574,36 @@ def _executor_cores_override(job_type: str, config: Any | None) -> int | None:
     return int(value) if value is not None else None
 
 
+def _executor_memory_override(job_type: str, config: Any | None) -> str | None:
+    if config is None:
+        return None
+    spark = config.platform.compute.spark
+    value = {
+        "bronze-ingest": spark.bronze_executor_memory,
+        "silver-stream": spark.silver_executor_memory,
+        "gold-refresh": spark.gold_executor_memory,
+    }.get(job_type)
+    return str(value).strip() if value is not None else None
+
+
+def _with_executor_memory(profile: dict[str, Any], memory: str) -> dict[str, Any]:
+    """*profile* with a *memory* heap per executor: the overhead keeps the
+    profile's ratio to the heap, so the pod grows in proportion."""
+    import math
+
+    from lakebench.config.schema import parse_spark_memory
+
+    gib = 1024**3
+    heap = parse_spark_memory(memory)
+    ratio = parse_spark_memory(profile["executor_memory_overhead"]) / parse_spark_memory(
+        profile["executor_memory"]
+    )
+    out = dict(profile)
+    out["executor_memory"] = f"{math.ceil(heap / gib)}g"
+    out["executor_memory_overhead"] = f"{math.ceil(heap * ratio / gib)}g"
+    return out
+
+
 def _reshape_executors(
     profile: dict[str, Any], cores: int, *, keep_count: bool = False
 ) -> dict[str, Any]:
@@ -626,8 +656,9 @@ def stage_profile(
 ) -> dict[str, Any] | None:
     """The resolved profile of *job_type* with its executor size: the cores
     set in the config, else, for a balance stage whose need is above the
-    executor cap at the profile's size, the smallest larger size that fits.
-    Without a config, *scale* and *schema* size it."""
+    executor cap at the profile's size, the smallest larger size that fits;
+    then the heap set in the config, if any. Without a config, *scale* and
+    *schema* size it."""
     sc, sch = _scale_and_schema(config, scale, schema)
     profile = _resolve_job_profile(job_type, sch)
     if profile is None:
@@ -636,8 +667,11 @@ def stage_profile(
     if forced is not None:
         # A value the config sets is exact; one the autosizer capped keeps
         # the total cores.
-        return _reshape_executors(profile, forced, keep_count=_cores_set(job_type, config))
-    return _auto_shape(job_type, profile, config, sc, sch)
+        shaped = _reshape_executors(profile, forced, keep_count=_cores_set(job_type, config))
+    else:
+        shaped = _auto_shape(job_type, profile, config, sc, sch)
+    memory = _executor_memory_override(job_type, config)
+    return _with_executor_memory(shaped, memory) if memory is not None else shaped
 
 
 def _cores_set(job_type: str, config: Any | None) -> bool:

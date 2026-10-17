@@ -382,6 +382,51 @@ def test_executor_cores_set_in_config_are_deployed_exactly(job):
     assert ex["instances"] == plain["spec"]["executor"]["instances"]
 
 
+@pytest.mark.parametrize(
+    "job", [JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH]
+)
+def test_executor_memory_set_in_config_is_deployed(job):
+    """``*_executor_memory`` deploys that heap per executor, with the overhead
+    at the profile's ratio to the heap; the cores and, on a cluster with room
+    for the larger pods, the count are unchanged."""
+    from lakebench.config.schema import parse_spark_memory
+
+    plain = SparkJobManager(_config("financial", 10), _capacity_k8s(434))._build_manifest(job)
+    base = plain["spec"]["executor"]
+    gib = 1024**3
+    heap_g = parse_spark_memory(base["memory"]) * 3 // 2 // gib
+    cfg = _config("financial", 10)
+    setattr(cfg.platform.compute.spark, f"{job.value.split('-')[0]}_executor_memory", f"{heap_g}g")
+    ex = SparkJobManager(cfg, _capacity_k8s(434))._build_manifest(job)["spec"]["executor"]
+    ratio = parse_spark_memory(base["memoryOverhead"]) / parse_spark_memory(base["memory"])
+    assert parse_spark_memory(ex["memory"]) == heap_g * gib
+    assert parse_spark_memory(ex["memoryOverhead"]) == pytest.approx(heap_g * gib * ratio, abs=gib)
+    assert ex["cores"] == base["cores"]
+    assert ex["instances"] == base["instances"]
+
+
+def test_executor_memory_is_counted_in_the_peak_and_ignored_by_batch_jobs():
+    """The larger pod is what the capacity plan counts; a batch job keeps its
+    profile's memory, as with the cores key."""
+    from lakebench.config.schema import parse_spark_memory
+
+    cfg = _continuous_financial(10)
+    before = compute_peak_requirements(10, "continuous", "financial", config=cfg)
+    cfg.platform.compute.spark.silver_executor_memory = "96g"
+    after = compute_peak_requirements(10, "continuous", "financial", config=cfg)
+    assert after.memory_gb > before.memory_gb
+    assert after.max_pod_memory_gb >= 96
+    built = stage_profile("silver-build", cfg)
+    assert parse_spark_memory(built["executor_memory"]) == parse_spark_memory(
+        get_job_profile("silver-build", "financial")["executor_memory"]
+    )
+
+
+def test_executor_memory_that_is_not_a_spark_size_is_refused():
+    with pytest.raises(ValueError, match="silver_executor_memory"):
+        _config("financial", 10).platform.compute.spark.__class__(silver_executor_memory="lots")
+
+
 class TestPreflightBetweenOldAndNewMinimum:
     """A cluster between the capped AML continuous request and the full one
     runs degraded with a warning naming the capped stages, rather than
