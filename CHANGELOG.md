@@ -4,6 +4,12 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.7]
+
+### Added
+
+- **`platform.compute.spark.bronze_executor_memory`, `silver_executor_memory` and `gold_executor_memory` (continuous mode, unset by default) set the heap per executor of bronze-ingest, silver-stream and gold-refresh.** The value is applied after the stage's executor cores, the memory overhead keeps the profile's ratio to the heap, and the capacity check, the concurrent budget, the node fit and the recorded `streaming_shape` all count the larger pod, so spare cluster memory can go to a stage without adding cores. Unset, every stage keeps its profile's per-core share and nothing moves; batch jobs ignore the keys.
+
 ## [1.7.6] - 2026-10-15
 
 ### Added

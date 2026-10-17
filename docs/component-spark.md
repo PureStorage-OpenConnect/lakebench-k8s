@@ -83,6 +83,7 @@ Spark settings live under `platform.compute.spark`, `platform.storage.scratch`, 
 | `platform.compute.spark.driver_memory` | `null` | Replaces the profile's driver memory for every job (e.g. `16g`). Must be a whole number with unit k, m, g or t. Use on small nodes or at scale 500+, where the driver holds more Iceberg commit metadata. |
 | `bronze_executors`, `silver_executors`, `gold_executors` | `null` | Executor count of the stage's job in the run's mode (bronze-verify or bronze-ingest, silver-build or silver-stream, gold-finalize or gold-refresh). Set, it bypasses the scaling formula and, in continuous mode, the shared-cluster Lakebench cap. |
 | `bronze_executor_cores`, `silver_executor_cores`, `gold_executor_cores` | `null` | Continuous mode only: executor size, 1-16 cores. Memory and scratch per core follow the profile; the count is unchanged, so total cores grow. Batch jobs ignore it. |
+| `bronze_executor_memory`, `silver_executor_memory`, `gold_executor_memory` | `null` | Continuous mode only: heap per executor (e.g. `96g`), applied after the cores. The overhead keeps the profile's ratio to the heap; the capacity check and the node fit count the larger pod. Batch jobs ignore it. |
 | `platform.storage.scratch.enabled` | `false` | Portworx scratch PVCs for executors. Unset, a batch run at scale 50 and above turns it on. |
 | `platform.storage.scratch.storage_class` | `px-csi-scratch` | Scratch StorageClass. Must be `repl=1`. |
 | `spark.conf` | `{}` | Spark conf merged over the job defaults (below). |
