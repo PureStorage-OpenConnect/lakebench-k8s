@@ -160,35 +160,112 @@ def test_silver_cap_memory_ceiling_floors_at_the_schema_default():
         )
 
 
-def test_silver_cap_implies_a_safe_per_executor_load():
-    """The ceiling is sized against the BASE silver-stream geometry (4 cores /
-    32g, the ``streaming_executor_count`` within the 28 cap) as a conservative
-    proxy: the per-executor row load it implies on that 32g geometry stays below
-    the one on-cluster point that ran without OOM (a 113.3M-row batch on 28
-    executors at 32g, ~4.05M rows per executor). The stage actually reshapes to
-    larger 64g executors at scale (measured 8 cores / 64g), where that same cap
-    is well under the ~2x higher load a 64g executor allows, so the
-    base-geometry sizing is conservative. The implied load is set by the heap
-    fractions, not the count,
-    so it is uniform across scale and one measured point bounds every scale. A
-    margin is kept for run-to-run noise and the unmeasured true peak."""
-    from lakebench.config.sizing import _financial_silver_cap_memory_ceiling as ceiling
+def _deployed_silver(cfg):
+    """(executors, heap bytes) of the silver-stream stage *cfg* deploys."""
+    from lakebench.config.schema import parse_spark_memory
     from lakebench.modules.pipeline_engines.spark.job import (
-        _resolve_job_profile,
+        executor_override,
+        stage_profile,
         streaming_executor_count,
     )
 
-    profile = _resolve_job_profile("silver-stream", "financial")
-    proven_safe_rows_per_exec = 113_304_204 / 28
-    loads = []
-    for scale in (10, 48, 100, 300):
+    profile = stage_profile("silver-stream", cfg)
+    execs = executor_override("silver-stream", cfg) or streaming_executor_count(
+        "silver-stream", profile, cfg
+    )
+    return execs, parse_spark_memory(profile["executor_memory"])
+
+
+def _rows_per_heap(heap_bytes, scale):
+    """Rows the calibrated fractions allow on one executor of *heap_bytes*."""
+    from lakebench.config.sizing import (
+        SILVER_BATCH_HEAP_FRACTION,
+        SILVER_BATCH_MEMORY_INFLATION,
+        _financial_bronze_bytes_per_row,
+    )
+
+    return (
+        heap_bytes
+        * SILVER_BATCH_HEAP_FRACTION
+        / (_financial_bronze_bytes_per_row(scale) * SILVER_BATCH_MEMORY_INFLATION)
+    )
+
+
+def test_silver_cap_implies_a_safe_per_executor_load():
+    """The ceiling is sized on the executors the stage deploys. On the base
+    geometry (4 cores / 32g, scale 10) the per-executor load stays below the one
+    32g point that ran without OOM (a 113.3M-row batch on 28 executors, ~4.05M
+    rows each), with margin. Where the stage grows its executors (8 or 16
+    cores) the load is uniform across scale and stays at or under ~4.5M rows,
+    the one measured 64g point (~3.6M rows at ~68% of the limit) projected to
+    85% of the limit; a larger heap never counts for more than that."""
+    from lakebench.config.sizing import _financial_silver_cap_memory_ceiling as ceiling
+
+    proven_safe_rows_per_exec_32g = 113_304_204 / 28
+    projected_safe_rows_per_exec_64g = 3.6e6 / 0.68 * 0.85
+    base_cfg = _continuous_financial(10)
+    base_execs, base_heap = _deployed_silver(base_cfg)
+    assert base_heap == 32 * 1024**3
+    assert ceiling(base_cfg) / base_execs < proven_safe_rows_per_exec_32g * 0.85
+    grown = []
+    for scale in (20, 48, 100, 300):
         cfg = _continuous_financial(scale)
-        execs = streaming_executor_count("silver-stream", profile, cfg, scale=scale)
-        loads.append(ceiling(cfg) / execs)
-    # Uniform per-executor load across scale (set by the fractions, not count).
-    assert max(loads) - min(loads) < 1.0
-    # Safely under the proven-safe point, with margin (not fit to it).
-    assert loads[0] < proven_safe_rows_per_exec * 0.85
+        execs, heap = _deployed_silver(cfg)
+        assert heap > base_heap, scale
+        grown.append(ceiling(cfg) / execs)
+    assert max(grown) - min(grown) < 1.0
+    assert max(grown) <= projected_safe_rows_per_exec_64g
+
+
+def test_silver_cap_follows_the_deployed_executor_heap():
+    """Executors set in the config are the ones the cap is spread over: a
+    smaller executor than the base lowers the per-executor load in proportion
+    to its heap, and a larger one raises it, but never past
+    ``SILVER_BATCH_HEAP_GROWTH_LIMIT`` times the base heap, so 8-core / 64g and
+    16-core / 128g executors carry the same load. 1.7.6 sized every geometry
+    on the base 32g heap and its own executor count."""
+    from lakebench.config.sizing import (
+        SILVER_BATCH_HEAP_GROWTH_LIMIT,
+        _financial_silver_cap_memory_ceiling,
+    )
+
+    gib = 1024**3
+
+    def cap(cores, scale=48, execs=26):
+        cfg = _continuous_financial(scale)
+        cfg.platform.compute.spark.silver_executors = execs
+        cfg.platform.compute.spark.silver_executor_cores = cores
+        return _financial_silver_cap_memory_ceiling(cfg)
+
+    limit = 32 * gib * SILVER_BATCH_HEAP_GROWTH_LIMIT
+    assert cap(8) == int(26 * _rows_per_heap(limit, 48))
+    assert cap(16) == cap(8)
+    assert cap(2) == int(26 * _rows_per_heap(16 * gib, 48))
+    assert cap(2) < cap(4) < cap(8)
+    # The count set in the config is the one the batch is spread over.
+    assert cap(8, execs=13) == int(13 * _rows_per_heap(limit, 48))
+
+
+def test_silver_cap_counts_a_set_executor_heap_within_the_limit():
+    """``silver_executor_memory`` raises the derived cap with the heap up to the
+    growth limit, and no further."""
+    from lakebench.config.sizing import (
+        SILVER_BATCH_HEAP_GROWTH_LIMIT,
+        _financial_silver_cap_memory_ceiling,
+    )
+
+    gib = 1024**3
+
+    def cap(memory):
+        cfg = _continuous_financial(48)
+        cfg.platform.compute.spark.silver_executors = 20
+        cfg.platform.compute.spark.silver_executor_cores = 4
+        cfg.platform.compute.spark.silver_executor_memory = memory
+        return _financial_silver_cap_memory_ceiling(cfg)
+
+    assert cap("40g") == int(20 * _rows_per_heap(40 * gib, 48))
+    limit = int(20 * _rows_per_heap(32 * gib * SILVER_BATCH_HEAP_GROWTH_LIMIT, 48))
+    assert cap("96g") == cap("200g") == limit
 
 
 def test_financial_bronze_bytes_per_row_matches_the_measured_band():

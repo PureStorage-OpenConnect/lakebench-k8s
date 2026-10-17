@@ -843,6 +843,16 @@ SILVER_BATCH_HEAP_FRACTION = 0.35
 #: run-to-run noise and the unmeasured peak. Not a derived memory model.
 SILVER_BATCH_MEMORY_INFLATION = 10.0
 
+#: The most a deployed silver-stream executor's heap counts for, as a multiple
+#: of the base profile's (4 cores / 32g) heap, when the cap is sized. The
+#: fractions above are calibrated on 32g executors; the one measured point on a
+#: larger executor is a scale-48 run whose cap put ~3.6M rows on each 8-core /
+#: 64g executor at ~68% of its 80 GiB limit with no OOM. Projected to 85% of the
+#: limit that is ~4.5M rows, about 1.4x the ~3.2M rows the 32g calibration sets,
+#: not the 2x a heap twice as large would suggest. So a heap above the base
+#: counts for at most 1.4x the base heap, and a smaller heap counts as is.
+SILVER_BATCH_HEAP_GROWTH_LIMIT = 1.4
+
 
 def _financial_bronze_bytes_per_row(scale: float) -> float:
     """Pacs.008 bytes per bronze row at *scale*, from measured corpus size.
@@ -869,40 +879,47 @@ def _financial_silver_cap_memory_ceiling(config: LakebenchConfig) -> int:
     Financial-only by construction (it reads financial corpus sizes and the
     financial silver-stream profile); the caller gates on the financial schema.
 
-    The aggregate batch-usable heap is ``executors x executor_memory x
+    The aggregate batch-usable heap is ``executors x heap x
     SILVER_BATCH_HEAP_FRACTION``; dividing by the measured bronze bytes per row
     times :data:`SILVER_BATCH_MEMORY_INFLATION` gives a row count.
 
-    The heap and count are read from the BASE silver-stream profile (4 cores /
-    32g, ``streaming_executor_count`` within the 28-executor cap), a
-    deliberately conservative PROXY, not the geometry that deploys: to fit the
-    node the stage reshapes to larger executors (measured 8 cores / 64g at
-    scale 48 on an 11-node cluster), and the cluster concurrent budget trims the
-    count a little to share the cluster (26 -> 25 there). A 64g executor's safe
-    row load is about twice the 32g calibration point, so sizing against the
-    base 32g geometry is conservative: at scale 48 the derived cap lands at
-    ~3.6M rows on each deployed 64g executor, measured at ~68% of the 80 GiB
-    executor limit with no OOM, against the ~4.3M rows at 86% that the 32g
-    calibration saw. The one case this does not cover is a cluster so small the
-    budget starves silver to a single executor; the full cap on one executor
-    can then exceed its memory. That starvation only happens on clusters too
-    small to run the AML workload, and it predates this derivation (the old
-    flat default had the same shape); closing it would mean clamping the
-    per-trigger rows by the post-budget count at submit, a separate change.
-    Returns at least :data:`SILVER_CAP_FLOOR`.
+    The executors are the ones the stage deploys: the silver-stream profile
+    after its cores (set in the config, or grown to fit the offered load) and
+    any ``silver_executor_memory``, and the count set in the config or, unset,
+    the stage's ``streaming_executor_count`` at that size. The heap counts for
+    at most :data:`SILVER_BATCH_HEAP_GROWTH_LIMIT` times the base profile's,
+    the growth the one measurement on a larger executor supports; a smaller
+    heap counts as is. The cluster concurrent budget can still trim the count a
+    little at submit (26 -> 25 on an 11-node cluster), which this does not see.
+    The one case that matters is a cluster so small the budget starves silver
+    to a single executor; the full cap on one executor can then exceed its
+    memory. That starvation only happens on clusters too small to run the AML
+    workload, and it predates this derivation (the old flat default had the
+    same shape); closing it would mean clamping the per-trigger rows by the
+    post-budget count at submit, a separate change. Returns at least
+    :data:`SILVER_CAP_FLOOR`.
     """
     from lakebench.config.schema import parse_spark_memory
     from lakebench.modules.pipeline_engines.spark.job import (
         _resolve_job_profile,
+        executor_override,
+        stage_profile,
         streaming_executor_count,
     )
 
-    profile = _resolve_job_profile("silver-stream", "financial")
-    if profile is None:  # pragma: no cover -- silver-stream is always defined
+    base = _resolve_job_profile("silver-stream", "financial")
+    if base is None:  # pragma: no cover -- silver-stream is always defined
         return SILVER_CAP_FLOOR
+    profile = stage_profile("silver-stream", config) or base
     scale = config.architecture.workload.datagen.scale
-    execs = streaming_executor_count("silver-stream", profile, config, scale=scale)
-    heap_bytes = parse_spark_memory(str(profile["executor_memory"]))
+    execs = executor_override("silver-stream", config) or streaming_executor_count(
+        "silver-stream", profile, config, scale=scale
+    )
+    base_heap = parse_spark_memory(str(base["executor_memory"]))
+    heap_bytes = min(
+        parse_spark_memory(str(profile["executor_memory"])),
+        base_heap * SILVER_BATCH_HEAP_GROWTH_LIMIT,
+    )
     bytes_per_row = _financial_bronze_bytes_per_row(scale)
     if bytes_per_row <= 0:  # pragma: no cover -- scale is always >= MIN_SCALE
         return SILVER_CAP_FLOOR
