@@ -459,17 +459,6 @@ def resolve_auto_sizing(
             unbalanced_stages,
         )
 
-        # Silver's per-trigger row cap: a larger batch amortizes the
-        # world-sized dimension MERGE, up to what the silver-stream executors
-        # can hold. Derived from the memory envelope for financial continuous,
-        # floored at the schema default so a defaulted run never shrinks; a
-        # user-set value wins. None for non-financial / batch (keep default).
-        derived_cap = derive_silver_max_rows_per_trigger(config)
-        if derived_cap is not None and _set_if_default(
-            config.architecture.pipeline.sustained, "silver_max_rows_per_trigger", derived_cap
-        ):
-            changes.append(f"silver_max_rows_per_trigger={derived_cap:,}")
-
         budget = None
         if cluster_capacity is not None:
             changes.extend(
@@ -479,6 +468,20 @@ def resolve_auto_sizing(
                     cluster_capacity.largest_node_memory_bytes,
                 )
             )
+
+        # Silver's per-trigger row cap: a larger batch amortizes the
+        # world-sized dimension MERGE, up to what the silver-stream executors
+        # can hold. Derived from the memory envelope for financial continuous,
+        # after the node fit settles the executor size the stage deploys,
+        # floored at the schema default so a defaulted run never shrinks; a
+        # user-set value wins. None for non-financial / batch (keep default).
+        derived_cap = derive_silver_max_rows_per_trigger(config)
+        if derived_cap is not None and _set_if_default(
+            config.architecture.pipeline.sustained, "silver_max_rows_per_trigger", derived_cap
+        ):
+            changes.append(f"silver_max_rows_per_trigger={derived_cap:,}")
+
+        if cluster_capacity is not None:
             budget = _streaming_concurrent_budget(
                 config,
                 cluster_capacity.total_cpu_millicores,

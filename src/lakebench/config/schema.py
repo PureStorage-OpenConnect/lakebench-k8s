@@ -813,7 +813,7 @@ class SparkComputeConfig(ConfigModel):
     )
     silver_executor_memory: str | None = Field(
         default=None,
-        description="Continuous mode: override silver-stream heap per executor (a Spark size, for example `96g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size.",
+        description="Continuous mode: override silver-stream heap per executor (a Spark size, for example `96g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. For a financial run that leaves `silver_max_rows_per_trigger` unset, a larger heap raises the derived cap up to its measured bound. Null = the profile's per-core share of the executor size.",
     )
     gold_executor_memory: str | None = Field(
         default=None,
