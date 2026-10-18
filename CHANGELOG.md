@@ -4,6 +4,12 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.8]
+
+### Fixed
+
+- **Continuous maintenance no longer expires a bronze snapshot the live silver stream is still reading from, which crashed the stream.** The silver stream reads bronze as an Iceberg streaming source and resumes from the snapshot id in its checkpoint offset; a maintenance round that expired that snapshot left the stream unable to load its offset and killed its driver. Before expiring bronze while streams are live, maintenance reads the snapshot the silver stream's committed offset points at and holds the expiry cutoff one second before that snapshot's commit time, so the snapshot it resumes from and every newer one survive. This only ever expires less, never past the configured retention; a run with no live stream, or whose offset cannot be read, keeps the previous retention floor.
+
 ## [1.7.7] - 2026-10-17
 
 ### Added

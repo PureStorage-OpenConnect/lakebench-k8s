@@ -1313,6 +1313,83 @@ def expire_round_record(
     }
 
 
+def _silver_stream_offset_snapshot_id(cfg) -> int | None:
+    """The Iceberg snapshot id the silver stream's newest committed offset is
+    positioned on in bronze, read from its checkpoint in the silver bucket, or
+    None when there is no committed offset or it cannot be read. Never raises.
+
+    The silver stream reads bronze as an Iceberg streaming source; its
+    structured-streaming checkpoint writes one offset file per planned batch
+    under ``<checkpoint_base>/silver-stream/offsets/``. The highest-numbered
+    one holds the Iceberg source offset, whose ``snapshot_id`` is the bronze
+    snapshot the stream has read through. Maintenance holds expiry back from
+    it so the stream is never left without the snapshot it is positioned on.
+    """
+    import json as _json
+
+    try:
+        from lakebench.deploy.datagen import _s3_client_for
+
+        base = cfg.architecture.pipeline.sustained.checkpoint_base.strip("/")
+        bucket = cfg.platform.storage.s3.buckets.silver
+        prefix = f"{base}/silver-stream/offsets/"
+        raw = _s3_client_for(cfg).raw_client
+        listed = raw.list_objects_v2(Bucket=bucket, Prefix=prefix).get("Contents") or []
+        batches = []
+        for obj in listed:
+            name = obj["Key"].rsplit("/", 1)[-1]
+            if name.isdigit():
+                batches.append((int(name), obj["Key"]))
+        if not batches:
+            return None
+        _, key = max(batches)
+        body = raw.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8")
+        for text in reversed(body.splitlines()):
+            text = text.strip()
+            if not text.startswith("{"):
+                continue
+            try:
+                payload = _json.loads(text)
+            except ValueError:
+                continue
+            sid = payload.get("snapshot_id")
+            if sid is not None:
+                return int(sid)
+        return None
+    except Exception as e:  # noqa: BLE001 -- fail open: expiry keeps its retention floor
+        logger.warning("silver stream offset snapshot unavailable: %s", e)
+        return None
+
+
+def _snapshot_committed_at(engine, k8s, pod_name, namespace, catalog, table, snapshot_id, timeout):
+    """The ``committed_at`` of ``snapshot_id`` on ``catalog.table`` as a
+    UTC-aware datetime, read from the engine's snapshots metadata, or None
+    when it is gone or cannot be read. Never raises. The micros value is read
+    with ``scalar_from_output`` so both engines parse the same way."""
+    from lakebench.modules.table_formats.iceberg.maintenance import query_sql
+
+    try:
+        if engine == "trino":
+            prefix, tbl = (f"{catalog}.{table}".rsplit(".", 1)[0], table.rsplit(".", 1)[-1])
+            sql = (
+                f'SELECT to_unixtime(committed_at) * 1000000 FROM {prefix}."{tbl}$snapshots" '
+                f"WHERE snapshot_id = {int(snapshot_id)}"
+            )
+        else:
+            sql = (
+                f"SELECT unix_micros(committed_at) FROM {catalog}.{table}.snapshots "
+                f"WHERE snapshot_id = {int(snapshot_id)}"
+            )
+        out = query_sql(engine, k8s, pod_name, namespace, sql, timeout=timeout)
+    except Exception as e:  # noqa: BLE001 -- fail open
+        logger.warning("committed_at of %s@%s unavailable: %s", table, snapshot_id, e)
+        return None
+    micros = scalar_from_output(engine, out)
+    if micros is None:
+        return None
+    return datetime.fromtimestamp(micros / 1e6, timezone.utc)
+
+
 def _run_iceberg_maintenance(
     cfg,
     k8s,
@@ -1404,9 +1481,41 @@ def _run_iceberg_maintenance(
         retention_threshold = applied["expire"]
         orphan_retention = applied["orphan"]
 
+        # The silver stream reads bronze as an Iceberg streaming source. While
+        # it is live, hold bronze's expiry back from the snapshot its
+        # checkpoint offset points at, so expiry never removes the snapshot
+        # the stream is resuming from (that kills the stream). Only bronze is a
+        # streaming source, so only it is protected; fail-open, so a failure to
+        # read the offset leaves expiry at its retention floor.
+        bronze_source = f"{catalog}.{cfg.architecture.tables.bronze}"
+        bronze_protect_from = None
+        if live_streams:
+            sid = _silver_stream_offset_snapshot_id(cfg)
+            if sid is not None:
+                bronze_protect_from = _snapshot_committed_at(
+                    engine,
+                    k8s,
+                    pod_name,
+                    namespace,
+                    catalog,
+                    cfg.architecture.tables.bronze,
+                    sid,
+                    timeout,
+                )
+                if bronze_protect_from is not None:
+                    console.print(
+                        "  [dim]Bronze expiry floored at the live silver stream's "
+                        f"offset snapshot {sid}[/dim]"
+                    )
+
         def build_sql(tbl):
             return build_maintenance_sql(
-                engine, catalog, tbl, retention_threshold, orphan_retention=orphan_retention
+                engine,
+                catalog,
+                tbl,
+                retention_threshold,
+                orphan_retention=orphan_retention,
+                protect_from=bronze_protect_from if tbl == bronze_source else None,
             )
 
     import time as _time
