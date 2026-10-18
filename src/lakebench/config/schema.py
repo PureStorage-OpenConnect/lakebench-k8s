@@ -805,6 +805,20 @@ class SparkComputeConfig(ConfigModel):
         le=16,
         description="Continuous mode: override gold-refresh cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically.",
     )
+    # Continuous-mode executor heap overrides (None = the profile's per-core
+    # share of the executor size). Batch jobs keep their profile's memory.
+    bronze_executor_memory: str | None = Field(
+        default=None,
+        description="Continuous mode: override bronze-ingest heap per executor (a Spark size, for example `32g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size.",
+    )
+    silver_executor_memory: str | None = Field(
+        default=None,
+        description="Continuous mode: override silver-stream heap per executor (a Spark size, for example `96g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. For a financial run that leaves `silver_max_rows_per_trigger` unset, a larger heap raises the derived cap up to its measured bound. Null = the profile's per-core share of the executor size.",
+    )
+    gold_executor_memory: str | None = Field(
+        default=None,
+        description="Continuous mode: override gold-refresh heap per executor (a Spark size, for example `96g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size.",
+    )
 
     # Driver resource overrides (None = use profile defaults).
     # These are global - they apply to all Spark jobs. Use when cluster nodes
@@ -819,16 +833,22 @@ class SparkComputeConfig(ConfigModel):
         description="Override driver cores (1--16). Null = profile default (typically 4).",
     )
 
-    @field_validator("driver_memory", mode="after")
+    @field_validator(
+        "driver_memory",
+        "bronze_executor_memory",
+        "silver_executor_memory",
+        "gold_executor_memory",
+        mode="after",
+    )
     @classmethod
     def _driver_memory_is_a_spark_size(cls, value: str | None, info: ValidationInfo) -> str | None:
-        """A driver memory Spark cannot read fails the job at submit, and the
-        capacity check cannot count it: commands that change data refuse it;
-        teardown and read commands drop it with a note."""
+        """A driver or executor memory Spark cannot read fails the job at
+        submit, and the capacity check cannot count it: commands that change
+        data refuse it; teardown and read commands drop it with a note."""
         if value is None or _SPARK_MEMORY_SIZE.fullmatch(value.strip()):
             return value
         text = (
-            f"platform.compute.spark.driver_memory {value!r} is not a Spark memory size "
+            f"platform.compute.spark.{info.field_name} {value!r} is not a Spark memory size "
             "Lakebench can count: write a whole number above 0 with a unit, k, m, g or t "
             "(for example 16g)"
         )

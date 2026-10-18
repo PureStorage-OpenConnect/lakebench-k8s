@@ -4,6 +4,16 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.7] - 2026-10-17
+
+### Added
+
+- **`platform.compute.spark.bronze_executor_memory`, `silver_executor_memory` and `gold_executor_memory` (continuous mode, unset by default) set the heap per executor of bronze-ingest, silver-stream and gold-refresh.** The value is applied after the stage's executor cores, the memory overhead keeps the profile's ratio to the heap, and the capacity check, the concurrent budget, the node fit and the recorded `streaming_shape` all count the larger pod, so spare cluster memory can go to a stage without adding cores. Unset, every stage keeps its profile's per-core share and nothing moves; batch jobs ignore the keys.
+
+### Breaking
+
+- **A financial continuous run that leaves `silver_max_rows_per_trigger` unset now derives it from the silver-stream executors the stage deploys (their cores, heap and count) instead of the base 4-core, 32g profile, and a heap above the base counts for at most 1.4 times the base heap.** 1.7.6 spread the cap over the base profile's executor count at 32g whatever the stage deployed, so a grown or configured executor carried between 1.4M and 4.7M rows depending on scale and geometry, above the measured points at scale 20; 1.7.7 puts a uniform 4.47M rows on every grown executor (the one measured 64g point, 3.6M rows at 68% of the limit, projected to 85%) and scales a smaller heap down in proportion. On an 11-node, 434-core cluster the defaulted cap moves from 89,344,640 to 84,877,408 at scale 20, 98,279,103 at scale 48 and 125,082,495 at scale 100 and above, and to 116,148,032 for 26 silver executors of 8 cores set in the config; the base 4-core geometry (scale 10 and below) is unchanged, so its recorded throughput, pace and freshness do not move. An explicitly configured `silver_max_rows_per_trigger` is used unchanged, and customer360 and batch runs keep the 20,000,000 default.
+
 ## [1.7.6] - 2026-10-15
 
 ### Added
