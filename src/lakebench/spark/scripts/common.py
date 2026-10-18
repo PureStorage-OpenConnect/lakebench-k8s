@@ -1814,6 +1814,107 @@ def checkpoint_is_fresh(spark, checkpoint_location):
     return not fs.exists(offsets) or len(fs.listStatus(offsets)) == 0
 
 
+def committed_source_snapshot_id(spark, checkpoint_location):
+    """The Iceberg snapshot id the newest committed offset of the streaming
+    checkpoint at ``checkpoint_location`` is positioned on, or None when the
+    checkpoint is fresh, absent or its offset is not an Iceberg source offset.
+
+    A structured-streaming checkpoint writes one file per planned batch under
+    ``offsets/`` named by batch id; the highest-numbered one is the latest
+    planned offset. Spark's offset file is a metadata line, an optional empty
+    line, then one source offset per line. The Iceberg streaming source writes
+    its offset as JSON carrying ``snapshot_id`` (the snapshot it has read
+    through). Maintenance uses this to hold ``expire_snapshots`` back from a
+    snapshot a live stream still needs: expiring it kills the stream.
+    """
+    import json as _json
+
+    jvm = spark._jvm
+    hconf = spark._jsc.hadoopConfiguration()
+    offsets = jvm.org.apache.hadoop.fs.Path(checkpoint_location.rstrip("/") + "/offsets")
+    fs = offsets.getFileSystem(hconf)
+    if not fs.exists(offsets):
+        return None
+    batch = -1
+    newest = None
+    for st in fs.listStatus(offsets):
+        name = st.getPath().getName()
+        if not name.isdigit():
+            continue
+        if int(name) > batch:
+            batch, newest = int(name), st.getPath()
+    if newest is None:
+        return None
+    stream = fs.open(newest)
+    try:
+        reader = jvm.java.io.BufferedReader(jvm.java.io.InputStreamReader(stream, "UTF-8"))
+        lines = []
+        line = reader.readLine()
+        while line is not None:
+            lines.append(str(line))
+            line = reader.readLine()
+    finally:
+        stream.close()
+    # Line 0 is the metadata (a version marker or JSON); the source offsets
+    # follow, after an optional blank line. The last non-empty line that
+    # parses as JSON with a snapshot_id is the Iceberg source's offset.
+    for text in reversed(lines):
+        text = text.strip()
+        if not text or not text.startswith("{"):
+            continue
+        try:
+            payload = _json.loads(text)
+        except ValueError:
+            continue
+        sid = payload.get("snapshot_id")
+        if sid is not None:
+            try:
+                return int(sid)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def snapshot_committed_at(spark, fq_table, snapshot_id):
+    """The ``committed_at`` of ``snapshot_id`` in ``fq_table`` as a UTC-aware
+    datetime, or None when the snapshot is not in the table's snapshots (it
+    may already be expired) or cannot be read. Read from the snapshots
+    metadata table, no data scan."""
+    if snapshot_id is None:
+        return None
+    from datetime import timezone as _tz
+
+    try:
+        rows = spark.sql(
+            "SELECT unix_micros(committed_at) AS us "
+            f"FROM {fq_table}.snapshots WHERE snapshot_id = {int(snapshot_id)}"
+        ).collect()
+    except Exception as e:  # noqa: BLE001
+        log(f"[maintenance] committed_at of {fq_table}@{snapshot_id} unavailable: {one_line(e)}")
+        return None
+    if not rows or rows[0]["us"] is None:
+        return None
+    return datetime.fromtimestamp(int(rows[0]["us"]) / 1e6, _tz.utc)
+
+
+def streaming_source_protect_from(spark, checkpoint_location, fq_source_table):
+    """The commit time to hold ``expire_snapshots`` back from on
+    ``fq_source_table``, so a live stream reading it from
+    ``checkpoint_location`` keeps the snapshot its offset points at. The
+    ``committed_at`` of the snapshot the newest committed offset references,
+    or None when there is no committed offset, the snapshot is already gone,
+    or anything cannot be read (expiry then falls back to its configured
+    retention). Never raises."""
+    try:
+        sid = committed_source_snapshot_id(spark, checkpoint_location)
+    except Exception as e:  # noqa: BLE001
+        log(f"[maintenance] stream offset at {checkpoint_location} unreadable: {one_line(e)}")
+        return None
+    if sid is None:
+        return None
+    return snapshot_committed_at(spark, fq_source_table, sid)
+
+
 def refuse_fresh_checkpoint_over_data(spark, checkpoint_location, fq_table):
     """Exit when a fresh checkpoint would re-read the source into a full table.
 

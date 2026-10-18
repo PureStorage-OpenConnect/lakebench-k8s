@@ -151,11 +151,22 @@ def build_maintenance_sql(
     retention_threshold: str,
     orphan_retention: str | None = None,
     now: datetime | None = None,
+    protect_from: datetime | None = None,
 ) -> list[str]:
     """Build expire_snapshots + remove_orphan_files SQL for the given engine.
 
     ``orphan_retention`` defaults to ``retention_threshold`` and is never
     below ``ORPHAN_MIN_RETENTION_SECONDS`` (24 h + 10 min).
+
+    ``protect_from`` (when given) is the commit time of the oldest snapshot a
+    live streaming reader still references on this table. The expire cutoff is
+    then held strictly before it, so ``expire_snapshots`` never removes the
+    snapshot a stream is positioned on or any newer one. A streaming source
+    tracks its position by snapshot id in its checkpoint offset; expiring that
+    snapshot kills the stream with "Cannot load current offset at snapshot ...
+    the snapshot was expired or removed". The configured retention only bounds
+    how far back expiry reaches, never how recent, so capping the cutoff here
+    can only expire less, never more.
 
     Trino: ``ALTER TABLE ... EXECUTE`` with a duration, prefixed in the same
     submission by ``SET SESSION <catalog>.<proc>_min_retention`` equal to the
@@ -170,7 +181,16 @@ def build_maintenance_sql(
     1000 AS BIGINT)`` always failed "number of args and params must match
     after binding" (live, 2026-09-26).
     """
+    now = now or datetime.now(timezone.utc)
     expire_s = _parse_threshold_seconds(retention_threshold)
+    # Hold the cutoff strictly before the oldest snapshot a live stream still
+    # references, so expiry never removes it. One second before its commit
+    # time keeps that snapshot and every newer one. This only ever makes the
+    # window older (expires less); it never reaches more recent than
+    # retention asked.
+    if protect_from is not None:
+        protect = protect_from.astimezone(timezone.utc) - timedelta(seconds=1)
+        expire_s = max(expire_s, int((now - protect).total_seconds()))
     # The orphan floor is enforced here, whatever the caller passes.
     orphan_s = max(
         _parse_threshold_seconds(orphan_retention or retention_threshold),
