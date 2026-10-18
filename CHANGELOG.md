@@ -4,6 +4,12 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.8]
+
+### Fixed
+
+- **Under Polaris, silver and gold tables now land in their own buckets instead of every zone rooting in the bronze bucket.** The catalog already allowed the silver and gold bucket locations and the bootstrap already created each namespace with a location in its own bucket, but the Polaris server refused a namespace location outside the catalog's default base, so silver and gold tables inherited the bronze base and all three zones' data landed in the bronze bucket; the silver and gold buckets stayed effectively empty while per-zone storage accounting, quotas and lifecycle were wrong. Enabling `ALLOW_NAMESPACE_LOCATION_OVERRIDE` and `ALLOW_TABLE_LOCATION_OVERRIDE` on the Polaris server makes the per-zone namespace locations take effect. Table contents and query results are unchanged; only the physical bucket each zone's data lands in moves. Hive and Delta already split by bucket and are unaffected.
+
 ## [1.7.7] - 2026-10-17
 
 ### Added
