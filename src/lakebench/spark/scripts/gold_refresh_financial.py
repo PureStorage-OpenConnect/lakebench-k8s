@@ -288,6 +288,74 @@ def _newest_ingest_epoch_s(spark, fq_table):
         return None
 
 
+def _max_micros(df):
+    """``unix_micros(MAX(ingest_ts))`` of ``df``, or None when it is empty or
+    the column holds no non-null value."""
+    return df.agg(unix_micros(max_("ingest_ts")).alias("t")).collect()[0]["t"]
+
+
+def _newest_sealed_ingest_epoch_s(spark, pinned, sealed):
+    """Newest ingest_ts over the SEALED rows of the pinned snapshot, in epoch
+    seconds (None if unknown), computed without a full scan of the sealed set
+    in the common case.
+
+    ``sealed`` is the pinned frame already semi-joined to the sealed batch
+    set (what detection reads). A direct MAX over it is a full scan: the
+    semi-join defeats Iceberg's file-metadata answer for MAX. ingest_ts is
+    the bronze file-landing time carried into silver and is not monotone with
+    ``_batch_id`` (a later batch can carry an older ingest_ts), so the newest
+    sealed value cannot be read off the newest batch; it is the true max over
+    every sealed row.
+
+    The pinned snapshot is the sealed rows plus the in-flight unsealed tail
+    (one batch not yet in the versions table). So:
+
+    - ``snapshot_max`` = MAX over the whole pinned snapshot is answered from
+      file metadata (no join, no data scan); it equals
+      max(sealed_max, unsealed_max).
+    - ``unsealed_max`` = MAX over the pinned rows NOT sealed (a left-anti
+      join), which scans only that small tail.
+    - When ``snapshot_max`` is strictly newer than ``unsealed_max`` (or there
+      is no unsealed row), the newest-ingest row is sealed, so the sealed max
+      equals ``snapshot_max`` exactly.
+    - Only when the newest-ingest row lies in the unsealed tail
+      (``snapshot_max == unsealed_max``) is the sealed max not derivable from
+      the two bounds; then, and only then, it falls back to MAX over the
+      sealed frame. In steady state almost every row is sealed and the newest
+      file-landing row is among them, so this path is not taken.
+
+    The result is identical to MAX over ``sealed`` in every case; the cheap
+    paths only avoid the scan. On any error it falls back to that direct MAX,
+    preserving the previous behaviour.
+    """
+    try:
+        snapshot_t = _max_micros(pinned)
+        if snapshot_t is None:
+            return None
+        # The unsealed tail: pinned rows whose (_stream_id, _batch_id) is not
+        # in the sealed set. left_anti of pinned against the sealed frame on
+        # the batch identity, so it mirrors whichever sealed filter was built.
+        batched = {"_stream_id", "_batch_id"} <= set(pinned.columns) <= set(sealed.columns)
+        if batched:
+            sealed_batches = sealed.select("_stream_id", "_batch_id").distinct()
+            unsealed = pinned.join(sealed_batches, ["_stream_id", "_batch_id"], "left_anti")
+            unsealed_t = _max_micros(unsealed)
+            if unsealed_t is None or snapshot_t > unsealed_t:
+                return snapshot_t / 1e6
+        # The newest-ingest row is in the unsealed tail (or the batch columns
+        # are absent): the sealed max needs the direct scan.
+        sealed_t = _max_micros(sealed)
+        return sealed_t / 1e6 if sealed_t is not None else None
+    except Exception as e:  # noqa: BLE001
+        log(f"[metrics] newest sealed ingest_ts unavailable: {one_line(e)}")
+        try:
+            sealed_t = _max_micros(sealed)
+            return sealed_t / 1e6 if sealed_t is not None else None
+        except Exception as e2:  # noqa: BLE001
+            log(f"[metrics] newest sealed ingest_ts fallback unavailable: {one_line(e2)}")
+            return None
+
+
 def _alert_content_keys(alerts):
     """One row per distinct alert content: (_key, rule_id, related_txn_ids).
 
@@ -565,12 +633,7 @@ def _pin_silver(spark):
     rows = tt["total_records"]
     if rows is None:
         rows, _ = iceberg_table_stats(spark, fq)
-    try:
-        t = txns.agg(unix_micros(max_("ingest_ts")).alias("t")).collect()[0]["t"]
-        newest = t / 1e6 if t is not None else None
-    except Exception as e:  # noqa: BLE001
-        log(f"[metrics] newest ingest_ts of {fq} unavailable: {one_line(e)}")
-        newest = None
+    newest = _newest_sealed_ingest_epoch_s(spark, pinned, txns)
     return txns, sid, versions_used, rows, newest, tt
 
 

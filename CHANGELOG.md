@@ -4,6 +4,12 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.8]
+
+### Breaking
+
+- **The continuous gold freshness probe reads the newest ingest time over the sealed transactions from the pinned snapshot's file metadata and the small unsealed tail, not a full scan of the sealed frame.** The reported `newest_ingest_s` (data freshness) is the same value, the true maximum ingest time over the rows detection saw: in steady state, where the newest row is sealed, it comes from the snapshot's metadata maximum, and only when the newest-ingest row is in the in-flight unsealed batch is the sealed maximum scanned, so freshness does not move and the probe no longer grows with the corpus (it was a per-tick full scan of the sealed snapshot).
+
 ## [1.7.7] - 2026-10-17
 
 ### Added
