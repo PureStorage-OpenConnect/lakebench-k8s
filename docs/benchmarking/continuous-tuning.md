@@ -64,6 +64,6 @@ window's end, busy 100%; raise platform.compute.spark.silver_executors
 | High `data_freshness`, balanced | Gold write time, or a configured `gold_refresh_interval` | Add `gold_executors`; leave the interval at `0 seconds` |
 | QpH dropping across rounds | Table growth | Add Trino workers or memory |
 | Q9 contention > 20% | Rounds colliding with gold rewrites | Raise `benchmark_interval` |
-| `total_s3_objects` growing unbounded (Iceberg) | Maintenance not keeping pace, or failing | Check the journal's Iceberg maintenance events for timed-out or failed statements, then lower `retention_interval`. `retention_threshold` below `1h` does nothing while streams are live (expiry floored at 1 h, orphan removal at 24 h 10 min). |
+| `total_s3_objects` growing unbounded (Iceberg) | Maintenance not keeping pace, or failing | Check the journal's Iceberg maintenance events for timed-out or failed statements, then lower `retention_interval`. `retention_threshold` below `1h` does nothing while streams are live (expiry floored at 1 h, and at the snapshot the live silver stream still reads from, so the stream is never left without its offset; orphan removal at 24 h 10 min). |
 | Same, Iceberg tables created before metadata retention | They keep every `metadata.json` | Recreate them with a fresh deployment. |
 | Same, Delta | Runs under 7 days get no effective cleanup (VACUUM keeps the 7-day default while streams are live) | |

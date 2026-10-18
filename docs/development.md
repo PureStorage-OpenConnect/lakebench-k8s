@@ -747,7 +747,13 @@ graded checks against the real backend. How to read them:
   referenced. The builder enforces it whatever the caller passes.
 - While streams are live, snapshot expiry is floored at
   `maintenance.py:LIVE_EXPIRE_MIN_RETENTION_SECONDS`, so a stream that falls
-  behind keeps the snapshots it still needs.
+  behind keeps the snapshots it still needs. It is floored again at the
+  snapshot the live silver stream's committed offset references: before
+  expiring the bronze streaming source, `_sustained.py` reads that offset's
+  snapshot and holds the cutoff one second before its commit time, so expiry
+  never removes the snapshot the stream resumes from. The two floors compose
+  (whichever expires less wins); an unreadable offset keeps the time floor
+  alone.
 - The builder does not know about live streams. That floor, and Delta's 7-day
   floor while streams are live, is applied by
   `src/lakebench/cli/_sustained.py:applied_retentions`. The run records its
