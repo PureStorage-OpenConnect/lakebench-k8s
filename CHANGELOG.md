@@ -4,6 +4,12 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.8]
+
+### Breaking
+
+- **The TM operations case-activity stage reads only the silver months the case windows cover, and the pass pins its sealed set at one versions snapshot.** Case activity pinned all of silver and filtered inside Spark; it now bounds the pinned read to the span from the earliest case window start to the latest case window end with a literal ``months(txn_timestamp)`` predicate, so Iceberg prunes the months no case reaches and the per-case activity counts are identical, with the stage's cost growing with the lookback window rather than the whole corpus. The sealed filter is now pinned at the versions snapshot captured with the transactions snapshot, so a micro-batch that seals mid-pass is no longer counted both as in flight and as sealed, which overshot the completeness reconciliation by that batch's payment count and failed it; the completeness stage and the monitored or excluded classification still read every payment, because they measure the whole population by meaning. TM runs only in continuous financial runs with TM enabled, so no other run's recorded numbers move.
+
 ## [1.7.7] - 2026-10-17
 
 ### Added

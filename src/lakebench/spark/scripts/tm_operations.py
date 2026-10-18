@@ -75,11 +75,13 @@ from datetime import date, timedelta
 
 from common import (
     ICEBERG_V2_SNAPPY_PROPS_SQL,
+    SealedFilterError,
     env,
     iceberg_table_stats,
     log,
     one_line,
     sealed_txns_filter,
+    sealed_txns_filter_at,
 )
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
@@ -1517,6 +1519,38 @@ def simulate(spark, inputs, prior, params, as_of, prev_as_of, cycle):
     return disp.select("r.*"), cases.select("r.*"), tagged
 
 
+def _case_window_bounds(cases):
+    """``(start, end)`` dates spanning every case's activity window in
+    ``cases`` (the min ``activity_window_start`` and max
+    ``activity_window_end``), or None when there is no case. One aggregate
+    over the case frame, which has one row per case."""
+    from pyspark.sql.functions import col
+    from pyspark.sql.functions import max as max_
+    from pyspark.sql.functions import min as min_
+
+    row = cases.agg(
+        min_(col("activity_window_start")).alias("lo"),
+        max_(col("activity_window_end")).alias("hi"),
+    ).collect()[0]
+    if row["lo"] is None or row["hi"] is None:
+        return None
+    return row["lo"], row["hi"]
+
+
+def _bound_to_window(txns, start, end):
+    """``txns`` with ``txn_timestamp`` in ``[start, end)``, written as literal
+    timestamp comparisons so Iceberg prunes the ``months(txn_timestamp)``
+    partitions outside the span. ``end`` is exclusive, matching
+    ``case_activity``'s ``_d < activity_window_end``; both bounds are case
+    dates, so the filter never drops a payment any case window covers."""
+    from pyspark.sql.functions import col, lit
+
+    return txns.where(
+        (col("txn_timestamp") >= lit(start).cast("timestamp"))
+        & (col("txn_timestamp") < lit(end).cast("timestamp"))
+    )
+
+
 def case_activity(txns, cases):
     """Payments in each case's lookback window, both sides of the customer,
     in one scan of the payments (each payment exploded to its distinct
@@ -2339,12 +2373,23 @@ def run_tm_operations(
         if sid is not None:
             # I10: filter the pinned snapshot against silver_batch_versions
             # so a mid-batch crash window is invisible to the P10 monitoring
-            # layer. The versions read is against CURRENT state; the pinned
-            # snapshot may include txns rows whose versions row landed later
-            # -- those correctly become visible only after they seal.
-            txns = sealed_txns_filter(
-                spark, read_at_snapshot(spark, table, sid), CATALOG, SILVER_BATCH_VERSIONS
-            )
+            # layer. The versions table is pinned ``VERSION AS OF`` the
+            # snapshot captured right after the transactions snapshot, so
+            # every action on this frame -- the in-flight watermark, the
+            # reconciliation count and the case activity scan -- sees the one
+            # sealed set. Reading the versions table at current state instead
+            # lets a batch that seals mid-pass be counted as in flight by an
+            # earlier action and as sealed by a later one, so reconciliation
+            # overshoots by that batch. The pin may hide txns rows whose
+            # versions row landed after the pin; those become visible on the
+            # next pass, which is the same bound I10 already accepts.
+            vsid = current_snapshot_id(spark, f"{CATALOG}.{SILVER_BATCH_VERSIONS}")
+            pinned = read_at_snapshot(spark, table, sid)
+            try:
+                txns = sealed_txns_filter_at(spark, pinned, CATALOG, SILVER_BATCH_VERSIONS, vsid)
+            except (TypeError, SealedFilterError) as e:
+                log(f"[tm] pinned versions read at {vsid} failed, filtering current: {one_line(e)}")
+                txns = sealed_txns_filter(spark, pinned, CATALOG, SILVER_BATCH_VERSIONS)
         else:
             log(f"[tm] {table} has no snapshot to pin; reading the frame as passed")
             # I10: apply the same filter to the caller-supplied fallback
@@ -2503,7 +2548,14 @@ def run_tm_operations(
             lit(True)
         )
         _phase("write_dispositions")
-        activity = case_activity(txns, cases_sim)
+        # Case activity reads only the span the case windows cover. Bounding
+        # the pinned silver read to [min window start, max window end) prunes
+        # the month partitions no case can reach, so this scan grows with the
+        # lookback window rather than the whole corpus. The per-case window
+        # join inside case_activity is unchanged, so the result is identical.
+        bounds = _case_window_bounds(cases_sim)
+        activity_txns = _bound_to_window(txns, *bounds) if bounds is not None else txns
+        activity = case_activity(activity_txns, cases_sim)
         case_cols = [n for n, _ in ddl_columns(DDL_CASES)][:-5]
         cases = cases_sim.join(activity, "case_id", "left").withColumn(
             "activity_txn_count", _coalesce_long("activity_txn_count")
