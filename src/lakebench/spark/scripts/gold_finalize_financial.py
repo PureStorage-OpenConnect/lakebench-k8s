@@ -547,6 +547,42 @@ def run_detection_rules(
         except Exception as e:  # noqa: BLE001 -- each rule then builds its own
             log(f"[detection] shared screening base not built: {one_line(e)}")
             screen_base = None
+    # Per-tick frame cache (continuous): the incremental rules each read their
+    # own span-pruned slice of the pinned silver frame, and their spans
+    # overlap, so the one snapshot is scanned once per rule. Persist the slice
+    # the union of their read spans covers and hand every rule that cached
+    # frame: each rule's own span filter then reads from the cache, not a
+    # fresh Iceberg scan, and reads exactly the rows it would have. The cache
+    # is built only when every running incremental rule is a bounded region
+    # pass (read_span_union returns the union); a tick with a full pass keeps
+    # the per-rule reads, so the whole corpus is never pinned in memory.
+    tick_frame = None
+    rule_txns = txns
+    if incremental is not None:
+        try:
+            from incremental_detection import _within
+
+            def _params_of(rid):
+                p = rule_params(get_rule(rid), run_id, silver_entities)
+                p.update((rule_overrides or {}).get(rid, {}))
+                return p
+
+            running = [r for r in rules if r in INCREMENTAL_RULES]
+            read_union = incremental.read_span_union(running, _params_of)
+            if read_union is not None:
+                tick_frame = _within(txns, read_union).persist(StorageLevel.MEMORY_AND_DISK)
+                rule_txns = tick_frame
+                read_days = sum(hi - lo for lo, hi in read_union) / (24 * 3_600_000_000)
+                log(
+                    f"[detection] per-tick frame cache: {len(read_union)} span(s), "
+                    f"{read_days:.1f} read-days shared by {', '.join(running)}"
+                )
+        except Exception as e:  # noqa: BLE001 -- fall back to per-rule reads
+            log(f"[detection] per-tick frame cache not built: {one_line(e)}")
+            if tick_frame is not None:
+                tick_frame.unpersist()
+            tick_frame = None
+            rule_txns = txns
     for rule_id in rules:
         target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
         if (
@@ -605,7 +641,14 @@ def run_detection_rules(
             run_rule = fn
             if incremental is not None and rule_id in INCREMENTAL_RULES:
                 run_rule = incremental.rule(rule_id, fn)
-            alerts = run_rule(txns, **params)
+            # An incremental rule reads from the per-tick cache (rule_txns)
+            # when it was built; every other read is the pinned frame as
+            # passed. The cache holds the union of the incremental rules' read
+            # spans, so a bounded rule sees exactly its own rows.
+            frame = (
+                rule_txns if (incremental is not None and rule_id in INCREMENTAL_RULES) else txns
+            )
+            alerts = run_rule(frame, **params)
             # Persist before counting, so the rule is computed exactly once.
             # The loop used to count the frame and then INSERT from a temp
             # view, which is not materialised: every rule ran twice, each run
@@ -689,7 +732,18 @@ def run_detection_rules(
             # screening base while a later screening rule still needs it:
             # then only this rule's alerts frame is dropped (W5 and W6 persist
             # nothing else).
-            if screen_base is not None and rule_id in screen_rules[:-1]:
+            keep_screen = screen_base is not None and rule_id in screen_rules[:-1]
+            if tick_frame is not None:
+                # The per-tick cache must survive every rule, so a blanket
+                # clearCache would wipe it. Drop only this rule's own frames:
+                # its alerts frame here, and its W1/W3/W17 intermediates (which
+                # the rules unpersist themselves). The shared screening base is
+                # dropped once the last screening rule has read it.
+                if rule_frame is not None:
+                    rule_frame.unpersist()
+                if not keep_screen and rule_id in screen_rules:
+                    screen_base = None
+            elif keep_screen:
                 if rule_frame is not None:
                     rule_frame.unpersist()
             else:
@@ -700,6 +754,10 @@ def run_detection_rules(
             # bucket; the alerts are written (or dropped) by now.
             cleanup_path_search_spill(spark)
             timings["cleanup_s"] += time.time() - cleanup_start
+    # The per-tick frame cache lived across every rule; drop it now the tick's
+    # rules have read it.
+    if tick_frame is not None:
+        tick_frame.unpersist()
     log(f"[detection] total alerts written: {total_alerts}")
 
     finish_start = time.time()

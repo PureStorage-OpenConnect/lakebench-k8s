@@ -352,6 +352,56 @@ class IncrementalDetection:
 
     # -- the wrapped rule ---------------------------------------------------
 
+    def _mode_for(self, rule_id: str):
+        """``(mode, cut)`` for this rule's pass this tick: ``full`` (no prior
+        state or an unknown prior position, reads all of silver), ``unchanged``
+        (nothing new, its alerts stand) or ``region`` (reads the cut's spans
+        widened by the rule's lookback). The single definition the wrapped
+        rule and the per-tick read-span union both use."""
+        prior = self.state.get(rule_id)
+        cut = self.cut.get(rule_id)
+        if prior is None or cut == FULL:
+            return "full", None
+        if cut is None:
+            return "unchanged", cut
+        return "region", cut
+
+    def read_span_union(self, rule_ids, params_of):
+        """The merged silver read spans of the incremental rules in
+        ``rule_ids`` that run a region pass this tick, or None when a running
+        rule reads all of silver (a full pass) or its reach cannot be
+        determined. ``params_of(rule_id)`` gives the rule's resolved
+        parameters.
+
+        Each region rule reads its cut widened by a rule-specific look-back
+        and look-forward (``_rule_read_reach``); the union of those widened
+        cuts holds every row any region rule reads this tick, so one frame
+        pinned to it serves them all from a single silver scan. The reach is a
+        superset of the rule planner's exact read span (the planner composes
+        the same widens, never wider), so a rule reading the pinned frame sees
+        exactly the rows it would have read from silver. Pure span arithmetic:
+        it does not invoke the planners, so it scans nothing."""
+        from detection_rules import get_rule
+
+        spans: list = []
+        for rule_id in rule_ids:
+            if rule_id not in _RULES:
+                continue
+            mode, cut = self._mode_for(rule_id)
+            if mode == "unchanged":
+                continue
+            if mode == "full" or cut is None:
+                return None
+            fn = get_rule(rule_id)
+            if fn is None:
+                return None
+            reach = _rule_read_reach(rule_id, _defaults(fn, params_of(rule_id)))
+            if reach is None:
+                return None
+            back, fwd, step = reach
+            spans.extend(widen(cut, back, fwd, step))
+        return merge_spans(spans) if spans else None
+
     def rule(self, rule_id: str, fn):
         def run(txns: DataFrame, **params) -> DataFrame:
             started = time.time()
@@ -359,13 +409,7 @@ class IncrementalDetection:
             if rule_id == "W2_structuring":
                 self.staged_customers[rule_id] = _customers_key(p.get("silver_entities"))
             prior = self.state.get(rule_id)
-            cut = self.cut.get(rule_id)
-            if prior is None or cut == FULL:
-                mode, cut = "full", None
-            elif cut is None:
-                mode = "unchanged"
-            else:
-                mode = "region"
+            mode, cut = self._mode_for(rule_id)
             alerts_of, steps, bounds = _RULES[rule_id](self, txns, p, prior, mode, cut)
             if mode == "unchanged":
                 state = prior
@@ -765,6 +809,41 @@ def _screen(rule_id: str):
         return (lambda s: s["alerts"]), steps, bounds
 
     return run
+
+
+def _rule_read_reach(rule_id: str, p: dict):
+    """``(back_us, fwd_us, step_us)`` bounding how far before and after its cut
+    a region pass of ``rule_id`` reads silver, or None when it cannot be
+    determined from the parameters. ``widen(cut, back, fwd, step)`` is a
+    superset of the rule planner's exact read span: the planner composes the
+    same widens in the same step, never reaching wider, so a frame pinned to
+    the union of these reaches serves every region rule the exact rows it
+    would have read from silver. The formulas mirror each planner's read
+    span; keep them in step with the planners above."""
+    if rule_id in ("W5_sanctions_match", "W6_pep_counterparty"):
+        # read == cut.
+        return 0, 0, 1
+    if rule_id == "W2_structuring":
+        window = int(p["window_hours"]) * HOUR_US
+        return 2 * window, 2 * window, window
+    if rule_id == "W3_round_tripping":
+        hop = int(p["hop_window_hours"]) * HOUR_US
+        total = int(p["total_window_days"]) * 24 * HOUR_US
+        return total + 2 * hop, total + 2 * hop, hop
+    if rule_id == "W4_risk_propagation":
+        per = p.get("alert_window_hours")
+        if not per:
+            # Without alert windows W4 reads all of an entity's pairs: a full
+            # pass, so it cannot be bounded to a span.
+            return None
+        reach = int(p["velocity_hours"]) * HOUR_US + 1_000_000
+        step = int(per) * HOUR_US
+        return reach + step, reach + step, step
+    if rule_id == "W17_layering_chain":
+        hop = int(p["hop_window_hours"]) * HOUR_US
+        span = (max(2, int(p["min_hops"]), int(p["max_hops"])) - 1) * hop
+        return span + 3 * hop, span + 3 * hop, hop
+    return None
 
 
 _RULES = {

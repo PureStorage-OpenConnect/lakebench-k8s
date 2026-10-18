@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Breaking
 
 - **The continuous gold freshness probe reads the newest ingest time over the sealed transactions from the pinned snapshot's file metadata and the small unsealed tail, not a full scan of the sealed frame.** The reported `newest_ingest_s` (data freshness) is the same value, the true maximum ingest time over the rows detection saw: in steady state, where the newest row is sealed, it comes from the snapshot's metadata maximum, and only when the newest-ingest row is in the in-flight unsealed batch is the sealed maximum scanned, so freshness does not move and the probe no longer grows with the corpus (it was a per-tick full scan of the sealed snapshot).
+- **Continuous gold detection persists the silver span its incremental rules read once per tick and runs every rule against that cached frame, instead of each rule scanning the pinned snapshot for its own span.** The six incremental rules' read spans overlap, so the one snapshot was scanned once per rule each tick; the tick now scans the union of their read spans once and the per-rule span filters read from the cache, and the per-rule cleanup drops only each rule's own frames so the shared frame survives the tick. The alerts a tick writes are identical, since the cache holds the union of the rules' read spans and each rule reads the rows it would have, but the per-tick executor memory profile changes because the shared frame is held across the tick's rules.
 
 ## [1.7.7] - 2026-10-17
 
