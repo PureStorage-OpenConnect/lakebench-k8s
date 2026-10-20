@@ -129,6 +129,8 @@ def _run(jars):
                 opened_date DATE NOT NULL,
                 closed_date DATE,
                 current_balance DECIMAL(38, 2),
+                last_entry_seq BIGINT,
+                last_book_ts TIMESTAMP,
                 home_fi STRING,
                 is_customer BOOLEAN
             ) USING iceberg

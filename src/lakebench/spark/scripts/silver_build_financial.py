@@ -243,6 +243,8 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_ACCOUNTS} (
     opened_date        DATE   NOT NULL,
     closed_date        DATE,
     current_balance    DECIMAL(38, 2),
+    last_entry_seq     BIGINT,
+    last_book_ts       TIMESTAMP,
     home_fi            STRING,
     is_customer        BOOLEAN
 ) USING iceberg
@@ -797,6 +799,11 @@ def build_accounts(bronze, kyc=None, long=None):
         col("opened_date"),
         lit(None).cast("date").alias("closed_date"),
         lit(None).cast("decimal(38,2)").alias("current_balance"),
+        # Prior-state columns the continuous stream maintains; batch mode has
+        # no cross-batch prior state, so NULL. No consumer reads these in a
+        # batch build; keep them so batch and stream share one DDL.
+        lit(None).cast("bigint").alias("last_entry_seq"),
+        lit(None).cast("timestamp").alias("last_book_ts"),
         *[
             (col(f"_{name}") if kyc is not None else lit(None)).cast(sql_type).alias(name)
             for name, sql_type in KYC_ACCOUNT_COLUMNS

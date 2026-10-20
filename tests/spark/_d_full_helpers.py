@@ -109,6 +109,8 @@ CREATE TABLE lh.silver.accounts (
     opened_date        DATE   NOT NULL,
     closed_date        DATE,
     current_balance    DECIMAL(38, 2),
+    last_entry_seq     BIGINT,
+    last_book_ts       TIMESTAMP,
     home_fi            STRING,
     is_customer        BOOLEAN
 ) USING iceberg
@@ -250,6 +252,8 @@ def seed_account(spark, iban, holder_entity_id=1, bank_bic="BICFI", currency="US
         lit(datetime(2024, 1, 1).date()).alias("opened_date"),
         lit(None).cast("date").alias("closed_date"),
         lit(None).cast("decimal(38,2)").alias("current_balance"),
+        lit(None).cast("bigint").alias("last_entry_seq"),
+        lit(None).cast("timestamp").alias("last_book_ts"),
         lit(None).cast("string").alias("home_fi"),
         lit(None).cast("boolean").alias("is_customer"),
     )
