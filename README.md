@@ -33,12 +33,12 @@ collects measurements and writes reports.
 
 - **Customer 360:** a retail analytics workload. Customer interactions are
   ingested, validated, transformed, aggregated and queried.
-  ([overview](docs/benchmarks/c360-overview.md))
+  ([overview](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/benchmarks/c360-overview.md))
 - **Financial Crime / AML:** transaction-monitoring over synthetic financial
   transactions: ingestion, transformation, detection and analytical queries.
   It evaluates how the architecture executes the workload, not the
   effectiveness of a production AML system.
-  ([overview](docs/benchmarks/aml-overview.md))
+  ([overview](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/benchmarks/aml-overview.md))
 
 ## Running an experiment
 
