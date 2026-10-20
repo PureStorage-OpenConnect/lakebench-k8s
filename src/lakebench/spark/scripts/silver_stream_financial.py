@@ -1219,6 +1219,14 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int, check_replay: b
         (
             new_pairs.withColumn("_stream_id", lit(sid))
             .withColumn("_batch_id", lit(int(batch_id)).cast("bigint"))
+            # Coalesce before the append so a batch writes a few sizeable
+            # files, not one per shuffle partition (~352 ~7 KB files/batch).
+            # counterparty_pairs is anti-joined in full every batch, so each
+            # tiny file was re-opened on every later batch; the accumulation
+            # grew the per-batch pairs read. ~1.6-3M new pairs/batch over 8
+            # files is ~200-370 KB each, well above the small-file threshold.
+            # Coalesce (no shuffle) over the anti-join's output partitions.
+            .coalesce(8)
             .writeTo(f"{CATALOG}.{SILVER_PAIRS}")
             .append()
         )

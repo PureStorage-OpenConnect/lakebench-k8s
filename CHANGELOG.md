@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **Continuous AML silver reads each micro-batch's prior per-account balance state from `silver.accounts` instead of aggregating the whole `silver.account_statements` history, so a batch's balances cost tracks the accounts it touches rather than the length of the run.** `silver.accounts` gains two columns, `last_entry_seq` and `last_book_ts`, that the stream maintains every batch alongside `current_balance`; the per-batch prior-state read and the `current_balance` roll-up are computed from the batch's own rows and the stored per-account state, not by scanning all of `account_statements` three times per batch. The written `account_statements` rows (iban, entry_seq, bal_before, bal_after, and the rest) are identical. `current_balance` now follows the balance at the maximum `entry_seq`, matching the batch build's `update_accounts_balance`; the previous stream roll-up ordered by `book_ts` descending, so in a run with late-arriving bronze rows (multi-pod datagen, or any batch whose per-iban `book_ts` is not monotone) the recorded `current_balance`, and therefore `IQ1`'s `SUM(current_balance)`, can differ from a 1.7.9 run of the same corpus. A run with strictly monotone arrival (single-pod datagen) is unchanged. On the first micro-batch after a stream restart the prior state is still recomputed from the committed `account_statements` history, after the batch's own uncommitted rows are deleted, so replay stays idempotent. Batch builds write `NULL` for the two new columns; no batch-mode consumer reads them.
 
+### Fixed
+
+- **Continuous AML silver coalesces each batch's new `silver.counterparty_pairs` rows before appending them, so a batch writes a few sizeable files instead of one per shuffle partition.** The pairs table is anti-joined in full every micro-batch to find newly seen counterparty pairs, so the roughly 350 tiny files each batch previously appended were re-opened on every later batch and grew the per-batch pairs read; the rows written are unchanged.
+
 ## [1.7.9] - 2026-10-19
 
 ### Fixed
