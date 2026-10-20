@@ -126,6 +126,17 @@ ORPHAN_MIN_RETENTION_SECONDS = 24 * 3600 + 600
 # Floor for expire_snapshots while streams are live, so a stream's reader is
 # never left without the snapshot it is positioned on.
 LIVE_EXPIRE_MIN_RETENTION_SECONDS = 3600
+# How far before a live stream's referenced snapshot the expire cutoff is held.
+# The cutoff is sent to Trino as a relative duration computed on the CLI host's
+# clock but evaluated against the engine pod's clock, so the two clocks' skew
+# (plus statement latency) is added to the effective cutoff. A one-second
+# margin does not survive that: a Trino coordinator measured 8 s ahead of the
+# CLI host pushed the cutoff past the protected snapshot and expired it,
+# killing the silver stream after ~4.5 h of a 24 h run. The margin must exceed
+# any plausible pod-to-host skew and round latency; ten minutes of bronze
+# snapshots cost nothing to retain one extra round, and the next round reclaims
+# them.
+STREAM_OFFSET_PROTECT_MARGIN_SECONDS = 600
 
 
 def _format_duration(seconds: int) -> str:
@@ -160,13 +171,17 @@ def build_maintenance_sql(
 
     ``protect_from`` (when given) is the commit time of the oldest snapshot a
     live streaming reader still references on this table. The expire cutoff is
-    then held strictly before it, so ``expire_snapshots`` never removes the
-    snapshot a stream is positioned on or any newer one. A streaming source
-    tracks its position by snapshot id in its checkpoint offset; expiring that
-    snapshot kills the stream with "Cannot load current offset at snapshot ...
-    the snapshot was expired or removed". The configured retention only bounds
-    how far back expiry reaches, never how recent, so capping the cutoff here
-    can only expire less, never more.
+    then held ``STREAM_OFFSET_PROTECT_MARGIN_SECONDS`` before it, so
+    ``expire_snapshots`` never removes the snapshot a stream is positioned on
+    or any newer one. A streaming source tracks its position by snapshot id in
+    its checkpoint offset; expiring that snapshot kills the stream with "Cannot
+    load current offset at snapshot ... the snapshot was expired or removed".
+    The configured retention only bounds how far back expiry reaches, never how
+    recent, so capping the cutoff here can only expire less, never more. The
+    margin is minutes, not a second: the cutoff is a relative duration computed
+    on this host but evaluated on the engine pod, so the pod-to-host clock skew
+    is added to it, and a one-second margin let a pod running 8 s ahead expire
+    the protected snapshot.
 
     Trino: ``ALTER TABLE ... EXECUTE`` with a duration, prefixed in the same
     submission by ``SET SESSION <catalog>.<proc>_min_retention`` equal to the
@@ -183,13 +198,16 @@ def build_maintenance_sql(
     """
     now = now or datetime.now(timezone.utc)
     expire_s = _parse_threshold_seconds(retention_threshold)
-    # Hold the cutoff strictly before the oldest snapshot a live stream still
-    # references, so expiry never removes it. One second before its commit
-    # time keeps that snapshot and every newer one. This only ever makes the
-    # window older (expires less); it never reaches more recent than
+    # Hold the cutoff a margin before the oldest snapshot a live stream still
+    # references, so expiry never removes it. The margin absorbs the clock skew
+    # between this host and the engine pod the duration is evaluated on; one
+    # second did not (a pod 8 s ahead expired the snapshot). This only ever
+    # makes the window older (expires less); it never reaches more recent than
     # retention asked.
     if protect_from is not None:
-        protect = protect_from.astimezone(timezone.utc) - timedelta(seconds=1)
+        protect = protect_from.astimezone(timezone.utc) - timedelta(
+            seconds=STREAM_OFFSET_PROTECT_MARGIN_SECONDS
+        )
         expire_s = max(expire_s, int((now - protect).total_seconds()))
     # The orphan floor is enforced here, whatever the caller passes.
     orphan_s = max(

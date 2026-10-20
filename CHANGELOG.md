@@ -4,6 +4,12 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.9]
+
+### Fixed
+
+- **Continuous maintenance no longer expires the bronze snapshot a live silver stream resumes from when the maintenance engine's clock runs ahead of the host, and skips bronze snapshot expiry entirely when it cannot establish the stream's position.** The 1.7.8 protection held the bronze expire cutoff one second before the silver stream's offset snapshot, but the cutoff is a relative duration built on the CLI host's clock and evaluated on the engine pod, so the pod-to-host clock skew shifted the effective cutoff forward and a Trino coordinator running eight seconds ahead expired the protected snapshot and killed the stream about 4.5 hours into a 24-hour run; the margin is now ten minutes, which clears any realistic skew and statement latency while expiring at most one extra round of bronze snapshots that the next round reclaims. When a stream is live and the offset cannot be read (no committed offset yet, or the offset or its snapshot is unreadable), bronze's `expire_snapshots` is skipped for that round instead of running at the retention floor, which is what crashed a stream lagging past the floor, and the skip is recorded in the maintenance outcomes; bronze orphan removal and every other table are unaffected. After a protected bronze expiry runs, maintenance re-reads the offset snapshot and records a loud failure if it is gone, so a protection miss surfaces in the round rather than in the stream's crash hours later.
+
 ## [1.7.8] - 2026-10-18
 
 ### Breaking

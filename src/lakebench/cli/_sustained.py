@@ -1452,7 +1452,11 @@ def _run_iceberg_maintenance(
     table_names = _rotated(all_tables, start_at)
 
     # Build SQL based on table format. Delta VACUUM has one retention.
+    # Bronze stream-offset protection state, set only on the Iceberg path.
+    bronze_protect_sid: int | None = None
+    bronze_expire_skipped: str | None = None
     applied = applied_retentions(table_format, retention_threshold, live_streams)
+    bronze_protection_failed: str | None = None
     if table_format == "delta":
         from lakebench.deploy.delta_maintenance import (
             build_delta_maintenance_sql,
@@ -1483,15 +1487,26 @@ def _run_iceberg_maintenance(
 
         # The silver stream reads bronze as an Iceberg streaming source. While
         # it is live, hold bronze's expiry back from the snapshot its
-        # checkpoint offset points at, so expiry never removes the snapshot
-        # the stream is resuming from (that kills the stream). Only bronze is a
-        # streaming source, so only it is protected; fail-open, so a failure to
-        # read the offset leaves expiry at its retention floor.
+        # checkpoint offset points at, so expiry never removes the snapshot the
+        # stream is resuming from (that kills the stream). Only bronze is a
+        # streaming source, so only it is protected.
+        #
+        # Fail closed, not open: when the floor cannot be established while a
+        # stream is live -- no committed offset yet, or the offset or its
+        # snapshot cannot be read -- bronze's expire_snapshots is skipped for
+        # this round rather than run at the retention floor. The code cannot
+        # know the stream's lag when the read fails, and the retention floor is
+        # exactly what kills a stream lagging past it. Skipping keeps one extra
+        # round of bronze snapshots, which the next successful round reclaims;
+        # running would risk the crash. Only bronze's expire is dropped; its
+        # orphan removal and every other table are unaffected.
         bronze_source = f"{catalog}.{cfg.architecture.tables.bronze}"
         bronze_protect_from = None
         if live_streams:
-            sid = _silver_stream_offset_snapshot_id(cfg)
-            if sid is not None:
+            bronze_protect_sid = _silver_stream_offset_snapshot_id(cfg)
+            if bronze_protect_sid is None:
+                bronze_expire_skipped = "no readable committed silver-stream offset"
+            else:
                 bronze_protect_from = _snapshot_committed_at(
                     engine,
                     k8s,
@@ -1499,17 +1514,33 @@ def _run_iceberg_maintenance(
                     namespace,
                     catalog,
                     cfg.architecture.tables.bronze,
-                    sid,
+                    bronze_protect_sid,
                     timeout,
                 )
-                if bronze_protect_from is not None:
+                if bronze_protect_from is None:
+                    bronze_expire_skipped = (
+                        f"offset snapshot {bronze_protect_sid} commit time unreadable"
+                    )
+                else:
                     console.print(
                         "  [dim]Bronze expiry floored at the live silver stream's "
-                        f"offset snapshot {sid}[/dim]"
+                        f"offset snapshot {bronze_protect_sid}[/dim]"
                     )
+            if bronze_expire_skipped is not None:
+                console.print(
+                    "  [yellow]Bronze expire_snapshots skipped this round "
+                    f"({bronze_expire_skipped}); not expiring bronze while a stream "
+                    "is live and its offset is unknown[/yellow]"
+                )
+                _journal_safe(
+                    j.record,
+                    EventType.STREAMING_HEALTH,
+                    message="Bronze expire_snapshots skipped (live stream, offset unknown)",
+                    details={"reason": bronze_expire_skipped},
+                )
 
         def build_sql(tbl):
-            return build_maintenance_sql(
+            sqls = build_maintenance_sql(
                 engine,
                 catalog,
                 tbl,
@@ -1517,6 +1548,10 @@ def _run_iceberg_maintenance(
                 orphan_retention=orphan_retention,
                 protect_from=bronze_protect_from if tbl == bronze_source else None,
             )
+            if tbl == bronze_source and bronze_expire_skipped is not None:
+                # Drop only bronze's expire_snapshots; keep its orphan removal.
+                sqls = [s for s in sqls if _maintenance_operation(s) != "expire_snapshots"]
+            return sqls
 
     import time as _time
 
@@ -1534,6 +1569,37 @@ def _run_iceberg_maintenance(
         budget=budget,
     )
     elapsed = _time.monotonic() - started
+    # Post-verify: bronze expiry ran protected, so the snapshot the live silver
+    # stream resumes from must still exist. If it is gone the protection failed
+    # (clock skew, a margin too small) and the stream is about to die, so say so
+    # loudly rather than discover it in the stream's crash hours later.
+    if table_format != "delta" and bronze_protect_sid is not None and bronze_expire_skipped is None:
+        still_there = _snapshot_committed_at(
+            engine,
+            k8s,
+            pod_name,
+            namespace,
+            catalog,
+            cfg.architecture.tables.bronze,
+            bronze_protect_sid,
+            timeout,
+        )
+        if still_there is None:
+            console.print(
+                "  [red]Bronze expire removed the live silver stream's offset "
+                f"snapshot {bronze_protect_sid}; the stream will fail to load its "
+                "offset. The protection margin was too small for the host/engine "
+                "clock skew.[/red]"
+            )
+            _journal_safe(
+                j.record,
+                EventType.STREAMING_HEALTH,
+                message="Bronze expire removed the live silver stream's offset snapshot",
+                details={"offset_snapshot_id": bronze_protect_sid},
+            )
+            bronze_protection_failed = (
+                f"offset snapshot {bronze_protect_sid} expired despite protection"
+            )
     if rounds is not None:
         rounds.append(
             expire_round_record(
@@ -1561,6 +1627,12 @@ def _run_iceberg_maintenance(
                 "remove_orphan_files": orphan_retention,
                 "vacuum": retention_threshold,
             },
+        ),
+        **({"bronze_expire_skipped": bronze_expire_skipped} if bronze_expire_skipped else {}),
+        **(
+            {"bronze_protection_failed": bronze_protection_failed}
+            if bronze_protection_failed
+            else {}
         ),
         **_statement_outcome(out, len(plan), engine),
     )
