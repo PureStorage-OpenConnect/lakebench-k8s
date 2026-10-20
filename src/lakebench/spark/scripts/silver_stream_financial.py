@@ -569,8 +569,17 @@ def _maintain_statements(
             # (stream, batch) were already DELETEd at the top of this function
             # before the prior-state aggregate, so there is no second DELETE
             # here. On a normal batch the (stream, batch) key is new.
+            #
+            # Freeze `out` BEFORE the append. `out`'s lineage reads
+            # silver.account_statements on the check_replay branch (prior_state
+            # at step 2); the append below grows that table, so a lazy `out`
+            # (a plain cache is lazy) would re-read the just-written rows when
+            # step 5 forces it and double-count this batch's own delta into the
+            # accounts roll-up. An eager localCheckpoint cuts the lineage now,
+            # capturing the window result once, the same device _merge_profiles
+            # uses for a MERGE source that must not re-read its table.
+            out = out.localCheckpoint(eager=True)
             out.writeTo(f"{CATALOG}.{SILVER_STATEMENTS}").append()
-            out = out.cache()
 
             # 5. Roll up silver.accounts for this batch's touched IBANs:
             # current_balance, last_entry_seq, last_book_ts. Computed from the
