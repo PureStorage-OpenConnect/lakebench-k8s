@@ -999,7 +999,7 @@ def tick_position(txns, seen):
         new = new | (
             (col("_stream_id") == lit(stream_id)) & (col("_batch_id") > lit(int(batch_id)))
         )
-    from incremental_detection import DAY_US, merge_spans
+    from incremental_detection import DAY_US, _disjoint_spans
 
     # One row per (stream, day of new rows): datagen pods drift apart in
     # event time, so a tick's new rows lie on separate runs of days.
@@ -1017,7 +1017,12 @@ def tick_position(txns, seen):
     if seen is None:
         return FULL, position
     days = sorted({int(r["d"]) for r in rows if r["d"] is not None})
-    return (merge_spans((d * DAY_US, (d + 1) * DAY_US) for d in days) or None), position
+    # Disjoint day-runs with their real event-time gaps preserved, NOT
+    # merge_spans (which gap-fills to <=MAX_SPANS). The cut must reach
+    # IncrementalDetection.cap_newest_spans as its true disjoint runs so the
+    # tick can keep the newest and carry the older overflow; gap-fill coverage
+    # is applied only where silver is read (widen/_within).
+    return (_disjoint_spans((d * DAY_US, (d + 1) * DAY_US) for d in days) or None), position
 
 
 def manifest_files(spark):
@@ -1114,6 +1119,13 @@ def run_tick(spark, state, cycle) -> dict:
         log(f"Cycle {cycle}: new rows in {len(cut)} span(s), {days:.0f} day(s)")
     if state.incremental is not None:
         state.incremental.begin_tick(cut, CONTINUOUS_RULES)
+        carried = {r: len(s) for r, s in state.incremental.carry_spans.items() if s}
+        if carried:
+            total = sum(carried.values())
+            log(
+                f"Cycle {cycle}: {total} span(s) carried to a later tick "
+                f"(cut capped at MAX_SPANS; deferred by rule: {carried})"
+            )
     state.prev_tick_seen = seen_now
     detection = run_detection_rules(
         spark,

@@ -88,19 +88,79 @@ def _ceil(x: int, step: int) -> int:
     return -((-x) // step) * step
 
 
-def merge_spans(spans) -> tuple:
-    """Sorted, disjoint ``(lo, hi)`` epoch-microsecond spans (``hi``
-    exclusive) covering ``spans``, at most MAX_SPANS of them."""
+def _disjoint(spans) -> list[list[int]]:
+    """``spans`` sorted and overlaps coalesced, WITHOUT any gap-filling: the
+    real event-time gaps between runs of days are preserved."""
     out: list[list[int]] = []
     for lo, hi in sorted((int(a), int(b)) for a, b in spans):
         if out and lo <= out[-1][1]:
             out[-1][1] = max(out[-1][1], hi)
         else:
             out.append([lo, hi])
+    return out
+
+
+def _disjoint_spans(spans) -> tuple:
+    """``_disjoint`` as a tuple of ``(lo, hi)`` pairs: the cut's disjoint runs,
+    with real gaps preserved (unlike ``merge_spans``, which gap-fills)."""
+    return tuple((lo, hi) for lo, hi in _disjoint(spans))
+
+
+#: Of each tick's MAX_SPANS read budget, the share reserved for the OLDEST
+#: carried runs so a lagging span always makes progress and cannot be deferred
+#: forever by a steady feed of newer runs. The rest of the budget goes to the
+#: newest runs (the freshness the benchmark measures).
+CARRY_DRAIN_SPANS = 8
+
+
+def merge_spans(spans) -> tuple:
+    """Sorted, disjoint ``(lo, hi)`` epoch-microsecond spans (``hi``
+    exclusive) covering ``spans``, at most MAX_SPANS of them.
+
+    When there are more than MAX_SPANS disjoint runs, the widest gaps are
+    collapsed so the result still COVERS every input span. Callers that read
+    silver over the result (``widen``/``_within``) accept the extra coverage;
+    the per-tick CUT does not -- it uses ``cap_newest_spans`` instead so a
+    tick's read never dilates to span real event-time gaps. See that helper."""
+    out = _disjoint(spans)
     while len(out) > MAX_SPANS:
         i = min(range(len(out) - 1), key=lambda k: out[k + 1][0] - out[k][1])
         out[i : i + 2] = [[out[i][0], out[i + 1][1]]]
     return tuple((lo, hi) for lo, hi in out)
+
+
+def cap_newest_spans(spans) -> tuple:
+    """Split ``spans`` into ``(kept, carry)``: the MAX_SPANS disjoint runs to
+    read this tick, and the older overflow to defer to a later tick.
+
+    Datagen pods drift apart in event time, so a tick's new rows scatter into
+    many separate day-runs spanning most of the corpus. ``merge_spans`` would
+    fill those gaps to fit MAX_SPANS, dilating one tick's read to ~the whole
+    corpus (the growth this bounds). Instead keep MAX_SPANS runs DISJOINT and
+    carry the rest forward: the deferred spans are read on a later tick, so no
+    rows are skipped -- the alert set is unchanged once the carry drains, only
+    later-dated spans are detected a tick or two later.
+
+    The budget is split so progress is guaranteed: the OLDEST CARRY_DRAIN_SPANS
+    runs are always kept (so a lagging span cannot be starved forever by a
+    steady feed of newer runs), and the remaining budget takes the newest runs
+    (the freshness the benchmark measures). ``spans`` must already be disjoint
+    (gap-preserving); a gap-filled input would have too few runs to split."""
+    out = _disjoint(spans)
+    if len(out) <= MAX_SPANS:
+        return tuple((lo, hi) for lo, hi in out), ()
+    # out is ascending by time. Reserve the oldest CARRY_DRAIN_SPANS, fill the
+    # rest with the newest runs; everything else carries.
+    drain = min(CARRY_DRAIN_SPANS, MAX_SPANS)
+    oldest = out[:drain]
+    newest_n = MAX_SPANS - drain
+    newest = out[drain:][-newest_n:] if newest_n else []
+    kept_set = {(lo, hi) for lo, hi in oldest} | {(lo, hi) for lo, hi in newest}
+    # Carry is everything not kept: the middle runs between the oldest drained
+    # set and the newest window. Sorted ascending for a stable next-tick merge.
+    kept = sorted(kept_set)
+    carry = sorted((lo, hi) for lo, hi in out if (lo, hi) not in kept_set)
+    return tuple(kept), tuple(carry)
 
 
 def widen(spans, back: int, fwd: int, step: int = 1) -> tuple:
@@ -202,6 +262,12 @@ class IncrementalDetection:
         # MAX_CARRY_PASSES times.
         self.staged_pending: dict[str, dict[int, int]] = {}
         self.carried: dict[str, dict[int, int]] = {}
+        # {rule_id: spans} the event-time runs a tick deferred because the
+        # rule's cut held more than MAX_SPANS disjoint runs (datagen pods
+        # drift apart in event time). These rejoin the cut on the next tick,
+        # so no rows are skipped; they are detected a tick or two later. See
+        # cap_newest_spans.
+        self.carry_spans: dict[str, tuple] = {}
 
     # -- tick bookkeeping ---------------------------------------------------
 
@@ -211,15 +277,44 @@ class IncrementalDetection:
         previous position is unknown. A rule that does not pass this tick
         keeps the union for its next pass."""
         if cut is None:
+            # No new rows this tick, but a rule may still hold deferred spans
+            # from an earlier over-MAX_SPANS tick; keep draining them.
+            for rule_id in rules:
+                carry = self.carry_spans.get(rule_id)
+                if carry and self.cut.get(rule_id) not in (None, FULL):
+                    self._apply_cut(rule_id, self.cut[rule_id])
+                elif carry and self.cut.get(rule_id) is None:
+                    self._apply_cut(rule_id, ())
             return
         for rule_id in rules:
             prior = self.cut.get(rule_id)
-            if prior is None:
-                self.cut[rule_id] = cut
-            elif prior == FULL or cut == FULL:
+            if prior == FULL or cut == FULL:
                 self.cut[rule_id] = FULL
+                self.carry_spans.pop(rule_id, None)
+            elif prior is None:
+                self._apply_cut(rule_id, cut)
             else:
-                self.cut[rule_id] = merge_spans(prior + cut)
+                # Combine with _disjoint, NOT merge_spans: merge_spans gap-fills
+                # to <=MAX_SPANS, which would hand _apply_cut a single dilated
+                # envelope and defeat the cap. The cut must stay as its real
+                # disjoint runs all the way to cap_newest_spans; gap-fill
+                # coverage happens only at the read side (widen/_within).
+                self._apply_cut(rule_id, _disjoint_spans(prior + cut))
+
+    def _apply_cut(self, rule_id: str, spans) -> None:
+        """Set the rule's cut to ``spans`` plus any spans carried from an
+        earlier tick, bounded to MAX_SPANS disjoint runs; the overflow is
+        carried to the next tick. ``spans`` is disjoint-run form (or ());
+        FULL is handled by the caller."""
+        carried = self.carry_spans.pop(rule_id, ())
+        combined = _disjoint_spans(tuple(spans) + tuple(carried))
+        if not combined:
+            self.cut[rule_id] = None
+            return
+        kept, overflow = cap_newest_spans(combined)
+        self.cut[rule_id] = kept or None
+        if overflow:
+            self.carry_spans[rule_id] = overflow
 
     def write_spans(self, rule_id: str):
         """The alert_ts spans outside which the rule's latest pass left its
