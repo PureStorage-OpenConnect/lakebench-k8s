@@ -5,6 +5,9 @@
 - Query sets `qs12-910d16a91962` (batch with TM operations) and `qs8-ffe2bc1a012e` (FQ1 to FQ8).
 - Maintenance policy `m2-2026-09-26`.
 
+New here? Start with the [AML overview](aml-overview.md), which explains what
+the workload is, what each stage stresses, and why you would run it.
+
 The specification for engineers who run or compare the benchmark and
 contributors who implement it on a new component. It describes the code of
 this release. Python paths are relative to `src/lakebench/`, generator paths

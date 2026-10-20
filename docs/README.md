@@ -12,8 +12,12 @@ workload experiments.
 
 ## Workloads
 
+- [Customer 360 overview](benchmarks/c360-overview.md): what the workload is,
+  what each stage stresses, and why you would run it
 - [Customer 360](benchmarks/C360.md): data model, pipeline stages, queries,
   metrics and comparability
+- [AML overview](benchmarks/aml-overview.md): what the workload is, what each
+  stage stresses, and why you would run it
 - [AML](benchmarks/AML.md): data model, seed policy, detection rules,
   scoring and comparability
 - [AML Scoring](aml-scoring.md): how to read recall and precision, what

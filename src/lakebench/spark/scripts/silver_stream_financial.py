@@ -417,25 +417,55 @@ def _maintain_statements(
             min_(col("book_ts")).alias("_this_min_book_ts")
         )
         try:
-            stmts_tbl = spark.table(f"{CATALOG}.{SILVER_STATEMENTS}")
-            # Inner join to restrict the aggregate to touched accounts;
-            # groupBy + max/max_by is one shuffle vs a full-table window.
-            prior_state = (
-                stmts_tbl.join(
+            # Prior per-account state is read from silver.accounts (one row
+            # per account, bounded by account count), NOT by aggregating the
+            # whole silver.account_statements history (which grows ~170M rows
+            # per batch, so the old full-history groupBy made every batch's
+            # cost scale with the run length). The three columns
+            # current_balance / last_entry_seq / last_book_ts are maintained
+            # at the end of this function (step 5) every batch, so they are
+            # exactly the prior state the old aggregate recomputed. On the
+            # first batch after a restart the full-history aggregate is used
+            # instead (see the `check_replay` branch below): a crash could
+            # have advanced silver.accounts past the sealed statements, so the
+            # authoritative prior comes from the committed statements, not the
+            # possibly-ahead accounts row.
+            if check_replay:
+                stmts_tbl = spark.table(f"{CATALOG}.{SILVER_STATEMENTS}")
+                # Clean any ghost statement rows this (stream, batch) wrote
+                # before the crash FIRST, so the aggregate below reads only
+                # committed prior state, not this batch's partial replay.
+                spark.sql(
+                    f"DELETE FROM {CATALOG}.{SILVER_STATEMENTS} "
+                    f"WHERE _stream_id = '{sid}' AND _batch_id = {int(batch_id)}"
+                )
+                prior_state = (
+                    stmts_tbl.join(
+                        touched.select("account_id"),
+                        on="account_id",
+                        how="inner",
+                    )
+                    .groupBy("account_id")
+                    .agg(
+                        expr(
+                            "cast(max_by(bal_after, entry_seq) as decimal(38,2)) as _prev_bal_after"
+                        ),
+                        expr("cast(max(entry_seq) as bigint) as _prev_max_seq"),
+                        expr("max(book_ts) as _prev_max_book_ts"),
+                    )
+                )
+            else:
+                accts_tbl = spark.table(f"{CATALOG}.{SILVER_ACCOUNTS}")
+                prior_state = accts_tbl.join(
                     touched.select("account_id"),
                     on="account_id",
                     how="inner",
+                ).select(
+                    col("account_id"),
+                    col("current_balance").cast("decimal(38,2)").alias("_prev_bal_after"),
+                    col("last_entry_seq").cast("bigint").alias("_prev_max_seq"),
+                    col("last_book_ts").alias("_prev_max_book_ts"),
                 )
-                .groupBy("account_id")
-                .agg(
-                    # Spark 3.5+ max_by: bal_after at the maximum entry_seq per
-                    # account. entry_seq is monotone per (account_id, book_ts),
-                    # so max_by(entry_seq) gives the latest row deterministically.
-                    expr("cast(max_by(bal_after, entry_seq) as decimal(38,2)) as _prev_bal_after"),
-                    expr("cast(max(entry_seq) as bigint) as _prev_max_seq"),
-                    expr("max(book_ts) as _prev_max_book_ts"),
-                )
-            )
 
             # Late-arrival detection: any account_id whose THIS-batch min
             # book_ts is strictly less than the PRIOR max book_ts is a late
@@ -535,58 +565,64 @@ def _maintain_statements(
                 lit(sid).alias("_stream_id"),
             )
 
-            # 4. DELETE-INSERT idempotency. Same protocol as silver.transactions.
-            if check_replay:
-                spark.sql(
-                    f"DELETE FROM {CATALOG}.{SILVER_STATEMENTS} "
-                    f"WHERE _stream_id = '{sid}' AND _batch_id = {int(batch_id)}"
-                )
+            # 4. INSERT. On a replay (check_replay) the ghost rows for this
+            # (stream, batch) were already DELETEd at the top of this function
+            # before the prior-state aggregate, so there is no second DELETE
+            # here. On a normal batch the (stream, batch) key is new.
+            #
+            # Freeze `out` BEFORE the append. `out`'s lineage reads
+            # silver.account_statements on the check_replay branch (prior_state
+            # at step 2); the append below grows that table, so a lazy `out`
+            # (a plain cache is lazy) would re-read the just-written rows when
+            # step 5 forces it and double-count this batch's own delta into the
+            # accounts roll-up. An eager localCheckpoint cuts the lineage now,
+            # capturing the window result once, the same device _merge_profiles
+            # uses for a MERGE source that must not re-read its table.
+            out = out.localCheckpoint(eager=True)
             out.writeTo(f"{CATALOG}.{SILVER_STATEMENTS}").append()
 
-            # 5. Roll up silver.accounts.current_balance for touched IBANs only.
-            # A separate temp-view keeps the merge source narrow to the
-            # batch's touched IBANs (typically << the accounts table).
+            # 5. Roll up silver.accounts for this batch's touched IBANs:
+            # current_balance, last_entry_seq, last_book_ts. Computed from the
+            # batch's OWN rows (`out`), NOT by re-reading statements history.
+            # This is the winner of (prior state, this batch): entry_seq is
+            # strictly increasing per account (built as _prev_max_seq +
+            # row_number over this batch), so this batch's max entry_seq always
+            # exceeds the prior one, and max_by(..., entry_seq) over `out`
+            # alone gives the correct latest balance. That matches batch mode's
+            # update_accounts_balance (max_by(bal_after, entry_seq)); the old
+            # step-5 ordered by book_ts DESC, which diverged under late
+            # arrivals. last_book_ts takes greatest(prior, this batch) so a
+            # wholly-late batch cannot move it backwards and under-count the
+            # next batch's late arrivals.
+            batch_state = out.groupBy("account_id", "iban").agg(
+                expr("cast(max_by(bal_after, entry_seq) as decimal(38,2)) as _new_bal"),
+                expr("cast(max(entry_seq) as bigint) as _new_max_seq"),
+                expr("max(book_ts) as _new_max_book_ts"),
+            )
             safe_sid = _sanitize_for_view(sid)
-            view_name = f"_d_full_touched_ibans_{safe_sid}_{int(batch_id)}"
-            touched.select("iban").createOrReplaceTempView(view_name)
-            try:
-                # The MERGE reads a materialised source: on Spark 4.1 a MERGE
-                # whose source plan reads an Iceberg table can fail.
-                balances = spark.sql(
+            with materialised_source(
+                spark, batch_state, f"{_BALANCES_MERGE_VIEW}_{safe_sid}_{int(batch_id)}"
+            ) as src_view:
+                spark.sql(
                     f"""
-SELECT iban, running_balance
-FROM (
-    SELECT s.iban,
-           s.bal_after AS running_balance,
-           row_number() OVER (
-               PARTITION BY s.iban
-               ORDER BY s.book_ts DESC, s.entry_seq DESC
-           ) AS rn
-    FROM {CATALOG}.{SILVER_STATEMENTS} s
-    JOIN {view_name} touched ON s.iban = touched.iban
-) ranked
-WHERE rn = 1
-""".strip()
-                )
-                with materialised_source(
-                    spark, balances, f"{_BALANCES_MERGE_VIEW}_{safe_sid}_{int(batch_id)}"
-                ) as src_view:
-                    spark.sql(
-                        f"""
 MERGE INTO {CATALOG}.{SILVER_ACCOUNTS} t
 USING {src_view} src
-ON t.iban = src.iban
-WHEN MATCHED THEN UPDATE SET current_balance = src.running_balance
+ON t.account_id = src.account_id
+WHEN MATCHED THEN UPDATE SET
+    current_balance = src._new_bal,
+    last_entry_seq  = src._new_max_seq,
+    last_book_ts    = greatest(
+        coalesce(t.last_book_ts, src._new_max_book_ts), src._new_max_book_ts
+    )
 """.strip()
-                    )
-            finally:
-                try:
-                    spark.catalog.dropTempView(view_name)
-                except Exception:  # noqa: BLE001
-                    pass
+                )
 
             return int(n_entries), late_iban_count
         finally:
+            try:
+                out.unpersist(blocking=False)
+            except Exception:  # noqa: BLE001
+                pass
             touched.unpersist(blocking=False)
     finally:
         entries.unpersist(blocking=False)
@@ -1192,6 +1228,14 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int, check_replay: b
         (
             new_pairs.withColumn("_stream_id", lit(sid))
             .withColumn("_batch_id", lit(int(batch_id)).cast("bigint"))
+            # Coalesce before the append so a batch writes a few sizeable
+            # files, not one per shuffle partition (~352 ~7 KB files/batch).
+            # counterparty_pairs is anti-joined in full every batch, so each
+            # tiny file was re-opened on every later batch; the accumulation
+            # grew the per-batch pairs read. ~1.6-3M new pairs/batch over 8
+            # files is ~200-370 KB each, well above the small-file threshold.
+            # Coalesce (no shuffle) over the anti-join's output partitions.
+            .coalesce(8)
             .writeTo(f"{CATALOG}.{SILVER_PAIRS}")
             .append()
         )

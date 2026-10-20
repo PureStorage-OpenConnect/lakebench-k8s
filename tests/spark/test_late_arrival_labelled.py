@@ -6,10 +6,14 @@ running_balance is arrival-order rather than strict-monotone, and the
 stream MUST publish that as an invariant-6 label rather than a silent
 divergence from batch mode.
 
-Runs two micro-batches:
+Runs three micro-batches:
 * batch 0: one payment at hour 24, GB01 debtor, US02 creditor.
 * batch 1: one payment at hour 0 (EARLIER than batch 0's row), same
   iban pair.
+* batch 2 (labelled posture only): one payment at hour 1 -- later than
+  batch 1 but still earlier than batch 0, so the prior max book_ts must
+  remain hour 24 and both ibans stay late. Guards the last_book_ts
+  running-max against a per-batch-only value.
 
 Without ``LB_SILVER_STATEMENTS_STRICT_PARITY``:
 * ``_maintain_statements`` reports exactly 2 late ibans on batch 1 and 0 on
@@ -62,6 +66,16 @@ def test_late_arrival_in_a_fresh_jvm(spark_subprocess, spark_jars, strict):
         "silver_statements_parity_mode: arrival_order_running_balance" in out["log_lines_batch1"]
     ), out
     assert "silver_statements_late_arrivals_this_batch: 2" in out["log_lines_batch1"], out
+    # Batch 2 (hour 1) is later than batch 1 (hour 0) but still earlier than
+    # batch 0 (hour 24). The prior max book_ts must remain hour 24 across all
+    # prior batches, so both IBANs are still late. Guards the last_book_ts
+    # running-max (greatest) against a per-batch-only value that batch 1 would
+    # have pushed back to hour 0, which would silently miss these late rows.
+    assert out["batch2_late_count"] == 2, out
+    assert (
+        "silver_statements_parity_mode: arrival_order_running_balance" in out["log_lines_batch2"]
+    ), out
+    assert "silver_statements_late_arrivals_this_batch: 2" in out["log_lines_batch2"], out
 
 
 def _run(jars):
@@ -123,14 +137,37 @@ def _run(jars):
             raised = True
         b1_lines = captured[captured_len_before_b1:]
 
+        # Batch 2: one payment at hour 1 -- later than batch 1's hour-0 row
+        # but STILL earlier than batch 0's hour-24 row. This is the
+        # last_book_ts regression guard: the stored last_book_ts must be the
+        # running max over ALL prior batches (hour 24), not just the previous
+        # batch's max (which batch 1 would have pushed back to hour 0). If
+        # last_book_ts were taken from the latest batch's own rows it would
+        # read hour 0 here, and batch 2's hour-1 min would NOT be < prior, so
+        # both IBANs would be silently missed. With greatest(stored, batch)
+        # the prior max stays hour 24 and both IBANs count as late.
+        b2_rows = [("B2T0", BASE_TS + timedelta(hours=1), "GB01", "US02", "25.00")]
+        captured_len_before_b2 = len(captured)
+        b2_result = None
+        b2_raised = False
+        try:
+            b2_result = foreach_batch_harness(
+                spark, ss._merge_batch, bronze_batch(spark, b2_rows), 2
+            )
+        except SilverAbort:
+            b2_raised = True
+        b2_lines = captured[captured_len_before_b2:]
+
         common.log = real_log  # type: ignore[assignment]
 
         out = {
             "batch0_late_count": int(b0_result[1]),
             "batch1_late_count": None if raised else int(b1_result[1]),
             "batch1_raised_silver_abort": raised,
+            "batch2_late_count": None if b2_raised else int(b2_result[1]),
             "log_lines_batch0": "\n".join(b0_lines),
             "log_lines_batch1": "\n".join(b1_lines),
+            "log_lines_batch2": "\n".join(b2_lines),
         }
         print(json.dumps(out, default=str))
         spark.stop()

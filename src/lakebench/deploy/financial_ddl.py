@@ -218,6 +218,8 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     opened_date        DATE   NOT NULL,
     closed_date        DATE,
     current_balance    DECIMAL(38, 2),
+    last_entry_seq     BIGINT,                    -- max entry_seq seen; prior state for the stream
+    last_book_ts       TIMESTAMP,                 -- max book_ts seen; late-arrival detection
     home_fi            STRING,                    -- BIC8 of the holding bank
     is_customer        BOOLEAN                    -- held at the reporting FI
 )
