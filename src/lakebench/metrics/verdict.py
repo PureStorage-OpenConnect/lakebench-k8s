@@ -541,13 +541,33 @@ def _failed_queries(metrics: PipelineMetrics) -> list[str]:
     outcome per query."""
     rounds = _rounds(metrics)
     if rounds:
+        from lakebench.benchmark.result import is_sla_crossing
+
+        # The names that succeeded in some round. A later timeout on one of
+        # these is a measured SLA crossing, not a failure -- recorded, not
+        # failed. This MUST match cli._run._benchmark_gate_problems so the CLI
+        # exit and this (report-/verdict-recomputed) outcome cannot disagree.
+        passed_ever = {
+            str(q.get("name") or q.get("query_name") or "")
+            for rnd in rounds
+            for q in rnd.queries or []
+            if isinstance(q, Mapping) and q.get("success", True)
+        }
         out: list[str] = []
         for rnd in rounds:
             for q in rnd.queries or []:
                 if not isinstance(q, Mapping) or q.get("success", True):
                     continue
                 name = str(q.get("name") or q.get("query_name") or "")
-                if not name.startswith(TOLERATED_ROUND_FAILURE_PREFIX) and name not in out:
+                if name.startswith(TOLERATED_ROUND_FAILURE_PREFIX):
+                    continue
+                if is_sla_crossing(
+                    timed_out=bool(q.get("timed_out", False)),
+                    name=name,
+                    passed_ever=passed_ever,
+                ):
+                    continue
+                if name not in out:
                     out.append(name)
         return out
     if metrics.benchmark is None:

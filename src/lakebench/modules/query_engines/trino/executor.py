@@ -66,6 +66,16 @@ def server_run_time_limit(timeout: int) -> int:
     return max(1, int(timeout) - SERVER_TIMEOUT_MARGIN_SECONDS)
 
 
+def _is_time_limit_error(stderr: str) -> bool:
+    """True when Trino failed the query for exceeding its run-time cap.
+
+    ``query_max_run_time`` kills the query with EXCEEDED_TIME_LIMIT; the CLI
+    also prints the client-side 'maximum time limit' phrasing. Either means a
+    time-limit crossing rather than a defect."""
+    low = (stderr or "").lower()
+    return "exceeded_time_limit" in low or "exceeded maximum time limit" in low
+
+
 class TrinoExecutor:
     """Executes queries via ``kubectl exec`` into the Trino CLI."""
 
@@ -218,6 +228,7 @@ class TrinoExecutor:
                 raw_output="",
                 error=f"Query timed out ({timeout}s)",
                 engine_source=source,
+                timed_out=True,
             )
 
         if result.returncode != 0:
@@ -230,6 +241,11 @@ class TrinoExecutor:
                 raw_output=result.stdout or "",
                 error=error,
                 engine_source=source,
+                # query_max_run_time fires server-side ~5s before the client
+                # timeout, so a time-limit crossing usually comes back here as
+                # a non-zero exit with EXCEEDED_TIME_LIMIT, not as
+                # TimeoutExpired above. Both are the same SLA crossing.
+                timed_out=_is_time_limit_error(result.stderr or ""),
             )
 
         output = result.stdout.strip()

@@ -135,6 +135,7 @@ class SparkThriftExecutor:
                 rows_returned=0,
                 raw_output="",
                 error=f"Query timed out ({timeout}s)",
+                timed_out=True,
             )
 
         if result.returncode != 0:

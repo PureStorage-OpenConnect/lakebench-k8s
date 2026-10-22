@@ -37,6 +37,11 @@ class QueryResult:
     rows_returned: int
     success: bool
     error_message: str = ""
+    # True when this query failed by exceeding its time limit (not any other
+    # error). A timeout on a query that passed in an earlier round is a
+    # measured SLA crossing, recorded but not a run failure; every other
+    # failure still fails the run. False on success.
+    timed_out: bool = False
     # Every timed execution of this query in the round, in run order. The
     # score (elapsed_seconds) is their median. Empty means one untracked
     # sample, which is how older records (without a samples field) read.
@@ -63,6 +68,7 @@ class QueryResult:
             "rows_returned": self.rows_returned,
             "success": self.success,
             "error_message": self.error_message,
+            "timed_out": self.timed_out,
             "samples": [round(t, 3) for t in times],
             "min_seconds": round(lo, 3),
             "max_seconds": round(hi, 3),
@@ -651,6 +657,7 @@ class BenchmarkRunner:
                     rows_returned=last.rows_returned,
                     success=False,
                     error_message=last.error_message,
+                    timed_out=last.timed_out,
                     samples=times + [last.elapsed_seconds],
                     engine_sources=sources,
                 )
@@ -703,5 +710,6 @@ class BenchmarkRunner:
             rows_returned=exec_result.rows_returned,
             success=exec_result.success,
             error_message=exec_result.error or "",
+            timed_out=exec_result.timed_out,
             engine_sources=[exec_result.engine_source] if exec_result.engine_source else [],
         )

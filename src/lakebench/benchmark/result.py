@@ -24,10 +24,36 @@ class QueryExecutorResult:
     # The tag the engine was told to label this query with, for engines that
     # can report per-query storage I/O afterwards (Trino). None otherwise.
     engine_source: str | None = None
+    # True when the failure was the query exceeding its time limit (client
+    # timeout OR the engine's own run-time cap), as opposed to any other
+    # error. A timeout on a query that passed in an earlier round is a
+    # measured SLA crossing, not a defect; every other error is still a
+    # failure. Only meaningful when ``error`` is set.
+    timed_out: bool = False
 
     @property
     def success(self) -> bool:
         return self.error is None
+
+
+def is_sla_crossing(*, timed_out: bool, name: str, passed_ever: set[str] | None) -> bool:
+    """Whether a FAILED benchmark query is a measured SLA crossing rather than
+    a defect, and so is recorded but does not fail the run.
+
+    A continuous run judges rounds as the corpus grows. A query that passed in
+    some round and later only exceeds its time limit has crossed the SLA the
+    growing corpus imposes on this engine -- a measurement, not a defect. A
+    timeout on a query that never passed measured nothing, and any non-timeout
+    error is a real failure; both still fail. *passed_ever* is the set of query
+    names that succeeded in some round; None (batch mode, one benchmark) means
+    there is no earlier round to cross from, so nothing is a crossing.
+
+    This is the single definition of a crossing. Both the CLI gate
+    (``cli._run._benchmark_gate_problems``) and the metrics.json verdict
+    re-derivation (``metrics.verdict._failed_queries``) call it, so the exit
+    code and the stored/report verdict cannot disagree.
+    """
+    return passed_ever is not None and timed_out and name in passed_ever
 
 
 def last_json_line(output: str) -> dict | None:

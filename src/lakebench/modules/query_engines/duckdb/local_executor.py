@@ -206,6 +206,7 @@ class LocalDuckDBExecutor(DuckDBExecutor):
                 rows_returned=0,
                 raw_output="",
                 error=f"Query exceeded {timeout}s",
+                timed_out=True,
             )
 
         elapsed = time.monotonic() - start

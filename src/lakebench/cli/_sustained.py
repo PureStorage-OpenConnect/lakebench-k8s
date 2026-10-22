@@ -2224,9 +2224,21 @@ def _run_benchmark_round(
     investigator_queries = _investigator_state(bench_runner, tm_run) if tm_run else None
     if tm_run and investigator_queries != "included":
         bench_runner.tm_run_id = None  # this round runs without IQ1 to IQ4
+    # The same per-query limit as the batch benchmark (900 s financial / 300 s
+    # c360): without it the in-stream rounds fell through to run_power's 300 s
+    # default, so financial continuous queries timed out at 300 s while
+    # financial batch allowed 900 s. This value is also the limit a crossing is
+    # measured against.
+    from lakebench.cli._run import bench_query_timeout
+
+    query_timeout = bench_query_timeout(cfg)
+    if collector.current_run is not None:
+        collector.current_run.benchmark_query_timeout_seconds = query_timeout
     round_started = utc_now()
     try:
-        bench_result = bench_runner.run_power(cache="hot", iterations=1)
+        bench_result = bench_runner.run_power(
+            cache="hot", iterations=1, query_timeout=query_timeout
+        )
     finally:
         if tm_run:
             bench_runner.tm_run_id = tm_run
@@ -4876,6 +4888,17 @@ def _run_sustained(
                     # expected contention, reported but not a run failure.
                     from lakebench.cli._run import _benchmark_gate_problems, empty_benchmark_queries
 
+                    # The names that succeeded in some round. A later timeout on
+                    # one of these is a measured SLA crossing (the corpus grew
+                    # past what the engine answers inside the limit), recorded
+                    # but not a run failure. Built once over all rounds so the
+                    # gate's view matches the verdict re-derivation.
+                    passed_ever = {
+                        q.get("name")
+                        for r in rounds
+                        for q in (r.queries or [])
+                        if q.get("success")
+                    }
                     for idx, rnd in enumerate(rounds, 1):
                         final = idx == len(rounds)
                         q9 = tolerated_q9_results(rnd.queries, final=final)
@@ -4886,13 +4909,31 @@ def _run_sustained(
                                 "(gold refresh replaces the table it reads)"
                             )
                         rest = [q for q in rnd.queries if q not in q9]
+                        # A timed-out query that passed earlier is a crossing,
+                        # not a failure: say so once, and record it on the round
+                        # with this round's silver file count, rather than
+                        # letting it pass silently.
+                        for q in rest:
+                            if (
+                                not q.get("success")
+                                and q.get("timed_out")
+                                and q.get("name") in passed_ever
+                            ):
+                                print_warning(
+                                    f"Round {idx}: {q['name']} crossed its query time "
+                                    "limit (passed in an earlier round); recorded, not failed"
+                                )
+                                if rnd.round_meta is not None:
+                                    rnd.round_meta.query_sla_crossings.append(q["name"])
                         # Early rounds can run before gold or the alert tables
                         # hold rows; an empty result there is reported, and
                         # only the last round is held to the empty-result gate.
                         if not final:
                             for name in empty_benchmark_queries(rest):
                                 print_warning(f"Round {idx}: {name} returned no rows")
-                        for problem in _benchmark_gate_problems(cfg, rest, check_empty=final):
+                        for problem in _benchmark_gate_problems(
+                            cfg, rest, check_empty=final, passed_ever=passed_ever
+                        ):
                             print_error(f"Round {idx}: {problem}")
                             _record_failure(collector, f"Round {idx}: {problem}")
                             pipeline_success = False
