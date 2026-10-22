@@ -28,13 +28,13 @@ at a fixed seed but not checked; check them from `metrics.json`
 | Batch bronze reached 95% of the scale's expected volume | record gate `scale_ratio` | yes |
 | No benchmark query outside `allow_empty` returned zero rows | record gate `query_answers` | yes |
 | TM invariants ([8.5](tm-operations.md#85-tm-operations)) | TM verdict (`metrics/tm_ops.py`) | only on `fail`; `unknown` (an unchecked invariant, an interrupted pass, an unparsed cycle log), `not_run` and `disabled` warn |
-| Any failed query; a non-`allow_empty` query with 0 rows | benchmark gate | yes. Batch: the scored round. Continuous: a failed query in any round fails; the empty check applies to the last round only |
+| Any failed query; a non-`allow_empty` query with 0 rows | benchmark gate | yes. Batch: the scored round. Continuous: a failed query in any round fails, EXCEPT a query that exceeded its time limit after passing in some earlier round, which is a measured SLA crossing (recorded under the round's `query_sla_crossings`, not a failure) as the growing corpus crosses what the engine answers inside the limit; a timeout on a query that never passed, and every non-timeout error, still fail. The empty check applies to the last round only |
 | Recall, precision, false-positive rate | score-financial | no; scoring is best effort |
 | Subject-customer check (every planted subject is a customer) | score-financial | no (warning) |
 | Reference detector, band-leakage report, fidelity gate | `financial reference-score`, `scripts/aml_gate.py` | not part of `run` |
 | Continuous: data arrived in the window, silver committed and gold refreshed on new data at least twice inside it, gold freshness measured | continuous window gate | yes |
 | Continuous: gold-refresh logs present, a cumulative-alerts line, peak alerts > 0 | AML continuous gate | yes |
-| Continuous: ingest ratio at least 0.95, unless the [trickle](../../glossary.md#trickle) bounded intake and the pipeline kept pace, or a capacity run with bronze at capacity (then a warning) | record gates | yes |
+| Continuous: ingest ratio at least 0.95, unless the [trickle](../../glossary.md#trickle) bounded intake and the pipeline kept pace, or a capacity run with bronze at capacity (then a warning). Not scored (a warning, not a failure) when the bronze driver log was incomplete, since the row count it is computed from is then partial | record gates | yes |
 | Continuous: balanced; no handoff's lag rose by more than one cadence across the window's second half | balance check | no (warning); recorded and shown in the report's Balance card, peak gold freshness beside it |
 
 No AML query has fixed expected results, and Lakebench does not compare
