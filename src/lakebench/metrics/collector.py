@@ -886,6 +886,12 @@ class StageMetrics:
     ttd_p95_seconds: float | None = None
     ttd_max_seconds: float | None = None
     total_batches: int = 0
+    # The highest batch id seen in the driver log. When the capture is
+    # complete this is total_batches - 1; a large gap (max+1 >> count) means
+    # the driver log lost a run of batches -- kubelet severs kubectl logs -f
+    # at its idle timeout, so a 24h record can hold only the first ~4h of
+    # batches. Used to refuse a false ingest_ratio (0.24 on a kept-up run).
+    max_batch_id: int | None = None
     batch_size: int = 0
     unique_rows_processed: int | None = 0  # distinct input rows; None = unknown (gold re-reads)
     # Continuous only: the measurement window (metrics/continuous_window.py).
@@ -1331,6 +1337,21 @@ class PipelineBenchmark:
         # inside the window (throughput).
         bronze_stages = [s for s in streaming if s.stage_name == "bronze"]
         total_bronze_rows = sum(s.input_rows for s in bronze_stages)
+        # A driver log with a gap (batch ids jump) undercounts total_bronze_rows:
+        # kubectl logs -f is severed at the kubelet idle timeout and the record
+        # then holds only the batches before the cut, reading a kept-up bronze
+        # as a fraction of itself. Detect it so ingest_ratio is not scored off
+        # a partial numerator. Fraction of batches missing between the first and
+        # highest seen id; _BRONZE_LOG_GAP_BOUND is the tolerance (a few dropped
+        # lines are fine, a multi-hour hole is not).
+        self.bronze_log_incomplete = False
+        self.ingest_ratio_unscored_reason: str | None = None
+        for s in bronze_stages:
+            if s.max_batch_id is not None and s.total_batches > 0:
+                missing = (s.max_batch_id + 1) - s.total_batches
+                if missing > 0 and missing / (s.max_batch_id + 1) >= _BRONZE_LOG_GAP_BOUND:
+                    self.bronze_log_incomplete = True
+                    break
         run_duration = max((s.elapsed_seconds for s in streaming), default=0.0)
         datagen_rows = self.config_snapshot.get("datagen_output_rows", 0)
         sustained = self.config_snapshot.get("sustained") or {}
@@ -1428,10 +1449,22 @@ class PipelineBenchmark:
                     round(datagen_rows / dg_elapsed * max(0.0, run_duration - trigger)),
                 )
             self.released_rows = released
-            self.ingest_ratio = (
-                total_bronze_rows / released if released else self.corpus_ingest_ratio
-            )
-            self.pipeline_saturated = self.ingest_ratio < 0.95
+            if self.bronze_log_incomplete:
+                # The numerator is built from a truncated driver log, so the
+                # ratio would read a kept-up bronze as a shortfall. Report it
+                # as not scored rather than publish a false quarter-ingest.
+                self.ingest_ratio = None
+                self.corpus_ingest_ratio = None
+                self.pipeline_saturated = None
+                self.ingest_ratio_unscored_reason = (
+                    "bronze driver log incomplete (capture severed mid-window); "
+                    "rows ingested cannot be counted from the log"
+                )
+            else:
+                self.ingest_ratio = (
+                    total_bronze_rows / released if released else self.corpus_ingest_ratio
+                )
+                self.pipeline_saturated = self.ingest_ratio < 0.95
         else:
             self.ingest_ratio = None
             self.corpus_ingest_ratio = None
@@ -1887,6 +1920,9 @@ class PipelineBenchmark:
             if self.corpus_ingest_ratio is not None:
                 scores["corpus_ingest_ratio"] = round(self.corpus_ingest_ratio, 4)
                 scores["released_rows"] = self.released_rows
+            if getattr(self, "bronze_log_incomplete", False):
+                scores["bronze_log_incomplete"] = True
+                scores["ingest_ratio_unscored_reason"] = self.ingest_ratio_unscored_reason
             if self.datagen_ahead is not None:
                 scores["backlog_rows"] = self.backlog_rows
                 scores["datagen_ahead"] = self.datagen_ahead
@@ -3007,6 +3043,12 @@ def build_config_snapshot(
 # sits near 1.0; startup and idle triggers only pull the share down.
 _BRONZE_BUSY_BOUND = 0.8
 
+# Fraction of bronze batches that may be missing from the driver log before the
+# ingest_ratio is refused as unscored. A severed capture (kubelet idle timeout)
+# drops every batch after ~4h, so a 24h run loses ~80%; a handful of dropped
+# lines at a rotation seam is well under this. 0.1 = a >10% hole is not scored.
+_BRONZE_LOG_GAP_BOUND = 0.1
+
 # Share of the window's bronze triggers that must have run a micro-batch for
 # intake to count as held to the trickle rate. The shortfall allowed covers
 # stream startup (60 of 60 triggers ran on a scale-100 run; 0.9
@@ -4004,6 +4046,7 @@ class MetricsCollector:
             _apply_ttd(metrics, ttd_lines, batch_ids)
             _apply_ttd_detail(metrics, ttd_detail)
         metrics.total_batches = len(batch_ids)
+        metrics.max_batch_id = max(batch_ids) if batch_ids else None
         metrics.total_rows_processed = total_rows
         if len(write_times) >= 2:
             metrics.batch_span_seconds = (max(write_times) - min(write_times)).total_seconds()

@@ -356,7 +356,12 @@ def compute_badge_status(
     # Data completeness
     if pb is not None:
         if is_sustained and pb.ingest_ratio is None:
-            warnings.append("Ingest ratio unmeasurable (datagen row count unknown)")
+            reason = getattr(pb, "ingest_ratio_unscored_reason", None)
+            warnings.append(
+                f"Ingest ratio not scored: {reason}"
+                if reason
+                else "Ingest ratio unmeasurable (datagen row count unknown)"
+            )
         elif (
             is_sustained
             and pb.ingest_ratio is not None

@@ -34,6 +34,7 @@ def _pb(
     trailing_idle=0,
     bronze_span=None,
     window=_WINDOW,
+    bronze_max_batch_id=None,
 ):
     # A trickle-held bronze logs one batch per trigger: first to last is
     # (batches - 1) triggers apart.
@@ -49,6 +50,7 @@ def _pb(
             latency_ms=bronze_ms,
             total_batches=bronze_batches,
             batch_span_seconds=bronze_span,
+            max_batch_id=bronze_max_batch_id,
         ),
         StageMetrics(
             stage_name="silver",
@@ -462,3 +464,41 @@ def test_logs_with_a_stall_parse_to_saturated():
     assert bronze.total_batches == 60
     assert pb.intake_limit == "below_bronze_capacity"
     assert pb.pipeline_saturated is True
+
+
+# -- 1.7.11: a severed driver-log capture must not be scored as a shortfall ----
+
+
+def test_bronze_log_gap_refuses_to_score_ingest_ratio():
+    """kubectl logs -f is cut at the kubelet idle timeout (~4h), so a long
+    run's record holds only the batches before the cut. The row count is then
+    a fraction of what bronze really ingested; ingest_ratio must be reported
+    not-scored, never as a quarter-ingest verdict on a kept-up bronze.
+
+    60 batches captured but the highest id seen is 299: 240 of 300 missing
+    (80%), well over the 10% tolerance.
+    """
+    pb = _live_s100(bronze_max_batch_id=299)
+    assert pb.bronze_log_incomplete is True
+    assert pb.ingest_ratio is None
+    assert pb.pipeline_saturated is None
+    assert pb.ingest_ratio_unscored_reason
+    scores = pb.to_dict()["scores"]
+    assert scores["bronze_log_incomplete"] is True
+    assert "incomplete" in scores["ingest_ratio_unscored_reason"]
+
+
+def test_complete_bronze_log_scores_normally():
+    """max_batch_id == total_batches - 1 is a complete capture: the gap guard
+    stays out of the way and ingest_ratio keeps its value."""
+    pb = _live_s100(bronze_max_batch_id=59)  # 60 batches, ids 0..59, no gap
+    assert pb.bronze_log_incomplete is False
+    assert pb.ingest_ratio == pytest.approx(0.1875, abs=1e-4)
+
+
+def test_a_few_dropped_lines_are_tolerated():
+    """A handful of missing batches (a rotation seam, not a severed tail) is
+    under the tolerance: still scored."""
+    pb = _live_s100(bronze_max_batch_id=61)  # 60 of 62, ~3% missing
+    assert pb.bronze_log_incomplete is False
+    assert pb.ingest_ratio == pytest.approx(0.1875, abs=1e-4)

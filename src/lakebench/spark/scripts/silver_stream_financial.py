@@ -1516,6 +1516,13 @@ def main() -> None:
     ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_stream_id", "STRING")
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "ingest_ts", "TIMESTAMP")
+    # 1.7.10: _maintain_statements reads prior per-account balance state from
+    # silver.accounts (current_balance, last_entry_seq, last_book_ts) instead
+    # of re-aggregating all of account_statements. A catalog whose accounts
+    # table predates these columns would fail that select with
+    # column-not-found on the first micro-batch. Idempotent on re-runs.
+    ensure_column(spark, f"{CATALOG}.{SILVER_ACCOUNTS}", "last_entry_seq", "BIGINT")
+    ensure_column(spark, f"{CATALOG}.{SILVER_ACCOUNTS}", "last_book_ts", "TIMESTAMP")
     # D-full-profiles: bring silver.entity_profiles forward on a reused
     # catalog whose DDL predates the internal Welford / originator-side
     # accumulators. Idempotent on re-runs.
