@@ -292,8 +292,8 @@ class DriverLogCapturer:
                     None,
                 )
             if known is not None:
-                idx, proc = known
-                if proc.poll() is None:
+                idx, known_proc = known
+                if known_proc.poll() is None:
                     continue  # tail still live
                 if phase == "Running":
                     self._resume_tail(app, idx, pod_name)

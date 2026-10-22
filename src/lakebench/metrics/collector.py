@@ -204,6 +204,10 @@ class StreamingJobMetrics:
     median_batch_duration_ms: float | None = None
     batch_size: int = 0
     total_batches: int = 0
+    # Highest batch id in the driver log. total_batches - 1 when the capture is
+    # complete; a large gap (max+1 >> count) means the log lost a run of
+    # batches (a severed kubectl logs -f), which undercounts bronze rows.
+    max_batch_id: int | None = None
     total_rows_processed: int = 0
     # Distinct input rows: bronze and silver take each row once. None on gold,
     # which re-reads silver every cycle (total_rows_processed amplifies).
@@ -2541,6 +2545,7 @@ def build_pipeline_benchmark(
             ttd_p95_seconds=sj.ttd_p95_seconds,
             ttd_max_seconds=sj.ttd_max_seconds,
             total_batches=sj.total_batches,
+            max_batch_id=sj.max_batch_id,
             batch_size=sj.batch_size,
             executor_count=_s_execs,
             executor_cores=_s_cores,

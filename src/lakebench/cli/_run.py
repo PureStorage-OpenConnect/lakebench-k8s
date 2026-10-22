@@ -1135,7 +1135,9 @@ def _benchmark_gate_problems(
         return bool(q["success"] if isinstance(q, dict) else q.success)
 
     def _timed_out(q):
-        return bool(q.get("timed_out", False) if isinstance(q, dict) else getattr(q, "timed_out", False))
+        return bool(
+            q.get("timed_out", False) if isinstance(q, dict) else getattr(q, "timed_out", False)
+        )
 
     def _is_crossing(q):
         return is_sla_crossing(timed_out=_timed_out(q), name=_name(q), passed_ever=passed_ever)

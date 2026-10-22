@@ -29,10 +29,7 @@ class TestLastStamp:
         # A kubectl error ('error: unexpected EOF') lands after the last real
         # line with no timestamp; resume must use the last STAMPED line.
         p = tmp_path / "d.log"
-        p.write_text(
-            "2026-10-21T18:26:03.499Z [lb] Batch 621\n"
-            "error: unexpected EOF\n"
-        )
+        p.write_text("2026-10-21T18:26:03.499Z [lb] Batch 621\nerror: unexpected EOF\n")
         assert DriverLogCapturer._last_stamp(p) == "2026-10-21T18:26:03.499Z"
 
     def test_none_when_no_stamped_line(self, tmp_path):

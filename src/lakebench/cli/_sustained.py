@@ -4894,10 +4894,10 @@ def _run_sustained(
                     # but not a run failure. Built once over all rounds so the
                     # gate's view matches the verdict re-derivation.
                     passed_ever = {
-                        q.get("name")
+                        str(q.get("name"))
                         for r in rounds
                         for q in (r.queries or [])
-                        if q.get("success")
+                        if q.get("success") and q.get("name")
                     }
                     for idx, rnd in enumerate(rounds, 1):
                         final = idx == len(rounds)
