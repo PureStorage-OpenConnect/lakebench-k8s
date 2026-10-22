@@ -3388,9 +3388,7 @@ def _run_once(
                     # and 900 s there, a query that timed out before counted
                     # only after, and the maintenance delta read -40% on a
                     # run where every query got faster.
-                    _pre_timeout = (
-                        900 if cfg.architecture.workload.schema_type.value == "financial" else 300
-                    )
+                    _pre_timeout = bench_query_timeout(cfg)
                     print_info("Warm-up pass (not measured)...")
                     _warm_benchmark(_pre_runner, _pre_timeout)
                     _pre_result = _pre_runner.run_power(
