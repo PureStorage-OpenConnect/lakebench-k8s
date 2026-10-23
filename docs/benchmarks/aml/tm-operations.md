@@ -12,8 +12,8 @@ the operations pass runs every `continuous_interval_seconds` (default
 `tm_operations.ops` reports the alert funnel (payments, monitored, alerts,
 escalated, cases, SARs), dispositions, priorities, alert aging and SLA
 breaches, case status, filing-days median and p95, late filings and continuing
-reviews. Each depends on simulated parameters (`spark/scripts/tm_operations.py`,
-recorded in `tm_operations.ops.simulation`), so they measure the simulation,
+reviews. Each depends on simulated parameters (recorded in
+`tm_operations.ops.simulation`), so they measure the simulation,
 not the architecture:
 
 | Parameter | Default |
@@ -72,31 +72,10 @@ report marks every operations number as conditional on these values.
   (`superseded_by_sar`).
 - Late filings are drawn at `late_filing_rate` and flagged `filed_late`.
 
-**Alert identity across cycles.** Detection re-runs over the whole corpus each
-cycle, so an alert's window can grow as payments arrive. The layer matches each
-alert to the last completed cycle's, read at the table snapshots that cycle
-recorded in the ledger:
-
-- Same content first. Else the same rule on the same customer, largest
-  overlap first, where:
-  - its last payment moved forward by at most 31 days;
-  - it holds at least a quarter of the payments the prior was first raised
-    on (a frozen 32-hash sketch, checked against all of the new alert's
-    payments), and never fewer than two.
-- A new alert sharing a single payment with a prior never takes its
-  identity.
-- Rules cap the related-payment list by payment id. An alert growing past
-  about three times that cap between cycles can lose its identity: carried as
-  withdrawn and raised again as new. That inflates alert counts but does not
-  move a decision.
-- A matched alert keeps its key, generated date, truth and priority as first
-  seen. An alert detection stops emitting is kept (`in_current_detection`
-  false). A new alert whose payments predate the previous cycle is dated on
-  this cycle, the first day it could have been raised.
-- The day-by-day replay is causal and its inputs for seen alerts are frozen, so
-  recomputing it reproduces every earlier decision. The `history_stable`
-  invariant checks this against the previous cycle's table.
-- Case activity counts are recomputed each cycle from silver.
+**Alert identity across cycles.** An alert keeps its identity, generated date,
+truth and priority across cycles as its window grows with arriving payments.
+An alert that grows past about three times its rule's evidence cap between
+cycles can lose its identity and be counted twice: once withdrawn, once new.
 
 **Who a scenario alerts on.**
 
@@ -106,8 +85,8 @@ recorded in the ledger:
 - The graph scenarios (W1, W3, W4, W17) run across the whole payment network
   and can alert on an account at another bank. They are the declared
   `counterparty_scenarios`.
-- The scope is fixed in `detection_rules.py` (`CUSTOMER_SCOPED_RULES`). The
-  config list only tells the invariant which non-customer alerts to expect.
+- The scope is fixed per rule. The config list only tells the invariant
+  which non-customer alerts to expect.
 - A customer-scoped rule on a silver with no customer flag, or no customer,
   reports `skipped`, not zero alerts.
 
@@ -179,8 +158,7 @@ days.
   composite QpH reads `blended`, with the median per set in
   `scores.composite_qph_by_set` ([8.2](continuous-metrics.md#82-continuous)).
 
-**Investigators under load** (`architecture.benchmark.investigator_sessions`,
-`benchmark/investigator_sessions.py`).
+**Investigators under load** (`architecture.benchmark.investigator_sessions`).
 
 - Set to N (1 to 32) on an AML config with TM operations on Trino or Spark
   Thrift; refused at load otherwise. `run` refuses it in batch, so it needs a

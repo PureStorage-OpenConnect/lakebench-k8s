@@ -61,7 +61,7 @@ the TM pass.
 Two diagnostic blocks derive from these; neither enters identity, a verdict
 or a comparison:
 
-- `experiment.attribution` (AML batch, `metrics/attribution.py`):
+- `experiment.attribution` (AML batch):
   - the slowest rule (`dominant_rule`, its `rule_elapsed_s` and
     `share_of_job`, the rule's time over the job's);
   - that rule's heaviest stage (`dominant_stage`: stage id, name, tasks,

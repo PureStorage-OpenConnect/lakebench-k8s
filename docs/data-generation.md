@@ -181,8 +181,7 @@ lakebench generate my-config.yaml --regenerate
 - `--regenerate` clears only the datagen prefix. Other data in the bucket
   (stream checkpoints, another workload's prefix) stays.
 - A multi-cycle run follows the same rule before cycle 0 and takes
-  `--regenerate` without `--generate`. (1.6 cleared an owned prefix
-  silently.)
+  `--regenerate` without `--generate`.
 - A continuous run refuses any bucket it does not own before it starts
   (exit 3, or 4 when ownership cannot be checked).
 - To keep the corpus instead, run with `run --skip-generate`, or without
@@ -219,8 +218,7 @@ The deployer applies the same ownership rule:
   it (`--allow-stale-bronze` on a prefix that already held objects). It
   follows the gate's decision, not the flag: objects that appear after the
   gate found the prefix empty are refused.
-- It never skips such a bucket silently, which made silver over-count the
-  stale files before 1.7.
+- It never skips such a bucket silently.
 
 Before the gate lists or clears the prefix, `generate`, `run --generate` and
 a multi-cycle run delete any earlier `lakebench-datagen` Job. They wait

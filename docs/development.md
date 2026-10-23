@@ -164,8 +164,7 @@ The pre-push hook (`scripts/hooks/pre-push`; install:
   the pushing branch's config, which an old branch may lack.
 - Is shared by every worktree of a clone, so install it from the checkout
   whose copy you want.
-- `tests/test_pre_push_hook.py` exercises it. The release gate's
-  `pre-push-hook` check fails if the installed copy differs from the tracked
+- The release gate's `pre-push-hook` check fails if the installed copy differs from the tracked
   one.
 
 `python scripts/prose_guard.py` fails on an em dash, an emoji or an AI
@@ -289,7 +288,7 @@ pull request cancels its older run. A job over its time limit fails.
 | Build Package | | After the four above: build the wheel and sdist, check `py.typed`, install the wheel, then `scripts/package_guard.py --dist dist` |
 
 - The Spark tier, the `slow` AML statistics tests and the full-history
-  gitleaks scan (`tests/test_gitleaks_history.py`) run locally before a push,
+  gitleaks scan (`scripts/release_gate.py --only gitleaks-history`) run locally before a push,
   not in CI.
 - Jobs use a fixed runner image (`ubuntu-24.04`). Every action is pinned by
   commit SHA, with its tag as a trailing comment.
@@ -482,6 +481,82 @@ maintainer-only and not shipped with the package).
   results hold for that image.
 - A change to AML generator output needs a new image and a `MODEL_VERSION`
   bump (`datagen_rs/src/model.rs`).
+
+### Held-out seed protocol
+
+[AML spec 3.3](benchmarks/aml/seed-policy.md#33-seed-policy) is what an
+evaluator needs. This is the rest.
+
+Seed resolution and refusals run at config load (`config/datagen_seed.py`,
+called from the workload validator in `config/schema.py`). The generator
+exits 2 with no seed, and with both `--seed` and `LB_DATAGEN_SEED`.
+
+| Seed class | Rule |
+|---|---|
+| Unset | resolves to 43. Refused with `corpus_role: evaluation` or `robustness`; with `corpus_role: calibration` it uses 43 |
+| Development | any seed neither spent nor held out. Generator tuning is allowed only on seed 43 and its four pre-registered replicates; Lakebench does not enforce that. `corpus_role: calibration` requires seed 43 |
+| Spent | refused for every use, a declared role included: the pre-registration's spent list, every seed with a recorded or burned look in `aml_registered_looks.json`, and the spent list in `heldout_hashes.json`. The generator refuses again the spent seeds it knows (its compiled list and the hash file's), not seeds known only from a recorded look |
+| Held out | a salted SHA-256 hash per role in `spark/data/aml/heldout_hashes.json` (append-only), also compiled into the guard. Accepted while the pre-registration has looks open, with the matching `corpus_role` and a seed hashing to that role |
+
+`datagen.robustness_perturbation` (financial only) is required with
+`corpus_role: robustness`, refused with `calibration` or `evaluation`, and
+allowed without a role on any seed the guard accepts. The generator refuses
+the robustness seed without it, and the evaluation seed or a calibration
+replicate with it. The reference scorer reads the perturbation from the
+manifest's stamp, not the config.
+
+**Hash points.** Five points hash the seed they see against the per-role
+hashes; no refusal message prints a held-out seed:
+
+1. config load;
+2. the look guard (`aml/look_guard.py`);
+3. generator start (`datagen_rs/src/heldout.rs`), which refuses a financial
+   corpus without the hash file Lakebench mounts on the datagen pod;
+4. bronze-verify (`spark/scripts/bronze_verify_financial.py`) and the recall
+   scorer (`spark/scripts/score_financial.py`), which recover the corpus seed
+   from every manifest row;
+5. the reference scorer (`spark/scripts/score_financial_reference.py`), which
+   also refuses a held-out corpus outside its registered run.
+
+**Registered corpora.**
+
+- `lakebench generate` writes the seed into a Kubernetes Secret named after
+  its salted hash (`config/seed_secret.py`). The datagen Job and the reference
+  scorer read it as `LB_DATAGEN_SEED`, so it appears in no Job argument, pod
+  spec or SparkApplication spec. `lakebench destroy` deletes it.
+- `generate` writes a protected corpus only with `--registered-corpus --yes`
+  and a digest-pinned `images.datagen`. It records the attempt in the host's
+  corpus ledger (`~/.lakebench/aml_corpora.jsonl`, `LB_AML_CORPORA_LEDGER`)
+  before its first cluster call, then `generated` (with the corpus
+  fingerprint and pod image ids) or `failed`. It refuses a seed whose look was
+  already taken.
+- The look guard also protects a bronze prefix where this host generated a
+  registered corpus. The ledger is per host, so take every look from one host.
+- `scripts/aml_gate.py --registered` scores a look only when the ledger holds
+  a matching `generated` entry. It takes the seed only from `--seed-file`,
+  records it as spent before any model is fitted, and records the report's
+  sha256 before printing a verdict. No `lakebench` command records a look.
+- `scripts/aml_heldout_audit.py` lists this host's run records, journals,
+  ledgers and ledger buckets that touch a protected corpus. An AML record
+  with no corpus block is listed as unidentified.
+- `destroy` and the read-only commands skip the load-time seed check, so a
+  deployment that generated a registered corpus can still be torn down.
+
+**Hash strength.** The salt in `heldout_hashes.json` is public, so a hash
+hides only a uniform 63-bit seed. The current 8-digit seeds are recovered in
+seconds and are already public; their hash records the role. A held-out seed
+added later must be a uniform 63-bit draw.
+
+**Looks.** Each held-out seed gets exactly one registered look. The look, its
+calibration and its predictions use one datagen image named by digest; a look
+on a new image needs its calibration re-run. Datagen is never tuned to a
+rule's recall or false-positive rate on any seed.
+
+### Typology coverage
+
+Typology coverage is maintained by hand. No test checks that every manifest
+typology is in `RULE_TARGETS` or `UNMAPPED_TYPOLOGIES`; add a new typology to
+one of them.
 
 ## Refactoring and shared cluster state
 

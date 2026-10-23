@@ -381,9 +381,6 @@ Lakebench runs `expire_snapshots` and `remove_orphan_files` (Delta:
   live. A continuous Delta run shorter than 7 days gets no effective cleanup,
   and `total_s3_objects` grows for the whole run.
 
-Continuous numbers from v1.5 and earlier were measured with no snapshot
-expiry and no VACUUM ([CHANGELOG](../CHANGELOG.md)).
-
 Maintenance uses the deployed query engine:
 
 | Engine | Maintenance | Method |

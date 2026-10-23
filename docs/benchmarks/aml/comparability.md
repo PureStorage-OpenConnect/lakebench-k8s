@@ -4,7 +4,7 @@
 
 `metrics.json` carries an `experiment` block, schema `exp2` or `exp1`
 ([7.3](execution-rules.md#73-prohibited-changes-invalidate-a-result-or-are-refused);
-`v2_unavailable` names what was missing, `metrics/experiment.py`). A
+`v2_unavailable` names what was missing). A
 published AML result must show:
 
 | Field | Source in metrics.json |
@@ -34,7 +34,7 @@ batch gate printed (not enforced).
 
 Lakebench does not compare runs; a reader compares two reports
 ([Comparing runs](../../benchmarking/comparing.md)). Two AML runs are
-comparable only when (`metrics/comparability.py`):
+comparable only when:
 
 - both passed and carry experiment blocks of the same identity version;
 - every Workload and Corpus identity key

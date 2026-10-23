@@ -12,9 +12,9 @@
   Spark 3.5 is accepted but in no release-matrix row, so its runs are
   unverified. AML is unverified above scale 300 and refused above 800.
 - **Batch detection covers 8 of 17 planted types**
-  ([3.6](typologies.md#36-typologies)). W1 skipped as `giant-component` at
-  scale 1 and 10 in the 1.6 batch records; at scale 100 its skip reason is
-  `vertex-cap`, a Lakebench cap. With W1 skipped, the pre-registered
+  ([3.6](typologies.md#36-typologies)). W1 can skip, as `giant-component`
+  (seen at scale 1 and 10) or as `vertex-cap`, a Lakebench cap (seen at scale
+  100). With W1 skipped, the pre-registered
   behavioural typology `gather_scatter` has no detector, and every such run warns. Recall
   describes this rule set, not the architecture.
 - **Continuous runs a different workload slice.**
@@ -37,16 +37,13 @@
   ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)),
   not batch `recall`; no published record carries one yet.
 - **Continuous results are never checked across runs**: alerts depend on
-  when ticks ran, so a comparison including one is at best NOT ESTABLISHED. The published
-  continuous record (1.6, scale 1, n=1) ingested 43.7% of the corpus in the
-  default 1,800 s window.
+  when ticks ran, so a comparison including one is at best NOT ESTABLISHED.
 - **Continuous throughput follows the offered load** (4 MB/s per scale unit by
   default). When the pipeline keeps up, `sustained_throughput_rps` is that
   load; it is a capacity only when datagen stays ahead with bronze busy
   (`datagen_ahead`, `intake_limit: bronze_capacity`). Under `--skip-generate`
   or a set `max_files_per_trigger` the [trickle](../../glossary.md#trickle) bounds it, named in
-  `limits.bound` and `limits.trickle_bound`. The published continuous record
-  ran under a trickle, predates that label and shows `bound: []`.
+  `limits.bound` and `limits.trickle_bound`.
 - **No expected results and no row relations checked**
   ([5](correctness.md#5-correctness-contract)). Correctness across
   architectures rests on equal alert sets between batch runs; query answers
@@ -73,12 +70,13 @@
   are measured from alerts against the manifest.
 - **The reference-model score reads unsealed silver.** `lakebench financial
   reference-score` reads silver without the sealed-batch filter the rules and
-  the covered scorer use (`spark/scripts/aml_features.py`). Rows from a batch
+  the covered scorer use. Rows from a batch
   whose seal marker never landed (a crash between the transaction commit and
   the marker) are counted there and nowhere else.
-- **The [look](../../glossary.md#look) guard is per host.** The corpus ledger recording a registered
-  corpus and its bronze prefix is a local file
-  ([3.3](seed-policy.md#33-seed-policy)). A development config on another
+- **The [look](../../glossary.md#look) guard is per host.** The corpus ledger
+  recording a registered corpus and its bronze prefix is a local file
+  ([held-out seed protocol](../../development.md#held-out-seed-protocol)).
+  A development config on another
   host pointed at that prefix is refused only by bronze-verify's manifest
   check, after the deploy. Take every look from one host.
 - **`--generator-image` is a string, not a check of the corpus.** A registered
@@ -88,11 +86,10 @@
   `repo:tag@sha256:<digest>` and `repo@sha256:<digest>` for one image are
   refused against each other. `aml_gate.py` does not check that the scored
   corpus was written by that image; the corpus markers' `build_commit` is
-  checked against `config/datagen_lineage.yaml` by hand.
-- **A materialised MERGE source can fail a micro-batch.** An executor lost
-  between materialising a silver-stream MERGE source and the MERGE fails that
-  micro-batch, and the stream restarts through its replay path. The published
-  continuous record ran Spark 4.0.2; none shows AML continuous on Spark 4.1.
+  checked against `src/lakebench/config/datagen_lineage.yaml` by hand.
+- **A lost executor can fail a silver micro-batch.** An executor lost while
+  a silver-stream MERGE runs fails that micro-batch, and the stream restarts
+  through its replay path.
 - **No counter-leakage hard negatives.** The generator plants no legitimate
   accounts built to mimic a typology's shortcut signature (for example
   long-quiet seasonal or travel accounts that break the dormancy gap
@@ -102,31 +99,5 @@
   floored at 1 h while streams are live. A bronze-ingest driver down longer
   can replay a batch and append duplicates; a silver stream down longer may
   resume from an expired snapshot and fail. Short restarts are fine.
-- **The concurrency degradation ratio has only a reduced-form measurement**:
-  1.6 measured investigator-query latency on Trino at scale 10, idle against
-  loaded, 30 executions each. The full measurement (Spark and Trino, scale 10
-  and 100, idle, beside one other workload and beside everything, at least 100
-  executions each) has no cited result.
 - **AML datagen throughput is reported, not gated**
-  ([8.3](metrics.md#83-both-modes)). Throughput figures published before the
-  generator freeze are superseded; no measurement on the frozen generator is
-  cited.
-- **Typology coverage is maintained by hand.** No test checks that every
-  manifest typology is in `RULE_TARGETS` or `UNMAPPED_TYPOLOGIES`; add a new
-  typology to one of them.
-
-### Recorded 1.6 figures
-
-Figures labelled "recorded" come from three run records written by
-Lakebench 1.6, not in the repository:
-
-| Record | Recipe | Verdict |
-|---|---|---|
-| 1.6 batch, scale 1 | polaris-iceberg-spark-trino | PASSED |
-| 1.6 batch, scale 10 | hive-iceberg-spark-trino | PASSED |
-| 1.6 continuous, scale 1 | hive-iceberg-spark-trino | PASSED |
-
-- They carry workload version `aml-1` and experiment schema `exp1`.
-- They predate continuous covered scoring, reason codes and record gates.
-- Each is n=1 at its own development seed, on Spark 4.0.2.
-- They are not comparable with a 1.7 run ([10](comparability.md#10-comparability)).
+  ([8.3](metrics.md#83-both-modes)).

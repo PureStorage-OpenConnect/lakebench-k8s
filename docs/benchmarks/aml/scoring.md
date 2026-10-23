@@ -6,8 +6,8 @@ Recall and false-positive figures never decide the verdict. A batch run fails
 when its scorer counts zero alerts ([5](correctness.md#5-correctness-contract))
 or scoring produced no result.
 
-- The scorer is `spark/scripts/score_financial.py` (not the frozen reference
-  scorer); its `recall.json` is copied into `financial_scoring`.
+- The scorer is a Spark job; its `recall.json` is copied into
+  `financial_scoring`.
 - It joins `gold.alerts` to the manifest on payment UETRs and writes
   `recall.parquet` and `recall.json` under `s3a://<gold>/scoring/<run_id>/`.
 - The manifest URI is a command-line argument. `lakebench run` derives it
@@ -41,7 +41,7 @@ or scoring produced no result.
 
 - Every alert carries its base code, so the base code's figures are the
   rule's own. Only rules that ran are split by code. When no alert carries a
-  code, or the alerts predate the column, the per-code blocks are empty and
+  code, or the alerts have no `reason_codes` column, the per-code blocks are empty and
   `by_code_status` says why. `reason_code_vocabulary` hashes the codes and the
   cut points they read. A rule's evidence-cap label applies to each of its
   codes.
@@ -54,9 +54,6 @@ or scoring produced no result.
   - its typologies are in `recall_bounded_by_evidence_cap`;
   - each such typology's entry in `typologies` names the rule in
     `bounded_by_evidence_cap`.
-
-Both 1.6 batch records (n=1 each) had 8 of 17 typologies `scored`, 8 `no_rule`
-and 1 `rule_skipped` (W1, giant component).
 
 **Screening rates across scale.** `scripts/aml_screen_rates.py` reads stored
 AML batch records, never a bucket or cluster, and writes
@@ -131,14 +128,12 @@ and prints one `LB_ALERT_SET` line, kept as `experiment.results.alert_set`.
   their totals. `spec` (`as1`) and `cols_sha` name the definition and column
   types. The value is the same on the Spark 4.0 and 4.1 lines.
 
-A different alert set is a different result: two runs where any rule's count or
+A different alert set is a different result: two runs where any rule's count
+or hash differs are not comparable.
 
-
-- A 1.7 AML batch record (exp2, or exp1 with `v2_unavailable`) with no alert
-  set means the fingerprint failed (reason in `results.alert_set_unavailable`)
-  or gold-finalize did not run. Do not compare it with another run on query
+- An AML batch record with no alert set means the fingerprint failed (reason
+  in `results.alert_set_unavailable`) or gold-finalize did not run. Do not compare it with another run on query
   results alone.
-- Records from 1.6 have no alert set.
 - A rule that ran and raised no alert is absent from `by_rule`, like a rule
   that did not run; `experiment.rules` records which rules ran.
 - Continuous runs never fingerprint inside a tick, since a full scan would fall
@@ -148,56 +143,33 @@ A different alert set is a different result: two runs where any rule's count or
 ## 8.8 Band-leakage report and reference detector
 
 A rule tuned to the distribution the generator plants can read high recall
-while learning nothing that generalises. Two checks address this: a legacy
-band-density report and the pre-registered fidelity gate (the reference
-detector). Both run in `score_financial_reference.py`, submitted by
-`lakebench financial reference-score`
-([4.4](pipeline.md#44-out-of-run-aml-commands)); `lakebench run` does not run
-it. `src/lakebench/aml/reference_score.py` supplies the band leakage gate.
+while learning nothing that generalises. `lakebench financial reference-score`
+([4.4](pipeline.md#44-out-of-run-aml-commands)) runs two checks against this,
+a band leakage report and the pre-registered fidelity gate (the reference
+detector). `lakebench run` runs neither.
 
-**Band leakage report** (legacy; never fails the job). It runs before the
-fidelity gate and writes `leakage_report.parquet`: per currency, baseline and
-typology payment counts inside `[95%, 99.99%]` of the reporting threshold
-(`structuring_band` in `datagen_rs/src/amounts.rs`), reported as
-`baseline / typology`. Structured amounts are now drawn across `[60%, 100%)`
-(`STRUCTURED_MAX_DEPTH = 0.4`, `structuring_amount`), so most planted rows fall
-outside the window and the ratios are loose.
+**Band leakage report** (never fails the job). `leakage_report.parquet` gives,
+per currency, baseline over typology payment density in `[95%, 99.99%]` of the
+reporting threshold, `leaking` below `--leakage-threshold` (default 10%); its
+`overall_pass` is copied to `aml_gate_report.json` as
+`band_leakage_overall_pass`.
 
-| Verdict | Meaning |
-|---|---|
-| `pass` | baseline density is at least 10% of typology density in this band |
-| `leaking` | ratio below 10%; a rule filtering only on this band would read high recall from a label indicator |
-| `no_typology` | no typology rows in this band; no leakage claim on its own |
+**Reference detector.** The job builds the pre-registered per-customer
+features from silver:
 
-- The threshold ships at 10% (`DEFAULT_LEAKAGE_RATIO`), tunable through the
-  Python API's `threshold_ratio` and the CLI's `--leakage-threshold`.
-- The report's `overall_pass` goes into `aml_gate_report.json` as
-  `band_leakage_overall_pass`. Neither it nor the parquet rows fail the job:
-  only the fidelity gate's own verdict (`error` or `empty_frame`, or a
-  `counts_only` mismatch, checked in `score_financial_reference.py:main`)
-  raises `SystemExit`. The pre-registered leakage caps that gate a corpus
-  live in the fidelity gate.
-- It catches a rule that filters on the band alone: when every planted payment
-  sat in `[9500, 9999]` USD, "amount between 9000 and 10000" read 100% recall
-  and 99% precision.
-
-**Reference detector.** After the band report, the script builds the
-pre-registered per-customer features from silver
-(`spark/scripts/aml_features.py`):
-
-- the 21 `FEATURE_COLUMNS`: activity counts and gaps, amount level and
-  spread, counterparty count, cross-border, round-amount, structuring-band
-  and high-risk-corridor fractions, the 24 h burst, overnight, weekend and
+- 21 features: activity counts and gaps, amount level and spread,
+  counterparty count, cross-border, round-amount, structuring-band and
+  high-risk-corridor fractions, the 24 h burst, overnight, weekend and
   hour-of-day entropy, `home_country_high_risk`, `customer_type`, `crr_tier`;
-- plus the four `HISTORY_FEATURE_COLUMNS` of the monthly unit.
+- plus four history features of the monthly unit.
 
-It labels each customer by manifest participation and runs `evaluate_gate`
-in `src/lakebench/aml/fidelity_gate.py`. Only customers are scored.
+It labels each customer by manifest participation and runs the fidelity gate.
+Only customers are scored.
 
 - The model is scikit-learn's `HistGradientBoostingClassifier`. Its
   hyperparameters, the feature list, the unit of scoring (customer by UTC
   calendar month), the cross-validation folds and every gate constant come
-  from `aml_preregistration.json`.
+  from the pre-registration file, `aml_preregistration.json`.
 - Per in-scope typology the gate reports out-of-fold average precision with a
   bootstrap confidence interval and the positive count. It checks single- and
   pair-feature shortcuts, a nuisance-only model and a nuisance ablation
@@ -205,10 +177,9 @@ in `src/lakebench/aml/fidelity_gate.py`. Only customers are scored.
 - It writes `aml_gate_report.json` (the full report) and
   `reference_metrics.parquet` (one aggregate row, one row per typology) under
   the output prefix.
-- scikit-learn is not on the Spark image; the job installs it per run at the
-  versions pinned in `REFERENCE_PY_DEPS`. To run the detector or the local
-  gate yourself, `pip install "lakebench-k8s[aml]"`, which pins the same
-  versions.
+- scikit-learn is not on the Spark image; the job installs it per run at
+  pinned versions. To run the detector or the local gate yourself,
+  `pip install "lakebench-k8s[aml]"`, which pins the same versions.
 
 | Verdict | Meaning |
 |---|---|

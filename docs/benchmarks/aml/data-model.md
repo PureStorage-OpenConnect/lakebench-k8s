@@ -4,18 +4,13 @@
 
 - All tables are Iceberg; the AML workload refuses Delta at config load.
 - Every table is format-version 2, snappy, metadata delete-after-commit, 50
-  previous metadata versions (`spark/scripts/common.py`).
-- The executing DDL is inline in each stage script. `deploy/financial_ddl.py`
-  is a reference copy no runtime code imports; unit tests keep it in step
-  with the silver and TM column lists.
+  previous metadata versions.
 - No table declares a primary key; the keys below are logical.
 
-Row counts marked recorded come from the 1.6 batch records (scale 1 and 10):
-1.6 generator image, n=1 each at that run's seed, not comparable with 1.7.
-Bronze and everything downstream move with the seed through the screening
-track ([3.2](generation.md#32-scale-factor)). Both records hold the corpus as
-declared by the config, not observed from the datagen pods
-(`experiment.corpus.observed: false`).
+Row counts marked recorded were measured in one batch run at each scale (n=1,
+at that run's seed); counts marked formula follow from the scale. Bronze and
+everything downstream move with the seed through the screening track
+([3.2](generation.md#32-scale-factor)).
 
 ### 2.1 Raw corpus (S3, written by the generator)
 
@@ -27,7 +22,7 @@ declared by the config, not observed from the datagen pods
 | `bronze/watchlist.parquet` | one sanctions (v1, v2) or PEP list entry | `list_id` | single object | not recorded | not recorded |
 | `manifest/manifest.parquet` | one planted instance (the answer key) | `typology_id` | separate `manifest/` prefix | 7,285 (recorded) | 73,083 (recorded) |
 
-The pacs.008 file has 41 top-level columns (`datagen_rs/src/schema.rs`):
+The pacs.008 file has 41 top-level columns:
 
 - group header (`msg_id`, `cre_dt_tm`, `nb_of_txs`, `ctrl_sum`, settlement
   date and method) and payment type information;
@@ -75,7 +70,7 @@ stream fills it.
 | `silver.silver_batch_versions` | one sealed commit marker | (`stream_id`, `batch_id`) | none | one per batch cycle | one per batch cycle |
 | `silver.counterparty_pairs` | one (originator, beneficiary) pair the first time a batch sees it; continuous only | (`originator_id`, `beneficiary_id`) | none | n/a | n/a |
 
-- In both 1.6 batch records entities = accounts = profiles, statements = 2 x
+- In both recorded runs entities = accounts = profiles, statements = 2 x
   transactions, and edges < transactions. Lakebench records these counts
   (`jobs[].silver_tables`) but does not check the relations
   ([12](limitations.md#12-known-limitations)).
@@ -105,4 +100,4 @@ stream fills it.
 `model_version`, `entity_id`, `related_txn_ids`, `related_entity_ids`,
 `alert_ts`, `alert_score`, `priority`, `status`, `disposition`,
 `alert_type`, `run_id`, `narrative`, `evidence` (map), `detected_ts`,
-`reason_codes` (array, added in 1.7; [4.2](rules.md#42-detection-rules)).
+`reason_codes` (array; [4.2](rules.md#42-detection-rules)).

@@ -42,8 +42,7 @@ AML runs on Iceberg recipes. It is not supported on Delta.
 
 ## What each stage is designed to stress
 
-This is the core of the workload design. Each stage targets a distinct
-architectural capability.
+Each stage targets a distinct architectural capability.
 
 ### Bronze: file registration, not ingest compute
 
@@ -52,8 +51,7 @@ with a zero-copy `add_files`, so no payment data is rewritten. The stage
 therefore measures catalog and table-format behaviour under mass file
 registration, not scan or compute throughput. Above 1.5 TiB or 800,000
 files, or if `add_files` fails, it falls back to a CTAS that copies the data
-and doubles bronze storage; where that threshold sits for a given
-architecture is itself part of what the comparison reveals.
+and doubles bronze storage.
 
 ### Silver: streaming upsert and commit cost
 
@@ -65,20 +63,16 @@ with a running statistical recurrence, then commits. So silver measures
 streaming upsert cost and the per-commit overhead a catalog and table format
 carry when many small transactions land back to back.
 
-A property to understand before you compare: silver maintains accumulated
-state, and the cost of a batch tracks the size of that state, not only the
-rows the batch brought in. The double-entry ledger and the dimensions are
-rewritten or merged against the whole table, so per-batch cost rises as the
-run accumulates history. That is a real and disclosed property of the
-workload. It is part of what AML measures, the cost of keeping accumulated
-state current, and it is why a long run is a more revealing test than a short
-one.
+Silver maintains accumulated state, and the cost of a batch tracks the size of
+that state, not only the rows the batch brought in. The double-entry ledger
+and the dimensions are rewritten or merged against the whole table, so
+per-batch cost rises as the run accumulates history.
 
 ### Gold detection: incremental computation over growing state
 
 Gold runs the detection rules. In continuous mode a tick re-detects only what
 the silver rows new since the last tick can change, reading each rule's
-event-time spans rather than all of silver. This is the incremental-detection
+event-time spans, not all of silver. This is the incremental-detection
 stress: how the architecture sustains repeated graph and window detection
 against a table that keeps growing while it is being written. As with silver,
 per-tick cost is sensitive to accumulated history, so the comparison learns
@@ -121,7 +115,7 @@ corpus.
 ## How to read the results, and where the detail is
 
 Results compare only across runs made under matching conditions, and a cap
-measures the cap rather than the architecture's ceiling. The disclosure and
+measures the cap, not the architecture's ceiling. The disclosure and
 comparability rules are in [comparability](aml/comparability.md); what is
 fixed, tunable and prohibited is in [execution rules](aml/execution-rules.md).
 

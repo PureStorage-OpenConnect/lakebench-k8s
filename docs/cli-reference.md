@@ -60,7 +60,7 @@ line to stderr:
 
 Write a configuration file: the lines a first run needs are live, and the keys a deployment usually tunes follow commented at their defaults.
 
-<!-- BEGIN GENERATED: cli init -->
+<!-- BEGIN GENERATED: cli init (scripts/gen_cli_reference.py) -->
 ```
 lakebench init [OPTIONS]
 ```
@@ -144,13 +144,12 @@ lakebench config recipes [NAME]         # list recipes, what each one trades off
 
 Runs graded conformance checks against the configured S3 endpoint and
 reports what the backend does. It is diagnostic only and never gates
-`deploy` or `run`, so a store Lakebench has not seen is checked rather than
-refused.
+`deploy` or `run`.
 
 - **Required** checks: connectivity, bucket enumeration, object operations,
   multipart abort. A failure means Lakebench cannot run against the store.
-- **Advisory** checks: sigv4 region strictness. These are recorded because
-  they change how Lakebench configures Spark, not because they are defects.
+- **Advisory** checks: sigv4 region strictness, which changes how Lakebench
+  configures Spark.
 - `--no-full`, for an account that cannot create buckets, reports the write
   and multipart checks as skipped, not failed.
 - Exit 0: no required check failed. Exit 1: a required check failed. Exit
@@ -174,7 +173,7 @@ the source the `run` capacity preflight also uses.
 
 #### Subcommand reference
 
-<!-- BEGIN GENERATED: cli config -->
+<!-- BEGIN GENERATED: cli config (scripts/gen_cli_reference.py) -->
 #### `config show`
 
 Show fully resolved configuration with source annotations.
@@ -255,7 +254,7 @@ Runs the same checks as `lakebench config validate`: the config, S3 and
 Kubernetes. The flags differ: `validate` takes `-f/--file` and
 `-v/--verbose`; `config validate` takes `--local`.
 
-<!-- BEGIN GENERATED: cli validate -->
+<!-- BEGIN GENERATED: cli validate (scripts/gen_cli_reference.py) -->
 ```
 lakebench validate [CONFIG_FILE] [OPTIONS]
 ```
@@ -284,7 +283,7 @@ configured scale.
 
 Show what each config needs before anything is deployed. Read-only.
 
-<!-- BEGIN GENERATED: cli plan -->
+<!-- BEGIN GENERATED: cli plan (scripts/gen_cli_reference.py) -->
 ```
 lakebench plan CONFIG_FILES [OPTIONS]
 ```
@@ -357,7 +356,7 @@ lakebench plan hive.yaml polaris.yaml --cores 434 --memory 4349
 
 Deploy lakehouse infrastructure to Kubernetes.
 
-<!-- BEGIN GENERATED: cli deploy -->
+<!-- BEGIN GENERATED: cli deploy (scripts/gen_cli_reference.py) -->
 ```
 lakebench deploy [CONFIG_FILE] [OPTIONS]
 ```
@@ -401,7 +400,7 @@ rules and the fixes for dependency server failures are in
 
 Generate synthetic data to the bronze S3 bucket.
 
-<!-- BEGIN GENERATED: cli generate -->
+<!-- BEGIN GENERATED: cli generate (scripts/gen_cli_reference.py) -->
 ```
 lakebench generate [CONFIG_FILE] [OPTIONS]
 ```
@@ -485,7 +484,7 @@ Exit codes:
 
 Execute the data pipeline (batch or continuous).
 
-<!-- BEGIN GENERATED: cli run -->
+<!-- BEGIN GENERATED: cli run (scripts/gen_cli_reference.py) -->
 ```
 lakebench run [CONFIG_FILE] [OPTIONS]
 ```
@@ -710,8 +709,7 @@ A clear of the datagen prefix that stops part way never leaves part of a
 corpus unmarked. A destroy that keeps the bronze bucket and stops while
 emptying it is not covered.
 
-- A single-cycle run over a corpus with no marker (from 1.6 or an older
-  `generate`) proceeds and records `cycle_series.marker: "absent"`, unless
+- A single-cycle run over a corpus with no marker proceeds and records `cycle_series.marker: "absent"`, unless
   the corpus holds files of cycles after the first (`part-cNNN-*`, a
   multi-cycle corpus).
 - A multi-cycle `--skip-generate` needs a marker.
@@ -768,7 +766,7 @@ Ctrl-C (SIGINT) or SIGTERM stops `run` with exit 130.
 
 Stop every job Lakebench started in the deployment.
 
-<!-- BEGIN GENERATED: cli stop -->
+<!-- BEGIN GENERATED: cli stop (scripts/gen_cli_reference.py) -->
 ```
 lakebench stop [CONFIG_FILE] [OPTIONS]
 ```
@@ -808,7 +806,7 @@ with `lakebench logs`. A job already gone is reported as not running.
 For an AML (financial) deployment whose `lakebench-gold-refresh` is
 running, `stop` first asks it to finish the detection pass it is running
 (see
-[AML scoring](aml-scoring.md#continuous-recall-over-covered-instances)) and
+[AML scoring](benchmarks/aml/scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)) and
 waits up to 300 s. If that is not confirmed, or Ctrl-C ends the wait, `stop`
 warns "gold.alerts may hold a partial tick" (a tick is one detection pass)
 and deletes the jobs anyway.
@@ -817,7 +815,7 @@ and deletes the jobs anyway.
 
 Run the query engine benchmark independently.
 
-<!-- BEGIN GENERATED: cli benchmark -->
+<!-- BEGIN GENERATED: cli benchmark (scripts/gen_cli_reference.py) -->
 ```
 lakebench benchmark [CONFIG_FILE] [OPTIONS]
 ```
@@ -867,7 +865,7 @@ The result is saved as a record of its own under a new run id:
 
 Execute SQL queries against the configured query engine.
 
-<!-- BEGIN GENERATED: cli query -->
+<!-- BEGIN GENERATED: cli query (scripts/gen_cli_reference.py) -->
 ```
 lakebench query [CONFIG_FILE] [OPTIONS]
 ```
@@ -903,7 +901,7 @@ lakebench query --interactive
 
 Show deployment status of Lakebench components in the cluster.
 
-<!-- BEGIN GENERATED: cli status -->
+<!-- BEGIN GENERATED: cli status (scripts/gen_cli_reference.py) -->
 ```
 lakebench status [CONFIG_FILE] [OPTIONS]
 ```
@@ -939,7 +937,7 @@ What the table shows, with a config or with only `--namespace`, is in
 
 Delete data without destroying infrastructure.
 
-<!-- BEGIN GENERATED: cli clean -->
+<!-- BEGIN GENERATED: cli clean (scripts/gen_cli_reference.py) -->
 ```
 lakebench clean TARGET [CONFIG_FILE] [OPTIONS]
 ```
@@ -969,7 +967,7 @@ restores the old meaning (force) with a warning, for this release only.
 
 Tear down the resources this deployment owns.
 
-<!-- BEGIN GENERATED: cli destroy -->
+<!-- BEGIN GENERATED: cli destroy (scripts/gen_cli_reference.py) -->
 ```
 lakebench destroy [CONFIG_FILE] [OPTIONS]
 ```
@@ -1028,7 +1026,7 @@ a fresh HTML report at
 `lakebench-output/reports/report-<run_id>-<ts>.html` and leaves the
 delivered file alone.
 
-<!-- BEGIN GENERATED: cli report -->
+<!-- BEGIN GENERATED: cli report (scripts/gen_cli_reference.py) -->
 ```
 lakebench report [RUN|CONFIG] [OPTIONS]
 ```
@@ -1066,7 +1064,7 @@ lakebench report [RUN|CONFIG] [OPTIONS]
 
 Show logs from a component of the deployment.
 
-<!-- BEGIN GENERATED: cli logs -->
+<!-- BEGIN GENERATED: cli logs (scripts/gen_cli_reference.py) -->
 ```
 lakebench logs [CONFIG] [COMPONENT] [OPTIONS]
 ```
@@ -1124,7 +1122,7 @@ View the command and execution provenance journal: the history of every
 lakebench operation, including deploys, data generation, pipeline runs and
 teardowns.
 
-<!-- BEGIN GENERATED: cli journal -->
+<!-- BEGIN GENERATED: cli journal (scripts/gen_cli_reference.py) -->
 ```
 lakebench journal [OPTIONS]
 ```
@@ -1146,7 +1144,7 @@ itself, so there is no separate scoring command.
 
 See [AML Scoring](aml-scoring.md).
 
-<!-- BEGIN GENERATED: cli financial -->
+<!-- BEGIN GENERATED: cli financial (scripts/gen_cli_reference.py) -->
 #### `financial reference-score`
 
 Run the reference detector + leakage gate over silver + manifest.
@@ -1204,7 +1202,7 @@ Flags and defaults are in the generated tables below.
 - Exit 1: a status that cannot be read, a release not `deployed`, an install that failed, or a component not ready.
 - Exit 2: a malformed request, a version change without `--allow-version-change`, or `--controller-tmp-size` for an installed operator.
 - Exit 3, refused:
-  - a version change, which Lakebench does not automate because helm leaves a chart's `crds/` at the installed version
+  - a version change
   - a second Spark Operator or kube-prometheus-stack
   - leftover CRDs
   - a partial Stackable install that is ambiguous or at another version
@@ -1223,7 +1221,7 @@ The Spark Operator runs spark-submit in its controller pod, which caches
 jars under `/tmp`. The chart default of 1Gi is too small and gets the
 controller evicted. See [Troubleshooting](troubleshooting.md).
 
-<!-- BEGIN GENERATED: cli admin -->
+<!-- BEGIN GENERATED: cli admin (scripts/gen_cli_reference.py) -->
 #### `admin status`
 
 Show installed operators, lease state, and lakebench-annotated namespaces.
@@ -1345,7 +1343,7 @@ lakebench admin reclaim-bucket BUCKET [CONFIG_FILE] [OPTIONS]
 
 Show version information.
 
-<!-- BEGIN GENERATED: cli version -->
+<!-- BEGIN GENERATED: cli version (scripts/gen_cli_reference.py) -->
 ```
 lakebench version
 ```
@@ -1360,13 +1358,12 @@ the same. `-h` is short for `--help` on every command.
 
 ### Renamed, refused and deprecated commands
 
-Old names still parse, so a 1.6 command line gets an answer instead of a
-usage error. An alias prints one line on stderr and runs the new command. A
+Old names still parse, so an old command line gets an answer, not a usage
+error. An alias prints one line on stderr and runs the new command. A
 refusal exits 2 and names what to run instead, without echoing anything you
-passed. None of them appears in `--help` or in the reference above. The
-list is `lakebench.cli._aliases`.
+passed. None of them appears in `--help` or in the reference above.
 
-<!-- BEGIN GENERATED: cli aliases -->
+<!-- BEGIN GENERATED: cli aliases (scripts/gen_cli_reference.py) -->
 | Old | What happens | Use instead |
 |---|---|---|
 | `results` | alias: one line on stderr, then runs the new command; removed in v1.8 | `report --format table` |

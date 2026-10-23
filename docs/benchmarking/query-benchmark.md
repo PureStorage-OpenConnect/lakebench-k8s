@@ -79,7 +79,6 @@ Five rounds or more for trend analysis: `run_duration >= warmup + 4 * (interval 
 **Gold event age** (diagnostic, not freshness): query time minus `MAX(interaction_date)`, day resolution. It follows the corpus's event dates: a corpus dated 2024-12-18 to 2025-01-01 reads ~635 days in 2026.
 
 - Median: `pipeline_benchmark.diagnostics.query_time_event_age_seconds`. Per round: `round_meta.gold_event_age_seconds`.
-- Records before 1.6 wrote it as `query_time_freshness_seconds` / `gold_freshness_seconds` and printed it as the continuous Pipeline Score. The score line now shows `data_freshness_seconds`.
 
 ### In-stream QpH basis
 

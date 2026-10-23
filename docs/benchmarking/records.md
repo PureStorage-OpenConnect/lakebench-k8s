@@ -50,7 +50,7 @@ Each run saves `lakebench-output/runs/run-<id>/metrics.json`:
 
 ## Storage I/O
 
-The `io` block holds the storage traffic the engines reported for the run, derived from the rest of the record when it is written; records from before 1.7.2 lack it. Bytes are what the storage clients count; pod network bytes are not added.
+The `io` block holds the storage traffic the engines reported for the run, derived from the rest of the record when it is written. Bytes are what the storage clients count; pod network bytes are not added.
 
 - `intervals`: one per benchmark query (any instrumented engine), one for datagen, and one per 15 s step of each Spark stage that gained bytes. Each has `source`, `stage`, `label` (`benchmark`, `pre_compaction` or `round_<n>`), the `query`, `start` and `end` (UTC, from the engine's clock; null when not recorded), `read_bytes` and `write_bytes`, the basis of each, and `complete`.
 - `null` bytes mean not measured; `0` means measured and zero.

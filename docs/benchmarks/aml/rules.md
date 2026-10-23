@@ -3,10 +3,10 @@
 ## 4.2 Detection rules
 
 Gold-finalize runs the rules in the order W5, W6, W2, W3, W17, W4, W7, W8,
-then W1 (`spark/scripts/gold_finalize_financial.py`). Each rule is marked
+then W1. Each rule is marked
 `pending` in `gold.detection_status`, alerts from other runs are deleted, then
-each rule's rows are replaced. A rule that raises `RuleSkipped` is recorded
-`skipped` with a reason. Any other exception is recorded `error`, the rule's
+each rule's rows are replaced. A rule that skips is recorded `skipped` with a
+reason. Any other exception is recorded `error`, the rule's
 alerts are removed, and the other rules still run.
 
 Continuous gold-refresh runs W4, W2, W5, W6, W17 and W3 every tick. W1, W7 and
@@ -25,18 +25,14 @@ continuous W4 raises one alert per entity per week, batch W4 one per entity.
 | `W8_dormant_reactivation` | an inactive account with a sudden large flow | `dormant_reactivation` | `W8_DORMANCY_GAP` | none | -- | batch |
 | `W17_layering_chain` | open chains of 3 or more transfers, each forwarding 80 to 100% of the previous within 7 days | `stack` | `W17_CHAIN` | `W17_LONG_CHAIN` | 5 hops | batch, continuous |
 
-- The rule-to-typology map is `RULE_TARGETS` in `benchmark/aml_queries.py`.
-  Scoring and the verdict read it, never the manifest's coarser `workload`
-  category.
-- The cuts are `HIGH_PRIORITY_CUTOFFS` in `spark/scripts/detection_rules.py`.
-- W9 to W16 are reserved workload ids (writeback, time travel, ingest, the
-  ML workloads); hence W17.
+- Scoring and the verdict read the target typology column, never the
+  manifest's coarser `workload` category.
 
 **Screen bounds** (W5, W6).
 
 - Soundex codes of token pairs only block candidate pairs.
 - A match is Levenshtein similarity of at least 0.85 over normalised,
-  token-sorted names (`SCREEN_SIMILARITY_MIN`, self-chosen).
+  token-sorted names.
 - The entry's country is the only secondary identifier. There is no phonetic
   scoring, date of birth or identifier matching.
 - W6 screens every payment and uses $10,000 only to order the queue, so its
@@ -49,14 +45,10 @@ W1's `vertex-cap`, is a Lakebench cap: the run can still pass and the skip is
 labelled in `limits.bound` and the verdict's `rule_caps` qualifier (see "What
 a PASSED verdict asserts" in [benchmarking.md](../../benchmarking.md)).
 
-**Hubs in W3 and W17.** An account sending more than 200 transfers in a
-hop-window week is not an intermediary of a round trip or layering chain in
-that week; in other weeks it is. Since 1.7.1 (workload version `aml-3`, rule
-1.1.0) the cut is per week. Before, an account crossing it in any week was
-excluded everywhere, so W3 and W17 alerts, recall and false positives differ
-from 1.7.0 runs and the two are not comparable.
+**Hubs in W3 and W17.** An account sending more than 200 transfers in a week
+is not an intermediary for that week.
 
-**Reason codes** (`spark/scripts/aml_reason_codes.py`). Every alert carries
+**Reason codes.** Every alert carries
 `reason_codes`: its rule's base code, then each conditional code whose
 condition holds, so a rule's codes cover all its alerts.
 

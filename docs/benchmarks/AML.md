@@ -8,14 +8,9 @@
 New here? Start with the [AML overview](aml-overview.md), which explains what
 the workload is, what each stage stresses, and why you would run it.
 
-The specification for engineers who run or compare the benchmark and
-contributors who implement it on a new component. It describes the code of
-this release. Python paths are relative to `src/lakebench/`, generator paths
-to `datagen_rs/`. For how to read the scores, see
+The specification for engineers who run or compare the benchmark. It
+describes the code of this release. For how to read the scores, see
 [aml-scoring.md](../aml-scoring.md).
-
-Figures labelled "recorded" come from three 1.6 run records
-([recorded 1.6 figures](aml/limitations.md#recorded-16-figures)).
 
 ## Pages
 
@@ -33,35 +28,17 @@ Figures labelled "recorded" come from three 1.6 run records
 
 ## 1. Purpose and scope
 
-The workload models a bank's transaction-monitoring (TM) back office over a
-five-year archive of ISO 20022 pacs.008 credit transfers. A synthetic
-generator plants known money-laundering typologies into a clean payment
-stream. The pipeline:
-
-- lands the messages (bronze);
-- normalises them into payments, parties, accounts, statements, a
-  counterparty graph and profiles (silver);
-- runs nine detection rules and a simulated alert-triage, case and SAR
-  workflow (gold).
-
-A fixed query set is then timed against the result.
-
 Per architecture (catalog x table format x pipeline engine x query engine, on
-a known system), it measures:
+a known system), the workload measures:
 
 | Mode | Measures |
 |---|---|
 | Batch | time to turn a fixed raw corpus into queryable gold (`time_to_value_seconds`); data volume and requested compute used; query-set speed (`composite_qph`) |
 | Continuous | gold staleness while datagen writes at the scale's offered load (`data_freshness_seconds`); time from a planted pattern's payments landing to its alert (`time_to_detect_seconds`); the ingest rate bronze holds; QpH while tables are written |
 
-- Figures are valid only when the verdict passes
-  ([5](aml/correctness.md#5-correctness-contract)).
-- A batch comparison also needs the same query set and alert set
-  ([10](aml/comparability.md#10-comparability)). Lakebench does not compare
-  query answers.
-- A continuous run's alerts depend on when detection and TM passes ran
-  relative to arrival, so a continuous comparison cannot establish matching
-  results.
+Figures are valid only when the verdict passes
+([5](aml/correctness.md#5-correctness-contract)); the conditions for comparing
+two runs are in [10](aml/comparability.md#10-comparability).
 
 What it does not claim:
 
@@ -93,8 +70,7 @@ What it does not claim:
 ## 11. Supported compositions
 
 AML runs on Iceberg only. Of the 11 structurally valid tuples, 8 are
-workload-compatible, in batch and continuous (`config/schema.py`,
-`WORKLOAD_TABLE_FORMATS` and `WORKLOAD_MODES`).
+workload-compatible, in batch and continuous.
 
 The generated [support table](../compatibility-matrix.md#support-states)
 lists support states per recipe and mode. AML is supported only on the cells
@@ -113,9 +89,9 @@ it lists; every other valid combination is unverified.
 | hive-delta-spark-{trino,thrift,none} | -- | -- | unsupported, refused at load: the AML stage scripts and DDL are Iceberg-only |
 
 - The pipeline engine is Spark in every recipe. Every recipe uses
-  `apache/spark:4.1.3-python3` (`config/recipes.py`); a config that sets
-  `images.spark` runs that image.
-- The release matrix's AML rows (`config/support.py`): batch
+  `apache/spark:4.1.3-python3`; a config that sets `images.spark` runs that
+  image.
+- The release matrix's AML rows: batch
   hive-iceberg-spark-trino at scale 1 and 10, batch
   polaris-iceberg-spark-trino, continuous hive-iceberg-spark-trino and
   continuous polaris-iceberg-spark-trino.

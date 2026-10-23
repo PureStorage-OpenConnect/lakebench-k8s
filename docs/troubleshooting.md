@@ -18,8 +18,8 @@ or another key.
 **Cause:** the key no longer does anything. `images.hive` never chose the
 Hive that runs (the Stackable HiveCluster always runs Hive 3.1.3).
 `images.prometheus` and `images.grafana` became
-`observability.prometheus_image` and `observability.grafana_image` in 1.7.2.
-Other keys removed in 1.7.2 include `observability.chart_version`,
+`observability.prometheus_image` and `observability.grafana_image`.
+Other removed keys include `observability.chart_version`,
 `observability.storage_class` (now `observability.prometheus_storage_class`)
 and the per-mode executor keys `bronze_ingest_executors`,
 `silver_stream_executors` and `gold_refresh_executors` (now

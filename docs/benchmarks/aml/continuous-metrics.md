@@ -7,8 +7,7 @@ Primary: `data_freshness_seconds`, lower is better.
 | Metric | Unit | Direction | Definition |
 |---|---|---|---|
 | `data_freshness_seconds` | s | lower | the largest gold freshness sampled when a refresh completes (readers see data up to one refresh interval older): the maximum per-stage freshness, active freshness once the corpus drained; null when unmeasured |
-| `data_freshness_seconds`, recorded | s | -- | 202 s (1.6 continuous, scale 1, n=1), under the definition used through 1.7.0 (from silver, not file landing; not comparable) |
-| `time_to_detect_seconds`, `time_to_detect_p95_seconds`, `time_to_detect_max_seconds` | s | lower | median, 95th percentile and maximum time to detect (below), reported per rule. AML only. Recorded median under the definition used through 1.7.0 (before file landing; not comparable): 220 s (1.6 continuous, scale 1, n=1) |
+| `time_to_detect_seconds`, `time_to_detect_p95_seconds`, `time_to_detect_max_seconds` | s | lower | median, 95th percentile and maximum time to detect (below), reported per rule. AML only |
 | `time_to_detect_alerts`, `time_to_detect_late_alerts`, `time_to_detect_unmeasured_cycles` | count | none | alerts measured; alerts whose payments were all in silver before the previous pass of their rule (in the percentiles); gold cycles that logged no time-to-detect line |
 | `sustained_throughput_rps` | rows/s | higher | bronze rows ingested inside the window / `arrival_seconds`; under a [trickle](../../glossary.md#trickle)-bound intake, the offered load the trickle set (a Lakebench cap), not a capacity |
 | `window_seconds` | s | none | measured window length; follows `run_duration` |
@@ -21,7 +20,7 @@ Primary: `data_freshness_seconds`, lower is better.
 | `pace_seconds_per_million_rows` | s/M rows | lower | window seconds per million rows through silver (end to end); a silver batch straddling the window's start or end counts by the share of its run time inside it |
 | `bronze_pace_seconds_per_million_rows` | s/M rows | lower | window seconds per million rows bronze took |
 | `ingest_ratio` | ratio | target, guard | estimate: bronze rows by the window's end / `released_rows` (falls back to `corpus_ingest_ratio`); should sit in 0.95 to 1.05 |
-| `corpus_ingest_ratio` | ratio | none | bronze rows / datagen rows. Recorded under a trickle of 1 file per trigger, which a default run no longer sets: 0.4374 in a 1,800 s window (1.6 continuous, scale 1, n=1) |
+| `corpus_ingest_ratio` | ratio | none | bronze rows / datagen rows |
 | `pipeline_saturated` | bool | none | `ingest_ratio < 0.95`; false when the trickle, not the pipeline, bounded intake |
 | `intake_limit` | text | none | `none`, `trickle_rate`, `bronze_capacity`, `below_bronze_capacity` ([7.4](execution-rules.md#74-lakebench-imposed-caps)) |
 | `bronze_busy_fraction` | ratio | none | share of the window bronze spent in micro-batches |
@@ -48,8 +47,7 @@ run different query sets. `composite_qph_basis.blended` then says so,
 withheld, and the round median is not comparable with another run's. A
 published continuous `composite_qph` must carry `composite_qph_basis`.
 
-**Time to detect** (`spark/scripts/gold_refresh_financial.py`,
-`metrics/collector.py`). Batch runs report none; AML continuous runs always
+**Time to detect.** Batch runs report none; AML continuous runs always
 carry the keys, null when nothing was measured.
 
 - An alert is new on a [tick](../../glossary.md#tick) when its (rule, entity, sorted related payment
@@ -75,7 +73,7 @@ carry the keys, null when nothing was measured.
 - A tick that logged no measurement counts in
   `time_to_detect_unmeasured_cycles`; its alerts are measured one tick late.
 - Ticks also log a pass-end histogram (every new alert measured at the end of
-  the pass, the definition before per-rule commit times) and one histogram per
+  the pass) and one histogram per
   rule, kept with the gold-refresh stage metrics.
 
 **Time-travel reads** (`continuous.time_travel`; reported, never gating).

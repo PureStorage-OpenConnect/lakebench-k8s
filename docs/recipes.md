@@ -23,7 +23,7 @@ recipe: polaris-iceberg-spark-trino    # sets catalog, format, engine and query 
 - A config with no `recipe:`, or `recipe: default`, resolves to
   `hive-iceberg-spark-trino` with a deprecation note. 1.8 requires
   `recipe:`.
-- Recipe defaults merge without overwriting (`_deep_setdefault`): images,
+- Recipe defaults merge without overwriting: images,
   versions and engine resources set in the config take precedence.
 - The four recipe-owned keys (`architecture.catalog.type`,
   `architecture.table_format.type`, `architecture.pipeline_engine`,

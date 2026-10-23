@@ -4,7 +4,7 @@ See also: rules in [4.2](rules.md#42-detection-rules).
 
 ## 4.1 Batch mode
 
-`lakebench run` executes, in order (`cli/_run.py`):
+`lakebench run` executes, in order:
 
 | # | Stage | Input | Transformation | Output |
 |---|---|---|---|---|
@@ -55,8 +55,7 @@ in bronze.
 - With none, seed and image are recorded as declared by the config
   (`experiment.corpus.observed: false`, with `observed_note`).
 - Every run reads the generator's per-node markers under the bronze prefix
-  at run end. It records corpus id v2 and the generator lineage
-  (`metrics/corpus_identity.py`).
+  at run end. It records corpus id v2 and the generator lineage.
 - A publishable run generates its corpus in the same run.
 
 **Generate refusals.**
@@ -101,7 +100,7 @@ in bronze.
 
 ## 4.3 Continuous mode
 
-`lakebench run` with `pipeline.mode: continuous` (`cli/_sustained.py`):
+`lakebench run` with `pipeline.mode: continuous`:
 
 1. **Window checks.** Refuses (exit 2):
    - a window shorter than three gold refresh intervals when gold is on an
@@ -144,16 +143,11 @@ in bronze.
      (per-batch aggregates; readers must SUM), dimension MERGE with KYC,
      statements and balances, profile MERGE with the Welford recurrence,
      then the sealed marker.
-   - Every MERGE reads a source materialised from a local checkpoint
-     (`spark/scripts/common.py`, `materialised_source`). On Spark 4.1 with
-     Iceberg, a MERGE whose source is a temp view over an Iceberg table fails
-     inside Spark.
    - **gold-refresh**: a loop of [ticks](../../glossary.md#tick) (detection passes), back to back by
      default (`gold_refresh_interval` `0 seconds`). Each tick:
      - refreshes the catalog's view of silver and pins one sealed silver
        snapshot;
-     - brings W4, W2, W5, W6, W17 and W3 up to date with it
-       (`config/support.py`, `AML_CONTINUOUS_RULES`), re-detecting only what
+     - brings W4, W2, W5, W6, W17 and W3 up to date with it, re-detecting only what
        rows new since each rule's last pass can change;
      - refreshes the baseline dashboard rows and logs freshness and time to
        detect;
@@ -205,8 +199,7 @@ No published record carries a covered score yet.
 ## 4.4 Out-of-run AML commands
 
 `lakebench financial reference-score` is the one AML command outside
-`lakebench run`, and it is not part of `run` or its verdict
-(`cli/_financial.py`). Recall is scored only inside `run`.
+`lakebench run`, and it is not part of `run` or its verdict. Recall is scored only inside `run`.
 
 **`lakebench financial reference-score CONFIG --manifest ... --output-prefix ...`**
 runs the reference detector, the band-leakage report and the fidelity gate

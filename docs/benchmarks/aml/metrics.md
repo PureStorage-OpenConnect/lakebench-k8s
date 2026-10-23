@@ -4,8 +4,8 @@ See also: continuous metrics in [8.2](continuous-metrics.md#82-continuous); scor
 
 ## 8. Metrics
 
-Units, directions and bands come from the metric registry
-(`metrics/metric_registry.py`), which the report reads.
+Units, directions and bands come from the metric registry, which the report
+reads.
 `pipeline_benchmark.score_descriptions` describes each score a run recorded
 in one line. Direction `none`: a delta has no better side. In `metrics.json`:
 
@@ -23,8 +23,6 @@ Primary: `time_to_value_seconds`, lower is better.
 | Metric | Unit | Direction | Definition |
 |---|---|---|---|
 | `time_to_value_seconds` | s | lower | wall clock from the start of the first pipeline job (bronze-verify) to the end of the last (gold-finalize); a job with no recorded end counts at its start. Datagen, maintenance, settle and the benchmark are outside it |
-| `time_to_value_seconds`, recorded | s | -- | 874.51 s at scale 1 and 5,086.03 s at scale 10, n=1 each (1.6, not comparable with 1.7) |
-| `time_to_value_datagen_excluded_seconds` | s | none | diagnostic, multi-cycle Customer 360 batch only: the cycles' datagen seconds left out of `time_to_value_seconds`. Never on an AML record (`collector.py` sets it for customer360 only) |
 | `total_elapsed_seconds` | s | lower | the run's wall clock: datagen, stages and the gaps between them, maintenance and the benchmark |
 | `total_data_processed_gb` | GiB | none | sum of the GiB each job reported reading (bronze the raw files, silver the bronze input, gold silver's current snapshot); never a bucket listing; the query stage reports no input |
 | `pipeline_throughput_gb_per_second` | GiB/s | higher | `total_data_processed_gb / time_to_value_seconds` |
@@ -49,7 +47,6 @@ config, not to compare differently sized stacks.
 
 | Metric | Unit | Direction | Definition |
 |---|---|---|---|
-| `snapshots_expired`, `orphan_files_removed`, `storage_reclaimed_mb` | count, count, MB | none | reserved for what table maintenance removed; no code path fills them in this release, so they never appear in a record |
 | `maintenance_elapsed_seconds` | s | lower | maintenance and compaction time (batch pre-benchmark, or continuous in-window) |
 | `maintenance_pct_of_pipeline` | pct | none | maintenance time as a share of `total_elapsed_seconds` |
 | `pre_compaction_file_count`, `post_compaction_file_count` | count | none | data files before and after compaction |
