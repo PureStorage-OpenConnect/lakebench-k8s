@@ -89,11 +89,22 @@ def utc_naive(at: datetime) -> datetime:
 
 
 def committed_writes(events: list[StreamEvent]) -> list[StreamEvent]:
-    """Bronze ``write`` events whose batch logged its commit. A batch whose
-    stream was stopped mid-write logs ``writing`` but never commits, so its
-    rows never reached the table and must not be counted as ingested."""
+    """Bronze ``write`` events whose batch logged its commit, one per batch id.
+    A batch whose stream was stopped mid-write logs ``writing`` but never
+    commits, so its rows never reached the table and must not be counted as
+    ingested. At most one write per batch id is returned: a driver-log capture
+    resumed after the kubelet severed its tail re-fetches a ~1 s overlap, so
+    the same ``Batch N: writing`` line can appear twice, and the callers sum
+    ``rows`` per event. Keep the last write seen for each id (silver dedups the
+    same way via a per-ident dict); a duplicate from any cause is counted once."""
     done = {e.ident for e in events if e.kind == "commit"}
-    return [e for e in events if e.kind == "write" and e.ident in done]
+    by_ident: dict[int, StreamEvent] = {}
+    for e in events:
+        if e.kind == "write" and e.ident in done:
+            by_ident[e.ident] = e
+    # Log order, by the write's own position: the callers take min/max of the
+    # timestamps, so order is not relied on, but keep it stable and intuitive.
+    return sorted(by_ident.values(), key=lambda e: e.at)
 
 
 def parse_events(logs: str | None, job_type: str) -> list[StreamEvent]:

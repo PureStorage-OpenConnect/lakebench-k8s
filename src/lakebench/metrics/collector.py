@@ -205,9 +205,12 @@ class StreamingJobMetrics:
     batch_size: int = 0
     total_batches: int = 0
     # Highest batch id in the driver log. total_batches - 1 when the capture is
-    # complete; a large gap (max+1 >> count) means the log lost a run of
-    # batches (a severed kubectl logs -f), which undercounts bronze rows.
+    # complete; a large gap means the log lost a run of batches (a severed
+    # kubectl logs -f), which undercounts bronze rows.
     max_batch_id: int | None = None
+    # Largest run of consecutive missing batch ids. One long run = a truncated
+    # log; scattered 1s = normal empty/replay batches (see parse).
+    max_batch_id_gap: int | None = None
     total_rows_processed: int = 0
     # Distinct input rows: bronze and silver take each row once. None on gold,
     # which re-reads silver every cycle (total_rows_processed amplifies).
@@ -898,11 +901,14 @@ class StageMetrics:
     ttd_max_seconds: float | None = None
     total_batches: int = 0
     # The highest batch id seen in the driver log. When the capture is
-    # complete this is total_batches - 1; a large gap (max+1 >> count) means
-    # the driver log lost a run of batches -- kubelet severs kubectl logs -f
-    # at its idle timeout, so a 24h record can hold only the first ~4h of
-    # batches. Used to refuse a false ingest_ratio (0.24 on a kept-up run).
+    # complete this is total_batches - 1; a large gap means the driver log lost
+    # a run of batches -- kubelet severs kubectl logs -f at its idle timeout,
+    # so a 24h record can hold only the first ~4h of batches. Used to refuse a
+    # false ingest_ratio (0.24 on a kept-up run).
     max_batch_id: int | None = None
+    # Largest run of consecutive batch ids missing from the log: one long run
+    # distinguishes a severed capture from scattered empty/replay gaps.
+    max_batch_id_gap: int | None = None
     batch_size: int = 0
     unique_rows_processed: int | None = 0  # distinct input rows; None = unknown (gold re-reads)
     # Continuous only: the measurement window (metrics/continuous_window.py).
@@ -1348,21 +1354,22 @@ class PipelineBenchmark:
         # inside the window (throughput).
         bronze_stages = [s for s in streaming if s.stage_name == "bronze"]
         total_bronze_rows = sum(s.input_rows for s in bronze_stages)
-        # A driver log with a gap (batch ids jump) undercounts total_bronze_rows:
-        # kubectl logs -f is severed at the kubelet idle timeout and the record
-        # then holds only the batches before the cut, reading a kept-up bronze
-        # as a fraction of itself. Detect it so ingest_ratio is not scored off
-        # a partial numerator. Fraction of batches missing between the first and
-        # highest seen id; _BRONZE_LOG_GAP_BOUND is the tolerance (a few dropped
-        # lines are fine, a multi-hour hole is not).
+        # A driver log with a long gap in its batch ids undercounts
+        # total_bronze_rows: kubectl logs -f is severed at the kubelet idle
+        # timeout and the record then holds only the batches before the cut,
+        # reading a kept-up bronze as a fraction of itself. Detect it so
+        # ingest_ratio is not scored off a partial numerator. The signal is ONE
+        # long run of consecutive missing ids (every batch after the cut absent
+        # at once), not the total missing count: bronze empty and replay-skipped
+        # batches log an id but no "writing" line, so a sparse run has many gaps
+        # of 1 on a complete log. _BRONZE_LOG_GAP_BOUND is the shortest run that
+        # means a severance rather than scatter.
         self.bronze_log_incomplete = False
         self.ingest_ratio_unscored_reason: str | None = None
         for s in bronze_stages:
-            if s.max_batch_id is not None and s.total_batches > 0:
-                missing = (s.max_batch_id + 1) - s.total_batches
-                if missing > 0 and missing / (s.max_batch_id + 1) >= _BRONZE_LOG_GAP_BOUND:
-                    self.bronze_log_incomplete = True
-                    break
+            if s.max_batch_id_gap is not None and s.max_batch_id_gap >= _BRONZE_LOG_GAP_BOUND:
+                self.bronze_log_incomplete = True
+                break
         run_duration = max((s.elapsed_seconds for s in streaming), default=0.0)
         datagen_rows = self.config_snapshot.get("datagen_output_rows", 0)
         sustained = self.config_snapshot.get("sustained") or {}
@@ -2546,6 +2553,7 @@ def build_pipeline_benchmark(
             ttd_max_seconds=sj.ttd_max_seconds,
             total_batches=sj.total_batches,
             max_batch_id=sj.max_batch_id,
+            max_batch_id_gap=sj.max_batch_id_gap,
             batch_size=sj.batch_size,
             executor_count=_s_execs,
             executor_cores=_s_cores,
@@ -3102,11 +3110,11 @@ def build_config_snapshot(
 # sits near 1.0; startup and idle triggers only pull the share down.
 _BRONZE_BUSY_BOUND = 0.8
 
-# Fraction of bronze batches that may be missing from the driver log before the
-# ingest_ratio is refused as unscored. A severed capture (kubelet idle timeout)
-# drops every batch after ~4h, so a 24h run loses ~80%; a handful of dropped
-# lines at a rotation seam is well under this. 0.1 = a >10% hole is not scored.
-_BRONZE_LOG_GAP_BOUND = 0.1
+# Shortest run of consecutive missing bronze batch ids that means the driver
+# log was truncated (a severed capture drops thousands of batches in one run)
+# rather than merely sparse (empty/replay batches leave gaps of 1). 50 is far
+# above any scatter and far below a multi-hour severance.
+_BRONZE_LOG_GAP_BOUND = 50
 
 # Share of the window's bronze triggers that must have run a micro-batch for
 # intake to count as held to the trickle rate. The shortfall allowed covers
@@ -4106,6 +4114,17 @@ class MetricsCollector:
             _apply_ttd_detail(metrics, ttd_detail)
         metrics.total_batches = len(batch_ids)
         metrics.max_batch_id = max(batch_ids) if batch_ids else None
+        # The largest run of consecutive batch ids missing from the log. A
+        # severed capture (kubectl logs -f cut at the kubelet idle timeout)
+        # leaves ONE long hole -- every batch after the cut is absent at once.
+        # Scattered single gaps (bronze empty/replay batches log an id but no
+        # "writing" line, so they are not counted) make many runs of 1, not one
+        # long run, so this distinguishes a truncated log from a sparse one.
+        if batch_ids:
+            ordered = sorted(batch_ids)
+            metrics.max_batch_id_gap = max(
+                (b - a - 1 for a, b in zip(ordered, ordered[1:], strict=False)), default=0
+            )
         metrics.total_rows_processed = total_rows
         if len(write_times) >= 2:
             metrics.batch_span_seconds = (max(write_times) - min(write_times)).total_seconds()

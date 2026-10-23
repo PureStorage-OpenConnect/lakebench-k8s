@@ -1670,3 +1670,44 @@ def test_batch_elapsed_is_wall_clock_and_stage_bytes_ignore_buckets(bucket_gib):
     assert scores["total_data_processed_gb"] == 20.0
     datagen = next(s for s in pb.stages if s.stage_name == "datagen")
     assert datagen.output_size_gb == pytest.approx(10.0)
+
+
+# -- 1.7.11: a resumed driver-log capture must not double-count a seam batch ---
+
+
+def test_bronze_resume_seam_duplicate_counts_each_batch_once():
+    """A driver-log capture resumed after the kubelet severed its tail
+    re-fetches a ~1 s --since-time overlap, so the same `Batch N: writing`
+    and `committed` lines can appear twice in the file. committed_writes keys
+    by batch id, so the duplicated batch's rows are counted once, not twice:
+    the ingest_ratio numerator (rows_to_end / window_input_rows) stays true.
+    """
+    from lakebench.metrics.continuous_window import committed_writes
+
+    # Batches 0..3 inside the window; batch 2 (its writing+commit pair) appears
+    # a second time, as a resume seam would duplicate it.
+    lines = [
+        _line(10, "Batch 0: writing 26,000 rows to ice.bronze.raw"),
+        _line(15, "Batch 0: committed in 5.0s"),
+        _line(40, "Batch 1: writing 26,000 rows to ice.bronze.raw"),
+        _line(45, "Batch 1: committed in 5.0s"),
+        _line(70, "Batch 2: writing 26,000 rows to ice.bronze.raw"),
+        _line(75, "Batch 2: committed in 5.0s"),
+        # --- resume seam: batch 2 re-fetched by --since-time ---
+        _line(70, "Batch 2: writing 26,000 rows to ice.bronze.raw"),
+        _line(75, "Batch 2: committed in 5.0s"),
+        _line(100, "Batch 3: writing 26,000 rows to ice.bronze.raw"),
+        _line(105, "Batch 3: committed in 5.0s"),
+    ]
+    events = parse_events("\n".join(lines) + "\n", "bronze-ingest")
+
+    # One write per committed batch id, despite the duplicate.
+    writes = committed_writes(events)
+    assert len(writes) == 4, [e.ident for e in writes]
+    assert sorted(e.ident for e in writes) == [0, 1, 2, 3]
+
+    st = window_stats(events, "bronze-ingest", W0, W1)
+    # Four batches x 26,000, not five: the seam duplicate is not added.
+    assert st["window_input_rows"] == 4 * 26_000
+    assert st["rows_to_end"] == 4 * 26_000
+    assert st["write_batches"] == 4
