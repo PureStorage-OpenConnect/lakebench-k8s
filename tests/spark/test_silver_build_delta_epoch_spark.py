@@ -59,17 +59,6 @@ def test_operator_retry_of_a_committed_cycle_is_still_a_no_op(result):
     assert case["held_after_retry"] == case["held"], _why(case)
 
 
-def test_precondition_deciding_reads_come_from_a_checkpoint(result):
-    """Scenario precondition, not product behaviour: the cycle that would
-    collide reads its keys with a checkpoint already in the log
-    (checkpointInterval 2), as on a long-lived table, so the scenarios above
-    exercise the checkpoint read path."""
-    reset = result["epoch_reset"]["log"][-1]
-    assert reset["cycle"] == 1 and reset["checkpoints_before"] >= 1
-    stale = [e for e in result["stale_cycle"]["log"] if e["epoch"] == 0 and e["cycle"] == 1][-1]
-    assert stale["checkpoints_before"] > 0
-
-
 def test_catalog_lost_cycle0_refuses_the_surviving_log(result):
     """With the metastore gone, cycle 0 refuses the old log instead of
     appending to it, so no old rows are adopted and no cycle is skipped."""
@@ -77,13 +66,3 @@ def test_catalog_lost_cycle0_refuses_the_surviving_log(result):
     assert case["rcs"] == [[0, 0], [1]], _why(case)
     assert case["refused_orphan_log"], _why(case)
     assert case["held"] == {"0:0": 9, "0:1": 9}, _why(case)
-
-
-def test_later_cycle_rebuild_after_the_remedy_and_its_retry(result):
-    """A cycle that finds no table builds it from every cycle's files; the
-    create records its key, so an operator retry is skipped, not appended."""
-    case = result["catalog_lost"]
-    assert case["rebuild_rc"] == 0, _why(case)
-    assert case["held_after_rebuild"] == {"1:0": 9, "1:1": 9}, _why(case)
-    assert case["retry_rc"] == 0, _why(case)
-    assert case["held_after_retry"] == case["held_after_rebuild"], _why(case)

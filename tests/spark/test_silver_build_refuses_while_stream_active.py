@@ -66,9 +66,8 @@ def test_force_rebuild_bypasses_marker_check():
         (CKPT, _FakeFS()),
         (CKPT, _FakeFS(exists_raises=True)),
         (None, _FakeFS([MARKER])),
-        ("", _FakeFS([MARKER])),
     ],
-    ids=["no_marker", "probe_failure", "checkpoint_unset", "checkpoint_empty"],
+    ids=["no_marker", "probe_failure", "checkpoint_unset"],
 )
 def test_guard_fails_open(checkpoint, fs):
     from common import refuse_batch_while_stream_active

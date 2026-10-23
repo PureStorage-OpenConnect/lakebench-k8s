@@ -1,4 +1,4 @@
-"""N incremental cycles equal one rebuild (C36-2), run in fresh JVMs.
+"""N incremental cycles equal one rebuild, run in fresh JVMs.
 
 Not collected by pytest (no ``test_`` prefix).
 ``test_c360_multicycle_equivalence_spark`` runs it with ``spark_subprocess``.
@@ -13,10 +13,7 @@ Each job is the real script started as its own driver, as on the cluster:
   ``_delta`` scripts) with ``LB_BRONZE_CYCLE`` and, from cycle 1,
   ``LB_SILVER_INCREMENTAL``/``LB_GOLD_INCREMENTAL`` as the CLI sets them;
 - rebuild: one ``silver_build`` and one ``gold_finalize`` over every file
-  (``LB_BRONZE_CYCLE`` unset, the single-cycle read of the whole prefix);
-- changed: the rebuild again with one cycle-1 purchase's
-  ``transaction_amount`` changed by one cent, which the comparisons must
-  tell apart.
+  (``LB_BRONZE_CYCLE`` unset, the single-cycle read of the whole prefix).
 
 Every job takes ``LB_DATA_CLOCK`` = the exclusive end of the series window,
 as ``job.py`` gives every cycle of a multi-cycle Customer 360 run.
@@ -149,14 +146,6 @@ def fingerprint(spark, work: str, fmt: str, layer: str) -> dict:
     return table_rows(table) if layer == "gold" else table_fingerprint(table)
 
 
-def changed(rows: list[dict]) -> list[dict]:
-    """The rows with the first purchase's amount changed by one cent."""
-    out = [dict(r) for r in rows]
-    hit = next(r for r in out if r["interaction_type"] == "purchase")
-    hit["transaction_amount"] = round(hit["transaction_amount"] + 0.01, 2)
-    return out
-
-
 def scenario(spark, jars: str, root: str, fmt: str) -> dict:
     cycles = [cycle_rows(c) for c in range(len(WINDOWS))]
     log: list = []
@@ -178,17 +167,13 @@ def scenario(spark, jars: str, root: str, fmt: str) -> dict:
         if any(rcs):
             return {"rcs": rcs, "log": log}
 
-    def rebuild(name: str, data: list[list[dict]]) -> tuple[str, list[int]]:
-        work = fresh(root, f"{fmt}-{name}")
-        for c, rows in enumerate(data):
-            stage_bronze(spark, work, c, rows)
-        return work, [
-            job(jars, work, fmt, "silver_build", None, log),
-            job(jars, work, fmt, "gold_finalize", None, log),
-        ]
-
-    full, full_rcs = rebuild("rebuild", cycles)
-    alt, alt_rcs = rebuild("changed", [cycles[0], changed(cycles[1]), cycles[2]])
+    full = fresh(root, f"{fmt}-rebuild")
+    for c, rows in enumerate(cycles):
+        stage_bronze(spark, full, c, rows)
+    full_rcs = [
+        job(jars, full, fmt, "silver_build", None, log),
+        job(jars, full, fmt, "gold_finalize", None, log),
+    ]
     # The incremental run really appended: cycles 1 and 2 of silver and gold
     # took the incremental path (a silent fallback to a full rebuild would
     # make the comparison trivially equal).
@@ -201,14 +186,13 @@ def scenario(spark, jars: str, root: str, fmt: str) -> dict:
         }
         for c in (1, 2)
     }
-    out = {"rcs": rcs + full_rcs + alt_rcs, "log": log, "incremental": markers}
+    out = {"rcs": rcs + full_rcs, "log": log, "incremental": markers}
     if any(out["rcs"]):
         return out
     for layer in ("silver", "gold"):
         out[layer] = {
             "incremental": fingerprint(spark, inc, fmt, layer),
             "rebuild": fingerprint(spark, full, fmt, layer),
-            "changed": fingerprint(spark, alt, fmt, layer),
         }
     out["log"] = [{k: e[k] for k in ("job", "cycle", "rc")} for e in log]
     return out

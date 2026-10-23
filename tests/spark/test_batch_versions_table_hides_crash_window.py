@@ -1,4 +1,4 @@
-"""I10: silver_batch_versions semi-join hides a mid-batch crash from
+"""The silver_batch_versions semi-join hides a mid-batch crash from
 consumers.
 
 Simulates the crash window between the transactions/edges commits and the
@@ -6,7 +6,9 @@ sealed-marker insert. We drive _merge_batch directly, but replace the
 sealed INSERT with a raise so silver_batch_versions never receives the
 row for that batch. Then a reader that semi-joins silver.transactions
 against silver_batch_versions on (_stream_id, _batch_id) sees zero rows
-for the crashed batch.
+for the crashed batch. With silver_batch_versions absent (a catalog that
+predates it) ``gold_finalize_financial._sealed_txns`` returns the unfiltered
+table rather than raising.
 
 Runs in a Spark child (``spark_subprocess``) with the Iceberg jar from
 ``LB_SPARK_TEST_JARS`` on the driver classpath at JVM launch, matching the
@@ -55,6 +57,8 @@ def test_crash_window_is_invisible_to_semi_join(spark_subprocess, spark_jars):
     # Idempotent double-seal of the SAME (sid, batch) key: re-driving
     # _merge_batch for batch 0 must not add a second versions row.
     assert out["versions_row_count_after_replay_of_batch_0"] == 3, out
+    # No sidecar table: the filter passes every row through.
+    assert out["fallback_rows"] == out["unfiltered_rows_at_end"] > 0, out
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +210,11 @@ def _run(jars):
             "lh.silver.silver_batch_versions"
         ).count()
 
+        # ---- Fallback: drop the sidecar; the helper returns unfiltered.
+        unfiltered_rows_at_end = spark.table("lh.silver.transactions").count()
+        spark.sql("DROP TABLE lh.silver.silver_batch_versions")
+        fallback_rows = gf._sealed_txns(spark, "silver.transactions").count()
+
         out = {
             "unfiltered_rows": int(unfiltered_rows),
             "filtered_rows": int(filtered_rows),
@@ -220,6 +229,8 @@ def _run(jars):
                 versions_row_count_after_replay_of_batch_0
             ),
             "versions_row_count": int(versions_row_count),
+            "unfiltered_rows_at_end": int(unfiltered_rows_at_end),
+            "fallback_rows": int(fallback_rows),
         }
         print(json.dumps(out))
         spark.stop()

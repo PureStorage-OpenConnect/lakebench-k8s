@@ -4,10 +4,8 @@ right entity key (AML-GOALS D5, D9, A6)."""
 
 from __future__ import annotations
 
-import json
 import math
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -76,7 +74,10 @@ def feats(load_script_module, spark):
 
 
 def test_counts_gaps_and_self_payment(feats):
+    import aml_features as af
+
     a = feats["A"]
+    assert set(af.FEATURE_COLUMNS) <= set(a)
     # a1..a4 once each (the self-payment a4 is not double counted), plus
     # nothing received.
     assert a["txn_count"] == 4
@@ -140,20 +141,6 @@ def test_country_and_kyc_features(feats):
     assert feats["C"]["customer_type"] is None and feats["C"]["is_customer"] is False
     # E has no entity row: not a customer, no attributes.
     assert feats["E"]["is_customer"] is False and feats["E"]["home_country_high_risk"] is None
-
-
-def test_feature_columns_match_preregistration(feats):
-
-    import aml_features as af
-
-    prereg = json.loads(
-        (
-            Path(__file__).resolve().parents[2]
-            / "src/lakebench/spark/data/aml/aml_preregistration.json"
-        ).read_text()
-    )
-    assert list(af.FEATURE_COLUMNS) + list(af.HISTORY_FEATURE_COLUMNS) == prereg["features"]
-    assert set(af.FEATURE_COLUMNS) <= set(feats["A"])
 
 
 def test_structuring_band_matches_w2(spark):

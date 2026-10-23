@@ -1,10 +1,11 @@
-"""EVD-10 (ER-15): the alert-set fingerprint over (rule, subject, window).
+"""The alert-set fingerprint over (rule, subject, window).
 
 ``common.alert_set_fingerprint`` on a fixed 50-row frame with every
-gold.alerts column gives one pinned value on the 4.0 and 4.1 lines (REL-2's
-cross-row AML equality depends on it); row order does not matter; dropping an
-alert or changing one subject changes it, and only for that rule; generated
-ids and wall-clock times do not. ``gold_finalize_financial.alert_set_line``
+gold.alerts column gives one pinned value on the 4.0 and 4.1 lines (cross-run
+AML equality depends on it); dropping an alert or changing one subject
+changes it, and only for that rule; generated ids and wall-clock times do
+not. Row order, duplicates and the window column are covered by
+``frame_fingerprint``'s own tests. ``gold_finalize_financial.alert_set_line``
 prints it in the form the collector parses.
 
 No jars: the helper reads a DataFrame or a temp view, not a table.
@@ -12,7 +13,6 @@ No jars: the helper reads a DataFrame or a temp view, not a table.
 
 from __future__ import annotations
 
-import random
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -109,12 +109,6 @@ def test_pinned_cross_line_value(base):
     assert {k: got[k] for k in PINNED} == PINNED
 
 
-def test_shuffled_rows_equal(spark_session, base):
-    rows = _rows()
-    random.Random(43).shuffle(rows)
-    assert _aset(_df(spark_session, rows).repartition(3)) == _aset(base)
-
-
 def test_removed_alert_differs_for_its_rule_only(spark_session, base):
     rows = _rows()
     dropped = rows[:7] + rows[8:]  # row 7 is RULES[3]
@@ -127,12 +121,6 @@ def test_removed_alert_differs_for_its_rule_only(spark_session, base):
     }
 
 
-def test_duplicated_alert_differs(spark_session, base):
-    rows = _rows()
-    a = _aset(_df(spark_session, rows + [rows[3]]))
-    assert a["rows"] == 51 and a["h"] != _aset(base)["h"]
-
-
 def test_changed_subject_differs(spark_session, base):
     rows = _rows()
     a = _aset(_df(spark_session, _with(rows, 10, entity_id=rows[10][5] + 1)))
@@ -140,12 +128,6 @@ def test_changed_subject_differs(spark_session, base):
     rule = RULES[10 % len(RULES)]
     assert a["by_rule"][rule]["h"] != b["by_rule"][rule]["h"]
     assert a["by_rule"][rule]["rows"] == b["by_rule"][rule]["rows"]
-
-
-def test_changed_window_differs(spark_session, base):
-    rows = _rows()
-    a = _aset(_df(spark_session, _with(rows, 11, alert_ts=rows[11][8] + timedelta(microseconds=1))))
-    assert a["h"] != _aset(base)["h"]
 
 
 def test_generated_ids_and_wall_clock_do_not_count(spark_session, base):
@@ -165,8 +147,8 @@ def test_gold_finalize_line_round_trips(spark_session, load_script_module):
 
     gf = load_script_module("gold_finalize_financial")
     mixed = _rows() + _rows(run_id="older-run")[:5]
-    _df(spark_session, mixed).createOrReplaceTempView("er15_alerts")
-    line = gf.alert_set_line(spark_session, RUN, table="er15_alerts")
+    _df(spark_session, mixed).createOrReplaceTempView("run_alerts")
+    line = gf.alert_set_line(spark_session, RUN, table="run_alerts")
     assert line.startswith("LB_ALERT_SET {")
     got, seconds, why = parse_alert_set("[lb] 2026-10-03T00:00:00 - " + line)
     assert why is None and got == _aset(_df(spark_session, _rows()))

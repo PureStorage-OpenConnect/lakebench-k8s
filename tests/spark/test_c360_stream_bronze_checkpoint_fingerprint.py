@@ -57,15 +57,14 @@ def _guard(monkeypatch, fs, source_format, current, spark=None):
     common.check_bronze_fingerprint(spark, _TBL, _CKPT, source_format=source_format, fs=fs)
 
 
-@pytest.mark.parametrize("source_format", _FORMATS)
-def test_sidecar_missing_fails_open_and_writes_it(monkeypatch, source_format):
+def test_sidecar_missing_fails_open_and_writes_it(monkeypatch):
     fs = _FakeFS()
 
-    _guard(monkeypatch, fs, source_format, "111111")
+    _guard(monkeypatch, fs, "delta", "111111")
 
     written = json.loads(fs.files[_SIDECAR].decode("utf-8"))
     assert str(written["bronze_snapshot_fingerprint"]) == "111111"
-    assert written["source_format"] == source_format
+    assert written["source_format"] == "delta"
     assert written["bronze_table"] == _TBL
 
 

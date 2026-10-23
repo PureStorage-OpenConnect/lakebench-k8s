@@ -2,7 +2,7 @@
 micro-batch via a Welford + additive MERGE.
 
 The test uses the shared ``spark_session`` with a Hadoop Iceberg catalog
-(``iceberg_catalog``), like test_aml_stream_refuse_fresh_checkpoint.py:
+(``iceberg_catalog``), like test_aml_continuous_reset_spark.py:
 pyspark is required, and LB_SPARK_TEST_JARS must list an Iceberg runtime
 jar (``requires_jars("iceberg")``).
 """
@@ -185,3 +185,64 @@ def test_stream_distinct_counterparties_equal_a_full_count(spark):
         assert r["distinct_counterparties_in"] == want_in.get(e, 0), (e, "in")
     # A: Z, Y, X, W; B: Z, Y (Y despite the stale row).
     assert sorted(want_out.values(), reverse=True)[:2] == [4, 2]
+
+
+def test_profiles_replay_is_self_idempotent_on_stream_id_batch_id(spark):
+    """Replaying the same (stream_id, batch_id) in a new query run leaves
+    silver.entity_profiles byte-identical. The self-idempotent MERGE gates a
+    re-apply via a ``WHEN MATCHED AND (t._stream_id = s.batch_stream_id AND
+    t._batch_id = s.batch_batch_id) THEN UPDATE SET entity_id = entity_id``
+    no-op branch, so a driver crash between the profiles commit and the
+    sealed-marker commit does not double-count on retry."""
+    import silver_stream_financial as ss
+    from common import _RUNS_STARTED
+
+    for t in (
+        "transactions",
+        "entities",
+        "accounts",
+        "account_statements",
+        "counterparty_edges",
+        "entity_profiles",
+        "counterparty_pairs",
+        "silver_batch_versions",
+    ):
+        spark.sql(f"DROP TABLE IF EXISTS lh.silver.{t}")
+    _bootstrap_stream(spark, ss)
+    ss.SILVER_PAIRS = "silver.counterparty_pairs"
+    ss.streaming_query_id = lambda _s: "qid-replay"
+
+    def bronze():
+        return _bronze_row(spark, "T1", "A", "Z", datetime(2024, 6, 1), "100.00").union(
+            _bronze_row(spark, "T2", "A", "Z", datetime(2024, 6, 2), "200.00")
+        )
+
+    # First apply: fresh run id 'run-1' -> replay_possible=True.
+    spark.sparkContext.setJobGroup("run-1", "test")
+    _RUNS_STARTED.clear()
+    ss._merge_batch(bronze(), 0)
+    first = spark.table("lh.silver.entity_profiles").orderBy("entity_id").collect()
+    # Non-degenerate: A (sender) and Z (receiver) have profiles holding the
+    # two payments, so equality below is not two empty tables.
+    assert len(first) == 2, first
+    sender = next(r for r in first if r["txn_count_out"] == 2)
+    assert sender["total_sent_usd"] == Decimal("300.00"), first
+
+    # Second apply: NEW run id -> replay_possible=True again. The MERGE
+    # runs but its guarded WHEN MATCHED branch fires (same _stream_id,
+    # _batch_id already on the target rows) and emits a no-op UPDATE, so
+    # additive counters do not double.
+    spark.sparkContext.setJobGroup("run-2", "test")
+    _RUNS_STARTED.clear()
+    ss._merge_batch(bronze(), 0)
+    second = spark.table("lh.silver.entity_profiles").orderBy("entity_id").collect()
+
+    assert first == second, (
+        f"profiles must be byte-identical on replay; got before={first}, after={second}"
+    )
+    # The sealed-marker MERGE (WHEN NOT MATCHED INSERT) is itself
+    # idempotent: exactly one row per sealed batch.
+    ver_rows_after = spark.table(f"lh.{ss.SILVER_BATCH_VERSIONS}").collect()
+    assert len(ver_rows_after) == 1, (
+        f"replay must not append a second sealed-marker row; got {ver_rows_after}"
+    )

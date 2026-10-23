@@ -12,6 +12,10 @@ the value is identical to a direct max over the sealed frame in both the
 common case (newest row sealed) and the case the cheap path cannot answer
 (newest row in the unsealed tail).
 
+The same child checks the sealed-batch semi-join itself: ``_pin_silver``
+hides the unsealed batch's ghost rows on the pinned-snapshot path and on the
+fallback path taken when the snapshot lookup returns None.
+
 Runs in a Spark child (``spark_subprocess``) with the Iceberg jar on the
 driver classpath at JVM launch.
 """
@@ -26,11 +30,16 @@ import pytest
 
 pytest.importorskip("pyspark")
 
+pytestmark = pytest.mark.requires_jars("iceberg")
 
-@pytest.mark.requires_jars("iceberg")
-def test_newest_sealed_ingest_ignores_unsealed_tail(spark_subprocess, spark_jars):
+
+@pytest.fixture(scope="module")
+def out(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
-    out = json.loads(res.stdout.strip().splitlines()[-1])
+    return json.loads(res.stdout.strip().splitlines()[-1])
+
+
+def test_newest_sealed_ingest_ignores_unsealed_tail(out):
     # Case A: the newest ingest_ts is in a sealed batch, so the sealed max is
     # the snapshot max; the probe returns it, and _pin_silver reports it.
     assert out["a_newest"] == out["a_sealed_direct"], out
@@ -44,6 +53,18 @@ def test_newest_sealed_ingest_ignores_unsealed_tail(spark_subprocess, spark_jars
     assert out["b_newest"] == out["b_sealed_direct"], out
     assert out["b_newest"] < out["b_snapshot_max"], out
     assert out["b_pin_newest"] == out["b_newest"], out
+
+
+def test_pin_silver_and_fallback_hide_ghost_rows(out):
+    # 2 sealed batches (6 rows) + 1 unsealed batch (3 rows).
+    assert out["raw_row_count"] == 9, out
+    # Pinned snapshot path (has a current snapshot) semi-joins.
+    assert out["pinned_row_count"] == 6, out
+    # Fallback path (snapshot lookup returns None) also semi-joins.
+    assert out["fallback_row_count"] == 6, out
+    assert out["fallback_sid"] is None and out["fallback_versions"] == "none", out
+    # The pinned path names the versions snapshot it read.
+    assert out["versions_used_is_vsid"], out
 
 
 _TXNS_DDL = """
@@ -146,11 +167,23 @@ def _run(jars):
         b2_newest = datetime(2024, 6, 1, 12, 0, 0)
         _write("S1", 2, b2_newest)  # NOT sealed
 
-        txns_b, _sidb, _vub, _rowsb, b_pin_newest, _ttb = gr._pin_silver(spark)
+        txns_b, _sidb, versions_used, _rowsb, b_pin_newest, _ttb = gr._pin_silver(spark)
         pinned_b = _pinned()
         b_newest = gr._newest_sealed_ingest_epoch_s(spark, pinned_b, txns_b)
         b_sealed_direct = _direct(txns_b)
         b_snapshot_max = _direct(pinned_b)
+        raw_row_count = spark.table("lh.silver.transactions").count()
+        pinned_row_count = txns_b.count()
+        vsid = gr._current_snapshot(spark, "lh.silver.silver_batch_versions")
+
+        # Force the fallback path: _current_snapshot returns None.
+        real_current_snapshot = gr._current_snapshot
+        gr._current_snapshot = lambda _s, _fq: None
+        try:
+            txns_fb, sid_fb, versions_fb, *_ = gr._pin_silver(spark)
+            fallback_row_count = txns_fb.count()
+        finally:
+            gr._current_snapshot = real_current_snapshot
 
         out = {
             "a_newest": a_newest,
@@ -161,6 +194,12 @@ def _run(jars):
             "b_sealed_direct": b_sealed_direct,
             "b_snapshot_max": b_snapshot_max,
             "b_pin_newest": b_pin_newest,
+            "raw_row_count": int(raw_row_count),
+            "pinned_row_count": int(pinned_row_count),
+            "fallback_row_count": int(fallback_row_count),
+            "fallback_sid": sid_fb,
+            "fallback_versions": versions_fb,
+            "versions_used_is_vsid": versions_used == str(vsid),
         }
         print(json.dumps(out))
         spark.stop()

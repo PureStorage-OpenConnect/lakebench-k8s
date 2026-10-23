@@ -224,18 +224,18 @@ def watchlist_env(load_script_module, spark, tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def alerts(load_script_module, spark, watchlist_env):
+    """Every rule's alert frame over the fixture silver: {rule: (schema, rows)}."""
     txns, entities = _silver(spark)
     out = {}
     for rule in CUSTOMER_ONLY + GRAPH:
-        out[rule] = [
-            (r["entity_id"], r["alert_type"]) for r in _run(spark, rule, txns, entities).collect()
-        ]
+        df = _run(spark, rule, txns, entities)
+        out[rule] = (df.schema, df.collect())
     return out
 
 
 @pytest.mark.parametrize("rule", CUSTOMER_ONLY)
 def test_customer_only_rule_alerts_on_customers_only(alerts, rule):
-    got = {e for e, _ in alerts[rule]}
+    got = {r["entity_id"] for r in alerts[rule][1]}
     cust, noncust = PLANTED[rule]
     assert set(cust) <= got, f"{rule} lost its customer subject: {sorted(got)}"
     assert not (set(noncust) & got), f"{rule} alerted on a non-customer: {sorted(got)}"
@@ -243,7 +243,11 @@ def test_customer_only_rule_alerts_on_customers_only(alerts, rule):
 
 
 def test_w2_keeps_both_aggregations(alerts):
-    kinds = {e: t for e, t in alerts["W2_structuring"] if e in (1, 2)}
+    kinds = {
+        r["entity_id"]: r["alert_type"]
+        for r in alerts["W2_structuring"][1]
+        if r["entity_id"] in (1, 2)
+    }
     assert kinds == {1: "structuring", 2: "structuring_beneficiary"}
 
 
@@ -251,7 +255,7 @@ def test_w2_keeps_both_aggregations(alerts):
 def test_graph_rule_can_alert_on_a_counterparty(alerts, rule):
     """Why the graph scenarios are declared: their subject is where the
     pattern sits in the network, which can be an account at another bank."""
-    got = {e for e, _ in alerts[rule]}
+    got = {r["entity_id"] for r in alerts[rule][1]}
     assert any(not _is_customer(e) for e in got), f"{rule}: {sorted(got)}"
 
 
@@ -331,24 +335,23 @@ def test_missing_customer_master_is_a_skip(spark):
 
 
 @pytest.mark.parametrize("rule", CUSTOMER_ONLY + GRAPH)
-def test_rule_alerts_have_the_alert_columns(spark, rule):
-    """AML-2: every rule's alert frame has exactly the ALERT_COLUMNS names
+def test_rule_alerts_have_the_alert_columns(alerts, rule):
+    """Every rule's alert frame has exactly the ALERT_COLUMNS names
     and types, in order (gold_finalize's INSERT is positional), and the
     fixture gives every rule at least one alert, so the check is not over
     an empty frame alone."""
     from detection_rules import ALERT_COLUMNS
     from pyspark.sql.types import _parse_datatype_string
 
-    txns, entities = _silver(spark)
-    df = _run(spark, rule, txns, entities)
-    got = [(f.name, f.dataType) for f in df.schema.fields]
+    schema, rows = alerts[rule]
+    got = [(f.name, f.dataType) for f in schema.fields]
     want = [(name, _parse_datatype_string(ddl)) for name, ddl, _ in ALERT_COLUMNS]
     assert got == want, rule
-    assert df.count() > 0, rule
+    assert rows, rule
 
 
 def test_shared_screening_base_gives_the_same_alerts(spark, monkeypatch):
-    """AML-3: W5 and W6 build their screening input once when the driver
+    """W5 and W6 build their screening input once when the driver
     passes it as screen_base. Their alerts are the same rows either way, and
     with the base _screen_txns runs once for both instead of once each."""
     import detection_rules as dr
@@ -381,15 +384,14 @@ def test_shared_screening_base_gives_the_same_alerts(spark, monkeypatch):
 
 
 @pytest.mark.parametrize("rule", CUSTOMER_ONLY + GRAPH)
-def test_every_alert_carries_its_base_code_first(spark, rule):
-    """AML-5: every alert of every rule carries reason codes, its rule's base
+def test_every_alert_carries_its_base_code_first(alerts, rule):
+    """Every alert of every rule carries reason codes, its rule's base
     code first, all from the rule's vocabulary (the per-code union identity
     rests on the base code; without _alert_frame's guard W8, which has no
     conditional code, would write empty lists)."""
     from aml_reason_codes import BASE_CODE, REASON_CODES
 
-    txns, entities = _silver(spark)
-    rows = _run(spark, rule, txns, entities).select("reason_codes").collect()
+    rows = alerts[rule][1]
     assert rows, rule
     for r in rows:
         codes = list(r["reason_codes"])

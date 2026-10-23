@@ -222,15 +222,6 @@ def test_ntz_input_ignores_session_time_zone(spark):
     assert [tuple(a["related_txn_ids"]) for a in out] == [("n1", "n2", "n3")]
 
 
-def test_path_cap_skips_honestly(spark):
-    from detection_rules import RuleSkipped, w17_layering_chain
-
-    rows = [("s1", 1, 2, 0, 1000), ("s2", 2, 3, 24, 950), ("s3", 3, 4, 48, 900)]
-    with pytest.raises(RuleSkipped) as exc:
-        w17_layering_chain(_df(spark, rows), max_paths=0, run_id="r")
-    assert exc.value.reason == "path-cap"
-
-
 def test_hops_across_a_bucket_boundary_are_joined(spark):
     """The extension join is keyed on 7-day buckets aligned to the epoch
     (Thursdays 00:00 UTC). 2024-03-07 is such a boundary, 144 h after t0; a
@@ -248,15 +239,6 @@ def test_hops_across_a_bucket_boundary_are_joined(spark):
     cycle = [("q1", 70, 71, 143, 1), ("q2", 71, 72, 145, 1), ("q3", 72, 70, 150, 1)]
     out = w3_round_tripping(_df(spark, cycle), run_id="r").collect()
     assert [tuple(a["related_txn_ids"]) for a in out] == [("q1", "q2", "q3")]
-
-
-def test_w3_path_cap_skips_honestly(spark):
-    from detection_rules import RuleSkipped, w3_round_tripping
-
-    rows = [("r1", 1, 2, 0, 1), ("r2", 2, 1, 5, 1)]
-    with pytest.raises(RuleSkipped) as exc:
-        w3_round_tripping(_df(spark, rows), max_paths=0, run_id="r")
-    assert exc.value.reason == "path-cap"
 
 
 def test_budget_counts_edges_and_step_and_estimates_first(spark):

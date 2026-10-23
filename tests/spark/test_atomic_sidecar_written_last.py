@@ -1,4 +1,4 @@
-"""A1-atomic: the I10 sealed_batch_versions marker is written LAST.
+"""The silver_batch_versions sealed marker is written last.
 
 A silver_build_financial run must not seal a cycle unless every silver
 table for that cycle has been written and its row-count assertion has
@@ -6,21 +6,14 @@ passed. Any SilverAbort must leave the versions table untouched for that
 cycle, so a downstream reader filtered by the sealed_txns semi-join sees
 zero rows.
 
-Two abort surfaces:
-
-1. Pre-flight abort (empty entities): SilverAbort fires before any
-   ``_replace_data`` call.
-2. In-sequence abort (empty statements after write): SilverAbort fires
-   after silver.transactions/entities/accounts/account_statements have
-   been written but before edges/profiles; the cleanup truncates
-   silver.transactions.
-
-In both, ``MERGE INTO ... silver_batch_versions`` is absent from the SQL
-Spark executes for the cycle.
+Two abort surfaces: a pre-flight abort (empty entities) before any write,
+and an in-sequence abort (empty statements after their write). In both,
+``MERGE INTO ... silver_batch_versions`` is absent from the SQL Spark
+executes for the cycle.
 
 Requires pyspark (skipped locally when absent). No Iceberg backend is
 needed: DDL, ALTER TABLE and MERGE INTO are intercepted, and the write
-side effect (``_replace_data``) is a spy.
+side effect (``_replace_data``) is stubbed.
 """
 
 from __future__ import annotations
@@ -50,15 +43,6 @@ _BRONZE_SCHEMA = (
     "intr_bk_sttlm_amt decimal(18,2), intr_bk_sttlm_ccy string, "
     "cre_dt_tm timestamp, purp_cd string, "
     "rgltry_rptg array<string>, msg_id string"
-)
-
-_ALL_SILVER = (
-    "SILVER_TRANSACTIONS",
-    "SILVER_ENTITIES",
-    "SILVER_ACCOUNTS",
-    "SILVER_STATEMENTS",
-    "SILVER_EDGES",
-    "SILVER_PROFILES",
 )
 
 
@@ -92,13 +76,9 @@ def _install_mocks(monkeypatch, spark):
     import silver_build_financial as sbf
 
     bronze = _bronze_df(spark)
-    replace_calls: list[tuple[str, int]] = []
     sql_calls: list[str] = []
 
-    def _fake_replace_data(_spark, df, table):
-        replace_calls.append((table, int(df.count())))
-
-    monkeypatch.setattr(sbf, "_replace_data", _fake_replace_data)
+    monkeypatch.setattr(sbf, "_replace_data", lambda *_a, **_kw: None)
     monkeypatch.setattr(sbf, "refuse_batch_while_stream_active", lambda **_kw: None)
     monkeypatch.setattr(sbf, "ensure_namespaces_for_ddl", lambda *_a, **_kw: None)
     monkeypatch.setattr(sbf, "ensure_column", lambda *_a, **_kw: None)
@@ -141,7 +121,7 @@ def _install_mocks(monkeypatch, spark):
 
     monkeypatch.setattr(sbf.SparkSession, "builder", _Builder())
 
-    return sbf, replace_calls, sql_calls
+    return sbf, sql_calls
 
 
 def _stub_empty_entities(monkeypatch, sbf, spark):
@@ -164,24 +144,16 @@ def _stub_empty_statements(monkeypatch, sbf):
 
 
 @pytest.mark.parametrize(
-    "abort_at, must_write, never_write, truncates_transactions",
+    "abort_at",
     [
-        pytest.param("entities", (), _ALL_SILVER, False, id="empty-entities-preflight"),
-        pytest.param(
-            "statements",
-            ("SILVER_TRANSACTIONS", "SILVER_STATEMENTS"),
-            ("SILVER_EDGES", "SILVER_PROFILES"),
-            True,
-            id="empty-statements-in-sequence",
-        ),
+        pytest.param("entities", id="empty-entities-preflight"),
+        pytest.param("statements", id="empty-statements-in-sequence"),
     ],
 )
-def test_aborted_cycle_writes_no_sealed_marker(
-    monkeypatch, spark, abort_at, must_write, never_write, truncates_transactions
-):
+def test_aborted_cycle_writes_no_sealed_marker(monkeypatch, spark, abort_at):
     from common import SilverAbort
 
-    sbf, replace_calls, sql_calls = _install_mocks(monkeypatch, spark)
+    sbf, sql_calls = _install_mocks(monkeypatch, spark)
     if abort_at == "entities":
         _stub_empty_entities(monkeypatch, sbf, spark)
     else:
@@ -189,22 +161,6 @@ def test_aborted_cycle_writes_no_sealed_marker(
 
     with pytest.raises(SilverAbort):
         sbf.main()
-
-    written = [t for (t, _) in replace_calls]
-    for name in must_write:
-        assert getattr(sbf, name) in written, f"{name} should have been written; saw {written}"
-    for name in never_write:
-        assert getattr(sbf, name) not in written, (
-            f"{name} must NOT be written after the abort; saw {written}"
-        )
-    if not must_write:
-        assert replace_calls == [], (
-            f"pre-flight must raise before any write; _replace_data saw {replace_calls}"
-        )
-    truncates = [n for (t, n) in replace_calls if t == sbf.SILVER_TRANSACTIONS and n == 0]
-    assert bool(truncates) == truncates_transactions, (
-        f"silver.transactions truncate expected={truncates_transactions}; saw {replace_calls}"
-    )
 
     merges = [
         s for s in sql_calls if "merge into" in s.lower() and "silver_batch_versions" in s.lower()

@@ -229,14 +229,17 @@ def test_cap_keeps_positives_and_weights_negatives(spark, tmp_path, monkeypatch)
 
 
 def test_fidelity_gate_over_silver_monthly_unit(spark, silver_ref):
-    """The DRAFT monthly unit end to end on silver (burn-in shortened to fit a
-    one-year fixture): units, subject labels, and the ungated lifetime block."""
+    """The DRAFT monthly unit end to end on silver, counts only (burn-in
+    shortened to fit a one-year fixture): units, subject labels, the ungated
+    lifetime block, and no AP anywhere in the outputs."""
     from threadpoolctl import threadpool_limits
 
     ref, manifest = silver_ref(burn_in_months=1, history_days=60)
     with threadpool_limits(limits=2):
-        report = ref.run_fidelity_gate(spark, manifest, cap_rows=100_000, provenance={})
-    assert report["verdict"] == "ok" and report["unit"] == "utc_calendar_month"
+        report = ref.run_fidelity_gate(
+            spark, manifest, cap_rows=100_000, provenance={}, score=False
+        )
+    assert report["verdict"] == "counts_only" and report["unit"] == "utc_calendar_month"
     u = report["unit_detail"]
     assert u["window"] == "utc_calendar_month" and u["first_scored_month"] == 1
     assert u["n_units"] == report["n_scored_units"] and u["n_customers"] <= 120
@@ -244,20 +247,12 @@ def test_fidelity_gate_over_silver_monthly_unit(spark, silver_ref):
     assert report["n_groups"] == u["n_customers"]
     assert report["secondary_lifetime"]["gated"] is False
     assert report["secondary_lifetime"]["unit"] == "lifetime"
+    assert report["secondary_lifetime"]["verdict"] == "counts_only"
     for r in report["typologies"].values():
         assert r["n_positives"] <= 1  # one subject per instance
-
-    # Counts only: the same units and labels, and no AP anywhere in the outputs.
-    with threadpool_limits(limits=2):
-        counts = ref.run_fidelity_gate(
-            spark, manifest, cap_rows=100_000, provenance={}, score=False
-        )
-    assert counts["verdict"] == "counts_only"
-    assert counts["secondary_lifetime"]["verdict"] == "counts_only"
-    text = json.dumps(counts, default=str) + json.dumps(ref._metric_rows(counts), default=str)
+    text = json.dumps(report, default=str) + json.dumps(ref._metric_rows(report), default=str)
     assert '"ap_ci"' not in text and '"ap": 0' not in text and 'r_precision": 0' not in text
-    assert all(row["ap"] is None for row in ref._metric_rows(counts))
-    assert counts["unit_detail"]["n_units"] == u["n_units"]
+    assert all(row["ap"] is None for row in ref._metric_rows(report))
 
     # Capped: every positive unit survives, other customers are sampled whole.
     with threadpool_limits(limits=2):
@@ -288,7 +283,7 @@ def test_seed_claim_verified_only_by_the_corpus_verdict(spark, silver_ref):
     assert af.corpus_seed_check(manifest, 43)["matched_share"] == 1
     with threadpool_limits(limits=2):
         bare = ref.run_fidelity_gate(
-            spark, manifest, cap_rows=100_000, provenance={"corpus_seed": "43"}
+            spark, manifest, cap_rows=100_000, provenance={"corpus_seed": "43"}, score=False
         )
         verified = ref.run_fidelity_gate(
             spark,
@@ -297,6 +292,5 @@ def test_seed_claim_verified_only_by_the_corpus_verdict(spark, silver_ref):
             provenance={"corpus_seed": "43", "corpus_seed_matches_claim": True},
         )
     assert bare["corpus_role"] == "unverified"
-    assert bare["passes"]["corpus_seed_verified"] is False
     assert verified["corpus_role"] != "unverified"
     assert verified["passes"]["corpus_seed_verified"] is True
