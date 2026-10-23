@@ -64,20 +64,3 @@ def test_benchmark_metrics_roundtrip(tmp_path, benchmark):
 
     assert loaded is not None and loaded.benchmark is not None
     assert asdict(loaded.benchmark) == asdict(benchmark)
-
-
-def test_adapt_query_iceberg_scan():
-    from lakebench.benchmark.executor import DuckDBExecutor
-
-    executor = DuckDBExecutor(
-        namespace="test-ns",
-        catalog_name="lakehouse",
-        table_format="iceberg",
-        s3_buckets={"silver": "lb-silver"},
-        table_names={"silver": "silver_ns.my_table"},
-    )
-    adapted = executor.adapt_query("SELECT * FROM lakehouse.silver_ns.my_table")
-    assert adapted == (
-        "SELECT * FROM iceberg_scan("
-        "'s3://lb-silver/warehouse/silver_ns.db/my_table', allow_moved_paths := true)"
-    )

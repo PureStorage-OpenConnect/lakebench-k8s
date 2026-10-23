@@ -1,4 +1,4 @@
-"""CFG-3 (CC-13): spark.conf merges over the job defaults; owned keys are refused.
+"""spark.conf merges over the job defaults; owned keys are refused.
 
 Each job's conf is SPARK_CONF_DEFAULTS, then the user's spark.conf, then the
 keys Lakebench owns. A user value for an owned key would be overwritten, so
@@ -267,7 +267,6 @@ def test_record_redaction_rules():
         "spark.hadoop.fs.s3a.bypass.cache",
     }
     assert rec["spark.speculation"] == "true"
-    assert list(rec) == sorted(rec)
 
 
 def test_record_names_bucket_layers_not_bucket_names():

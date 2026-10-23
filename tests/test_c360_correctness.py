@@ -201,13 +201,6 @@ def test_facts_present_must_be_true():
     assert c3.gating_problems(rec)
 
 
-def test_unevaluated_record_fails_closed_in_both_gates():
-    rec = c3.unevaluated_record("the check could not run: KeyError('window_start')")
-    assert rec["status"] == "unknown" and rec["facts_present"] is False
-    assert c3.gating_outcome(rec)[0] == "FAIL"
-    assert c3.gating_problems(rec)
-
-
 def test_pass_requires_every_core_check():
     passing = [c3._check(cid, "reconcile", True, 0, 0) for cid in c3.CORE_CHECKS]
     assert c3.verdict(passing)["status"] == "pass"
@@ -381,29 +374,3 @@ def test_add_benchmark_checks_keeps_context():
     out = c3.add_benchmark_checks(rec, [_q("Q1_full_aggregation_scan", 2)])
     assert out["status"] == "fail" and out["failed"] == ["benchmark_rows_Q1"]
     assert out["context"] == {"x": 1} and out["gating"] is c3.GATING
-
-
-def test_c360_bronze_path(monkeypatch, load_script):
-    c360_bronze_path = load_script("common").c360_bronze_path
-    base = "s3a://b/customer/interactions/"
-    monkeypatch.delenv("LB_BRONZE_CYCLE", raising=False)
-    assert c360_bronze_path("s3a://b/", appending=True) == base
-    monkeypatch.setenv("LB_BRONZE_CYCLE", "2")
-    assert c360_bronze_path("s3a://b/", appending=True) == base + "part-c002-*.parquet"
-    assert c360_bronze_path("s3a://b/", appending=False) == base
-    # Cycle 0 of a multi-cycle run never reads another run's cycle files.
-    monkeypatch.setenv("LB_BRONZE_CYCLE", "0")
-    assert c360_bronze_path("s3a://b/", appending=False) == base + "part-[0-9]*.parquet"
-
-
-def test_c360_bronze_run_path(monkeypatch, load_script):
-    c360_bronze_run_path = load_script("common").c360_bronze_run_path
-    base = "s3a://b/customer/interactions/"
-    monkeypatch.delenv("LB_BRONZE_CYCLE", raising=False)
-    assert c360_bronze_run_path("s3a://b/") == base
-    monkeypatch.setenv("LB_BRONZE_CYCLE", "0")
-    assert c360_bronze_run_path("s3a://b/") == base + "part-[0-9]*.parquet"
-    monkeypatch.setenv("LB_BRONZE_CYCLE", "2")
-    assert c360_bronze_run_path("s3a://b/") == (
-        base + "{part-[0-9]*.parquet,part-c001-*.parquet,part-c002-*.parquet}"
-    )

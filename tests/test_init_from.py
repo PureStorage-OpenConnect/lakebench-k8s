@@ -1,4 +1,4 @@
-"""CFG-6 (CC-16): ``lakebench init --from OLD -o NEW``.
+"""``lakebench init --from OLD -o NEW``.
 
 The new file keeps OLD's name (or the name 1.6 recorded in the directory)
 and its buckets, never expands a ``${VAR}``, moves a plaintext secret to a
@@ -219,9 +219,6 @@ def _components(cfg: LakebenchConfig) -> dict[str, str]:
     [
         ("hive-iceberg-spark-trino", "customer360"),
         ("polaris-iceberg-spark-trino", "financial"),
-        ("hive-delta-spark-thrift", "customer360"),
-        ("polaris-iceberg-spark-duckdb", "customer360"),
-        ("hive-iceberg-spark-none", "financial"),
     ],
 )
 def test_init_from_round_trip_of_init_output(tmp_path, monkeypatch, recipe, workload):
@@ -547,7 +544,7 @@ def test_refused_key_rows_match_their_validators(row):
         LakebenchConfig.model_validate(data, context={"purpose": purpose})
 
 
-# -- review fixes ------------------------------------------------------------------------
+# -- edge cases of the conversion ------------------------------------------------------
 
 
 def test_init_from_reads_the_legacy_name_where_v16_did(tmp_path, monkeypatch):

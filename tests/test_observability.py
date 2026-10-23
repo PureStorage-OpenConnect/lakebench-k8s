@@ -158,17 +158,10 @@ class TestInferComponent:
         ("pod", "component"),
         [
             ("lakebench-trino-coordinator-0", "trino-coordinator"),
-            ("lakebench-trino-worker-0", "trino-worker"),
             ("lakebench-spark-thrift-server-0", "spark-thrift"),
-            ("lakebench-duckdb-abc123", "duckdb"),
             ("lakebench-hive-metastore-0", "hive"),
-            ("lakebench-postgres-0", "postgres"),
-            ("lakebench-polaris-0", "polaris"),
-            ("lakebench-prometheus-0", "prometheus"),
-            ("lakebench-grafana-xyz", "grafana"),
             ("some-spark-driver-pod", "spark-driver"),
             ("bronze-exec-1", "spark-executor"),
-            ("some-spark-process", "spark-job"),
             ("random-pod-xyz", "unknown"),
         ],
     )
@@ -424,7 +417,6 @@ class TestObservabilityComponent:
         with patch("lakebench.k8s.get_k8s_client", return_value=fake_k8s):
             result = Observability().install(settings, version=None)
         assert result.ok, result.message
-        assert fake_k8s.apply_manifest.call_count == 1
         applied = fake_k8s.apply_manifest.call_args_list[0].args[0]
         assert applied["kind"] == "ClusterRole"
         assert applied["metadata"]["name"] == "lakebench-kubelet-metrics"

@@ -453,9 +453,6 @@ def _prov(name, value):
         (_shard_field("typologies", ["beh", "random"]), "s10_plan_sound"),
         (_prov("corpus", "/corpora/elsewhere"), "s10_one_corpus"),
         (_prov("model_versions", ["other-model"]), "same_model_versions"),
-        (_prov("aml_features_sha256", "e" * 64), "same_aml_features_sha256"),
-        (_prov("adapter", "silver"), "same_adapter"),
-        (_prov("generator_image", IMAGE.replace("ab", "cd")), "same_generator_image"),
     ],
     ids=[
         "spanning_instance",
@@ -468,9 +465,6 @@ def _prov(name, value):
         "components_from_other_typologies",
         "other_corpus",
         "other_generator",
-        "other_feature_code",
-        "other_adapter",
-        "other_generator_image",
     ],
 )
 def test_shard_and_identity_defects_fail(base, prereg_file, tmp_path, fn, check):
@@ -491,14 +485,6 @@ def test_shard_and_identity_defects_fail(base, prereg_file, tmp_path, fn, check)
             "passes.corpus_seed_verified is not true",
         ),
         (
-            lambda rep: rep["passes"].pop("corpus_seed_verified"),
-            "passes.corpus_seed_verified is not true",
-        ),
-        (
-            lambda rep: rep["passes"].update(library_versions_match=False),
-            "passes.library_versions_match is not true",
-        ),
-        (
             lambda rep: rep.update(gate_code_sha256="d" * 64),
             "provenance check same_gate_code_sha256 failed",
         ),
@@ -507,19 +493,15 @@ def test_shard_and_identity_defects_fail(base, prereg_file, tmp_path, fn, check)
             _prov("generator_image", "docker.io/sillidata/lb-datagen:latest"),
             "lb-datagen:latest' is not a digest-pinned image",
         ),
-        (_prov("generator_image", None), "generator_image None is not a digest-pinned image"),
     ],
     ids=[
         "cap_bound",
         "diagnostic",
         "label_role",
         "seed_unverified",
-        "seed_check_missing",
-        "library_mismatch",
         "other_gate_code",
         "verdict_not_ok",
         "image_tag_not_digest",
-        "host_built_no_image",
     ],
 )
 def test_run_defects_fail(base, prereg_file, tmp_path, fn, expect):

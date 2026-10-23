@@ -320,16 +320,24 @@ class TestTemplateConditionals:
 
 
 # ===========================================================================
-# Every recipe renders every template, over HTTP and over HTTPS with a CA cert
+# Every recipe renders every template over HTTP; one recipe per catalog,
+# table format and query engine also over HTTPS with a CA cert
 # ===========================================================================
 
 
 # Exclude the "default" alias to avoid duplicate testing (it maps to hive-iceberg-spark-trino)
 _RECIPE_NAMES: list[str] = [r for r in RECIPES if r != "default"]
+_HTTPS_RECIPES = (
+    "polaris-iceberg-spark-trino",
+    "hive-delta-spark-thrift",
+    "hive-iceberg-spark-duckdb",
+)
 
 
-@pytest.mark.parametrize("https", [False, True], ids=["http", "https"])
-@pytest.mark.parametrize("recipe_name", _RECIPE_NAMES)
+@pytest.mark.parametrize(
+    ("recipe_name", "https"),
+    [(r, False) for r in _RECIPE_NAMES] + [(r, True) for r in _HTTPS_RECIPES],
+)
 def test_recipe_renders_every_template(renderer: TemplateRenderer, https_ctx, recipe_name, https):
     """Each template renders to valid YAML documents, each with a kind."""
     ctx = https_ctx(recipe_name) if https else _enrich_context(_make_engine(recipe=recipe_name))

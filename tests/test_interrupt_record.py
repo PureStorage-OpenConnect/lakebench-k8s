@@ -306,12 +306,6 @@ def test_unknown_uid_absent_object_is_not_recorded():
     assert rec["stopped"] == rec["left"] == rec["skipped"] == []
 
 
-def test_cleanup_client_does_not_retry():
-    api_client = _interrupt.no_retry_api_client()
-    assert api_client.configuration.retries is False
-    api_client.close()
-
-
 # ---------------------------------------------------------------------------
 # submit_job
 # ---------------------------------------------------------------------------

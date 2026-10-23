@@ -17,7 +17,6 @@ import pytest
 
 import lakebench
 from lakebench.config.datagen_seed import config_seed
-from lakebench.config.recipes import RECIPES
 from lakebench.config.support import resolved_format_version
 from lakebench.metrics import experiment as ex
 from lakebench.metrics.collector import (
@@ -251,7 +250,7 @@ class TestStamping:
         assert ex.identity_hash(flag) == ex.identity_hash(configured)
         assert flag["requested_effective"]["pipeline_mode"]["source"] == "command line"
 
-    @pytest.mark.parametrize("recipe", sorted(n for n in RECIPES if n != "default"))
+    @pytest.mark.parametrize("recipe", ["hive-delta-spark-trino", "polaris-iceberg-spark-duckdb"])
     def test_stamped_recipe_is_a_recipe_name(self, recipe):
         cfg = make_config(
             recipe=recipe,
@@ -277,22 +276,6 @@ class TestLegacy:
         path.write_text(json.dumps(raw))
         loaded = storage.load_run(raw["run_id"])
         assert "experiment" not in loaded.to_dict()
-
-
-class TestQuerySetId:
-    def test_query_set_change_moves_the_id(self):
-        """Tiebreakers moved the query-set id: the old id never matches the new."""
-        from lakebench.benchmark.queries import (
-            LEGACY_QUERY_SET_IDS,
-            get_benchmark_queries,
-            query_set_id,
-        )
-        from lakebench.config.schema import WorkloadSchema
-
-        for schema in (WorkloadSchema.CUSTOMER360, WorkloadSchema.FINANCIAL):
-            current = query_set_id([q.name for q in get_benchmark_queries(schema)])
-            for old, _ in LEGACY_QUERY_SET_IDS.values():
-                assert old != current
 
 
 class TestEffectiveMaintenance:

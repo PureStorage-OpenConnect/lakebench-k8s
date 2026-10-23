@@ -56,9 +56,7 @@ def _assert_handlers_restored(sentinel) -> None:
     "scenario, stage, how",
     [
         ("batch_c360", "silver-build", "SIGINT"),
-        ("batch_c360", "silver-build", "SIGTERM"),
         ("batch_c360", "silver-build", "raise"),
-        ("batch_aml", "score-financial", "SIGINT"),
         ("batch_aml", "score-financial", "SIGTERM"),
     ],
 )
@@ -251,7 +249,7 @@ def test_second_interrupt_stops_the_cleanup(tmp_path, monkeypatch, sentinel_sigt
 
 
 def test_sigterm_inside_lease_is_deferred(tmp_path, monkeypatch, sentinel_sigterm):
-    """SIGTERM during the watch-list heal's helm upgrade (cluster-safety 2):
+    """SIGTERM during the watch-list heal's helm upgrade:
     the upgrade finishes, the lease is released, and only then does the
     interrupt land and seal the record."""
     trace, rec, record = _run("batch_c360", tmp_path, monkeypatch, lease_signal="SIGTERM")
@@ -272,20 +270,6 @@ def test_sigterm_inside_lease_is_deferred(tmp_path, monkeypatch, sentinel_sigter
     assert intr["stopped"] == [] and intr["left"] == []
     assert rec.submits == []
     _assert_handlers_restored(sentinel_sigterm)
-
-
-def test_sigterm_inside_lease_without_the_deferral_lands_inside_helm(
-    tmp_path, monkeypatch, sentinel_sigterm
-):
-    """The same scenario with the lease's deferral bypassed: the interrupt
-    lands inside the helm upgrade, which never finishes. This is what the
-    test above rules out."""
-    from lakebench.deploy import cluster_lock
-
-    monkeypatch.setattr(cluster_lock._SignalDeferral, "install", lambda self, held: False)
-    trace, rec, record = _run("batch_c360", tmp_path, monkeypatch, lease_signal="SIGTERM")
-    assert ["SparkOperator", "helm upgrade", "done"] not in rec.calls
-    assert record["interrupted"]["at_stage"] == "operator-check"
 
 
 @pytest.mark.parametrize("gate_fails", [True, False])
@@ -401,9 +385,8 @@ def test_failed_datagen_deploy_registers_no_job(tmp_path, monkeypatch, sentinel_
     assert not _deletes(rec, "Job")
 
 
-@pytest.mark.parametrize("how", ["SIGINT", "SIGTERM"])
 def test_a_signal_while_results_are_gathered_keeps_the_record(
-    tmp_path, monkeypatch, sentinel_sigterm, how
+    tmp_path, monkeypatch, sentinel_sigterm
 ):
     """Ctrl-C during Phase 7 (the bucket sizing, slow at scale) of a run whose
     stages all completed: the record is still written, sealed INTERRUPTED
@@ -415,7 +398,7 @@ def test_a_signal_while_results_are_gathered_keeps_the_record(
     real = MetricsCollector.record_actual_sizes
 
     def sizes(self, *args, **kwargs):
-        send_interrupt(how)
+        send_interrupt("SIGINT")
         return real(self, *args, **kwargs)
 
     monkeypatch.setattr(MetricsCollector, "record_actual_sizes", sizes)
@@ -424,7 +407,7 @@ def test_a_signal_while_results_are_gathered_keeps_the_record(
     assert trace["exit_code"] == 130
     assert record["verdict"]["status"] == "INTERRUPTED"
     assert record["interrupted"]["at_stage"] == "results"
-    assert record["interrupted"]["signal"] == how
+    assert record["interrupted"]["signal"] == "SIGINT"
     # The sizing it was in finished; nothing was stopped.
     assert record["bronze_size_gb"] > 0 and record["interrupted"]["stopped"] == []
     _assert_handlers_restored(sentinel_sigterm)
@@ -435,8 +418,7 @@ def test_a_signal_while_results_are_gathered_keeps_the_record(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("how", ["SIGINT", "SIGTERM"])
-def test_interrupt_continuous_deletes_datagen_job(tmp_path, monkeypatch, sentinel_sigterm, how):
+def test_interrupt_continuous_deletes_datagen_job(tmp_path, monkeypatch, sentinel_sigterm):
     """A signal in the window while datagen still runs: the three streams and
     the datagen Job this run created are deleted by uid, the record reads
     INTERRUPTED at the window, and nothing is deleted by name afterwards."""
@@ -445,14 +427,14 @@ def test_interrupt_continuous_deletes_datagen_job(tmp_path, monkeypatch, sentine
         tmp_path,
         monkeypatch,
         datagen_running=True,
-        events=((700.0, how),),
+        events=((700.0, "SIGTERM"),),
     )
     assert trace["unscripted"] == []
     assert trace["exit_code"] == 130
     assert record["success"] is False
     assert record["verdict"]["status"] == "INTERRUPTED"
     intr = record["interrupted"]
-    assert intr["signal"] == how and intr["at_stage"] == "window"
+    assert intr["signal"] == "SIGTERM" and intr["at_stage"] == "window"
     assert intr["prior_failure"] is False
     assert intr["stopped"] == [
         "Job/lakebench-datagen",

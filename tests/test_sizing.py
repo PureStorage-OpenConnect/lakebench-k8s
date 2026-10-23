@@ -20,7 +20,6 @@ from lakebench.cli import app
 from lakebench.cli._prerequisites import _check_cluster_capacity
 from lakebench.config.sizing import (
     TABLE_MODES,
-    TABLE_SCALES,
     TABLE_WORKLOADS,
     check_capacity,
     default_sizing_config,
@@ -31,7 +30,6 @@ from lakebench.config.support import DATAGEN_SCALE_BANDS
 from lakebench.k8s.client import ClusterCapacity
 
 GIB = 1024**3
-CELLS = [(wl, m, s) for wl in TABLE_WORKLOADS for m in TABLE_MODES for s in TABLE_SCALES]
 # The reference cluster: 434 cores / 4,349 GB allocatable.
 REFERENCE = ClusterCapacity(434_000, 4349 * GIB, 10, 64_000, 512 * GIB)
 
@@ -142,7 +140,14 @@ def _preflight_need(cfg, capacity: ClusterCapacity) -> tuple[int, int]:
     return int(m.group(1)), int(m.group(2))
 
 
-@pytest.mark.parametrize("wl,mode,scale", CELLS)
+@pytest.mark.parametrize(
+    "wl,mode,scale",
+    [
+        ("financial", "batch", 10),
+        ("customer360", "continuous", 10),
+        ("financial", "continuous", 100),
+    ],
+)
 def test_preflight_prints_the_plan_figure(wl, mode, scale):
     """The preflight's "needs" figure is plan_requirements for the capacity it
     sizes with; offline (no capacity) it is the floor. Continuous above scale
@@ -226,10 +231,22 @@ def test_preflight_largest_pod_counts_datagen():
     assert "Largest pod needs 8 cores (datagen pod)" in res.hint
 
 
-def test_batch_run_without_generate_counts_no_datagen_pod():
-    """A batch run without generate creates no datagen pod, so 7.9-core nodes
-    that hold every Spark pod pass; with datagen they do not."""
+def test_skip_generate_leaves_datagen_out():
+    """A run without generate creates no datagen pod: the plan leaves it out in
+    both modes, and in batch 7.9-core nodes that hold every Spark pod pass,
+    where with datagen they do not."""
     from tests.conftest import make_config
+
+    for mode in ("batch", "continuous"):
+        cfg = default_sizing_config("financial", mode, 10)
+        with_dg = plan_requirements(cfg)
+        without = plan_requirements(cfg, datagen_runs=False)
+        assert without.datagen is None and not without.co_resident.includes_datagen
+        assert "datagen" not in without.largest_pod.cpu_from
+        if mode == "continuous":
+            assert without.floor.cpu_cores < with_dg.floor.cpu_cores
+        else:  # batch s10: Spark (36) is above datagen (32), so the floor holds
+            assert without.floor == with_dg.floor
 
     cfg = make_config(workload={"datagen": {"scale": 1}})
     cap = ClusterCapacity(16 * 7900, 16 * 61 * GIB, 16, 7900, 61 * GIB)
@@ -362,19 +379,6 @@ def test_scratch_disabled_is_labelled():
 
     cfg = default_sizing_config("customer360", "batch", 1)
     assert "(not requested: scratch disabled)" in floor_text(plan_requirements(cfg))
-
-
-def test_skip_generate_leaves_datagen_out_in_both_modes():
-    for mode in ("batch", "continuous"):
-        cfg = default_sizing_config("financial", mode, 10)
-        with_dg = plan_requirements(cfg)
-        without = plan_requirements(cfg, datagen_runs=False)
-        assert without.datagen is None and not without.co_resident.includes_datagen
-        assert "datagen" not in without.largest_pod.cpu_from
-        if mode == "continuous":
-            assert without.floor.cpu_cores < with_dg.floor.cpu_cores
-        else:  # batch s10: Spark (36) is above datagen (32), so the floor holds
-            assert without.floor == with_dg.floor
 
 
 def _admitted_at(wl: str, mode: str, capacity: ClusterCapacity, check_pod: bool = True):

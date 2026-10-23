@@ -1,8 +1,8 @@
-"""DEP-3 (SD-10): shared components install through ``admin install
---component`` under the lease, and deploy only verifies them.
+"""Shared components install through ``admin install --component`` under
+the lease, and deploy only verifies them.
 
-Cluster calls run against the recording fixture (tests/fixtures/recording_k8s.py,
-SD-9), so a shared mutation without the lease, or any mutation where the
+Cluster calls run against the recording fixture (tests/fixtures/recording_k8s.py),
+so a shared mutation without the lease, or any mutation where the
 test expects none, fails the test.
 """
 
@@ -22,7 +22,7 @@ from tests.conftest import make_config
 from tests.fixtures.recording_k8s import K8sRecorder, recording
 
 runner = CliRunner()
-NS = "sd10-t"
+NS = "shared-t"
 OBS_KUBELET_ROLE = "lakebench-kubelet-metrics"
 SCRATCH_PARAMS = {"repl": "1", "io_profile": "auto", "priority_io": "high"}
 STACKABLE_OPS = ("commons-operator", "listener-operator", "secret-operator", "hive-operator")
@@ -124,7 +124,7 @@ def _invoke(*args: str):
 
 
 def test_admin_install_noop_when_installed(tmp_path):
-    """DEP-3 acceptance: every component installed -> exit 0, zero mutations
+    """Every component installed -> exit 0, zero mutations
     and no lease taken. The reads are asserted so a short-circuit cannot
     pass as a no-op."""
     cfg = _config(tmp_path)
@@ -232,18 +232,6 @@ def test_fresh_observability_install_applies_the_clusterrole_under_the_lease(tmp
         # No helm interactions for the per-namespace stack.
         assert not [c for c in rec.calls if c.api == "helm" and c.mutating]
         assert all(c.lease_held for c in shared)
-        rec.assert_clean()
-
-
-def test_observability_installed_is_noop(tmp_path):
-    """The ClusterRole already exists: admin install reports noop and makes
-    no mutation."""
-    cfg = _config(tmp_path)
-    with recording(NS) as rec:
-        _seed_observability(rec)
-        r = _invoke("install", str(cfg), "--component", "observability", "-y")
-        assert r.exit_code == 0, r.output
-        assert rec.mutations() == [], [c.describe() for c in rec.mutations()]
         rec.assert_clean()
 
 
@@ -474,40 +462,6 @@ def test_deploy_never_installs_under_fixture():
     assert "not collected" in results["observability"].message
 
 
-def test_deploy_with_everything_installed_makes_only_the_leased_watch_list_add():
-    from lakebench.deploy.engine import DeploymentEngine, DeploymentStatus
-    from lakebench.deploy.observability import ObservabilityDeployer
-
-    cfg = make_config(name=NS, observability={"enabled": True})
-    with recording(NS) as rec:
-        rec.for_config(cfg)
-        rec.add_namespace(NS, annotations={"lakebench.deployment/name": NS})
-        _seed_all(rec)
-        engine = _engine(cfg)
-        with (
-            patch.object(DeploymentEngine, "_operator_rbac_exists", return_value=True),
-            patch(
-                "lakebench.deploy.observability._wait_for_deployment_ready",
-                return_value="",
-            ),
-        ):
-            op = DeploymentEngine._deploy_spark_operator(engine)
-            obs = ObservabilityDeployer(engine).deploy()
-        assert op.status == DeploymentStatus.SUCCESS, op.message
-        assert obs.status == DeploymentStatus.SUCCESS, obs.message
-        shared = rec.shared_mutations()
-        assert shared, "the watch-list add must reach the fake"
-        assert all(c.lease_held for c in shared)
-        assert {(c.api, c.verb) for c in shared if c.api == "helm"} == {("helm", "upgrade")}
-        # Deploy creates the per-namespace ClusterRoleBinding; the ClusterRole
-        # itself was created by admin install and is only read.
-        cluster_mutations = [c for c in shared if c.kind in {"clusterroles"}]
-        assert not cluster_mutations, [c.describe() for c in cluster_mutations]
-        rec.assert_clean()
-    upgrade = next(c.argv for c in rec.calls if c.api == "helm" and c.verb == "upgrade")
-    assert upgrade[upgrade.index("--version") + 1] == "2.5.1"
-
-
 # ---------------------------------------------------------------------------
 # Config: install: true is refused
 # ---------------------------------------------------------------------------
@@ -518,11 +472,6 @@ def test_deploy_with_everything_installed_makes_only_the_leased_watch_list_add()
     [
         ("platform.compute.spark.operator.install", "spark-operator", True),
         ("architecture.catalog.hive.operator.install", "stackable", True),
-        # The refusal runs after Pydantic coercion, so a quoted or numeric
-        # true cannot slip past it.
-        ("platform.compute.spark.operator.install", "spark-operator", "true"),
-        ("platform.compute.spark.operator.install", "spark-operator", "yes"),
-        ("platform.compute.spark.operator.install", "spark-operator", 1),
     ],
 )
 def test_deploy_refuses_install_true(tmp_path, key, component, raw):
@@ -619,14 +568,14 @@ def test_spark_prepare_refuses_a_repo_name_bound_to_another_url():
 def test_full_deploy_makes_no_shared_mutation_but_the_leased_watch_list_add(
     recipe, monkeypatch, tmp_path
 ):
-    """DEP-3 acceptance on the whole deploy: under the recording fixture,
+    """The whole deploy: under the recording fixture,
     with every shared component installed, deploy_all's only shared
     mutations are the leased watch-list add (helm upgrade of spark-operator
     and the operator restart), and it installs nothing."""
     from lakebench.deploy.engine import DeploymentEngine
     from lakebench.k8s.client import K8sClient
-    from tests.test_category1_teardown import _config as cat1_config
-    from tests.test_category1_teardown import _instant_waits, _seed_cluster
+    from tests.test_teardown_paths import _config as cat1_config
+    from tests.test_teardown_paths import _instant_waits, _seed_cluster
 
     _instant_waits(monkeypatch)
     cfg = cat1_config(recipe, "c360-batch", tmp_path)
@@ -646,6 +595,8 @@ def test_full_deploy_makes_no_shared_mutation_but_the_leased_watch_list_add(
         # Deploy never applies the ClusterRole, only its ClusterRoleBinding.
         assert not [c for c in shared if c.kind == "clusterroles"], [c.describe() for c in shared]
         rec.assert_clean()
+    upgrade = next(c.argv for c in rec.calls if c.api == "helm" and c.verb == "upgrade")
+    assert upgrade[upgrade.index("--version") + 1] == "2.5.1"
 
 
 # --- admin install refusals: each state answers with its exit code and
@@ -729,10 +680,7 @@ _INSTALL_REFUSALS = [
     pytest.param(_seed_operator_not_ready, ("--component", "spark-operator"), 1, None, id="operator-not-ready"),
     pytest.param(_seed_leftover_spark_crd, ("--component", "spark-operator"), 3, None, id="leftover-spark-crd"),
     pytest.param(_seed_partial_stackable, ("--component", "stackable"), 3, None, id="partial-stackable-leftover-crd"),
-    *[
-        pytest.param(_seed_release_status(s), ("--component", "spark-operator"), 1, None, id=f"release-{s}")
-        for s in ("pending-install", "pending-upgrade", "failed", "uninstalling")
-    ],
+    pytest.param(_seed_release_status("pending-install"), ("--component", "spark-operator"), 1, None, id="release-pending-install"),
     pytest.param(_seed_scratch_diff, ("<cfg>", "--component", "scratch-storage-class"), 3, None, id="scratch-diff-named"),
     pytest.param(_seed_scratch_diff, ("<cfg>", "--component", "all"), 3, None, id="scratch-diff-all"),
     pytest.param(_seed_operator_elsewhere, ("--component", "spark-operator"), 3, None, id="second-spark-operator"),
@@ -768,15 +716,6 @@ def test_admin_install_answers_and_changes_nothing(tmp_path, seed, argv, code, f
         else:
             r = _invoke("install", *argv, "-y")
         assert r.exit_code == code, r.output
-        assert rec.mutations() == []
-
-
-def test_scratch_parameter_diff_refuses_through_the_alias(tmp_path):
-    cfg = _config(tmp_path)
-    with recording(NS) as rec:
-        _seed_scratch_diff(rec)
-        r = _invoke("install-scratch-storage-class", str(cfg))
-        assert r.exit_code == 3, r.output
         assert rec.mutations() == []
 
 

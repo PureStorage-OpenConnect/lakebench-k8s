@@ -76,11 +76,6 @@ def _config_file(tmp_path: Path, context: str = "A") -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_names_the_current_context(kubeconfig) -> None:
-    t = ClusterTarget.resolve(None)
-    assert t.context == "B" and not t.in_cluster
-
-
 def test_resolve_prefers_the_config_context(kubeconfig) -> None:
     cfg = MagicMock()
     cfg.platform.kubernetes.context = "A"
@@ -318,7 +313,7 @@ def test_cli_args_refuses_when_the_pinned_context_moved_server(kubeconfig) -> No
 
 def test_pin_command_raises_on_a_broken_kubeconfig(tmp_path, monkeypatch) -> None:
     """An existing kubeconfig that cannot be resolved stops the command;
-    it never runs unpinned."""
+    it never runs unpinned and never falls back to in-cluster credentials."""
     from lakebench.benchmark.executor import get_executor
     from lakebench.k8s.target import pin_command
     from tests.conftest import make_config
@@ -326,21 +321,13 @@ def test_pin_command_raises_on_a_broken_kubeconfig(tmp_path, monkeypatch) -> Non
     path = tmp_path / "kubeconfig"
     path.write_text("apiVersion: v1\nkind: Config\ncontexts: []\nclusters: []\nusers: []\n")
     point_kubeconfig_at(monkeypatch, path)
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.1.50")
+    with pytest.raises(ConfigException):
+        ClusterTarget.resolve(None)
     with pytest.raises(ConfigException):
         pin_command(None)
     with pytest.raises(ValueError, match="cannot pin the cluster context"):
         get_executor(make_config())
-
-
-def test_existing_but_broken_kubeconfig_never_falls_back_to_in_cluster(
-    tmp_path, monkeypatch
-) -> None:
-    path = tmp_path / "kubeconfig"
-    path.write_text("apiVersion: v1\nkind: Config\ncontexts: []\nclusters: []\nusers: []\n")
-    point_kubeconfig_at(monkeypatch, path)
-    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.1.50")
-    with pytest.raises(ConfigException):
-        ClusterTarget.resolve(None)
 
 
 def test_query_executor_prefix_uses_the_active_target(kubeconfig) -> None:

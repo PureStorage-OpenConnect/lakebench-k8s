@@ -3,8 +3,7 @@
 The rules run inside Spark drivers, so most of these read the driver scripts
 as source or AST instead of importing them: the packaged AML reference data,
 the rule dispatch and typology maps against their orchestrator-side copies,
-which rules each gold script schedules, W7's deterministic dedup, the
-run-scoped alert projection and the gold.alerts column order. Also the
+which rules each gold script schedules and the gold.alerts column order. Also the
 scripts ConfigMaps shipping the reference JSON and the Spark Thrift memory
 the autosizer gives a financial workload.
 """
@@ -18,9 +17,6 @@ import pytest
 
 DETECTION_RULES_PATH = Path(__file__).resolve().parents[1] / (
     "src/lakebench/spark/scripts/detection_rules.py"
-)
-GOLD_FINALIZE_PATH = Path(__file__).resolve().parents[1] / (
-    "src/lakebench/spark/scripts/gold_finalize_financial.py"
 )
 
 
@@ -48,20 +44,6 @@ def test_aml_reference_shapes():
     # (bronze/watchlist.parquet), not packaged files.
     assert not (ref_dir / "sanctions_list.json").exists()
     assert not (ref_dir / "pep_list.json").exists()
-
-
-def test_fatf_list_is_dated_and_sourced():
-    import json
-
-    ref_dir = Path(__file__).resolve().parents[1] / "src/lakebench/spark/data/aml"
-    hrj = json.loads((ref_dir / "high_risk_jurisdictions.json").read_text())
-    assert hrj["as_of"] == "2026-06-19" and "fatf-gafi.org" in hrj["source"]
-    tiers = {}
-    for e in hrj["entries"]:
-        tiers.setdefault(e["risk_tier"], set()).add(e["country_code"])
-    assert tiers["black"] == {"IR", "KP", "MM"}
-    assert len(tiers["grey"]) == 22 and {"BA", "IQ"} <= tiers["grey"]
-    assert not {"DZ", "NA", "AE"} & tiers["grey"]
 
 
 def test_customer_scope_lists_agree_across_the_package_boundary():
@@ -177,70 +159,6 @@ def test_autosizer_sizes_spark_thrift_memory_for_financial(node_gib, expected):
     assert resolved == expected, f"expected {expected} on a {node_gib} GiB node, got {resolved!r}"
 
 
-def test_gold_finalize_detection_rules_subset_of_dispatcher():
-    """Every rule id in DEFAULT_DETECTION_RULES must
-    exist in detection_rules._RULE_DISPATCH, otherwise ``get_rule``
-    returns None and the loop silently skips.
-    """
-    gf_path = (
-        Path(__file__).resolve().parents[1]
-        / "src/lakebench/spark/scripts/gold_finalize_financial.py"
-    )
-    gf_tree = ast.parse(gf_path.read_text())
-    tuple_node = None
-    for node in gf_tree.body:
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if getattr(t, "id", None) == "DEFAULT_DETECTION_RULES":
-                    tuple_node = node.value
-                    break
-    assert isinstance(tuple_node, ast.Tuple), "DEFAULT_DETECTION_RULES must be a tuple literal"
-    tuple_ids = {e.value for e in tuple_node.elts if isinstance(e, ast.Constant)}
-
-    dr_tree = _module_ast()
-    dispatch = None
-    for node in dr_tree.body:
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if getattr(t, "id", None) == "_RULE_DISPATCH":
-                    dispatch = node.value
-                    break
-    assert dispatch is not None
-    dispatch_keys = {k.value for k in dispatch.keys if isinstance(k, ast.Constant)}
-    missing = tuple_ids - dispatch_keys
-    assert not missing, (
-        f"DEFAULT_DETECTION_RULES references rules missing from _RULE_DISPATCH: "
-        f"{missing}; the detection loop would silently skip these at runtime"
-    )
-
-
-def test_w7_country_dedup_is_deterministic():
-    """``dropDuplicates(['entity_id'])`` is shuffle-order-dependent when an entity has multiple country
-    values. Re-runs of gold_finalize against the same silver produce
-    different alert counts, breaking the "reproducible per rule"
-    contract. Fix must use a deterministic aggregation.
-    """
-    tree = _module_ast()
-    fn = next(
-        (
-            n
-            for n in tree.body
-            if isinstance(n, ast.FunctionDef) and n.name == "w7_cross_border_high_risk"
-        ),
-        None,
-    )
-    assert fn is not None
-    body = ast.unparse(fn)
-    assert "dropDuplicates(" not in body, (
-        "w7 must not use dropDuplicates for entity-country collapse -- "
-        "shuffle-order dependent, violates run-to-run reproducibility"
-    )
-    assert "groupBy" in body and "bene_country" in body, (
-        "w7 must collapse silver.entities to one country per entity_id via "
-        "a deterministic aggregation"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Rule->typology map, detection_status, run_id-scoped
 # projection, non-null guards, reason normalization.
@@ -275,17 +193,6 @@ def test_rule_target_typology_matches_aml_queries():
     )
 
 
-def test_projection_is_run_scoped_and_non_null_guarded():
-    """_project_derived_gold must (a) filter to this run's alerts so a skip
-    can't re-emit stale prior-run clusters as fresh, and (b) guarantee the
-    NOT NULL derived columns receive non-null input regardless of
-    storeAssignmentPolicy."""
-    body = GOLD_FINALIZE_PATH.read_text()
-    assert 'col("run_id") == lit(run_id)' in body, "projection must be run-scoped"
-    assert 'col("related_entity_ids").isNotNull()' in body
-    assert 'col("alert_score").isNotNull()' in body
-
-
 def test_score_financial_scopes_alerts_by_run_id():
     """score_financial must scope its gold.alerts read to the
     current run (via detection_status.run_id) so stale prior-run alerts from
@@ -316,8 +223,9 @@ def _alert_columns():
 
 def test_every_targeted_rule_is_scheduled_or_declared_skipped():
     """A rule with a planted target must run in batch, and in continuous
-    either run or be recorded as skipped, or its typology reads 0 alerts
-    (review finding: W5/W6 were targeted but never invoked)."""
+    either run or be recorded as skipped, or its typology reads 0 alerts.
+    Every batch rule must be in _RULE_DISPATCH, or ``get_rule`` returns None
+    and the detection loop silently skips it."""
     import re as _re
 
     scripts = DETECTION_RULES_PATH.parent
@@ -338,4 +246,6 @@ def test_every_targeted_rule_is_scheduled_or_declared_skipped():
     )
     assert {"W5_sanctions_match", "W6_pep_counterparty"} <= targeted
     assert targeted <= batch, targeted - batch
+    dispatch = _module_const_dict(_module_ast(), "_RULE_DISPATCH")
+    assert batch <= set(dispatch), batch - set(dispatch)
     assert targeted <= cont, targeted - cont

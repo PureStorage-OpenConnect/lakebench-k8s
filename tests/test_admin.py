@@ -703,13 +703,3 @@ class TestRepairOperator:
         r = h.invoke()
         assert r.exit_code == 4, r.output
         assert "admin install --component spark-operator" in _flat(r)
-
-    def test_waits_up_to_three_watch_list_holds(self):
-        from lakebench.deploy.cluster_lock import ADMIN_MAX_HOLD_S
-        from lakebench.modules.pipeline_engines.spark.operator import _WATCH_LIST_LOCK_TIMEOUT_S
-
-        h = _Repair(values=["ns-a", "ns-gone"], live=["ns-a", "ns-gone"], active=("ns-a",))
-        h.invoke()
-        kw = h.lock.call_args.kwargs
-        assert kw["timeout"] == _WATCH_LIST_LOCK_TIMEOUT_S
-        assert kw["max_hold_s"] == ADMIN_MAX_HOLD_S

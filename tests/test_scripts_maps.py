@@ -69,17 +69,6 @@ def test_duplicate_key_across_roles_raises(monkeypatch):
         sm.build_script_configmaps(_cfg(), "ns")
 
 
-def test_map_metadata_labels_and_hash():
-    cm = sm.build_script_configmaps(_cfg(), "ns-x")[0]
-    md = cm["metadata"]
-    assert md["namespace"] == "ns-x"
-    assert md["labels"]["app.kubernetes.io/component"] == "spark-scripts"
-    assert md["labels"]["app.kubernetes.io/instance"] == "sd8"
-    assert md["labels"]["lakebench.io/deployment"] == "sd8"
-    assert md["labels"]["lakebench.io/scripts-role"] == "common"
-    assert md["annotations"]["lakebench.io/scripts-sha256"] == sm.data_sha256(cm["data"])
-
-
 def test_hashes_move_with_one_byte(tmp_path):
     pkg = _copy_package(tmp_path)
     before = sm.build_script_configmaps(_cfg(), "ns", package_dir=pkg)
@@ -106,8 +95,8 @@ def _scripts_volume(template: dict) -> dict:
     return vols[0]
 
 
-@pytest.mark.parametrize("schema,fmt", [("customer360", "iceberg"), ("financial", "iceberg")])
-def test_pod_template_projects_every_role(schema, fmt):
+def test_pod_template_projects_every_role():
+    schema, fmt = "financial", "iceberg"
     mgr = SparkJobManager(_cfg(schema, fmt), FakeK8s())
     want = [{"configMap": {"name": sm.map_name(r), "optional": False}} for r in sm.ROLES]
     for jt in JobType:

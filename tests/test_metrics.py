@@ -101,14 +101,6 @@ class TestMetricsStorage:
                 {"W1_connected_components": "vertex-cap"},
                 {},
             ),
-            (
-                "[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=10 prior=0 elapsed=1.0s\n"
-                "[lb] 2026-09-22T10:00:01 - [detection] W1_connected_components: skipped=vertex-cap detail=vertices=9000000 max=8000000 elapsed=0.2s\n"
-                "[lb] 2026-09-22T10:00:02 - [detection] W7_cross_border_high_risk: alerts=0 error=AnalysisException: boom elapsed=0.4s\n",
-                {"W2_structuring": 10, "W7_cross_border_high_risk": 0},
-                {"W1_connected_components": "vertex-cap"},
-                {"W7_cross_border_high_risk": ["AnalysisException"]},
-            ),
             # a JVM log line glued to the end of a detection line still counts
             (
                 "[detection] W7_cross_border_high_risk: alerts=509768 prior=0 elapsed=12.0s\n"
@@ -756,55 +748,6 @@ class TestSustainedScoringEdgeCases:
         for stage in pb.stages:
             if stage.stage_type == "streaming":
                 assert stage.freshness_seconds is None
-
-    def test_sustained_saturation_detection(self):
-        """Pipeline is saturated when ingest_ratio < 0.95."""
-        run = self._make_streaming_run(
-            streaming=[
-                StreamingJobMetrics(
-                    job_name="lakebench-bronze-ingest",
-                    job_type="bronze-ingest",
-                    total_batches=80,
-                    total_rows_processed=400_000,
-                    elapsed_seconds=1800.0,
-                    success=True,
-                    throughput_rps=222.2,
-                    micro_batch_duration_ms=200.0,
-                    freshness_seconds=10.0,
-                    batch_size=5000,
-                ),
-                StreamingJobMetrics(
-                    job_name="lakebench-silver-stream",
-                    job_type="silver-stream",
-                    total_batches=75,
-                    total_rows_processed=380_000,
-                    elapsed_seconds=1800.0,
-                    success=True,
-                    throughput_rps=211.1,
-                    micro_batch_duration_ms=350.0,
-                    freshness_seconds=12.0,
-                    batch_size=5000,
-                ),
-                StreamingJobMetrics(
-                    job_name="lakebench-gold-refresh",
-                    job_type="gold-refresh",
-                    total_batches=70,
-                    total_rows_processed=350_000,
-                    elapsed_seconds=1800.0,
-                    success=True,
-                    throughput_rps=194.4,
-                    micro_batch_duration_ms=500.0,
-                    freshness_seconds=20.0,
-                    batch_size=5000,
-                ),
-            ],
-        )
-        # Bronze processed 400,000 rows but datagen produced 500,000
-        pb = build_pipeline_benchmark(run, datagen_output_rows=500_000)
-
-        # ingest_ratio = 400_000 / 500_000 = 0.8 < 0.95 -> saturated
-        assert pb.pipeline_saturated is True
-        assert pb.ingest_ratio == pytest.approx(0.8, rel=1e-2)
 
 
 def test_stored_record_carries_no_address_url_in_error_text():

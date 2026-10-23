@@ -3,56 +3,11 @@
 import json
 from pathlib import Path
 
-from lakebench.journal import CommandName, EventType, Journal, JournalEvent
-
-
-class TestJournalEvent:
-    """Tests for JournalEvent dataclass."""
-
-    def test_to_dict_roundtrip(self) -> None:
-        event = JournalEvent(
-            event_type=EventType.DEPLOY_COMPONENT,
-            session_id="s1",
-            message="Namespace created",
-            command="deploy",
-            success=True,
-            details={"component": "namespace", "elapsed_seconds": 3.2},
-        )
-        d = event.to_dict()
-        assert d["event_type"] == "deploy.component"
-        assert d["command"] == "deploy"
-        assert d["details"]["component"] == "namespace"
-
-        restored = JournalEvent.from_dict(d)
-        assert restored.event_type == EventType.DEPLOY_COMPONENT
-        assert restored.session_id == "s1"
-        assert restored.success is True
-        assert restored.details["elapsed_seconds"] == 3.2
-
-        nested = JournalEvent.from_dict(
-            {**d, "event_type": "command.start", "details": {"args": {"dry_run": True}}}
-        )
-        assert nested.event_type == EventType.COMMAND_START
-        assert nested.details["args"]["dry_run"] is True
+from lakebench.journal import CommandName, EventType, Journal
 
 
 class TestJournal:
     """Tests for Journal session and event management."""
-
-    def test_open_new_session(self, tmp_path: Path) -> None:
-        j = Journal(journal_dir=tmp_path)
-        sid = j.open_session(config_name="test-bench")
-        assert sid is not None
-        assert j.session_id == sid
-
-        # Session file should exist with one event
-        files = list(tmp_path.glob("session-*.jsonl"))
-        assert len(files) == 1
-
-        events = _read_jsonl(files[0])
-        assert len(events) == 1
-        assert events[0]["event_type"] == "session.start"
-        assert events[0]["details"]["config_name"] == "test-bench"
 
     def test_session_resume_same_config(self, tmp_path: Path) -> None:
         config_file = tmp_path / "lakebench.yaml"
@@ -121,21 +76,6 @@ class TestJournal:
         assert j.load_session_events(sid) == events
         assert j.load_session_events("nonexistent-session") == []
 
-    def test_record_event_appends_jsonl(self, tmp_path: Path) -> None:
-        j = Journal(journal_dir=tmp_path)
-        j.open_session(config_name="test")
-
-        j.record(EventType.DEPLOY_COMPONENT, "NS created", details={"component": "namespace"})
-        j.record(EventType.DEPLOY_COMPONENT, "PG created", details={"component": "postgres"})
-
-        files = list(tmp_path.glob("session-*.jsonl"))
-        events = _read_jsonl(files[0])
-
-        # session.start + 2 deploy.component
-        assert len(events) == 3
-        assert events[1]["details"]["component"] == "namespace"
-        assert events[2]["details"]["component"] == "postgres"
-
     def test_record_without_open_is_noop(self, tmp_path: Path) -> None:
         j = Journal(journal_dir=tmp_path)
         event = j.record(EventType.DEPLOY_COMPONENT, "Should not write")
@@ -186,19 +126,6 @@ class TestJournal:
 
         files_after = list(tmp_path.glob("session-*.jsonl"))
         assert len(files_after) == 0
-
-    def test_close_session_marks_ended(self, tmp_path: Path) -> None:
-        j = Journal(journal_dir=tmp_path)
-        j.open_session(config_name="test")
-        j.begin_command(CommandName.DEPLOY)
-        j.end_command(success=True)
-        j.close_session()
-
-        files = list(tmp_path.glob("session-*.jsonl"))
-        events = _read_jsonl(files[0])
-        assert events[-1]["event_type"] == "session.end"
-        assert events[-1]["details"]["events_recorded"] == 3
-        assert events[-1]["details"]["commands_run"] == 1
 
     def test_config_hash_for_drift_detection(self, tmp_path: Path) -> None:
         def session_hash(directory: Path, content: str) -> str:

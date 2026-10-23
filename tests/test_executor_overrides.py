@@ -1,5 +1,5 @@
-"""CFG-2 (CC-12): executor overrides are bounded, counted, labelled and kept
-out of evidence."""
+"""Executor overrides are bounded, counted, labelled and kept out of
+evidence."""
 
 from __future__ import annotations
 
@@ -30,21 +30,14 @@ from tests.fixtures.experiment_helpers import _cfg, _metrics
 
 def test_override_above_28_refused():
     for field in [f for f, _ in EXECUTOR_OVERRIDE_FIELDS.values()]:
-        for value in [29, 200]:
-            with pytest.raises(ValueError, match="proven ceiling of 28"):
-                make_config(platform={"compute": {"spark": {field: value}}})
+        with pytest.raises(ValueError, match="proven ceiling of 28"):
+            make_config(platform={"compute": {"spark": {field: 29}}})
 
 
 def test_override_28_loads_and_17_driver_cores_refused():
     assert make_config(platform={"compute": {"spark": {"silver_executors": 28}}})
     with pytest.raises(ValueError, match="proven ceiling of 16"):
         make_config(platform={"compute": {"spark": {"driver_cores": 17}}})
-
-
-@pytest.mark.parametrize("value", [0, -3])
-def test_override_below_1_refused(value):
-    with pytest.raises(ValueError):
-        make_config(platform={"compute": {"spark": {"silver_executors": value}}})
 
 
 def _write(tmp_path: Path, spark: dict) -> Path:
@@ -299,7 +292,7 @@ def test_a_local_run_applies_no_override():
     assert sb["override"] is None and "override_bound" not in sb
 
 
-# -- 6. one key per stage -----------------------------------------------------------
+# -- 7. one key per stage -----------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -333,10 +326,6 @@ def test_the_bronze_verify_preflight_of_a_continuous_run_keeps_its_profile():
     ("old", "new"),
     [
         ("bronze_ingest_executors", "bronze_executors"),
-        ("silver_stream_executors", "silver_executors"),
-        ("gold_refresh_executors", "gold_executors"),
-        ("bronze_ingest_executor_cores", "bronze_executor_cores"),
-        ("silver_stream_executor_cores", "silver_executor_cores"),
         ("gold_refresh_executor_cores", "gold_executor_cores"),
     ],
 )

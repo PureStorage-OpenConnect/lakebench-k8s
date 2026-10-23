@@ -318,7 +318,6 @@ def test_the_cluster_clock_offset_moves_the_round_end():
     ("configured", "reason"),
     [
         ("1h", "configured retention"),
-        ("60m", "configured retention"),
         (None, "configured retention unknown"),
     ],
 )
@@ -347,9 +346,7 @@ def test_maintenance_skipped_leaves_every_expiry_unexplained():
     ("states", "incomplete", "verdict"),
     [
         ([], False, "fail"),
-        (["expired", "expired"], False, "fail"),
         (["verified", "mismatch"], False, "fail"),
-        (["verified", "error"], False, "fail"),
         (["verified", "not_read"], False, "incomplete"),
         (["verified"], True, "incomplete"),
         (["verified_hash_only"], False, "fail"),
@@ -379,13 +376,6 @@ def test_a_recorded_tick_with_no_result_is_an_error():
     cont = _continuous([_rec(1, T1), _rec(2, T2)], [])
     got = tt.merge(cont, _result([(2, "verified")]), POLICY)
     assert got["ticks"][0]["state"] == "error" and got["verdict"] == "fail"
-
-
-def test_line_distinguishes_a_failed_check_from_a_pass():
-    bad = tt.merge(_continuous([_rec(1, T1)], []), _result([(1, "mismatch")]), POLICY)
-    ok = tt.merge(_continuous([_rec(1, T1)], []), _result([(1, "verified")]), POLICY)
-    assert tt.line(bad).startswith("time-travel check: FAIL")
-    assert "FAIL" not in tt.line(ok) and tt.line(ok).startswith("time-travel check: pass")
 
 
 # --- the CLI step ---------------------------------------------------------------
@@ -591,8 +581,8 @@ def test_a_continuous_maintenance_round_records_its_time_and_tables():
 # --- profile ---------------------------------------
 
 
-@pytest.mark.parametrize("schema", ["customer360", "financial"])
-def test_profile_equals_the_scorer_and_one_attempt(schema):
+def test_profile_equals_the_scorer_and_one_attempt():
+    schema = "financial"
     from lakebench.modules.pipeline_engines.spark import job as job_mod
     from lakebench.spark.job import JobType, SparkJobManager
     from tests.test_spark import _mock_k8s

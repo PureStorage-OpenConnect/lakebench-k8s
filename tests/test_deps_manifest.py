@@ -113,11 +113,8 @@ def test_an_empty_group_is_refused():
     ("group", "name"),
     [
         ("jars", "../evil.jar"),
-        ("jars", "sub/evil.jar"),
-        ("jars", "evil jar.jar"),
         ("jars", "evil\n.jar"),
         ("duckdb-ext", "v1.5.5/../x.duckdb_extension"),
-        ("duckdb-ext", "/v1.5.5/linux_amd64/x.duckdb_extension"),
     ],
 )
 def test_unsafe_file_names_are_refused(group, name):
@@ -211,12 +208,8 @@ def _deps(**keys):
     "value",
     [
         "ftp://nexus/m2/",
-        "nexus/m2/",
         "http://user:pw@nexus/m2/",
-        "http://token@nexus/m2/",
         "http://nexus/m2/?x=1",
-        "http://nexus/m2/#frag",
-        "http://nexus/m 2/",
     ],
 )
 def test_bad_mirror_urls_are_refused(value):

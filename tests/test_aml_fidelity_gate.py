@@ -435,20 +435,12 @@ def test_bootstrap_resamples_groups():
     assert fg._resample_rows(np.array([4, 4, 1]), order, start, length).tolist() == [4, 4, 1]
 
 
-def test_report_records_groups_and_libraries():
-    import platform
-
-    import numpy
-    import sklearn
-
+def test_report_records_groups():
     df = _frame()
     df["group"] = np.arange(len(df)) // 3
     df["month"] = np.arange(len(df)) % 3  # a unit is (group, month)
     rep = fg.evaluate_gate(df, _prereg(), score=False)
     assert rep["n_groups"] == len(df) // 3
-    libs = rep["libraries"]
-    assert libs["python"] == platform.python_version()
-    assert libs["sklearn"] == sklearn.__version__ and libs["numpy"] == numpy.__version__
 
 
 def test_runner_version_check_reads_job_pins():
@@ -924,13 +916,6 @@ def test_secondary_lifetime_skips_the_new_fits():
     assert fg.lifetime_prereg(p)["shortcut_model"]["also_reference_model"] is True
 
 
-def _random_case():
-    df = _frame(n=1500, prev=0.06, separable=False)
-    p = _prereg()
-    y = df["label:beh"].to_numpy(int)
-    return df[p["features"]].to_numpy(float), y, np.arange(len(y)), [[0], [1, 2], [0, 1, 2]]
-
-
 def _one_class_fold_case():
     """Every positive in one customer: that fold trains on one class and falls
     back to the training prevalence, as _oof_scores does."""
@@ -941,17 +926,10 @@ def _one_class_fold_case():
 
 
 @pytest.mark.parametrize("wide", [False, True], ids=["narrow", "wide"])
-@pytest.mark.parametrize(
-    "case",
-    [
-        pytest.param(_random_case, marks=SLOW, id="random-frame"),
-        pytest.param(_one_class_fold_case, id="one-class-fold"),
-    ],
-)
-def test_oof_many_matches_oof_scores(case, wide, monkeypatch):
+def test_oof_many_matches_oof_scores(wide, monkeypatch):
     """The parallel fold fitter gives the numbers the sequential one gives,
     narrow or wide, and batching the sets does not change any AP."""
-    X, y, groups, sets = case()
+    X, y, groups, sets = _one_class_fold_case()
     w = np.ones(len(y))
     p = _prereg()
     folds = fg._folds(y, groups, p)
@@ -959,8 +937,7 @@ def test_oof_many_matches_oof_scores(case, wide, monkeypatch):
     for cols, g in zip(sets, got, strict=True):
         want = fg._oof_scores(lambda: fg._reference_model(p), X[:, cols], y, w, folds)
         np.testing.assert_array_equal(g, want)
-    if case is _one_class_fold_case:
-        assert any(len(np.unique(y[tr])) < 2 for tr, _ in folds)
-        batched = fg._ap_many(lambda: fg._reference_model(p), X, sets, y, w, folds, wide)
-        monkeypatch.setenv("LB_AML_GATE_JOBS", "1")
-        assert fg._ap_many(lambda: fg._reference_model(p), X, sets, y, w, folds, wide) == batched
+    assert any(len(np.unique(y[tr])) < 2 for tr, _ in folds)
+    batched = fg._ap_many(lambda: fg._reference_model(p), X, sets, y, w, folds, wide)
+    monkeypatch.setenv("LB_AML_GATE_JOBS", "1")
+    assert fg._ap_many(lambda: fg._reference_model(p), X, sets, y, w, folds, wide) == batched

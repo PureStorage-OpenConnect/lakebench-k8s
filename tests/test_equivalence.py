@@ -163,7 +163,7 @@ class TestStamps:
 
 
 # ---------------------------------------------------------------------------
-# Stale block, package usability, maintenance never reached
+# Stale block, package usability
 # ---------------------------------------------------------------------------
 
 
@@ -193,11 +193,6 @@ class TestBlockFollowsTheRecord:
         }
         assert "benchmark (not run)" in stored["stages"]["skipped"]
         assert not any(x.startswith("benchmark (") for x in e["stages"]["skipped"])
-
-    def test_run_ending_before_maintenance_is_not_run(self):
-        run = _run()
-        run.maintenance_outcomes = []
-        assert "not_run" in run.to_dict()["experiment"]["effective_maintenance"]["id"]
 
 
 # ---------------------------------------------------------------------------

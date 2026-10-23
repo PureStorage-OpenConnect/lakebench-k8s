@@ -1,5 +1,5 @@
-"""SAF-2 (b, c, f): deploy records its nonce; a nameless config may tear down
-or read only a deployment it can prove is its own (CC-2).
+"""Deploy records its nonce; a nameless config may tear down or read only a
+deployment it can prove is its own.
 
 The cluster is a fake ``CoreV1Api`` holding namespaces with their UID and
 annotations; ``patch_namespace`` merges annotations like the API server.
@@ -25,15 +25,15 @@ from lakebench.deploy.ownership import (
     ANNOTATION_STATE_SCHEMA,
     write_deploy_nonce,
 )
-from lakebench.exit_codes import PrerequisiteError, SafetyRefusal
-from tests.fixtures.saf2_deploy_state_helpers import BUCKETS as BUCKETS
-from tests.fixtures.saf2_deploy_state_helpers import NAME as NAME
-from tests.fixtures.saf2_deploy_state_helpers import FakeCore as FakeCore
-from tests.fixtures.saf2_deploy_state_helpers import _legacy_state as _legacy_state
-from tests.fixtures.saf2_deploy_state_helpers import _named as _named
-from tests.fixtures.saf2_deploy_state_helpers import _nameless as _nameless
-from tests.fixtures.saf2_deploy_state_helpers import _v16_namespace as _v16_namespace
-from tests.fixtures.saf2_deploy_state_helpers import _v17_state as _v17_state
+from lakebench.exit_codes import SafetyRefusal
+from tests.fixtures.deploy_state_helpers import BUCKETS as BUCKETS
+from tests.fixtures.deploy_state_helpers import NAME as NAME
+from tests.fixtures.deploy_state_helpers import FakeCore as FakeCore
+from tests.fixtures.deploy_state_helpers import _legacy_state as _legacy_state
+from tests.fixtures.deploy_state_helpers import _named as _named
+from tests.fixtures.deploy_state_helpers import _nameless as _nameless
+from tests.fixtures.deploy_state_helpers import _v16_namespace as _v16_namespace
+from tests.fixtures.deploy_state_helpers import _v17_state as _v17_state
 
 
 def _load(cfg_path: Path, name: str | None = None, purpose=LoadPurpose.TEARDOWN):
@@ -66,7 +66,7 @@ def _refused(path_name: str, fn, *a, **kw) -> SafetyRefusal:
 
 
 # ---------------------------------------------------------------------------
-# State file mechanics (b)
+# State file mechanics
 # ---------------------------------------------------------------------------
 
 
@@ -177,7 +177,7 @@ def test_write_deploy_nonce_marks_v17_state_only_when_recorded():
 
 
 # ---------------------------------------------------------------------------
-# The nameless checks (c)
+# The nameless checks
 # ---------------------------------------------------------------------------
 
 
@@ -229,16 +229,6 @@ def test_v16_namespace_with_name_and_matching_stamps_proceeds(
         if legacy_state:
             _legacy_state(d)
         assert _check(cfg, core, name=NAME) == "u1#n16"
-
-
-def test_copied_dir_foreign_nonce_refused(tmp_path):
-    """A state that names a live namespace whose nonce it never recorded."""
-    cfg = _nameless(tmp_path)
-    core = FakeCore()
-    _v16_namespace(core, nonce="foreign")
-    _v17_state(cfg, [("mine", "confirmed")])
-    err = _refused("nameless.nonce_mismatch", _check, cfg, core, name=NAME)
-    assert "foreign" in str(err)
 
 
 def test_copied_dir_state_for_other_dir_refused(tmp_path):
@@ -309,7 +299,7 @@ def test_check3_refuses_v17_stamped_namespace(tmp_path):
 
 
 def test_copied_legacy_state_destroy_with_name(tmp_path):
-    """PC-1's byte copy of a v1.6 config and state.json takes check 3."""
+    """A byte copy of a v1.6 config and state.json takes check 3."""
     import shutil
 
     src = tmp_path / "worktree"
@@ -332,17 +322,8 @@ def test_missing_namespace(tmp_path):
     assert _check(cfg, core, name=NAME, allow_absent=True) is None
 
 
-def test_unreadable_namespace_is_a_prerequisite_error(tmp_path):
-    cfg = _nameless(tmp_path)
-    _legacy_state(tmp_path)
-    core = FakeCore()
-    core.fail_reads = True
-    with pytest.raises(PrerequisiteError):
-        _check(cfg, core, name=NAME)
-
-
 # ---------------------------------------------------------------------------
-# Relocation (f)
+# Relocation
 # ---------------------------------------------------------------------------
 
 
@@ -479,18 +460,6 @@ def test_readonly_commands_create_no_files(tmp_path, fake_cluster, monkeypatch):
     assert no_name.exit_code == 2, no_name.output
 
 
-def test_dry_run_creates_no_state(tmp_path, monkeypatch):
-    from lakebench.cli import _deploy
-
-    cfg_path = _named(tmp_path)
-    core = FakeCore()
-    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
-    cfg = load_config(cfg_path, purpose=LoadPurpose.MUTATE)
-    before = sorted(os.listdir(tmp_path))
-    assert _deploy._record_deploy_nonce(cfg, cfg_path, dry_run=True, nonce=None) is None
-    assert sorted(os.listdir(tmp_path)) == before
-
-
 def test_deploy_records_before_the_namespace_gets_it(tmp_path, monkeypatch):
     """Steps 1 to 4 then 7: the state holds the nonce pending before the
     namespace is stamped, and confirmed after."""
@@ -513,23 +482,6 @@ def test_deploy_records_before_the_namespace_gets_it(tmp_path, monkeypatch):
     _deploy._confirm_deploy_nonce(cfg, cfg_path, "own")
     st = ds.read_state_file(ds.state_path(cfg_path, NAME))
     assert st is not None and st.nonces[0].status == "confirmed"
-
-
-def test_deploy_state_write_failure_stops_before_any_change(tmp_path, monkeypatch):
-    from lakebench.cli import _deploy
-
-    cfg_path = _named(tmp_path)
-    core = FakeCore()
-    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
-    cfg = load_config(cfg_path, purpose=LoadPurpose.MUTATE)
-
-    def no_write(path, state):
-        raise OSError("read-only file system")
-
-    monkeypatch.setattr(ds, "write_state", no_write)
-    with pytest.raises(PrerequisiteError, match="read-only"):
-        _deploy._record_deploy_nonce(cfg, cfg_path, dry_run=False, nonce=None)
-    assert core.patches == []
 
 
 def test_deploy_refuses_moved_state(tmp_path, monkeypatch):

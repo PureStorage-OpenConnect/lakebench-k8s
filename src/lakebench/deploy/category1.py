@@ -21,7 +21,7 @@ needs them.
 surviving namespace, each with its reason.
 
 Every WI that makes a namespaced object adds its entry in the same change;
-``tests/test_category1_teardown.py`` runs deploy and the run-time creators
+``tests/test_teardown_paths.py`` runs deploy and the run-time creators
 under the recording fake and fails on an object nothing deletes. Objects
 Spark creates at run time (driver Services, ``spark-drv-*`` ConfigMaps,
 OnDemand scratch PVCs) carry ownerReferences to the driver pod and are

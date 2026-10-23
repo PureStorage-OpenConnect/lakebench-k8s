@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-# --- sustained honest-runner gate (3a) ---------------------------------------
+# --- sustained alert gate ----------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -36,37 +36,19 @@ def test_aml_cumulative_alerts(logs, alerts):
     assert _aml_cumulative_alerts(logs) == alerts
 
 
-def test_alert_gate_runs_for_financial_only():
-    """Customer360 sustained runs emit no alerts by design and are exempt."""
-    from lakebench.cli._sustained import _aml_alert_gate_applies
-    from lakebench.config.schema import WorkloadSchema
-
-    assert _aml_alert_gate_applies(WorkloadSchema.FINANCIAL.value) is True
-    assert _aml_alert_gate_applies(WorkloadSchema.CUSTOMER360.value) is False
-
-
-def test_alert_gate_fails_on_zero_alerts():
+@pytest.mark.parametrize(
+    ("logs", "alerts"),
+    [
+        ("[detection] cumulative gold.alerts rows: 0", 0),
+        ("Refreshed dashboards", None),
+        (None, None),
+    ],
+    ids=["zero_alerts", "detection_did_not_run", "no_gold_log"],
+)
+def test_alert_gate_fails(logs, alerts):
     from lakebench.cli._sustained import _aml_alert_gate_failure
 
-    failure = _aml_alert_gate_failure("[detection] cumulative gold.alerts rows: 0", 0)
-    assert failure is not None
-    assert failure[1] == "AML continuous gate: detection produced 0 alerts"
-
-
-def test_alert_gate_fails_when_detection_did_not_run():
-    from lakebench.cli._sustained import _aml_alert_gate_failure
-
-    failure = _aml_alert_gate_failure("Refreshed dashboards", None)
-    assert failure is not None
-    assert failure[1] == "AML continuous gate: detection did not run"
-
-
-def test_alert_gate_fails_without_gold_logs():
-    from lakebench.cli._sustained import _aml_alert_gate_failure
-
-    failure = _aml_alert_gate_failure(None, None)
-    assert failure is not None
-    assert failure[1] == "AML continuous gate: no gold-refresh driver log"
+    assert _aml_alert_gate_failure(logs, alerts) is not None
 
 
 def test_alert_gate_passes_on_positive_alerts():

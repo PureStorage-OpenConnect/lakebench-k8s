@@ -69,29 +69,27 @@ class TestParse:
         assert got is None and secs == 0.1 and why == "Table not found"
 
     def test_malformed_is_unavailable(self):
-        for mutate, problem in [
+        def oversized(b):
+            b["by_rule"] = {"W2_structuring": {"rows": 8, "h": "9" * 5000}}
+            b["rows"], b["h"] = 8, "9" * 5000
+
+        cases = [
             (lambda b: b.update(rows=b["rows"] + 1), "rows is not the sum"),
             (lambda b: b.update(h=str(int(b["h"]) + 1)), "h is not the sum"),
             (lambda b: b.pop("by_rule"), "missing by_rule"),
             (lambda b: b["by_rule"]["W2_structuring"].update(h="x"), "by_rule[W2_structuring]"),
             (lambda b: b.update(rows=True), "rows or h"),
             (lambda b: b.update(spec=""), "spec"),
-        ]:
+            (oversized, "malformed"),
+        ]
+        lines = [("LB_ALERT_SET {not json}", "not valid JSON")]
+        for mutate, problem in cases:
             body = copy.deepcopy(ASET)
             mutate(body)
-            got, _s, why = als.parse_alert_set(_line(body))
+            lines.append((_line(body), problem))
+        for line, problem in lines:
+            got, _s, why = als.parse_alert_set(line)
             assert got is None and why is not None and problem in why
-
-    def test_bad_json(self):
-        got, _s, why = als.parse_alert_set("LB_ALERT_SET {not json}")
-        assert got is None and "not valid JSON" in why
-
-    def test_oversized_hash_is_malformed_not_a_crash(self):
-        body = copy.deepcopy(ASET)
-        body["by_rule"] = {"W2_structuring": {"rows": 8, "h": "9" * 5000}}
-        body["rows"], body["h"] = 8, "9" * 5000
-        got, _s, why = als.parse_alert_set(_line(body))
-        assert got is None and "malformed" in why
 
     def test_bad_seconds_dropped(self):
         _g, secs, _w = als.parse_alert_set(_line(ASET, seconds=-1))

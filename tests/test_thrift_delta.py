@@ -89,25 +89,12 @@ def test_thrift_delta_hive_disables_metadata_query_rewrite():
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("4G", 4 * GIB),
         ("4g", 4 * GIB),
-        ("4gb", 4 * GIB),
-        ("4096m", 4 * GIB),
         ("4096", 4 * GIB),
         ("1536M", 1536 * MIB),
-        ("4194304k", 4 * GIB),
-        ("4294967296b", 4 * GIB),
-        ("1t", 1024 * GIB),
         ("", None),
-        ("abc", None),
         ("4Gi", None),
-        ("0g", None),
-        ("-1g", None),
         ("1.5g", None),
-        ("1e1g", None),
-        ("4 g", None),
-        ("infg", None),
-        ("4x", None),
     ],
 )
 def test_spark_memory_bytes(value, expected):

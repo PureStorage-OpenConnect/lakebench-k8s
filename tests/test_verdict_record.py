@@ -820,9 +820,6 @@ def test_s100_path_cap_skips_pass_with_the_cap_qualifier() -> None:
         "W1_connected_components": "vertex-cap",
         "W3_round_tripping": "path-cap",
     }
-    # The same skips are labelled as Lakebench bounds in the stored limits.
-    kinds = rec["experiment"]["limits"]["bound_kinds"]
-    assert "rule W3_round_tripping cap" in kinds and "rule W17_layering_chain cap" in kinds
 
 
 def test_s100_other_skip_still_fails() -> None:

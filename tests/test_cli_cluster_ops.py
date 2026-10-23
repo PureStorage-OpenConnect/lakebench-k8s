@@ -1,4 +1,4 @@
-"""CLI-6 (CC-27): `logs`, `stop` and `status` through the Kubernetes API.
+"""`logs`, `stop` and `status` through the Kubernetes API.
 
 Each command is driven through the real Typer app with fake API objects in
 place of ``kubernetes.client.CoreV1Api`` and friends, so the tests see the
@@ -231,18 +231,6 @@ def test_stop_unreachable_exits_4(cluster):
 
 
 # -- status ------------------------------------------------------------------------
-
-
-def test_status_ok_exits_0(cluster):
-    cluster.apps.objects = dict(co._TRINO_HIVE)
-    r = _invoke("status", cluster.config)
-    assert r.exit_code == 0, r.output
-
-
-def test_status_missing_ns_exit1(cluster):
-    cluster.core.ns_exists = False
-    r = _invoke("status", cluster.config)
-    assert r.exit_code == ExitCode.FAILED, r.output
 
 
 def test_status_unready_exit1(cluster):

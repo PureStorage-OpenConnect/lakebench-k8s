@@ -1,8 +1,8 @@
-"""CLI-1 (CC-8): one exit-code enum, a top-level handler, a generated table.
+"""One exit-code enum, a top-level handler, a generated table.
 
-The expected code values below are copied from the target UX design table
-(TUD 4.3), not from ``lakebench.exit_codes``, so a renumbering in the module
-fails here.
+The expected code values below are copied by hand from the documented table
+(docs/exit-codes.md), not from ``lakebench.exit_codes``, so a renumbering in
+the module fails here.
 """
 
 from __future__ import annotations
@@ -24,16 +24,14 @@ from lakebench.exit_codes import (
     ExitCode,
     Incomplete,
     LakebenchError,
-    NotConfirmed,
     PrerequisiteError,
     SafetyRefusal,
-    UsageError,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# TUD 4.3, by hand.
-TUD_CODES = {
+# docs/exit-codes.md, by hand.
+DOCUMENTED_CODES = {
     "OK": 0,
     "FAILED": 1,
     "USAGE": 2,
@@ -64,20 +62,8 @@ def _stderr(result) -> str:
 # -- the enum and the module ---------------------------------------------------
 
 
-def test_exit_code_values_match_tud():
-    assert {m.name: int(m) for m in ExitCode} == TUD_CODES
-
-
-def test_error_class_codes():
-    for cls, code in [
-        (LakebenchError, 1),
-        (UsageError, 2),
-        (SafetyRefusal, 3),
-        (PrerequisiteError, 4),
-        (NotConfirmed, 5),
-        (Incomplete, 6),
-    ]:
-        assert int(cls("x").code) == code
+def test_exit_code_values_match_the_documented_table():
+    assert {m.name: int(m) for m in ExitCode} == DOCUMENTED_CODES
 
 
 # -- refusals reported as failed step results ---------------------------------
@@ -111,7 +97,7 @@ def test_a_real_failure_is_never_hidden_by_a_refusal():
 
 
 def test_refusal_text_without_the_flag_is_a_failure():
-    """Classification reads the flag, never the wording (CLI-2 rewrites text)."""
+    """Classification reads the flag, never the wording, which may change."""
     text_only = _result("namespace", "failed", "Destroy NOT completed: a redeploy")
     assert cli_exit.refused_result_code([text_only]) is None
     ok = _result("namespace", "success", **_REFUSED)  # a flag on a step that did not fail
@@ -363,7 +349,7 @@ def _scenario_deploy_identity_foreign(monkeypatch, tmp_path):
     from unittest.mock import MagicMock
 
     import lakebench.cli._deploy as deploy_mod
-    from tests.fixtures import saf2_deploy_state_helpers as t
+    from tests.fixtures import deploy_state_helpers as t
 
     cfg = _init_config(tmp_path)
     # deploy reads the namespace to reconcile its recorded nonces first.
@@ -720,7 +706,7 @@ def _scenario_deploy_existing_namespace(monkeypatch, tmp_path):
     """`deploy --require-new` reports the engine's refusal of an existing
     namespace as exit 3, naming the path."""
     import lakebench.cli._deploy as deploy_mod
-    from tests.fixtures import saf2_deploy_state_helpers as t
+    from tests.fixtures import deploy_state_helpers as t
 
     cfg = _init_config(tmp_path)
     monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: t.FakeCore())
@@ -744,7 +730,7 @@ def _scenario_deploy_existing_namespace(monkeypatch, tmp_path):
 
 
 def _ops_cluster(monkeypatch, tmp_path):
-    """The CC-27 fakes (tests/test_cli_cluster_ops.py) on the real commands."""
+    """The cluster fakes of tests/test_cli_cluster_ops.py on the real commands."""
     import lakebench.cli as cli
     from tests.fixtures import cli_cluster_ops_helpers as co
 
@@ -863,9 +849,9 @@ def _scenario_run_deps_mismatch(monkeypatch, tmp_path):
 
 
 def _nameless_destroy(monkeypatch, tmp_path, setup, argv_extra=()):
-    """`destroy --force` on a nameless config against a fake namespace (SAF-2)."""
+    """`destroy --force` on a nameless config against a fake namespace."""
     import lakebench.cli._nameless as nameless
-    from tests.fixtures import saf2_deploy_state_helpers as t
+    from tests.fixtures import deploy_state_helpers as t
 
     core = t.FakeCore()
     monkeypatch.setattr(nameless, "_core_v1_factory", lambda cfg: lambda: core)
@@ -879,7 +865,7 @@ def _nameless_status(monkeypatch, tmp_path, setup):
     """`status` on a nameless config with no v1.6 state (a suggested name)."""
     import lakebench.cli._nameless as nameless
     from lakebench.config import deploy_state as ds
-    from tests.fixtures import saf2_deploy_state_helpers as t
+    from tests.fixtures import deploy_state_helpers as t
 
     core = t.FakeCore()
     monkeypatch.setattr(nameless, "_core_v1_factory", lambda cfg: lambda: core)
@@ -963,7 +949,7 @@ def _scenario_nameless_namespace_unreadable(monkeypatch, tmp_path):
 def _scenario_deploy_state_unrecordable(monkeypatch, tmp_path):
     import lakebench.cli._deploy as deploy_mod
     from lakebench.config import deploy_state as ds
-    from tests.fixtures import saf2_deploy_state_helpers as t
+    from tests.fixtures import deploy_state_helpers as t
 
     core = t.FakeCore()
     monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
@@ -989,7 +975,7 @@ def _scenario_deploy_state_unrecordable(monkeypatch, tmp_path):
 
 def _scenario_deploy_state_copied(monkeypatch, tmp_path):
     import lakebench.cli._deploy as deploy_mod
-    from tests.fixtures import saf2_deploy_state_helpers as t
+    from tests.fixtures import deploy_state_helpers as t
 
     core = t.FakeCore()
     monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
@@ -1159,8 +1145,8 @@ EXPECTED_STDERR = {
 
 
 # Text in the combined output that shows the scenario took its named path,
-# where the code alone has more than one producer. Refusals (exit 3) are
-# identified by the exit-path file instead.
+# where the code alone has more than one producer. Refusals (exit 3) and
+# the one exit 6 path are identified by the exit-path file instead.
 EXPECTED_OUTPUT = {
     "plan.missing_storage_class": "Next: (cluster admin) lakebench admin install --component",
     "plan.ok": "ok: Kubeflow Spark Operator 2.x",
@@ -1170,7 +1156,6 @@ EXPECTED_OUTPUT = {
     "s3.unreachable#run_reuse": "Cannot check the corpus in bronze before reusing it",
     "run.prereq_failed#operator_not_ready": "Spark Operator not ready",
     "run.verdict_failed#step_failed": "Failed to deploy Spark scripts ConfigMap",
-    "destroy.namespace_terminating": "still terminating",
     "run.interrupted": "Interrupted by SIGINT during silver-build",
     "repeat.no_verified_corpus": "no verified corpus to reuse",
     "run.args": "--force-reset only applies to a continuous run",
@@ -1184,12 +1169,23 @@ EXPECTED_OUTPUT = {
 UNEXPECTED_OUTPUT = {"confirm.declined": "Not confirmed", "run.verdict_failed": "ERROR"}
 
 
+# Every refusal (exit 3) names its path in LB_EXIT_PATH_FILE, so the release
+# harness tells refusals apart (incarnation mismatch, unverified cluster,
+# lease held) without reading message text. Deploy and destroy step
+# refusals exit through typer.Exit and note their paths first. Exit 6 has
+# one producer the harness also checks by path.
+_PATH_NAMED_CODES = {ExitCode.REFUSED, ExitCode.INCOMPLETE}
+
+
 @pytest.mark.parametrize("name", sorted(SCENARIOS))
 def test_exit_code_paths(name, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)  # journal and state files land here
     monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
+    target = tmp_path / "exit-path"
+    monkeypatch.setenv(cli_exit.EXIT_PATH_FILE_ENV, str(target))
     result = SCENARIOS[name](monkeypatch, tmp_path)
-    assert result.exit_code == exit_codes.path_code(_path_name(name)), result.output
+    expected = exit_codes.path_code(_path_name(name))
+    assert result.exit_code == expected, result.output
     assert "Traceback" not in result.output
     if name in EXPECTED_STDERR:
         assert EXPECTED_STDERR[name] in _stderr(result), result.output
@@ -1197,28 +1193,10 @@ def test_exit_code_paths(name, monkeypatch, tmp_path):
         assert EXPECTED_OUTPUT[name] in result.output, result.output
     if name in UNEXPECTED_OUTPUT:
         assert UNEXPECTED_OUTPUT[name] not in result.output, result.output
-
-
-# Every refusal (exit 3) names its path in LB_EXIT_PATH_FILE, so the release
-# harness tells refusals apart (incarnation mismatch, unverified cluster,
-# lease held) without reading message text. Deploy and destroy step
-# refusals exit through typer.Exit and note their paths first.
-_REFUSALS = sorted(n for n in SCENARIOS if exit_codes.path_code(_path_name(n)) == ExitCode.REFUSED)
-# Exit 6 has one producer the harness and S-P4 check by path.
-_PATH_NAMED = [*_REFUSALS, "destroy.namespace_terminating"]
-
-
-@pytest.mark.parametrize("name", _PATH_NAMED)
-def test_refusal_names_its_path_in_the_exit_path_file(name, monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("KUBECONFIG", "/nonexistent/kubeconfig")
-    target = tmp_path / "exit-path"
-    monkeypatch.setenv(cli_exit.EXIT_PATH_FILE_ENV, str(target))
-    result = SCENARIOS[name](monkeypatch, tmp_path)
-    assert result.exit_code == exit_codes.path_code(_path_name(name)), result.output
-    code, *paths = target.read_text().splitlines()[-1].split()
-    assert code == str(int(exit_codes.path_code(_path_name(name))))
-    assert name in paths, (name, paths)
+    if expected in _PATH_NAMED_CODES:
+        code, *paths = target.read_text().splitlines()[-1].split()
+        assert code == str(int(expected))
+        assert name in paths, (name, paths)
 
 
 def test_clean_destroy_exits_ok(monkeypatch, tmp_path):

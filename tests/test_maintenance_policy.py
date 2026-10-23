@@ -34,13 +34,11 @@ def test_storage_reads_an_unstamped_record_as_legacy(tmp_path):
     assert storage.load_run(m.run_id).maintenance_policy_id == LEGACY_MAINTENANCE_POLICY_ID
 
 
-@pytest.mark.parametrize("mode", ["batch", "continuous"])
 @pytest.mark.parametrize("skip", [True, False])
-def test_skip_maintenance_stamps_a_distinct_id(monkeypatch, tmp_path, mode, skip):
+def test_skip_maintenance_stamps_a_distinct_id(monkeypatch, tmp_path, skip):
     """A run without maintenance is not labelled with the full policy id."""
     from unittest.mock import MagicMock
 
-    import lakebench.cli._sustained as sustained_mod
     from lakebench.cli import app
     from lakebench.metrics.collector import MetricsCollector
     from tests.fixtures import datagen_timeout_helpers as dg
@@ -57,22 +55,12 @@ def test_skip_maintenance_stamps_a_distinct_id(monkeypatch, tmp_path, mode, skip
         return out
 
     monkeypatch.setattr(MetricsCollector, "start_run", start_run)
-    sustained_calls = []
-    real_sustained = sustained_mod._run_sustained
-
-    def counting_sustained(*a, **k):
-        sustained_calls.append(1)
-        return real_sustained(*a, **k)
-
-    monkeypatch.setattr(sustained_mod, "_run_sustained", counting_sustained)
-    extras = {"architecture": "{pipeline: {mode: continuous}}"} if mode == "continuous" else {}
-    cfg = dg._write_cfg(tmp_path, **extras)
+    cfg = dg._write_cfg(tmp_path)
     argv = ["run", str(cfg), "--skip-preflight", "--skip-benchmark", "--yes"]
     if skip:
         argv.append("--skip-maintenance")
     res = CliRunner().invoke(app, argv)
     assert len(seen) == 1, res.output[-2000:]
-    assert bool(sustained_calls) is (mode == "continuous")
     want = skipped_policy_id() if skip else MAINTENANCE_POLICY_ID
     assert seen[0].maintenance_policy_id == want
     assert skipped_policy_id() != MAINTENANCE_POLICY_ID

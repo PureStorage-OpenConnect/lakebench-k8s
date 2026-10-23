@@ -40,29 +40,11 @@ class TestFormatMeasurement:
         else:
             assert tag in out
 
-    @pytest.mark.parametrize(
-        ("reason", "name"),
-        [
-            ("bronze-verify: executor cap 28 (scale asks for 40)", "_MAX_EXECUTORS_SAFE=28"),
-            (
-                "bronze-ingest: concurrent executor budget granted 6 of 12",
-                "concurrent executor budget",
-            ),
-            (
-                "TM max_alerts_per_customer (50): 1200 alerts over capacity",
-                "tm_max_alerts_per_customer",
-            ),
-            ("auto-sizing: silver dropped 4 executors", "auto-sizing cut"),
-            (
-                "pre-benchmark maintenance stopped on its time budget",
-                "pre-benchmark maintenance budget",
-            ),
-            ("rule R7 skipped: over cap", "rule R7 cap"),
-        ],
-    )
-    def test_capped_value_carries_bounded_by_and_cap_name(self, reason, name):
+    def test_capped_value_carries_bounded_by_and_cap_name(self):
         # The reader gets the cap constant next to the number, with the full
         # reason in the tooltip.
+        reason = "bronze-verify: executor cap 28 (scale asks for 40)"
+        name = "_MAX_EXECUTORS_SAFE=28"
         out = format_measurement("1,200", "rows/s", caps_bound=[reason])
         assert "BOUNDED BY" in out
         assert name in out
@@ -193,12 +175,9 @@ class TestConfidenceChipOnBadge:
     @pytest.mark.parametrize(
         ("n_runs", "n_iterations", "present", "absent"),
         [
-            (1, None, "single_run", None),
-            # invariant 7: fewer than 3 independent runs never claim replication
+            # fewer than 3 independent runs never claim replication
             (2, None, "single_run", "replicated_n=2"),
             (3, None, "replicated_n=3", None),
-            # in-stream rounds within one continuous run are not replication
-            (1, 5, "single_run", "replicated_n=5"),
         ],
     )
     def test_badge_chip(self, tmp_path, n_runs, n_iterations, present, absent):

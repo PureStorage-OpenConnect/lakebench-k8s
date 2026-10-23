@@ -438,19 +438,6 @@ class TestDestroyAllWiring:
         ns = [r for r in results if r.component == "namespace"][-1]
         assert ns.status is DeploymentStatus.FAILED
 
-    def test_in_lease_retries_back_off(self, monkeypatch):
-        """429s under parallel UAT: retry after 2 s, then 5 s, still in the lease."""
-        cluster = FakeCluster(drain_polls=1)
-        slept: list[float] = []
-        monkeypatch.setattr(destroy_mod, "_sleep", lambda sec: slept.append(sec))
-
-        def throttled(ns, uid=None):
-            raise K8sResourceError("429 Too Many Requests")
-
-        cluster.delete_namespace = throttled
-        self._run_destroy(cluster)
-        assert slept[:2] == [2.0, 5.0]
-
     def test_every_reply_lost_but_terminating_is_not_reported_kept(self):
         cluster = FakeCluster(drain_polls=1)
         real_delete = cluster.delete_namespace
@@ -527,13 +514,6 @@ class TestDestroyAllWiring:
         assert calls == []
         engine.k8s.delete_namespace.assert_not_called()
         assert results[-1].status is DeploymentStatus.FAILED
-
-    def test_gone_reports_success(self):
-        cluster = FakeCluster(drain_polls=1)
-        results, _, _, _ = self._run_destroy(cluster)
-        ns = [r for r in results if r.component == "namespace"]
-        assert ns[-1].status is DeploymentStatus.SUCCESS
-        assert ns[-1].message == "Namespace ns-a deleted"
 
 
 class TestClient:

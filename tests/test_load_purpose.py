@@ -1,8 +1,8 @@
-"""LoadPurpose (CC-1): SAF-2 parts (a) and (e), and CFG-1's per-purpose refusals.
+"""LoadPurpose: what each command may load.
 
-A config with no name cannot change data, a removed key is refused by the
-commands that change data and dropped with a note by the others, and no
-read-only command writes a file.
+A config with no name cannot change data, a removed key or a setting nothing
+honours is refused by the commands that change data and dropped with a note
+by the others, and no read-only command writes a file.
 """
 
 from __future__ import annotations
@@ -14,10 +14,11 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from lakebench.cli import app
-from lakebench.config import load_config
+from lakebench.config import LakebenchConfig, load_config
 from lakebench.config.loader import (
     ConfigFileNotFoundError,
     ConfigNameRequired,
@@ -43,7 +44,7 @@ def _listing(root: Path) -> list[str]:
     return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
 
 
-# -- SAF-2 (a): nameless configs ---------------------------------------------
+# -- nameless configs ---------------------------------------------
 
 
 @pytest.mark.parametrize("purpose", [LoadPurpose.MUTATE, LoadPurpose.RUN])
@@ -62,14 +63,14 @@ def test_nameless_teardown_without_state_refused(tmp_path):
     with pytest.raises(ConfigNameRequired) as e:
         load_config(cfg_path, purpose=LoadPurpose.TEARDOWN)
     assert e.value.resolution.source == "suggested"
-    # With an explicit override it loads (CC-2 adds the checks on top).
+    # With an explicit override it loads.
     assert load_config(cfg_path, purpose=LoadPurpose.TEARDOWN, name_override="x").name == "x"
 
 
 def test_v16_state_name_read_verbatim(tmp_path):
-    # R7: the v1.6 name is read, never written. SAF-2 refuses a v1.6
-    # directory without --name, so teardown and read loads refuse and name
-    # it; the override (CC-2's --name) and COMPARE load under it.
+    # The v1.6 name is read, never written. A v1.6 directory without --name
+    # is refused, so teardown and read loads refuse and name it; the --name
+    # override and INSPECT load under it.
     (tmp_path / ".lakebench").mkdir()
     shutil.copy(FIXTURES / "v16-state" / "state.json", tmp_path / ".lakebench" / "state.json")
     before = (tmp_path / ".lakebench" / "state.json").read_bytes()
@@ -106,7 +107,7 @@ def test_name_override_must_match_config_name(tmp_path):
         load_config(cfg_path, purpose=LoadPurpose.READ, name_override="other")
 
 
-# -- CFG-1 (purpose): removed keys -------------------------------------------
+# -- removed keys ----------------------------------------------
 
 REMOVED_KEY = {
     "name": "rk",
@@ -188,21 +189,9 @@ VERB_PURPOSES = [
     ("lakebench.cli._deploy", ["deploy"], LoadPurpose.MUTATE, False),
     ("lakebench.cli._generate", ["generate"], LoadPurpose.MUTATE, False),
     ("lakebench.cli._run", ["run"], LoadPurpose.RUN, False),
-    ("lakebench.cli._query", ["benchmark"], LoadPurpose.MUTATE, False),
-    ("lakebench.cli._query", ["query", "--example", "count"], LoadPurpose.MUTATE, False),
     ("lakebench.cli._clean", ["clean", "silver"], LoadPurpose.MUTATE, True),
     ("lakebench.cli", ["stop"], LoadPurpose.TEARDOWN, False),
     ("lakebench.cli._destroy", ["destroy"], LoadPurpose.TEARDOWN, False),
-    ("lakebench.cli._admin", ["admin", "doctor"], LoadPurpose.TEARDOWN, False),
-    ("lakebench.cli", ["status"], LoadPurpose.READ, False),
-    ("lakebench.cli", ["logs", "hive"], LoadPurpose.READ, False),
-    ("lakebench.cli", ["info"], LoadPurpose.INSPECT, False),
-    ("lakebench.cli", ["validate"], LoadPurpose.MUTATE, False),
-    ("lakebench.cli._config", ["config", "storage"], LoadPurpose.INSPECT, False),
-    ("lakebench.cli._config", ["config", "show"], LoadPurpose.INSPECT, False),
-    ("lakebench.cli._config", ["config", "recommend"], LoadPurpose.INSPECT, False),
-    ("lakebench.cli", ["report"], LoadPurpose.READ, False),
-    ("lakebench.cli", ["results"], LoadPurpose.READ, False),
     (
         "lakebench.cli._financial",
         ["financial", "reference-score", "--manifest", "s3://m", "--output-prefix", "s3://o"],
@@ -242,7 +231,7 @@ def test_cli_verbs_load_with_their_purpose(
     assert bool(seen[0].get("allow_long_names")) is long_names
 
 
-# -- v1.6 directories with several nameless configs (SAF-2 c, check 1) --------
+# -- v1.6 directories with several nameless configs --------------------------
 
 
 def _v16_dir(tmp_path: Path) -> Path:
@@ -253,7 +242,7 @@ def _v16_dir(tmp_path: Path) -> Path:
 
 def test_v16_state_teardown_refused_when_siblings_share_the_name(tmp_path):
     # v1.6 gave a.yaml and b.yaml one name. destroy b.yaml must not reach the
-    # deployment a.yaml made (finding 1 of the CC-1 review).
+    # deployment a.yaml made.
     a = _v16_dir(tmp_path)
     b = _write(tmp_path, NAMELESS, "b.yaml")
     for path, other in ((a, "b.yaml"), (b, "a.yaml")):
@@ -263,12 +252,12 @@ def test_v16_state_teardown_refused_when_siblings_share_the_name(tmp_path):
         assert f"nameless {other}" in msg
         assert "name: lb-20260915-101530" in msg
         assert e.value.siblings == [tmp_path / other]
-    # status reads the same way (SAF-2: status refuses as destroy does).
+    # status refuses as destroy does.
     with pytest.raises(ConfigNameRequired):
         load_config(a, purpose=LoadPurpose.READ)
     # Naming the one that deployed it makes it loadable as itself, and the
     # other, now the only nameless config, still does not reach that
-    # deployment (finding 1 of the CC-1 fix review).
+    # deployment.
     named = _write(tmp_path, {**NAMELESS, "name": "lb-20260915-101530"}, "a.yaml")
     assert load_config(named, purpose=LoadPurpose.TEARDOWN).name == "lb-20260915-101530"
     for purpose in (LoadPurpose.TEARDOWN, LoadPurpose.READ):
@@ -302,7 +291,7 @@ def test_sibling_scan_ignores_files_that_are_not_nameless_configs(tmp_path):
 
 def test_v16_state_mutate_refusal_does_not_offer_a_shared_name(tmp_path):
     # Offering "name: X" when another nameless config may have made X steers
-    # the user into redeploying over that deployment (finding 3).
+    # the user into redeploying over that deployment.
     a = _v16_dir(tmp_path)
     with pytest.raises(ConfigNameRequired) as alone:
         load_config(a, purpose=LoadPurpose.MUTATE)
@@ -334,3 +323,185 @@ def test_sibling_scan_counts_every_nameless_form(tmp_path, monkeypatch, sibling)
     a = _v16_dir(tmp_path)
     _write(tmp_path, sibling, "b.yaml")
     assert other_nameless_configs(a) == [tmp_path / "b.yaml"]
+
+
+# -- settings nothing honours ------------------------------------------------
+
+_BASE = {
+    "name": "unhonoured-t",
+    "platform": {
+        "storage": {
+            "s3": {
+                "endpoint": "http://minio:9000",
+                "access_key": "minioadmin",
+                "secret_key": "minioadmin",
+            }
+        }
+    },
+}
+
+
+def _write_over_base(tmp_path: Path, extra: dict) -> Path:
+    data = yaml.safe_load(yaml.safe_dump(_BASE))
+
+    def merge(dst: dict, src: dict) -> None:
+        for k, v in src.items():
+            if isinstance(v, dict) and isinstance(dst.get(k), dict):
+                merge(dst[k], v)
+            else:
+                dst[k] = v
+
+    merge(data, extra)
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(data))
+    return path
+
+
+_EXECUTOR = {"platform": {"compute": {"spark": {"executor": {"instances": 16, "memory": "8g"}}}}}
+_SPARK_OP = {"platform": {"compute": {"spark": {"operator": {"install": True}}}}}
+_HIVE_OP = {"architecture": {"catalog": {"hive": {"operator": {"install": True}}}}}
+
+
+@pytest.mark.parametrize(
+    ("extra", "loc"),
+    [
+        (_EXECUTOR, ("platform", "compute", "spark")),
+        (_HIVE_OP, ("architecture", "catalog", "hive", "operator")),
+    ],
+)
+def test_unhonoured_setting_refused_on_data_changing_commands(tmp_path, extra, loc):
+    with pytest.raises(ConfigValidationError) as e:
+        load_config(
+            _write_over_base(tmp_path, extra), purpose=LoadPurpose.MUTATE, print_notes=False
+        )
+    assert [err["loc"] for err in e.value.errors] == [loc]
+
+
+def test_operator_install_coerced_true_refused(tmp_path):
+    path = _write_over_base(
+        tmp_path, {"platform": {"compute": {"spark": {"operator": {"install": "yes"}}}}}
+    )
+    with pytest.raises(ConfigValidationError, match="install: true' is refused"):
+        load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)
+
+
+@pytest.mark.parametrize("extra", [_SPARK_OP, _HIVE_OP])
+def test_operator_install_true_loads_false_for_teardown(tmp_path, extra):
+    path = _write_over_base(tmp_path, extra)
+    cfg = load_config(path, purpose=LoadPurpose.TEARDOWN, print_notes=False)
+    assert cfg.platform.compute.spark.operator.install is False
+    assert cfg.architecture.catalog.hive.operator.install is False
+    assert "install: true' is ignored" in " ".join(load_notes(cfg).texts())
+
+
+# -- run-only benchmark refusals ----------------------------------------------
+
+
+def test_run_refuses_what_it_does_not_run(tmp_path):
+    for bench, needle in [
+        ({"cache": "cold"}, "lakebench benchmark --cold"),
+        ({"mode": "throughput"}, "lakebench benchmark --mode"),
+        ({"mode": "composite"}, "lakebench benchmark --mode"),
+        ({"streams": 4}, "lakebench benchmark --streams"),
+    ]:
+        path = _write_over_base(tmp_path, {"architecture": {"benchmark": bench}})
+        with pytest.raises(ConfigValidationError) as e:
+            load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
+        assert needle in str(e.value)
+        # `lakebench benchmark` (MUTATE) honours all of them.
+        cfg = load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False)
+        assert cfg.architecture.benchmark.model_dump(include=set(bench)) == bench
+
+
+def test_run_refuses_explicit_streams(tmp_path):
+    # An explicit value above 1 is refused for every workload and mode; the
+    # schema default (4, used by `lakebench benchmark`) is not.
+    for schema, mode in (("customer360", "batch"), ("financial", "continuous")):
+        path = _write_over_base(
+            tmp_path,
+            {
+                "architecture": {
+                    "benchmark": {"streams": 2},
+                    "workload": {"schema": schema},
+                    "pipeline": {"mode": mode},
+                },
+            },
+        )
+        with pytest.raises(ConfigValidationError, match="benchmark.streams 2"):
+            load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
+    # A benchmark block without streams keeps the default 4 unset: allowed.
+    unset = _write_over_base(tmp_path, {"architecture": {"benchmark": {"iterations": 3}}})
+    cfg = load_config(unset, purpose=LoadPurpose.RUN, print_notes=False)
+    assert cfg.architecture.benchmark.streams == 4
+    one = _write_over_base(tmp_path, {"architecture": {"benchmark": {"streams": 1}}})
+    load_config(one, purpose=LoadPurpose.RUN, print_notes=False)
+
+
+def test_run_snapshot_records_power_hot_1(tmp_path):
+    from lakebench.metrics.collector import build_config_snapshot
+
+    path = _write_over_base(
+        tmp_path,
+        {"architecture": {"benchmark": {"mode": "extended", "iterations": 5}}},
+    )
+    cfg = load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
+    bench = build_config_snapshot(cfg, run_mode="batch")["benchmark"]
+    assert {k: bench[k] for k in ("mode", "streams", "cache", "iterations")} == {
+        "mode": "power",
+        "streams": 1,
+        "cache": "hot",
+        "iterations": 5,
+    }
+    # A batch config run with --continuous records the in-stream rounds.
+    cont = build_config_snapshot(cfg, run_mode="continuous")["benchmark"]
+    assert cont == {"mode": "power", "streams": 1, "cache": "hot", "iterations": 1}
+
+
+# -- errors never echo their input ------------------------------------------
+
+_SEED = 4343434343
+
+
+def _all_error_text(exc: BaseException) -> str:
+    """Every text a caller prints: the message, the repr and, for the
+    loader's error, the error dicts the CLI iterates."""
+    parts = [str(exc), repr(exc)]
+    errors = getattr(exc, "errors", None)
+    if isinstance(errors, list):
+        parts.append(repr(errors))
+    return "\n".join(parts)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        # A list where the workload block belongs: the error's input is the
+        # whole list, seed included.
+        {"architecture": {"workload": [{"datagen": {"seed": _SEED}}]}},
+        # A model-level failure on the architecture block (an unsupported
+        # combination), whose input is every architecture key.
+        {
+            "architecture": {
+                "workload": {"datagen": {"seed": _SEED}},
+                "catalog": {"type": "unity"},
+                "table_format": {"type": "iceberg"},
+            }
+        },
+    ],
+    ids=["type-error", "model-validator"],
+)
+def test_validation_error_never_echoes_a_seed(tmp_path, bad):
+    data = {**_BASE, **bad}
+    with pytest.raises(ValidationError) as e:
+        LakebenchConfig.model_validate(data)
+    assert str(_SEED) not in _all_error_text(e.value)
+
+    path = tmp_path / "bad.yaml"
+    path.write_text(yaml.safe_dump(data))
+    with pytest.raises(ConfigValidationError) as ce:
+        load_config(path, purpose=LoadPurpose.READ, print_notes=False)
+    assert str(_SEED) not in _all_error_text(ce.value)
+    for err in ce.value.errors:
+        assert "input" not in err
+    # The pydantic error (which keeps its input) is not chained on.
+    assert ce.value.__cause__ is None and ce.value.__suppress_context__

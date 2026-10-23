@@ -1,5 +1,5 @@
 """Unknown config keys are rejected, documented deprecated spellings still load,
-and every shipped example validates (GOALS P5.3, WORKPLAN G1).
+and every shipped example validates.
 
 Before this, a misspelt key was dropped silently and the run went ahead on the
 default. The shipped local AML example carried three whole blocks that no code
@@ -150,3 +150,31 @@ def test_scratch_create_storage_class_is_dropped_with_warning(tmp_path):
     assert not hasattr(cfg.platform.storage.scratch, "create_storage_class")
     with pytest.raises(ConfigValidationError, match="'create_storage_class' was removed"):
         load_config(_write(tmp_path, data))
+
+
+def test_snapshot_records_the_configured_values():
+    from lakebench.metrics.collector import build_config_snapshot
+    from tests.conftest import make_config
+
+    cfg = make_config(
+        architecture={
+            "workload": {"schema": "customer360", "datagen": {"scale": 3}},
+            "benchmark": {"iterations": 5},
+            "query_engine": {"type": "trino", "trino": {"worker": {"replicas": 7}}},
+        },
+        platform={
+            "storage": {
+                "s3": {
+                    "endpoint": "http://minio:9000",
+                    "access_key": "minioadmin",
+                    "secret_key": "minioadmin",
+                }
+            },
+            "compute": {"spark": {"gold_executors": 6}},
+        },
+    )
+    snap = build_config_snapshot(cfg)
+    assert snap["scale"] == 3
+    assert snap["benchmark"]["iterations"] == 5
+    assert snap["trino"]["worker"]["replicas"] == 7
+    assert snap["spark"]["executor_overrides"]["gold"] == 6

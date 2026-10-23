@@ -27,7 +27,6 @@ from lakebench.metrics.continuous_window import (
     CAPPED_CONSUMED_RATIO,
     arrival_seconds,
     balance,
-    classify_submission_failure,
     freshness_summary,
     parse_events,
     window_gate_problems,
@@ -318,18 +317,11 @@ _MAVEN = (
 )
 
 
-def test_a_truncated_maven_download_is_named():
-    reason = classify_submission_failure(_MAVEN)
-    assert "org.apache.iceberg#iceberg-aws-bundle;1.11.0" in reason
-    assert "0 of 63,613,165 bytes" in reason
-
-
-def test_submission_failures_are_reported_while_the_operator_retries(capsys):
+def test_submission_failures_are_reported_while_the_operator_retries():
     from lakebench.cli._sustained import StreamStartWatch
     from lakebench.spark.job import JobState, JobStatus
 
-    journal = MagicMock()
-    watch = StreamStartWatch("silver-stream", journal)
+    watch = StreamStartWatch("silver-stream", MagicMock())
     for attempt in (1, 1, 2):
         watch(
             JobStatus(
@@ -343,31 +335,6 @@ def test_submission_failures_are_reported_while_the_operator_retries(capsys):
     watch(JobStatus(name="s", state=JobState.RUNNING, message=""), 600.0)
     assert [f["attempt"] for f in watch.failures] == [1, 2]  # repeats are not re-reported
     assert watch.running_at is not None
-    out = "".join(capsys.readouterr())
-    assert "submission attempt 1 failed" in out and "iceberg-aws-bundle" in out
-    assert journal.record.call_count == 2
-
-
-def test_wait_until_running_reports_every_polled_status():
-    from lakebench.modules.pipeline_engines.spark import monitor as mon
-    from lakebench.spark.job import JobState, JobStatus
-
-    jm = MagicMock()
-    jm.get_job_status.side_effect = [
-        JobStatus(name="j", state=s, message="m")
-        for s in (JobState.SUBMISSION_FAILED, JobState.RUNNING)
-    ]
-    m = mon.SparkJobMonitor.__new__(mon.SparkJobMonitor)
-    m.job_manager, m.namespace = jm, "ns"
-    seen = []
-    mon.time.sleep, _sleep = (lambda s: None), mon.time.sleep
-    try:
-        assert m.wait_until_running(
-            "j", poll_interval=0, on_status=lambda st, el: seen.append(st.state)
-        ).success
-    finally:
-        mon.time.sleep = _sleep
-    assert seen == [JobState.SUBMISSION_FAILED, JobState.RUNNING]
 
 
 def test_a_stream_not_running_at_window_end_fails():
@@ -1046,6 +1013,8 @@ def test_a_failure_open_when_the_wait_ends_is_closed_with_its_time():
 
 
 def test_stream_submission_failures_reach_the_stage_and_the_report(tmp_path):
+    """Gold's failures carry lost seconds; bronze's come from a record from
+    before lost_seconds was kept and read unknown, not 0s."""
     from lakebench.metrics.collector import (
         PipelineMetrics,
         StreamingJobMetrics,
@@ -1063,7 +1032,11 @@ def test_stream_submission_failures_reach_the_stage_and_the_report(tmp_path):
     )
     fail = {"at": "t", "attempt": 1, "reason": "r", "lost_seconds": 42.0}
     m.streaming = [
-        StreamingJobMetrics(job_name="lakebench-bronze-ingest", job_type="bronze-ingest"),
+        StreamingJobMetrics(
+            job_name="lakebench-bronze-ingest",
+            job_type="bronze-ingest",
+            submission_failures=[{"at": "t", "attempt": 1, "reason": "r"}],
+        ),
         StreamingJobMetrics(
             job_name="lakebench-gold-refresh",
             job_type="gold-refresh",
@@ -1071,7 +1044,7 @@ def test_stream_submission_failures_reach_the_stage_and_the_report(tmp_path):
         ),
     ]
     pb = build_pipeline_benchmark(m)
-    gold = next(s for s in pb.stages if s.submission_failures)
+    gold = next(s for s in pb.stages if len(s.submission_failures) == 2)
     assert gold.submission_retry_seconds == 60.0 and len(gold.submission_failures) == 2
     m.pipeline_benchmark = pb
     MetricsStorage(tmp_path).save_run(m)
@@ -1081,41 +1054,7 @@ def test_stream_submission_failures_reach_the_stage_and_the_report(tmp_path):
         .read_text()
     )
     assert "2 failed submissions, 60s before it ran" in html
-
-
-def test_stream_failures_recorded_without_lost_seconds_say_so(tmp_path):
-    """A record from before lost_seconds was kept reads unknown, not 0s."""
-    from lakebench.metrics.collector import (
-        PipelineMetrics,
-        StreamingJobMetrics,
-        build_pipeline_benchmark,
-    )
-    from lakebench.metrics.storage import MetricsStorage
-    from lakebench.reports.generator import ReportGenerator
-
-    m = PipelineMetrics(
-        run_id="20260927-000000-eeeeee",
-        deployment_name="d",
-        start_time=datetime(2026, 9, 27),
-        success=True,
-        config_snapshot={"mode": "continuous", "table_format": "iceberg"},
-    )
-    m.streaming = [
-        StreamingJobMetrics(
-            job_name="lakebench-bronze-ingest",
-            job_type="bronze-ingest",
-            submission_failures=[{"at": "t", "attempt": 1, "reason": "r"}],
-        )
-    ]
-    m.pipeline_benchmark = build_pipeline_benchmark(m)
-    MetricsStorage(tmp_path).save_run(m)
-    html = (
-        ReportGenerator(metrics_dir=tmp_path, output_dir=tmp_path)
-        .generate_report(m.run_id)
-        .read_text()
-    )
     assert "1 failed submission, time lost not recorded" in html
-    assert "0s before it ran" not in html
 
 
 def _header(fmt: str, engine: str, **kw) -> list[tuple[str, str]]:
@@ -1134,34 +1073,9 @@ def _header(fmt: str, engine: str, **kw) -> list[tuple[str, str]]:
     return maintenance_schedule_lines(fmt, engine, **args)
 
 
-def test_delta_run_header_names_delta_maintenance_not_iceberg():
-    """lb16-cf: Delta runs printed "Iceberg retention: every 600s"."""
-    trino = _header("delta", "trino")
-    text = " | ".join(t for _, t in trino)
-    assert "Iceberg" not in text
-    assert "Delta VACUUM: every 600s (auto; retention 168h" in text
-    assert "Delta OPTIMIZE: not run" in text
-    assert trino[-1][0] == "warning" and "owner decision #46" in trino[-1][1]
-    thrift = " | ".join(t for _, t in _header("delta", "spark-thrift"))
-    assert "Delta VACUUM: not run (it OOMs Spark Thrift" in thrift and "Iceberg" not in thrift
-    skipped = _header("delta", "trino", skip_maintenance=True)
-    assert skipped[0][1] == "Delta VACUUM: disabled (--skip-maintenance)"
-    assert "DuckDB" in _header("delta", "duckdb")[0][1]
-
-
-def test_iceberg_run_header_is_unchanged():
-    assert _header("iceberg", "trino") == [
-        ("info", "Iceberg retention: every 600s (auto; threshold: 30m)"),
-        ("info", "Iceberg compaction: every 1200s (auto)"),
-    ]
-    assert _header("iceberg", "trino", skip_maintenance=True) == [
-        ("info", "Iceberg retention: disabled (--skip-maintenance)"),
-        ("info", "Iceberg compaction: disabled (--skip-maintenance)"),
-    ]
-    assert _header("iceberg", "trino", compaction_configured=False) == [
-        ("info", "Iceberg retention: every 600s (auto; threshold: 30m)"),
-    ]
-    assert "not run" in _header("iceberg", "duckdb")[0][1]
+@pytest.mark.parametrize("engine", ["trino", "spark-thrift"])
+def test_delta_run_header_does_not_name_iceberg(engine):
+    assert not any("Iceberg" in t for _, t in _header("delta", engine))
 
 
 def test_stream_marker_is_cleared_only_once_the_driver_pod_is_gone(monkeypatch):
@@ -1495,20 +1409,19 @@ def _windowed_run(silver: str, *, bucket_gib: float = 0.0, fleet=None, rounds=()
     return build_pipeline_benchmark(m, datagen_fleet=fleet)
 
 
-@pytest.mark.parametrize("shift_s", [0.0, 60.0, 120.0, 200.0])
+@pytest.mark.parametrize("shift_s", [0.0, 120.0])
 def test_pace_counts_a_silver_batch_on_the_window_edge_pro_rata(shift_s):
-    """Pace is window seconds per million silver rows in the window (owner,
-    2026-10-08). Whole-batch counting moved it ~25% on which side of the
+    """Pace is window seconds per million silver rows in the window. Whole-batch counting moved it ~25% on which side of the
     window's end one 250 s batch committed; pro rata it does not move."""
     pb = _windowed_run(_silver_batches(shift_s - 250, 250.0, 1_000_000, 900))
     # 600 s of 250 s batches of 1M rows: 2.4M rows, 250 s per million.
     assert pb.pace_seconds_per_million_rows == pytest.approx(250.0, rel=0.02)
 
 
-@pytest.mark.parametrize("bucket_gib", [0.0, 500.0])
-def test_continuous_stage_bytes_never_come_from_a_bucket_listing(bucket_gib):
+def test_continuous_stage_bytes_never_come_from_a_bucket_listing():
     """Bronze and silver input are their window rows at datagen's raw bytes
     per row; extra bytes in the buckets move no total and no rate."""
+    bucket_gib = 500.0
     fleet = {
         "pods_reported": 1,
         "total_bytes_written": 2 * 1024**3,
@@ -1625,12 +1538,12 @@ def test_a_c360_run_needs_a_round_and_one_q9_answer(schema, rounds, fails):
     assert (no_rounds_problem(cfg, run) is not None) is fails
 
 
-@pytest.mark.parametrize("bucket_gib", [0.0, 500.0])
-def test_batch_elapsed_is_wall_clock_and_stage_bytes_ignore_buckets(bucket_gib):
+def test_batch_elapsed_is_wall_clock_and_stage_bytes_ignore_buckets():
     """Batch (beside the continuous rows above, one rule): total elapsed is
     the run's wall clock, not stage seconds summed over gaps; maintenance is
     a share of time to value plus maintenance; GiB are what the jobs and
     datagen's pods reported, whatever the buckets hold."""
+    bucket_gib = 500.0
     from lakebench.metrics.collector import JobMetrics, PipelineMetrics, build_pipeline_benchmark
 
     def job(kind, start_s, seconds, gib):

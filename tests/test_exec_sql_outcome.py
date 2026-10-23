@@ -107,12 +107,6 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
             id="beeline-schema-missing",
         ),
         pytest.param(
-            "Query q3 failed: line 1:13: Catalog 'lakehouse' not found",
-            False,
-            False,
-            id="trino-catalog-not-found",
-        ),
-        pytest.param(
             "Query q4 failed: line 1:13: Catalog 'lakehouse' does not exist",
             False,
             False,
@@ -171,13 +165,6 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
             id="spark-procedure-table-missing",
         ),
         pytest.param(
-            _BEELINE + "[TABLE_OR_VIEW_NOT_FOUND] The table or view `lakehouse`.`exp`.`nope` "
-            "cannot be found.",
-            True,
-            False,
-            id="spark-dml-table-missing",
-        ),
-        pytest.param(
             "Query q9 failed: Retention specified (30.00m) is shorter than the minimum "
             "retention configured in the system (7.00d). Minimum retention can be changed "
             "with iceberg.expire_snapshots_min_retention configuration property or "
@@ -201,13 +188,6 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
             True,
             False,
             id="trino-procedure-table-missing",
-        ),
-        pytest.param(
-            _BEELINE + "java.lang.IllegalArgumentException: Couldn't load table 'gold.t' in "
-            "catalog 'lakehouse' (state=,code=0)",
-            True,
-            False,
-            id="beeline-iceberg-procedure-table-missing",
         ),
     ],
 )

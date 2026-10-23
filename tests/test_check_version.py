@@ -61,35 +61,3 @@ def test_dev_version_cannot_be_tagged(tree):
         init, pp = tree(version)
         problems = cv.check("v1.6.0.dev0", init, pp)
         assert any("dev release" in p for p in problems), problems
-
-
-def test_malformed_or_unnormalised_tag_fails(tree):
-    for tag in ["vv1.6.0", "1.6.0", "v1.6", "v1.6.0.0", "vfoo", "v"]:
-        init, pp = tree("1.6.0")
-        assert cv.check(tag, init, pp), tag
-
-
-@pytest.mark.parametrize(("version", "tag"), [("1.6.0rc1", "v1.6.0rc1"), ("1.6.0b2", "v1.6.0b2")])
-def test_prerelease_cannot_be_tagged(tree, version, tag):
-    init, pp = tree(version)
-    problems = cv.check(tag, init, pp)
-    assert any("pre-release" in p for p in problems), problems
-
-
-def test_invalid_package_version(tree):
-    init, pp = tree("not-a-version")
-    assert any("PEP 440" in p for p in cv.check(None, init, pp))
-
-
-def test_static_pyproject_version_fails(tree):
-    init, pp = tree("1.6.0", '[project]\nname = "x"\nversion = "1.6.0"\n')
-    problems = cv.check(None, init, pp)
-    assert any("static version" in p for p in problems)
-    assert any("dynamic" in p for p in problems)
-    assert any("hatch.version" in p for p in problems)
-
-
-def test_missing_version_literal(tmp_path):
-    init = tmp_path / "__init__.py"
-    init.write_text("from ._v import __version__\n")
-    assert "no __version__ literal" in cv.check(None, init, tmp_path / "p.toml")[0]

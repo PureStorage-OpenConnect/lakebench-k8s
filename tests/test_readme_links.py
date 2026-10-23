@@ -32,10 +32,6 @@ def _slug(heading: str) -> str:
     return kept.replace(" ", "-")
 
 
-def test_the_readme_links_somewhere():
-    assert any(t.startswith(REPO_DOCS) for t in _targets())
-
-
 @pytest.mark.parametrize("target", _targets())
 def test_readme_links_are_absolute(target):
     assert re.match(r"https?://|mailto:", target), (

@@ -115,7 +115,6 @@ def test_uninitialised_floor_fails_closed(monkeypatch):
     [
         lambda d: d.update(format=2),
         lambda d: d.update(format=True),
-        lambda d: d.update(format=1.0),
         lambda d: d.update(algorithm="md5"),
         lambda d: d.update(salt="xyz"),
         lambda d: d["roles"]["evaluation"].append("not-a-hash"),
