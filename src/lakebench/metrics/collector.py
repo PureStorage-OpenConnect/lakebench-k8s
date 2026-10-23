@@ -7,7 +7,7 @@ import logging
 import math
 import re
 import statistics
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -204,10 +204,6 @@ class StreamingJobMetrics:
     median_batch_duration_ms: float | None = None
     batch_size: int = 0
     total_batches: int = 0
-    # Highest batch id in the driver log. total_batches - 1 when the capture is
-    # complete; a large gap means the log lost a run of batches (a severed
-    # kubectl logs -f), which undercounts bronze rows.
-    max_batch_id: int | None = None
     # Largest run of consecutive missing batch ids. One long run = a truncated
     # log; scattered 1s = normal empty/replay batches (see parse).
     max_batch_id_gap: int | None = None
@@ -900,12 +896,6 @@ class StageMetrics:
     ttd_p95_seconds: float | None = None
     ttd_max_seconds: float | None = None
     total_batches: int = 0
-    # The highest batch id seen in the driver log. When the capture is
-    # complete this is total_batches - 1; a large gap means the driver log lost
-    # a run of batches -- kubelet severs kubectl logs -f at its idle timeout,
-    # so a 24h record can hold only the first ~4h of batches. Used to refuse a
-    # false ingest_ratio (0.24 on a kept-up run).
-    max_batch_id: int | None = None
     # Largest run of consecutive batch ids missing from the log: one long run
     # distinguishes a severed capture from scattered empty/replay gaps.
     max_batch_id_gap: int | None = None
@@ -1777,10 +1767,10 @@ class PipelineBenchmark:
         allowed_lag = self.sustained_throughput_rps * (2 * silver_trigger_s + bronze_trigger_s)
         return bronze_rows - silver_committed <= allowed_lag
 
-    def _round_is_scorable(self, rnd) -> bool:
-        """A round counts toward the QpH median/trend only when it has a QpH
-        AND no real query failure (see ``round_is_scorable``)."""
-        return round_is_scorable(rnd, _rounds_passed_ever(self.benchmark_rounds))
+    def _scorable_rounds(self) -> list[BenchmarkMetrics]:
+        """Rounds with a QpH and no real query failure (``round_is_scorable``)."""
+        passed_ever = rounds_passed_ever(self.benchmark_rounds)
+        return [r for r in self.benchmark_rounds if round_is_scorable(r, passed_ever)]
 
     def composite_rounds(self) -> list[BenchmarkMetrics]:
         """In-stream rounds behind the continuous composite QpH: rounds with a
@@ -1790,7 +1780,7 @@ class PipelineBenchmark:
         executed the fixed full query set (``composite_query_set``); its rounds
         before the first case run a smaller set and stay in
         ``composite_qph_by_set``."""
-        rounds = [r for r in self.benchmark_rounds if self._round_is_scorable(r)]
+        rounds = self._scorable_rounds()
         fixed = composite_query_set(self.config_snapshot)
         if fixed is None or self.blended_composite_recorded:
             return rounds
@@ -1815,7 +1805,7 @@ class PipelineBenchmark:
         state; the first and last rounds and the silver data file count at
         each end show whether it was one. None when no round has a QpH.
         """
-        rounds = [r for r in self.benchmark_rounds if self._round_is_scorable(r)]
+        rounds = self._scorable_rounds()
         if not rounds:
             return None
         first, last = rounds[0].qph, rounds[-1].qph
@@ -2552,7 +2542,6 @@ def build_pipeline_benchmark(
             ttd_p95_seconds=sj.ttd_p95_seconds,
             ttd_max_seconds=sj.ttd_max_seconds,
             total_batches=sj.total_batches,
-            max_batch_id=sj.max_batch_id,
             max_batch_id_gap=sj.max_batch_id_gap,
             batch_size=sj.batch_size,
             executor_count=_s_execs,
@@ -2747,15 +2736,18 @@ def composite_qph_basis(rounds: list[BenchmarkMetrics]) -> tuple[dict[str, Any],
     return basis, by_set
 
 
-def _rounds_passed_ever(rounds) -> set:
-    """Query names that succeeded in some round -- the set a time-limit
-    crossing is judged against (a timeout on one of these is a crossing)."""
-    return {
-        q.get("name")
-        for r in (rounds or [])
-        for q in (r.queries or [])
-        if isinstance(q, dict) and q.get("success")
-    }
+def rounds_passed_ever(rounds) -> set[str]:
+    """Query names that succeeded in some round: the set a time-limit
+    crossing is judged against. The CLI gate, the verdict and the QpH median
+    all build it here."""
+    out: set[str] = set()
+    for r in rounds or []:
+        for q in r.queries or []:
+            if isinstance(q, Mapping) and q.get("success"):
+                name = q.get("name") or q.get("query_name")
+                if name:
+                    out.add(str(name))
+    return out
 
 
 def round_is_scorable(rnd, passed_ever: set) -> bool:
@@ -2808,7 +2800,7 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
     # time-limit crossing is excluded so a degrading series does not read as
     # improving), and, when the rounds ran the AML fixed full set beside a
     # smaller one, that set's rounds only (composite_rounds).
-    passed_ever = _rounds_passed_ever(rounds)
+    passed_ever = rounds_passed_ever(rounds)
     timed = [r for r in rounds if round_is_scorable(r, passed_ever)]
     groups = rounds_by_query_set(timed)
     fixed = aml_fixed_query_set()
@@ -4113,7 +4105,6 @@ class MetricsCollector:
             _apply_ttd(metrics, ttd_lines, batch_ids)
             _apply_ttd_detail(metrics, ttd_detail)
         metrics.total_batches = len(batch_ids)
-        metrics.max_batch_id = max(batch_ids) if batch_ids else None
         # The largest run of consecutive batch ids missing from the log. A
         # severed capture (kubectl logs -f cut at the kubelet idle timeout)
         # leaves ONE long hole -- every batch after the cut is absent at once.

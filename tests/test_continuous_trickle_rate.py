@@ -34,7 +34,6 @@ def _pb(
     trailing_idle=0,
     bronze_span=None,
     window=_WINDOW,
-    bronze_max_batch_id=None,
     bronze_max_batch_id_gap=None,
 ):
     # A trickle-held bronze logs one batch per trigger: first to last is
@@ -51,7 +50,6 @@ def _pb(
             latency_ms=bronze_ms,
             total_batches=bronze_batches,
             batch_span_seconds=bronze_span,
-            max_batch_id=bronze_max_batch_id,
             max_batch_id_gap=bronze_max_batch_id_gap,
         ),
         StageMetrics(

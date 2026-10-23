@@ -547,12 +547,9 @@ def _failed_queries(metrics: PipelineMetrics) -> list[str]:
         # these is a measured SLA crossing, not a failure -- recorded, not
         # failed. This MUST match cli._run._benchmark_gate_problems so the CLI
         # exit and this (report-/verdict-recomputed) outcome cannot disagree.
-        passed_ever = {
-            str(q.get("name") or q.get("query_name") or "")
-            for rnd in rounds
-            for q in rnd.queries or []
-            if isinstance(q, Mapping) and q.get("success", True)
-        }
+        from lakebench.metrics.collector import rounds_passed_ever
+
+        passed_ever = rounds_passed_ever(rounds)
         out: list[str] = []
         for rnd in rounds:
             for q in rnd.queries or []:

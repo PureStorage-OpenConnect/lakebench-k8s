@@ -4893,12 +4893,9 @@ def _run_sustained(
                     # past what the engine answers inside the limit), recorded
                     # but not a run failure. Built once over all rounds so the
                     # gate's view matches the verdict re-derivation.
-                    passed_ever = {
-                        str(q.get("name"))
-                        for r in rounds
-                        for q in (r.queries or [])
-                        if q.get("success") and q.get("name")
-                    }
+                    from lakebench.metrics.collector import rounds_passed_ever
+
+                    passed_ever = rounds_passed_ever(rounds)
                     for idx, rnd in enumerate(rounds, 1):
                         final = idx == len(rounds)
                         q9 = tolerated_q9_results(rnd.queries, final=final)
