@@ -130,8 +130,8 @@ REFUSING = {"run", "generate"}
 
 @pytest.mark.parametrize(
     ("seed", "declared"),
-    [(pc.EV, None), (pc.EV, "evaluation"), (pc.SPENT, None)],
-    ids=["evaluation-no-role", "evaluation-registered-role", "spent-no-role"],
+    [(pc.EV, None), (pc.EV, "evaluation")],
+    ids=["evaluation-no-role", "evaluation-registered-role"],
 )
 @pytest.mark.parametrize(
     "argv",
@@ -157,9 +157,10 @@ def test_commands_print_no_protected_seed(
     monkeypatch.setenv("KUBECONFIG", "/nonexistent")
     # The registered role of a held-out seed (looks are open in the fixture):
     # the config loads, so the per-verb guards and the planned experiment are
-    # what run. A spent seed has no registered role and is refused at load.
-    # The robustness seed takes the same CLI paths as the evaluation one; its
-    # messages are checked by test_seed_checks_name_no_protected_seed.
+    # what run. Without a role it is refused at load, as a spent seed is.
+    # The robustness and spent seeds take the same CLI paths as the
+    # evaluation one; their messages are checked by
+    # test_seed_checks_name_no_protected_seed.
     cfg = pc.financial_config(tmp_path / "c.yaml", seed=seed, role=declared)
     result = CliRunner().invoke(app, [a.replace("{cfg}", str(cfg)) for a in argv])
     _clean(result.output)

@@ -356,7 +356,12 @@ def compute_badge_status(
     # Data completeness
     if pb is not None:
         if is_sustained and pb.ingest_ratio is None:
-            warnings.append("Ingest ratio unmeasurable (datagen row count unknown)")
+            reason = getattr(pb, "ingest_ratio_unscored_reason", None)
+            warnings.append(
+                f"Ingest ratio not scored: {reason}"
+                if reason
+                else "Ingest ratio unmeasurable (datagen row count unknown)"
+            )
         elif (
             is_sustained
             and pb.ingest_ratio is not None
@@ -536,13 +541,30 @@ def _failed_queries(metrics: PipelineMetrics) -> list[str]:
     outcome per query."""
     rounds = _rounds(metrics)
     if rounds:
+        from lakebench.benchmark.result import is_sla_crossing
+
+        # The names that succeeded in some round. A later timeout on one of
+        # these is a measured SLA crossing, not a failure -- recorded, not
+        # failed. This MUST match cli._run._benchmark_gate_problems so the CLI
+        # exit and this (report-/verdict-recomputed) outcome cannot disagree.
+        from lakebench.metrics.collector import rounds_passed_ever
+
+        passed_ever = rounds_passed_ever(rounds)
         out: list[str] = []
         for rnd in rounds:
             for q in rnd.queries or []:
                 if not isinstance(q, Mapping) or q.get("success", True):
                     continue
                 name = str(q.get("name") or q.get("query_name") or "")
-                if not name.startswith(TOLERATED_ROUND_FAILURE_PREFIX) and name not in out:
+                if name.startswith(TOLERATED_ROUND_FAILURE_PREFIX):
+                    continue
+                if is_sla_crossing(
+                    timed_out=bool(q.get("timed_out", False)),
+                    name=name,
+                    passed_ever=passed_ever,
+                ):
+                    continue
+                if name not in out:
                     out.append(name)
         return out
     if metrics.benchmark is None:

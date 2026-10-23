@@ -102,30 +102,17 @@ class TestWriteOwnerMarker:
                 got = write_owner_marker(_boto(), B, ME)
             assert not got.ours
 
-    def test_mode_is_cached_per_endpoint(self):
-        with recording(NS) as rec:
-            rec.add_bucket(B)
-            rec.add_bucket("u01-silver")
-            write_owner_marker(_boto(), B, ME)
-            probes_before = [c for c in rec.calls if "probe-" in (c.name or "")]
-            write_owner_marker(_boto(), "u01-silver", ME)
-            probes_after = [c for c in rec.calls if "probe-" in (c.name or "")]
-            assert probes_before and probes_after == probes_before
-
 
 class TestMarkerIgnoredByEmptiness:
     @pytest.mark.parametrize(
         ("keys", "prefix", "holds"),
         [
             ([OWNER_MARKER_KEY], "", False),
-            ([OWNER_MARKER_KEY, ".lakebench/probe-x"], "", False),
-            # d1's MaxKeys=2 read two marker keys as empty whatever followed them.
+            # A MaxKeys=2 read took two marker keys as empty whatever followed them.
             ([OWNER_MARKER_KEY, ".lakebench/probe-x", "zz/data"], "", True),
             (["a/data", OWNER_MARKER_KEY], "", True),
             ([OWNER_MARKER_KEY], ".", False),
             ([OWNER_MARKER_KEY, ".m"], ".", True),
-            ([OWNER_MARKER_KEY], "data/", False),
-            (["data/x"], "data/", True),
             ([OWNER_MARKER_KEY], ".lakebench/", False),
         ],
     )

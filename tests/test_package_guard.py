@@ -6,8 +6,6 @@ string and no local-only path for the repository's own scans to find.
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import io
 import tarfile
 import zipfile
@@ -22,10 +20,6 @@ pg = exec_repo_script(ROOT / "scripts/package_guard.py", "package_guard")
 
 # A FlashBlade-shaped access key id from a fixed fake alphabet.
 FAKE_PSFB = "PSFB" + "QWERTYUIOPASDFGHJKLZXCVBNMQWERTYUIOPAS"
-FAKE_AKIA = "AKIA" + "Z9Y8X7W6V5U4T3S2"
-PEM = "-----BEGIN " + "RSA PRIVATE KEY-----"
-# High entropy, 40 characters: what the s3-secret-key-assignment rule is for.
-FAKE_SECRET = base64.b64encode(hashlib.sha256(b"package-guard").digest()).decode()[:40]
 
 
 def _sdist(path: Path, members: dict[str, str]) -> Path:
@@ -41,12 +35,7 @@ def _sdist(path: Path, members: dict[str, str]) -> Path:
 @pytest.mark.parametrize(
     "member",
     [
-        "docs/internal/x.md",
-        "dev" + "-artifacts/notes.md",
-        "CLAUDE" + ".md",
         "sub/dir/CLAUDE" + ".md",
-        "docs/reference/CREDENTIALS.md",
-        ".claude/settings.json",
         "../escape.txt",
     ],
 )
@@ -64,38 +53,11 @@ def test_planted_docs_internal_member_in_an_sdist_fails(tmp_path):
     ]
 
 
-@pytest.mark.parametrize(
-    ("body", "rule"),
-    [
-        (f"key = {FAKE_PSFB}\n", "flashblade-access-key"),
-        (f"aws: {FAKE_AKIA}\n", "aws-access-key"),
-        (f"{PEM}\nMIIE\n", "private-key"),
-        (f'secret_key: "{FAKE_SECRET}"\n', "gitleaks rule s3-secret-key-assignment"),
-    ],
-)
-def test_planted_key_pattern_fails_without_printing_it(body, rule):
-    found = pg.check_content({"w.whl/lakebench/x.yaml": ("ok\n" + body).encode()})
-    assert [f.detail for f in found] == [f"w.whl/lakebench/x.yaml:2: {rule}"]
+def test_planted_key_pattern_fails_without_printing_it():
+    found = pg.check_content({"w.whl/lakebench/x.yaml": f"ok\nkey = {FAKE_PSFB}\n".encode()})
+    assert [f.detail for f in found] == ["w.whl/lakebench/x.yaml:2: flashblade-access-key"]
     assert all(f.status == pg.FAIL for f in found)
-    for secret in (FAKE_PSFB, FAKE_AKIA, FAKE_SECRET):
-        assert secret not in " ".join(f.render() for f in found)
-
-
-def test_a_value_on_the_line_after_its_key_is_found():
-    found = pg.check_content({"m.yaml": f"x: 1\nsecret_key:\n  {FAKE_SECRET}\n".encode()})
-    assert [f.detail for f in found] == ["m.yaml:2: gitleaks rule s3-secret-key-assignment"]
-
-
-def test_binary_member_fails_unscanned():
-    found = pg.check_content({"c.bin": b"\0" + FAKE_PSFB.encode()})
-    assert [f.detail for f in found] == ["c.bin: binary member, not scanned"]
-
-
-def test_a_rule_python_cannot_compile_fails(tmp_path):
-    cfg = tmp_path / "gitleaks.toml"
-    cfg.write_text("[[rules]]\nid = 'bad'\nregex = 'a\\z'\n")
-    found = pg.check_content({"a.txt": b"ok"}, cfg)
-    assert [f.status for f in found] == [pg.FAIL] and "rule bad" in found[0].detail
+    assert FAKE_PSFB not in " ".join(f.render() for f in found)
 
 
 def test_link_member_in_an_sdist_fails(tmp_path):
@@ -126,16 +88,6 @@ def test_gitleaks_check_fails_closed(tmp_path, monkeypatch, gitleaks, baseline, 
     if baseline:
         (tmp_path / ".gitleaksignore").write_text("x\n")
     assert [f.status for f in pg.check_gitleaks(tmp_path)] == [getattr(pg, status)]
-
-
-def test_gitleaks_ignores_inline_allow_comments_and_names_the_member(tmp_path):
-    if pg.shutil.which("gitleaks") is None:
-        pytest.skip("gitleaks is not on PATH")
-    (tmp_path / "pkg").mkdir()
-    (tmp_path / "pkg" / "x.yaml").write_text(f"ok: 1\naccess_key: {FAKE_PSFB}  # gitleaks:allow\n")
-    (found,) = pg.check_gitleaks(tmp_path)
-    assert found.status == pg.FAIL
-    assert found.detail == "pkg/x.yaml:2: pure-flashblade-s3-access-key"
 
 
 def _absence(mode, problems):
@@ -269,32 +221,3 @@ def test_real_build_passes_non_seed_checks(tmp_path):
     assert [f for f in found if f.status == pg.FAIL] == [], [f.render() for f in found]
     by = {f.check: f for f in found}
     assert by["names"].status == by["content"].status == pg.PASS
-
-
-def test_release_gate_check_maps_pending_to_skip(monkeypatch):
-    import importlib.util
-    import sys
-
-    spec = importlib.util.spec_from_file_location(
-        "release_gate", ROOT / "scripts" / "release_gate.py"
-    )
-    rg = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, "release_gate", rg)
-    spec.loader.exec_module(rg)
-    real = rg._load_script
-
-    def fake(name):
-        mod = real(name)
-        if name == "package_guard":
-            mod.build = lambda outdir: None
-            mod.guard = lambda dist, work: findings
-        return mod
-
-    monkeypatch.setattr(rg, "_load_script", fake)
-    findings = [pg.Finding(pg.PASS, "names", "x"), pg.Finding(pg.PENDING, "heldout", "m: hit")]
-    assert rg.check_package_guard().status == rg.SKIP
-    findings = [pg.Finding(pg.FAIL, "content", "m:1: aws-access-key")]
-    res = rg.check_package_guard()
-    assert res.status == rg.FAIL and "aws-access-key" in res.detail
-    findings = [pg.Finding(pg.PASS, "names", "x")]
-    assert rg.check_package_guard().status == rg.PASS

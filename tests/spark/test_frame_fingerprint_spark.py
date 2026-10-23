@@ -134,14 +134,8 @@ def test_duplicated_row_differs(spark_session, frame):
 def test_swapped_null_position_differs(spark_session):
     """(x, NULL) and (NULL, x) over two columns of one type: xxhash64 alone
     gives the same hash for both; the null mask separates them."""
-    from pyspark.sql import functions as F
-
     left = spark_session.createDataFrame([("x", None)], "a string, b string")
     right = spark_session.createDataFrame([(None, "x")], "a string, b string")
-    assert (
-        left.select(F.xxhash64("a", "b")).first()[0]
-        == (right.select(F.xxhash64("a", "b")).first()[0])
-    ), "premise: Spark's xxhash64 skips NULLs"
     assert _fp(left, ["a", "b"]) != _fp(right, ["a", "b"])
 
 
@@ -162,53 +156,47 @@ def test_sixty_three_columns(spark_session):
     assert _fp(left, cols)[1] != _fp(right, cols)[1]
 
 
-@pytest.mark.parametrize(
-    ("schema", "left", "right"),
-    [
-        ("a array<string>, b array<string>", (["a", "b"], []), (["a"], ["b"])),
-        ("a array<string>", (["a", None],), (["a"],)),
-        ("a array<string>", (["a", None],), ([None, "a"],)),
-        ("a array<string>", ([],), ([None],)),
-        ("s struct<t:array<string>>", (([],),), ((None,),)),
-        ("s struct<a:string,b:string>", (("X", None),), ((None, "X"),)),
-        ("a array<struct<a:string,b:string>>", ([(None, None)],), ([None],)),
-        ("m map<string,string>", ({"a": "b"},), ({"a": None, "b": None},)),
-        ("s struct<m:map<string,string>>", (({},),), ((None,),)),
-        ("s struct<t:array<string>>", ((["a", None],),), ((["a"],),)),
-        ("a array<struct<x:string,y:string>>", ([("X", None)],), ([(None, "X")],)),
-        ("a array<array<string>>", ([["a"], []],), ([[], ["a"]],)),
-        ("s struct<m:map<string,string>>", (({"a": None},),), (({"a": "x"},),)),
-    ],
-    ids=[
-        "adjacent-arrays",
-        "array-trailing-null",
-        "array-null-moved",
-        "empty-vs-null-element",
-        "nested-empty-vs-null-array",
-        "struct-null-moved",
+# Nested values that xxhash64 alone hashes the same (it chains elements
+# without their lengths or NULL positions): (id, schema, left, right).
+NESTED_APART = [
+    ("adjacent-arrays", "a array<string>, b array<string>", (["a", "b"], []), (["a"], ["b"])),
+    ("array-trailing-null", "a array<string>", (["a", None],), (["a"],)),
+    ("array-null-moved", "a array<string>", (["a", None],), ([None, "a"],)),
+    ("empty-vs-null-element", "a array<string>", ([],), ([None],)),
+    ("nested-empty-vs-null-array", "s struct<t:array<string>>", (([],),), ((None,),)),
+    ("struct-null-moved", "s struct<a:string,b:string>", (("X", None),), ((None, "X"),)),
+    (
         "nested-all-null-struct-vs-null",
-        "map-null-values",
-        "nested-empty-vs-null-map",
-        "nested-array-null",
+        "a array<struct<a:string,b:string>>",
+        ([(None, None)],),
+        ([None],),
+    ),
+    ("map-null-values", "m map<string,string>", ({"a": "b"},), ({"a": None, "b": None},)),
+    ("nested-empty-vs-null-map", "s struct<m:map<string,string>>", (({},),), ((None,),)),
+    ("nested-array-null", "s struct<t:array<string>>", ((["a", None],),), ((["a"],),)),
+    (
         "array-of-struct-null-moved",
-        "nested-array-boundary",
-        "map-in-struct",
-    ],
-)
-def test_nested_values_differ(spark_session, schema, left, right):
-    """Nested values that xxhash64 alone hashes the same (it chains
-    elements without their lengths or NULL positions) fingerprint apart."""
-    cols = [part.strip().split(" ")[0] for part in schema.split(", ")]
-    a = spark_session.createDataFrame([left], schema)
-    b = spark_session.createDataFrame([right], schema)
-    assert _fp(a, cols) != _fp(b, cols)
+        "a array<struct<x:string,y:string>>",
+        ([("X", None)],),
+        ([(None, "X")],),
+    ),
+    ("nested-array-boundary", "a array<array<string>>", ([["a"], []],), ([[], ["a"]],)),
+    ("map-in-struct", "s struct<m:map<string,string>>", (({"a": None},),), (({"a": "x"},),)),
+]
 
 
-def test_nested_values_equal_when_equal(spark_session):
-    """The canonical form is a function of the value: the same values, with
+def test_nested_values_fingerprint_by_value(spark_session):
+    """Nested values that xxhash64 alone hashes the same fingerprint apart;
+    and the canonical form is a function of the value: the same values, with
     map entries (top level or nested) inserted in the other order and rows in
     another order, hash the same."""
     from pyspark.sql import functions as F
+
+    for case, schema, left, right in NESTED_APART:
+        cols = [part.strip().split(" ")[0] for part in schema.split(", ")]
+        a = spark_session.createDataFrame([left], schema)
+        b = spark_session.createDataFrame([right], schema)
+        assert _fp(a, cols) != _fp(b, cols), case
 
     def frame(entries, rows_reversed):
         m = F.create_map(*[F.lit(x) for kv in entries for x in kv])

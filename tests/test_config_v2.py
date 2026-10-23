@@ -45,9 +45,6 @@ def test_flat_field_overrides_nested(tmp_path, flat, nested, read):
     [
         ("namespace", "lb-flat", lambda c: c.platform.kubernetes.namespace),
         ("mode", "continuous", lambda c: c.architecture.pipeline.mode.value),
-        ("spark_image", "apache/spark:3.5.4-python3", lambda c: c.images.spark),
-        ("access_key", "flat-ak", lambda c: c.platform.storage.s3.access_key),
-        ("secret_key", "flat-sk", lambda c: c.platform.storage.s3.secret_key),
     ],
 )
 def test_flat_field_is_promoted(tmp_path, key, value, read):
@@ -80,22 +77,6 @@ class TestFlatConfigIntegration:
         assert config.platform.storage.s3.endpoint == "http://s3:9000"
         assert config.platform.storage.s3.access_key == "testkey"
         assert config.architecture.workload.datagen.scale == 5
-
-    def test_nameless_config_refused_for_mutating_load(self, tmp_path):
-        """A config without a name cannot change data (SAF-2); v1.6 auto-named it."""
-        from lakebench.config.loader import ConfigNameRequired
-
-        cfg_file = tmp_path / "lakebench.yaml"
-        cfg_file.write_text(
-            textwrap.dedent("""\
-            endpoint: http://minio:9000
-            access_key: minioadmin
-            secret_key: minioadmin
-            """)
-        )
-        with pytest.raises(ConfigNameRequired, match="cannot change data"):
-            load_config(cfg_file)
-        assert not (tmp_path / ".lakebench").exists()
 
     def test_nameless_read_writes_nothing_and_refuses_when_state_holds_a_name(self, tmp_path):
         """A read-only load writes nothing, and refuses once state.json holds a name."""

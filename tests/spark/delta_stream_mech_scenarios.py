@@ -1,15 +1,15 @@
-"""Delta silver-stream mechanics scenarios (B4 startup-race, I8 version-race).
+"""Delta silver-stream writer race scenarios, run in one fresh JVM.
 
-Not collected by pytest (no ``test_`` prefix). The pytest wrapper modules run
-this in a subprocess, so the scenarios get a JVM with their own static Spark
-conf, apart from the other Spark tests in the pytest process.
+Not collected by pytest (no ``test_`` prefix). ``test_delta_stream_writer_races``
+runs this in a subprocess, so the scenarios get a JVM with their own static
+Spark conf, apart from the other Spark tests in the pytest process.
 
-Usage: python delta_stream_mech_scenarios.py <scenario> <jars> <work_dir>  (jars: comma-separated)
+Usage: python delta_stream_mech_scenarios.py <jars> <work_dir>  (jars: comma-separated)
 
-Scenarios:
+Scenarios (each a key of the output):
     startup_race   -- two threads race the not-exists branch of
                       ``silver_stream_delta.write_silver_batch`` on the same
-                      table / warehouse. Prints B4-relevant counts.
+                      table / warehouse. Prints both writers' counts.
     version_race   -- one thread commits ten silver micro-batches while
                       another thread commits OPTIMIZE and a second
                       writer's appends to the same table between them.
@@ -114,7 +114,7 @@ def _run_version_race(spark, work, batches=10):
     stream id. Both are commits Delta lets run beside a blind append. They
     land between this writer's batches (the test asserts the version moved
     by more than one commit), where a before/after-version bracket around a
-    write would count them; the I8 read of the write's own commit
+    write would count them; the read of the write's own commit
     (userMetadata tag) does not.
     """
     import silver_stream_delta as ss
@@ -189,14 +189,10 @@ def _run_version_race(spark, work, batches=10):
 
 
 def main():
-    if len(sys.argv) < 4:
-        print(
-            json.dumps(
-                {"error": "usage: delta_stream_mech_scenarios.py <scenario> <jars> <work_dir>"}
-            )
-        )
+    if len(sys.argv) < 3:
+        print(json.dumps({"error": "usage: delta_stream_mech_scenarios.py <jars> <work_dir>"}))
         sys.exit(2)
-    scenario, jars, work = sys.argv[1], sys.argv[2], sys.argv[3]
+    jars, work = sys.argv[1], sys.argv[2]
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
     # Delta's hive-catalog path is what silver_stream_delta uses in this test.
     os.environ.setdefault("LB_CATALOG_TYPE", "hive")
@@ -205,15 +201,11 @@ def main():
 
     set_utc_session(spark)
 
-    if scenario == "startup_race":
-        out = _run_startup_race(spark, work)
-    elif scenario == "version_race":
-        try:
-            out = _run_version_race(spark, work, batches=10)
-        except Exception as e:  # noqa: BLE001 -- surfaced as JSON, like startup_race
-            out = {"scenario": "version_race", "errors": [f"{type(e).__name__}: {e}"]}
-    else:
-        out = {"error": f"unknown scenario {scenario!r}"}
+    out = {"startup_race": _run_startup_race(spark, work)}
+    try:
+        out["version_race"] = _run_version_race(spark, work, batches=10)
+    except Exception as e:  # noqa: BLE001 -- surfaced as JSON, like startup_race
+        out["version_race"] = {"scenario": "version_race", "errors": [f"{type(e).__name__}: {e}"]}
     spark.stop()
     print(json.dumps(out, default=str))
 

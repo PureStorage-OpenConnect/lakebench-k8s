@@ -353,27 +353,7 @@ def test_report_shows_settle_rows(tmp_path):
     assert "did not settle within 600s" in html
 
 
-# -- pre-benchmark maintenance stopped early (review of 79db73c) ----------------
-
-
-def test_stopped_maintenance_is_persisted_and_flagged_in_the_report(tmp_path):
-    from lakebench.metrics.storage import MetricsStorage
-    from lakebench.reports.generator import ReportGenerator
-
-    pm, pb = _pb_with_settle(None)
-    pb.maintenance_stopped = True
-    pb.maintenance_stop_reason = "OPTIMIZE lakehouse.gold.t timed out after 1800s"
-
-    path = MetricsStorage(tmp_path).save_run(pm)
-    scores = json.loads(path.read_text())["pipeline_benchmark"]["scores"]
-    assert scores["maintenance_stopped"] is True
-    assert scores["maintenance_stop_reason"].startswith("OPTIMIZE")
-
-    loaded = MetricsStorage(tmp_path).load_run(pm.run_id)
-    assert loaded.pipeline_benchmark.maintenance_stopped is True
-    html = ReportGenerator(metrics_dir=tmp_path)._generate_maintenance_section(loaded)
-    assert "maintenance stopped before completion" in html
-    assert "not a clean measurement" in html
+# -- pre-benchmark maintenance stopped early ----------------------------------
 
 
 def test_run_records_a_stopped_maintenance_budget_on_the_saved_run(tmp_path, monkeypatch):
@@ -397,7 +377,8 @@ def test_run_records_a_stopped_maintenance_budget_on_the_saved_run(tmp_path, mon
     assert scores["maintenance_stop_reason"] == reason
 
 
-def test_headline_qph_is_flagged_when_maintenance_stopped(tmp_path):
+def test_stopped_maintenance_is_persisted_and_flags_the_report(tmp_path):
+    from lakebench.metrics.storage import MetricsStorage
     from lakebench.reports.generator import ReportGenerator
 
     rg = ReportGenerator(metrics_dir=tmp_path)
@@ -409,7 +390,18 @@ def test_headline_qph_is_flagged_when_maintenance_stopped(tmp_path):
     assert "qph-stop-warning" not in rg._generate_qph_card(pm)
     pb.maintenance_stopped = True
     pb.maintenance_stop_reason = "OPTIMIZE lakehouse.gold.t timed out after 1800s"
-    for html in (rg._generate_batch_summary(pm).guards["Query rate"], rg._generate_qph_card(pm)):
+    path = MetricsStorage(tmp_path).save_run(pm)
+    scores = json.loads(path.read_text())["pipeline_benchmark"]["scores"]
+    assert scores["maintenance_stopped"] is True
+    assert scores["maintenance_stop_reason"].startswith("OPTIMIZE")
+    loaded = MetricsStorage(tmp_path).load_run(pm.run_id)
+    section = rg._generate_maintenance_section(loaded)
+    assert "maintenance stopped before completion" in section
+    assert "not a clean measurement" in section
+    for html in (
+        rg._generate_batch_summary(loaded).guards["Query rate"],
+        rg._generate_qph_card(loaded),
+    ):
         assert "qph-stop-warning" in html
         assert "maintenance stopped before completion" in html
 

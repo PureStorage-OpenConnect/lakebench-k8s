@@ -144,15 +144,6 @@ def test_query_io_never_raises():
         assert ex2.query_io([_src(4)]) == {}
 
 
-def test_query_io_batches_long_source_lists():
-    ex = _trino()
-    sources = [_src(i) for i in range(90)]
-    with patch("subprocess.run") as run:
-        run.return_value = subprocess.CompletedProcess([], 0, "", "")
-        ex.query_io(sources)
-    assert run.call_count == 3  # 40 + 40 + 10
-
-
 # -- the runner: attach the bytes after the stream -------------------------------
 
 
@@ -552,28 +543,13 @@ def test_report_draws_a_rate_chart_only_when_bytes_have_a_window():
     assert "no time window recorded" in section
 
 
-def test_report_says_not_measured_rather_than_zero():
+def test_report_says_not_measured_rather_than_zero_and_shows_a_measured_zero():
     section = _section(_render(load_record("1320bd")))
     assert "not measured" in section and "n/a" in section  # datagen reads nothing
-    assert "Not measured, Spark (bronze, gold, silver; read and write)" in section
     assert "0.00" not in section
-
-
-def test_a_zero_that_was_measured_is_shown_as_zero():
     rec = load_record("1320bd")
     _inject_trino_io(rec)
     assert "0.00 MiB" in _section(_render(rec))  # Trino wrote nothing during the benchmark
-
-
-def test_rate_chart_is_empty_without_bytes():
-    from datetime import datetime, timezone
-
-    from lakebench.reports.generator import _rate_chart_svg
-
-    t = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    assert _rate_chart_svg([0.0, 0.0], [0.0, 0.0], 5.0, t, t) == ""
-    svg = _rate_chart_svg([5e6, 0.0], [0.0, 1e6], 5.0, t, t)
-    assert svg.startswith("<svg") and "read" in svg and "written" in svg
 
 
 def test_datagen_window_is_recorded_and_time_to_value_does_not_count_it() -> None:

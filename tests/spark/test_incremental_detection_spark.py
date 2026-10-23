@@ -134,12 +134,11 @@ def _batches(rows, layout):
     ranges with a few days of overlap at each boundary and two-month-old rows
     in batch 6, delivered as ``layout``:
 
-    - ``ordered``: one silver stream, batch k is range k.
     - ``drift``: two datagen pods in one silver stream (silver's stream id is
       its query's, not a pod's): half the rows run ahead, so batch k brings
       range k of the slow half and range k + 3 of the fast half.
-    - ``restart``: as ordered, but silver restarts at batch 5 under a new
-      stream id with batch ids from 1 again.
+    - ``restart``: batch k is range k, but silver restarts at batch 5 under
+      a new stream id with batch ids from 1 again.
     """
     ordered = sorted(rows, key=lambda r: r[3])
     n = len(ordered)
@@ -164,9 +163,7 @@ def _batches(rows, layout):
                 ahead = []
             out[k] = [("s", k, slow[k] + ahead)]
         return out
-    if layout == "restart":
-        return {k: [("s", k, v)] if k < 5 else [("s2", k - 4, v)] for k, v in ranges.items()}
-    return {k: [("s", k, v)] for k, v in ranges.items()}
+    return {k: [("s", k, v)] if k < 5 else [("s2", k - 4, v)] for k, v in ranges.items()}
 
 
 _COLS = (
@@ -266,7 +263,7 @@ def _outside(rows, spans):
     return [r for r in rows if not any(lo <= _ts_us(r["alert_ts"]) < hi for lo, hi in spans)]
 
 
-@pytest.mark.parametrize("layout", ["ordered", "drift", "restart"])
+@pytest.mark.parametrize("layout", ["drift", "restart"])
 def test_incremental_alerts_equal_a_full_recompute_every_tick(
     spark_session, tmp_path, layout, monkeypatch
 ):

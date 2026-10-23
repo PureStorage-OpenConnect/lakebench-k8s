@@ -21,8 +21,8 @@ business value of any particular metric.
 ## Why run it
 
 Customer 360 is the light, scan-and-aggregate workload. Its silver stage is
-deliberately a single pass with no joins or shuffles, and its gold is a small
-daily rollup. Pick it when the architectural question you want measured is
+a single pass with no joins or shuffles, and its gold is a small daily
+rollup. Pick it when the architectural question you want measured is
 any of these:
 
 - Single-pass transform and scan-and-write throughput, free of join and
@@ -31,8 +31,7 @@ any of these:
 - How an engine behaves across a ladder of query shapes, from raw scan to
   windowed analytics, over a clean wide table.
 
-It is the deliberate opposite of [AML](aml-overview.md), which is heavy and
-stateful. Choosing between the two workloads is choosing which architectural
+[AML](aml-overview.md) is the heavy, stateful workload. Choosing between the two workloads is choosing which architectural
 stress you want to measure.
 
 Customer 360 runs on both Iceberg and Delta recipes, so it also serves as the
@@ -40,35 +39,33 @@ cross-table-format comparison.
 
 ## What each stage is designed to stress
 
-Each stage targets a distinct architectural capability, and the design intent
-is that they stay simple so the measurement isolates one thing at a time.
+Each stage targets one architectural capability.
 
 ### Bronze: schema validation and scan throughput
 
 In batch mode no bronze table is written. Bronze-verify is a validation pass
 over the landing Parquet: required columns and their types, row counts, and
 key columns that must not be entirely NULL. So bronze measures schema
-validation and file-scan throughput, and nothing else. This is a clean
-contrast with AML's register-in-place bronze, and the contrast is itself
-worth noting when you compare the two workloads.
+validation and file-scan throughput, and nothing else. AML's bronze, by
+contrast, registers files in place.
 
 ### Silver: single-pass transform, no joins or shuffles
 
 Silver drops duplicate-flagged rows and derives a wide per-event record in a
-single pass, with no joins and no shuffles by design. This isolates
+single pass, with no joins and no shuffles. It measures
 embarrassingly-parallel transform throughput: how fast the architecture can
 scan, compute per-row columns, and write. Below 100 GB of bronze it uses a
 simple strategy; at or above it switches to a streaming, hash-distributed
 pass. Because there is no accumulated cross-row state, silver cost tracks the
-data volume of the run, not the length of a history. That is the point of
-contrast with AML, where silver maintains state that grows.
+data volume of the run, not the length of a history. AML's silver maintains
+state that grows.
 
 ### Gold: grouped aggregation and single-file write
 
 Gold groups the whole silver table by day into a set of KPIs and writes the
-result as a single coalesced file. The output is intentionally tiny, around a
-year of daily rows, because the stage is testing the aggregation path and the
-dashboard read, not output volume. In continuous mode gold recomputes only
+result as a single coalesced file. The output is around a year of daily rows,
+so the stage measures the aggregation path and the dashboard read, not output
+volume. In continuous mode gold recomputes only
 the dates that new rows touch, which is the date-slice recompute stress. A
 non-degeneracy gate reads gold and silver to confirm the rollup covers every
 day, so the stage also exercises a full-table verification read.
@@ -78,11 +75,8 @@ day, so the stage also exercises a full-table verification read.
 The query set spans a ladder of access patterns, so one run reads an engine's
 behaviour across several shapes: raw scan, predicate pushdown and partition
 pruning, hash aggregation, window frames, a recency and frequency calculation
-over dates, and a read of the pre-aggregated gold table. The spec's query page
-has a table of what each query stresses; see [the query set](c360/queries.md)
-rather than repeating it here. The cross-cutting point is that the queries
-walk from scan through prune, aggregate, window and operational read, so a
-comparison reads an engine across that whole range on one clean table.
+over dates, and a read of the pre-aggregated gold table. What each query
+stresses is in [the query set](c360/queries.md).
 
 ## Batch and continuous are different questions
 
@@ -102,7 +96,7 @@ batch when you want a clean, repeatable pass over a fixed corpus.
 ## How to read the results, and where the detail is
 
 Results compare only across runs made under matching conditions, and a cap
-measures the cap rather than the architecture's ceiling. The disclosure and
+measures the cap, not the architecture's ceiling. The disclosure and
 comparability rules are in [comparability](c360/comparability.md); what is
 fixed, tunable and prohibited is in [execution rules](c360/execution-rules.md).
 

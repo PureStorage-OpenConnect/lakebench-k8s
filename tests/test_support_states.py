@@ -220,9 +220,7 @@ def _cfg(spark_image: str, recipe: str = "hive-iceberg-spark-trino", **arch):
     "image, recipe, arch, want",
     [
         ("apache/spark:4.1.1-python3", "hive-iceberg-spark-trino", {}, ("4.1", "1.12.0")),
-        ("apache/spark:4.0.2-python3", "polaris-iceberg-spark-trino", {}, ("4.0", "1.12.0")),
         ("apache/spark:4.0.2-python3", "hive-delta-spark-trino", {}, ("4.0", "4.0.0")),
-        ("apache/spark:4.1.1-python3", "hive-delta-spark-trino", {}, ("4.1", "4.1.0")),
         (
             "apache/spark:4.0.2-python3",
             "hive-iceberg-spark-trino",

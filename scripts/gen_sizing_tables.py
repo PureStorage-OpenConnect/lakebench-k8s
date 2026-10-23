@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the sizing tables in README.md and docs/sizing.md.
+"""Regenerate the sizing tables in docs/sizing.md.
 
 The tables are the minimum cluster per workload x mode x scale, computed
 by ``lakebench.config.sizing.plan_requirements`` (the one sizing source
@@ -11,8 +11,7 @@ Usage:
     python3.11 scripts/gen_sizing_tables.py           # rewrite the blocks
     python3.11 scripts/gen_sizing_tables.py --check   # exit 1 on drift
 
-``--check`` writes nothing; ``tests/test_sizing_tables_drift.py`` runs the
-same comparison in the unit suite.
+``--check`` writes nothing and exits 1 on drift.
 """
 
 from __future__ import annotations

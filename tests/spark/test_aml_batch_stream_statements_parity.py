@@ -1,4 +1,4 @@
-"""D-full-simple: batch and stream produce the SAME silver.account_statements
+"""Batch and stream produce the SAME silver.account_statements
 and silver.accounts.current_balance for the same bronze corpus.
 
 Runs the same 10-message bronze corpus twice against separate Iceberg
@@ -14,6 +14,10 @@ bal_before, bal_after, txn_id, uetr) matches, and per-iban
 current_balance matches. Sentinel columns (_batch_id, _stream_id) are
 excluded from the hash because batch mode writes NULL / 'batch' while
 stream writes the streaming_query_id + batchId; they compare separately.
+The stream's latest statement per iban must also equal the opening balance
+plus a hand-computed net movement (the tables under test are not their own
+oracle), and an untouched account keeps its NULL current_balance (the MERGE
+is scoped to the batch's touched set).
 
 Byte-identical parity holds ONLY under strict-monotone bronze arrival
 (single-pod datagen: DatagenConfig.parallelism=1). Multi-pod datagen
@@ -33,7 +37,7 @@ test_late_arrival_labelled.py).
 
 This parity test therefore constructs micro-batches with strictly
 monotonic book_ts per iban across batches (batch N > batch N-1). This
-is the ordering assumption D-full-simple's per-batch cumsum needs to
+is the ordering assumption the stream's per-batch cumsum needs to
 reproduce batch mode's global cumsum by associativity of addition and
 matching Window tie-breaks (book_ts, txn_id, _cdt_dbt_ord).
 """
@@ -53,11 +57,20 @@ pytest.importorskip("pyspark")
 
 pytestmark = [pytest.mark.requires_jars("iceberg"), pytest.mark.usefixtures("load_script")]
 
+# Net movement per iban over the five batches: GB01 pays US02 100+50+25+10+5.
+NET_MOVEMENT = {"GB01": -190.0, "US02": 190.0}
+
 
 def test_batch_stream_parity_in_a_fresh_jvm(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=900)
     out = json.loads(res.stdout.strip().splitlines()[-1])
     assert not problems(out), out
+    # The latest statements are the opening balance plus the net movement.
+    assert set(out["latest_bal_after"]) == set(NET_MOVEMENT), out
+    for iban, net in NET_MOVEMENT.items():
+        assert out["latest_bal_after"][iban] == out["opening"][iban] + net, (iban, out)
+    # The untouched iban keeps its NULL current_balance: the MERGE never visited it.
+    assert out["current_balance_stream"]["IT99"] == "None", out
 
 
 def problems(out):
@@ -102,18 +115,41 @@ def _run(jars):
         ]
         all_rows = [row for b in batches for row in b]
 
-        # Seed silver.accounts for BOTH the stream and the batch scoped tables.
-        for iban in ("GB01", "US02"):
+        # Seed silver.accounts for BOTH the stream and the batch scoped tables,
+        # with one untouched control iban (IT99) the stream must never touch.
+        for iban in ("GB01", "US02", "IT99"):
             seed_account(spark, iban)
 
         # --- STREAM pass on lh.silver.account_statements + lh.silver.accounts.
         ss = bind_stream_module(spark)
+        from pyspark.sql.functions import lit
+
         spark.sparkContext.setJobGroup("stream-run-1", "test")
         for bid, batch in enumerate(batches):
             foreach_batch_harness(spark, ss._merge_batch, bronze_batch(spark, batch), bid)
 
         stream_stmts = _stmt_rows(spark, "lh.silver.account_statements")
         stream_cb = _current_balance_map(spark, "lh.silver.accounts")
+        latest = spark.sql(
+            """
+            SELECT iban, bal_after FROM (
+                SELECT iban, bal_after,
+                    row_number() OVER (PARTITION BY iban ORDER BY book_ts DESC, entry_seq DESC) AS rn
+                FROM lh.silver.account_statements
+            ) WHERE rn = 1
+            """
+        ).collect()
+        from common import aml_opening_balance
+        from pyspark.sql.functions import xxhash64
+
+        opening = {
+            iban: float(
+                spark.range(1)
+                .select(aml_opening_balance(xxhash64(lit(iban))).alias("o"))
+                .first()["o"]
+            )
+            for iban in ("GB01", "US02")
+        }
 
         # --- BATCH pass: create a separate table, run build_statements against
         # the full bronze corpus once, update accounts.current_balance.
@@ -140,7 +176,6 @@ def _run(jars):
         _copy_accounts(spark, "lh.silver.accounts", "lh.silver.accounts_batch")
 
         import silver_build_financial as sbf
-        from pyspark.sql.functions import lit
 
         bronze_all = bronze_batch(spark, all_rows)
         accts_batch = spark.table("lh.silver.accounts_batch")
@@ -163,6 +198,8 @@ def _run(jars):
             "stream_row_count": len(stream_stmts),
             "current_balance_batch": batch_cb,
             "current_balance_stream": stream_cb,
+            "latest_bal_after": {r["iban"]: float(r["bal_after"]) for r in latest},
+            "opening": opening,
         }
         print(json.dumps(out, default=str))
         spark.stop()

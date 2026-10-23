@@ -94,7 +94,7 @@ dev = [
     "packaging>=23.0",
     "tomli>=2.0; python_version < '3.11'",
     "moto>=5.0.0",  # AWS mocking for tests
-    # tests/test_provenance_evd5.py builds the wheel the way CI does
+    # tests/test_provenance_record.py builds the wheel the way CI does
     # (python -m build --no-isolation), so the build hook runs in the suite.
     "build>=1.0",
     "hatchling>=1.21",

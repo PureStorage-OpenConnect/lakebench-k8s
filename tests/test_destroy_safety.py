@@ -1,4 +1,4 @@
-"""SAF-4 on destroy (SD-11) and the lease holder id.
+"""Destroy inside the cluster lease, and the lease holder id.
 
 - The legacy SecretClass cleanup runs inside the cluster lease, and skips
   (keeping them) when the lease stays held.

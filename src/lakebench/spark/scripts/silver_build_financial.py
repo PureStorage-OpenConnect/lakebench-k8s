@@ -1337,6 +1337,13 @@ def main() -> None:
     ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_stream_id", "STRING")
     ensure_column(spark, f"{CATALOG}.{SILVER_TRANSACTIONS}", "ingest_ts", "TIMESTAMP")
+    # 1.7.10: silver.accounts gained per-account balance state so the stream
+    # reads prior balances without re-aggregating all of account_statements.
+    # Batch writes NULL placeholders (build_accounts), but a catalog created
+    # before 1.7.10 predates the columns, so CREATE TABLE IF NOT EXISTS is a
+    # no-op and the accounts overwrite below would fail on a schema mismatch.
+    ensure_column(spark, f"{CATALOG}.{SILVER_ACCOUNTS}", "last_entry_seq", "BIGINT")
+    ensure_column(spark, f"{CATALOG}.{SILVER_ACCOUNTS}", "last_book_ts", "TIMESTAMP")
     ensure_partition_transform(
         spark, f"{CATALOG}.{SILVER_TRANSACTIONS}", "days(txn_timestamp)", "months(txn_timestamp)"
     )

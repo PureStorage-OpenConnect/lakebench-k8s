@@ -66,13 +66,12 @@ def _mock_spark_with_conf(dist_mode, fanout):
 @pytest.mark.parametrize(
     ("dist_mode", "fanout"),
     [
-        ("hash", "false"),
         # The operator's escape hatch must survive the cycle-1+ re-assert rather
         # than revert to hash.
         ("none", "false"),
         ("hash", "true"),
     ],
-    ids=["defaults", "distribution-none", "fanout"],
+    ids=["distribution-none", "fanout"],
 )
 def test_reassert_sets_the_full_property_set_from_the_conf(silver_build, dist_mode, fanout):
     spark = _mock_spark_with_conf(dist_mode, fanout)

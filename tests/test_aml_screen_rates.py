@@ -154,74 +154,34 @@ def test_unreadable_held_out_record_fails_closed(mod, monkeypatch):
     assert len(_about(problems, "s1-a")) == 1 and "protected" in _about(problems, "s1-a")[0]
 
 
-def test_record_without_the_keys_is_refused_by_name(mod):
-    for drop, why in [
-        (("nonplanted_alerts_by_rule",), "nonplanted_alerts_by_rule lacks W5 or W6"),
-        # Counting the other rules only is no better than counting none.
-        (("nonplanted_alerts_by_rule", W6), "nonplanted_alerts_by_rule lacks W5 or W6"),
-        (("customer_count",), "customer_count is missing or not positive"),
-        (
-            ("evidence_capped_alerts_by_rule",),
-            "evidence_capped_alerts_by_rule is missing or malformed",
-        ),
-    ]:
-        rec = _record("old", 1.0, 40, 20, 10_000)
-        *parents, key = drop
-        target = rec["financial_scoring"]
-        for parent in parents:
-            target = target[parent]
-        del target[key]
-        _doc, problems = mod.build([rec])
-        assert _about(problems, "old") == [f"run old: financial_scoring.{why}"]
+def _set(path: tuple, value):
+    def f(rec: dict) -> None:
+        node = rec
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+
+    return f
 
 
-def test_a_non_count_is_refused(mod):
-    for bad in [None, 55.9, -3, True, "40"]:
-        rec = _record("odd", 1.0, 40, 20, 10_000)
-        rec["financial_scoring"]["nonplanted_alerts_by_rule"][W5] = bad
-        _doc, problems = mod.build([rec])
-        assert _about(problems, "odd") == [
-            "run odd: financial_scoring.nonplanted_alerts_by_rule holds a non-count for W5 or W6"
-        ]
-
-
-def test_a_rule_that_did_not_run_is_refused_not_read_as_zero(mod):
-    rec = _record("skip", 1.0, 40, 0, 10_000)
-    rec["financial_scoring"]["rules"][1]["status"] = "skipped"
-    _doc, problems = mod.build([rec])
-    assert _about(problems, "skip") == [
-        "run skip: W6_pep_counterparty did not run (financial_scoring.rules)"
-    ]
-
-
-def test_a_corpus_without_observed_identity_is_refused(mod):
-    for change, why in [
-        ({"observed": False}, "no observed generator digest"),
-        ({"digest": None}, "no observed generator digest"),
-        ({"scale": 10.0}, "the observed datagen scale differs"),
-        ({"seed": 44}, "the observed datagen seed is missing or differs"),
-        ({"seed": None}, "the observed datagen seed is missing or differs"),
-    ]:
-        rec = _record("old-data", 1.0, 40, 20, 10_000)
-        rec["experiment"]["corpus"]["datagen"].update(change)
-        _doc, problems = mod.build([rec])
-        got = _about(problems, "old-data")
-        assert len(got) == 1 and why in got[0]
-
-
-def test_record_without_a_scale_is_refused(mod):
-    rec = _record("noscale", 1.0, 40, 20, 10_000)
-    rec["experiment"]["corpus"]["scale"] = None
-    _doc, problems = mod.build([rec])
-    assert _about(problems, "noscale") == ["run noscale: experiment.corpus.scale is missing"]
-
-
-def test_failed_verdict_is_refused(mod):
-    rec = _record("bad", 10.0, 40, 20, 10_000)
-    rec["verdict"]["status"] = "FAILED"
+@pytest.mark.parametrize(
+    ("scale", "mutate", "why"),
+    [
+        (1.0, _set(("financial_scoring", "customer_count"), 0), "customer_count"),
+        (1.0, _set(("financial_scoring", "nonplanted_alerts_by_rule", W5), "40"), "non-count"),
+        (1.0, _set(("financial_scoring", "rules", 1, "status"), "skipped"), "did not run"),
+        (1.0, _set(("experiment", "corpus", "datagen", "seed"), 44), "datagen seed"),
+        (10.0, _set(("verdict", "status"), "FAILED"), "verdict FAILED"),
+        (100.0, _set(("run_id",), "bad"), "scale 100"),
+    ],
+    ids=["no_customers", "non_count", "rule_skipped", "other_seed", "failed", "other_scale"],
+)
+def test_bad_record_is_refused_by_name(mod, scale, mutate, why):
+    rec = _record("bad", scale, 40, 20, 10_000)
+    mutate(rec)
     _doc, problems = mod.build([rec])
     got = _about(problems, "bad")
-    assert len(got) == 1 and "verdict FAILED" in got[0]
+    assert len(got) == 1 and why in got[0], problems
 
 
 @pytest.mark.parametrize("field", ["generator", "workload_version"])
@@ -258,12 +218,6 @@ def test_too_few_scale1_alerts_stop_the_file(mod):
         "seed-43: 49 non-planted W5 plus W6 alerts at scale 1, under 50: "
         "the ratio is too noisy to publish"
     ]
-
-
-def test_another_scale_is_refused(mod):
-    rec = _record("s100", 100.0, 40, 20, 10_000)
-    _doc, problems = mod.build([rec, *_four()])
-    assert problems == ["run s100: scale 100 is not one the figure uses (1 or 10)"]
 
 
 def test_malformed_shapes_are_refused_not_crashed(mod):

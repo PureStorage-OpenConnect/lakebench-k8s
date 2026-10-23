@@ -43,18 +43,11 @@ def assert_progress(rows_written, job_type):
 
     ``rows_written`` is the primary output-row count the caller tracked
     (silver.transactions rows for AML; the sole silver table for c360;
-    the accumulated micro-batch total for streams). The escape hatch
-    LB_SILVER_TEST_ALLOW_EMPTY=1 is honoured only when LB_TESTING=1 is
-    also set -- both must come from a test harness, never from job.py.
-    Any other zero-row silver run raises SilverAbort so the K8s Job
-    ends non-zero and the collector records the failure.
+    the accumulated micro-batch total for streams). A zero-row silver
+    run raises SilverAbort so the K8s Job ends non-zero and the collector
+    records the failure.
     """
     if int(rows_written) >= 1:
-        return
-    bypass = os.getenv("LB_SILVER_TEST_ALLOW_EMPTY") == "1"
-    testing = os.getenv("LB_TESTING") == "1"
-    if bypass and testing:
-        log(f"{job_type}: zero rows written; bypassed by LB_SILVER_TEST_ALLOW_EMPTY (test-only)")
         return
     raise SilverAbort(f"{job_type}: zero rows written; refusing exit-0 pass")
 

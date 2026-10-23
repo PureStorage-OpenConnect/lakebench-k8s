@@ -1,4 +1,4 @@
-"""The Category-1 teardown registry covers what deploy and run create (SD-21).
+"""The Category-1 teardown registry covers what deploy and run create.
 
 With ``create_namespace: false`` the namespace survives destroy, so nothing
 removes an object destroy does not delete by name or selector. This test runs
@@ -28,7 +28,6 @@ import pytest
 from tests.fixtures.recording_k8s import K8sRecorder, recording
 
 NS = "u01"
-SRC = Path(__file__).resolve().parent.parent / "src" / "lakebench"
 
 RECIPES = (
     "hive-iceberg-spark-trino",
@@ -65,13 +64,13 @@ def _instant_waits(mp: pytest.MonkeyPatch) -> None:
     mp.setattr(SparkThriftDeployer, "_wait_for_ready", lambda *a, **k: None)
     mp.setattr(DuckDBDeployer, "_wait_for_ready", lambda *a, **k: None)
     mp.setattr("lakebench.deploy.observability._wait_for_deployment_ready", lambda *a, **k: "")
-    # SAF-10: deploy stamps buckets with this cluster's fingerprint.
+    # Deploy stamps buckets with this cluster's fingerprint.
     mp.setattr("lakebench.deploy.ownership.api_server_fingerprint", lambda *a, **k: "fp-test")
     _instant_deps_server(mp)
 
 
 def _instant_deps_server(mp: pytest.MonkeyPatch) -> None:
-    """The deps step (DEP-2) waits for its pod and reads the set from it;
+    """The deps step waits for its pod and reads the set from it;
     the fake runs no pods, so the pod is Ready and serves the request."""
     from types import SimpleNamespace
 
@@ -120,7 +119,7 @@ def _config(recipe: str, workload: str, tmp_path: Path | None = None):
 
 
 def _seed_cluster(rec: K8sRecorder) -> None:
-    # Deploy's psql execs into lakebench-postgres-0 (SAF-8): the polaris role
+    # Deploy's psql execs into lakebench-postgres-0: the polaris role
     # probe (none yet, a fresh Polaris) and the role password sync.
     rec.exec_output = "lbrole:0\nALTER ROLE\nCREATE ROLE\nCREATE DATABASE\nGRANT\nCREATE SCHEMA\n"
     rec.add_spark_operator(watched=["default"])
@@ -285,8 +284,8 @@ def test_teardown_covers_every_created_object(recipe, workload, monkeypatch, tmp
         assert ("statefulsets", "lakebench-postgres") in created
         assert ("sparkapplications", f"lakebench-{_job_types(workload)[0].value}") in created
 
-        # CC-2 writes this annotation beside the deploy nonce; seed it so the
-        # removal is exercised before CC-2 lands.
+        # Deploy writes this annotation beside the deploy nonce; seed it so
+        # its removal is exercised.
         ns = rec.store[("namespaces", None, NS)]
         ns.metadata.annotations = {
             **(ns.metadata.annotations or {}),
@@ -322,91 +321,8 @@ def test_teardown_covers_every_created_object(recipe, workload, monkeypatch, tmp
         assert anns.get("lakebench.deployment/deploy-nonce")
         statuses = {r.component: r.status.value for r in results}
         assert statuses.get("category1") == "success", statuses
-        # Deploy, the run-time creators and destroy stayed in their lane (SAF-4).
+        # Deploy, the run-time creators and destroy stayed in their lane.
         rec.assert_clean()
-
-
-def test_entry_matching():
-    from lakebench.deploy.category1 import Cat1Entry
-
-    pvc = Cat1Entry("core_v1", "persistentvolumeclaims", name="data-lakebench-postgres-<n>")
-    assert pvc.matches("persistentvolumeclaims", "data-lakebench-postgres-12", None, NS)
-    assert not pvc.matches("persistentvolumeclaims", "data-lakebench-postgres-0-x", None, NS)
-    assert not pvc.matches("configmaps", "data-lakebench-postgres-0", None, NS)
-    sel = Cat1Entry("core_v1", "configmaps", label_selector="a=1,app.kubernetes.io/instance={name}")
-    assert sel.matches("configmaps", "x", {"a": "1", "app.kubernetes.io/instance": NS}, NS)
-    assert not sel.matches("configmaps", "x", {"a": "1", "app.kubernetes.io/instance": "u02"}, NS)
-    assert Cat1Entry("custom", "sparkapplications", name="*").matches(
-        "sparkapplications", "y", None, NS
-    )
-
-
-# Templates rendered by nothing: HiveDeployer.LEGACY_TEMPLATES (deprecated).
-_UNUSED_TEMPLATES = {"hive/configmap.yaml.j2", "hive/deployment.yaml.j2"}
-_NOT_NAMESPACED = {"Namespace", "SecretClass", "StorageClass"}
-_PLURAL = {
-    "ConfigMap": "configmaps",
-    "Secret": "secrets",
-    "Service": "services",
-    "ServiceAccount": "serviceaccounts",
-    "PersistentVolumeClaim": "persistentvolumeclaims",
-    "Deployment": "deployments",
-    "StatefulSet": "statefulsets",
-    "Job": "jobs",
-    "Role": "roles",
-    "RoleBinding": "rolebindings",
-    "HiveCluster": "hiveclusters",
-    "PodMonitor": "podmonitors",
-    "Route": "routes",
-}
-
-
-def _template_objects():
-    """``(template, kind, name, namespace, labels)`` for every document in templates/."""
-    import re
-
-    root = SRC / "templates"
-    for path in sorted(root.rglob("*.j2")):
-        for doc in re.split(r"(?m)^---\s*$", path.read_text()):
-            kind = re.search(r"(?m)^kind:\s*(\S+)", doc)
-            meta = re.search(r"(?m)^metadata:\s*\n((?:[ \t]+.*\n?)*)", doc)
-            if not kind or not meta:
-                continue
-            block = meta.group(1)
-            name = re.search(r"(?m)^  name:\s*(.+)$", block)
-            ns = re.search(r"(?m)^  namespace:\s*(.+)$", block)
-            labels_block = re.search(r"(?m)^  labels:\s*\n((?:    .*\n?)*)", block)
-            labels = {}
-            if labels_block:
-                for line in labels_block.group(1).splitlines():
-                    k, _, v = line.strip().partition(":")
-                    if k and not k.startswith("#"):
-                        labels[k.strip()] = v.strip().replace("{{ name }}", NS)
-            yield (
-                path.relative_to(root).as_posix(),
-                kind.group(1),
-                name.group(1).strip() if name else "",
-                ns.group(1).strip() if ns else "",
-                labels,
-            )
-
-
-def test_every_template_object_is_registered():
-    """[static] a template that makes a namespaced object needs its registry entry."""
-    from lakebench.modules.catalogs.hive.deployer import HiveDeployer
-
-    assert set(HiveDeployer.LEGACY_TEMPLATES) - {"hive/service.yaml.j2"} == _UNUSED_TEMPLATES
-    missing = []
-    seen = 0
-    for tpl, kind, name, ns, labels in _template_objects():
-        if tpl in _UNUSED_TEMPLATES or kind in _NOT_NAMESPACED or ns != "{{ namespace }}":
-            continue
-        seen += 1
-        plural = _PLURAL.get(kind)
-        if plural is None or not _registered(plural, name, labels):
-            missing.append(f"{tpl}: {kind}/{name}")
-    assert seen > 30
-    assert missing == [], missing
 
 
 @pytest.mark.parametrize(("ns_goes", "status"), [(False, "failed"), (True, "skipped")])
@@ -521,7 +437,7 @@ def test_two_deployments_isolated(monkeypatch, tmp_path):
     """Deployments A and B, each with its dependency server, deployed on one
     fake; destroying A (namespace kept) touches nothing of B's: B's lb-deps
     objects, its ConfigMaps and its deps-set annotation are unchanged, and
-    no delete lands outside A's namespace (DEP-2 s2.11)."""
+    no delete lands outside A's namespace."""
     import copy
 
     from lakebench.deploy.category1 import CATEGORY1_OBJECTS

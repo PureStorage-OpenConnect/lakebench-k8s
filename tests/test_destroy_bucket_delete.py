@@ -589,11 +589,11 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
         assert "2 failed statement" in tables.message
         assert boto.buckets == {}, "later steps still run"
 
-    # -- final review -------------------------------------------------------
+    # -- missing tables and catalogs ---------------------------------------
 
-    def test_partial_deployment_with_missing_tables_is_a_clean_teardown(self):
+    @pytest.mark.parametrize("table_format", ["iceberg", "delta"])
+    def test_partial_deployment_with_missing_tables_is_a_clean_teardown(self, table_format):
         """Deploy-only or failed-before-gold: the tables were never written."""
-        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
 
         def missing(sql):
             # Real Trino CLI output, as exec_sql wraps it.
@@ -608,16 +608,7 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
                     "line 1:13: Table 'lakehouse.gold.t' does not exist"
                 )
 
-        self._on_sql = missing
-        try:
-            self._run(
-                boto,
-                dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
-                maint=("trino", "trino-coordinator-0", "lakehouse"),
-            )
-        finally:
-            self._on_sql = None
-        tables = [x for x in self._results if x.component == "table-cleanup"][-1]
+        tables = self._run_tables(missing, table_format=table_format)
         assert tables.status is DeploymentStatus.SUCCESS, tables.message
         # Maintenance on a large table runs for minutes; 30 s killed it.
         assert self.sql_timeouts and min(self.sql_timeouts) >= 600
@@ -660,7 +651,7 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
         tables = [x for x in self._results if x.component == "table-cleanup"][-1]
         assert tables.status is DeploymentStatus.FAILED
 
-    # -- full review of f9dfda6: bound the table step ------------------------
+    # -- the table step is bounded -------------------------------------------
 
     def test_first_statement_timeout_stops_the_table_step(self):
         from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout
@@ -690,11 +681,6 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
         assert tables.status is DeploymentStatus.FAILED
         assert "cap" in tables.message
 
-    def test_combined_statement_is_labelled_by_its_operative_statement(self):
-        assert destroy_mod._operative_sql("SET SESSION x = '0s'; CALL c.system.vacuum()") == "CALL"
-        assert destroy_mod._operative_sql("SET a=b; VACUUM t RETAIN 0 HOURS") == "VACUUM"
-        assert destroy_mod._operative_sql("DROP TABLE IF EXISTS t") == "DROP"
-
     @pytest.mark.parametrize("table_format", ["iceberg", "delta"])
     def test_destroy_skips_maintenance_and_only_unregisters(self, table_format):
         """Trino only unregisters: no snapshot, orphan or vacuum statement
@@ -704,17 +690,6 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
         assert ran == [self.UNREG_SILVER, self.UNREG_GOLD]
         assert tables.status is DeploymentStatus.SUCCESS
         assert "maintenance skipped" in tables.message
-
-    def test_delta_destroy_missing_table_is_a_clean_teardown(self):
-        def missing(sql):
-            if "'gold'" in sql:
-                raise RuntimeError(
-                    "exec_sql failed (rc=1): Query 20260926_101010_00001_abcde failed: "
-                    "line 1:7: Table 'lakehouse.gold.t' does not exist"
-                )
-
-        tables = self._run_tables(missing, table_format="delta")
-        assert tables.status is DeploymentStatus.SUCCESS, tables.message
 
     # -- Polaris via Trino: DROP always requests purge, Polaris refuses it ----
 

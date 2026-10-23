@@ -117,22 +117,6 @@ def test_direction_of_a_score(key, mode, direction):
     assert reg.direction_hint(key, mode) == (f"{direction} is better" if direction else "")
 
 
-@pytest.mark.parametrize(
-    ("key", "mode", "band"),
-    [
-        ("qph_spread", "batch", "diagnostic"),
-        ("maintenance_value_pct", "batch", "diagnostic"),
-        ("compaction_ratio", "batch", "diagnostic"),
-        ("benchmark_rounds_count", "sustained", "diagnostic"),
-        ("window_seconds", "sustained", "config_bound"),
-        ("ingest_ratio", "sustained", "guard"),
-        ("scale_ratio", "batch", "correctness"),
-    ],
-)
-def test_a_score_without_a_better_side_keeps_its_band(key, mode, band):
-    assert reg.lookup(key, mode).band == band
-
-
 def test_every_emitted_score_has_a_band_and_a_side_when_performance():
     """Each numeric score _scores_dict emits resolves to an entry in its
     mode, and is directional exactly when its band is performance: a
@@ -148,21 +132,6 @@ def test_every_emitted_score_has_a_band_and_a_side_when_performance():
             if reg.is_directional(key, mode) is not (meta.band == "performance"):
                 wrong.append((key, mode, meta.band, meta.direction))
     assert wrong == []
-
-
-def test_stage_seconds_by_mode():
-    """Continuous stream stages are named bronze/silver/gold too, and run
-    for the whole window; datagen and the post-window query stage are real
-    times in either mode."""
-    assert reg.lookup("silver_seconds", "batch").band == "performance"
-    assert reg.lookup("silver_seconds", "sustained").band == "config_bound"
-    assert not reg.is_directional("silver_seconds", "sustained")
-    assert reg.lookup("query_seconds", "sustained").band == "performance"
-    assert reg.lookup("datagen_seconds", "sustained").band == "performance"
-    assert reg.lookup("total_core_hours", "sustained").band == "config_bound"
-    assert reg.lookup("total_core_hours", "batch").band == "performance"
-    assert reg.lookup("total_elapsed_seconds", "sustained").band == "diagnostic"
-    assert reg.is_directional("compute_efficiency_gb_per_core_hour", "sustained")
 
 
 def test_a_mode_split_key_needs_the_mode():

@@ -40,7 +40,6 @@ workload:
   `generate`, `run`, `benchmark`, `query`, `clean`, `financial`
   and `validate` refuse a config without one, and the error offers a name to
   add.
-- There is no `config upgrade` command (removed in 1.7; see the CHANGELOG).
 
 ## Removed keys
 
@@ -64,15 +63,15 @@ The removed keys, with what to do instead (generated from each model's
 | `architecture.catalog.unity.version` | the Unity Catalog that runs is the tag of images.unity. |
 | `architecture.pipeline.medallion` | nothing read the medallion block except bronze.path_template, and the Spark stages read a fixed bronze layout (customer/interactions/, pacs008/ for the financial workload): a custom bronze layout is not supported. |
 | `architecture.table_format.delta.properties` | no table property is applied from the config. |
-| `architecture.table_format.hudi` | Hudi is not a supported table format; removed in v1.2. |
+| `architecture.table_format.hudi` | Hudi is not a supported table format; use iceberg or delta. |
 | `architecture.table_format.iceberg.file_format` | Iceberg tables are always written as Parquet. |
 | `architecture.table_format.iceberg.properties` | no table property is applied from the config. |
 | `description` | nothing read it; keep notes in a YAML comment. |
 | `images.grafana` | set observability.grafana_image to pin the per-namespace Grafana. |
 | `images.hive` | the Stackable HiveCluster always runs Hive 3.1.3 (Hive 4 breaks Iceberg and Trino ANALYZE), whatever images.hive named, and run provenance records 3.1.3. |
 | `images.prometheus` | set observability.prometheus_image to pin the per-namespace Prometheus. |
-| `images.pull_secrets` | No deployer ever applied it; removed in v1.5. |
-| `observability.chart_version` | observability no longer deploys the kube-prometheus-stack Helm chart; pin the images with observability.prometheus_image and observability.grafana_image. |
+| `images.pull_secrets` | nothing applied it; delete the key. |
+| `observability.chart_version` | observability deploys no Helm chart; pin the images with observability.prometheus_image and observability.grafana_image. |
 | `observability.prometheus_stack_enabled` | observability.enabled always deploys the full per-namespace stack. |
 | `observability.reports` | every run writes report.html into its run directory under lakebench-output/runs; 'lakebench report --render' writes a fresh copy to lakebench-output/reports/ without overwriting. |
 | `observability.s3_metrics_enabled` | PodMonitor deployment is not gated on it. |
@@ -87,16 +86,16 @@ The removed keys, with what to do instead (generated from each model's
 | `platform.compute.spark.silver_stream_executor_cores` | use silver_executor_cores. |
 | `platform.compute.spark.silver_stream_executors` | use silver_executors, which sizes silver-stream in continuous mode and silver-build in batch mode. |
 | `platform.storage.s3.secret_ref` | lakebench never reads an existing Secret: deploy writes the S3 Secret from access_key and secret_key. Set those instead (use ${VAR} substitution, for example access_key: "${S3_ACCESS_KEY}", to keep the keys out of the file). |
-| `platform.storage.scratch.create_storage_class` | lakebench no longer creates StorageClasses; a cluster admin runs 'lakebench admin install --component scratch-storage-class' once. |
+| `platform.storage.scratch.create_storage_class` | lakebench creates no StorageClass; a cluster admin runs 'lakebench admin install --component scratch-storage-class' once. |
 | `platform.storage.scratch.size` | per-job scratch comes from the job profiles (silver-build: 60 GiB x scale / executors, 50-300Gi). |
 | `secret_ref` | lakebench never reads an existing Secret: deploy writes the S3 Secret from access_key and secret_key. Set those instead. |
-| `version` | there is one config schema and nothing read the number; a removed key is named in the upgrade notes instead. |
-| `workload.customer360.channels` | The customer360 generator never read it; removed in v1.5. |
+| `version` | there is one config schema and nothing read the number; delete the key. |
+| `workload.customer360.channels` | the customer360 generator never read it; delete the key. |
 | `workload.customer360.date_range_days` | the customer360 generator never read it: the event window is datagen.timestamp_start and datagen.timestamp_end. |
-| `workload.customer360.event_types` | The customer360 generator never read it; removed in v1.5. |
-| `workload.customer360.quality_distribution` | The customer360 generator never read it; removed in v1.5. |
-| `workload.datagen.checkpoint` | The Rust generator never implemented checkpoint-resume; removed 2026-09-28. Re-run generation from the start on failure. |
-| `workload.datagen.uploaders` | Never forwarded to the Rust generator; removed 2026-09-28. Uploader concurrency is fixed inside the S3 sink. |
+| `workload.customer360.event_types` | the customer360 generator never read it; delete the key. |
+| `workload.customer360.quality_distribution` | the customer360 generator never read it; delete the key. |
+| `workload.datagen.checkpoint` | the generator has no checkpoint-resume; delete the key and re-run generation from the start on failure. |
+| `workload.datagen.uploaders` | the generator never read it; delete the key. Uploader concurrency is fixed inside the S3 sink. |
 <!-- END GENERATED: config-removed -->
 
 - A removed key still at its old default is inert and loads under every
@@ -577,7 +576,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
-| `platform.compute.spark.operator.install` | boolean | `false` | advanced | Refused when `true`: deploy never installs the shared operator; a cluster admin runs `lakebench admin install --component spark-operator`. `false` loads as before. |
+| `platform.compute.spark.operator.install` | boolean | `false` | advanced | Refused when `true`: deploy never installs the shared operator; a cluster admin runs `lakebench admin install --component spark-operator`. `false` is accepted and does nothing. |
 | `platform.compute.spark.operator.namespace` | string | `spark-operator` | advanced | Namespace for the Spark Operator. |
 | `platform.compute.spark.operator.version` | string | `2.5.1` | advanced | Chart version a fresh `admin install` uses. v2.x required. An installed operator keeps its version. |
 | `platform.compute.spark.bronze_executors` | integer or null | `null` | advanced | Override the bronze stage's executor count (1--28): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = auto (from scale in batch, from the offered load in continuous). |
@@ -615,7 +614,7 @@ What `lb-deps` is and when it resolves again: see [Dependency server](#dependenc
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
 | `architecture.catalog.type` | one of `hive`, `polaris`, `unity`, `none` | `hive` | advanced | Catalog service: `hive` or `polaris`. `unity` and `none` have no supported recipe and are refused. |
-| `architecture.catalog.hive.operator.install` | boolean | `false` | advanced | Refused when `true`: deploy never installs the Stackable operators; a cluster admin runs `lakebench admin install --component stackable`. `false` loads as before. |
+| `architecture.catalog.hive.operator.install` | boolean | `false` | advanced | Refused when `true`: deploy never installs the Stackable operators; a cluster admin runs `lakebench admin install --component stackable`. `false` is accepted and does nothing. |
 | `architecture.catalog.hive.operator.namespace` | string | `stackable` | advanced | Namespace for Stackable operators. |
 | `architecture.catalog.hive.operator.version` | string | `25.7.0` | advanced | Stackable SDP chart version a fresh `admin install` uses. |
 | `architecture.catalog.hive.resources.cpu_min` | string | `500m` | advanced | Hive Metastore minimum CPU request. |
@@ -665,7 +664,7 @@ What `lb-deps` is and when it resolves again: see [Dependency server](#dependenc
 | `architecture.query_engine.duckdb.cores` | integer | `2` | advanced | DuckDB CPU cores. |
 | `architecture.query_engine.duckdb.memory` | string | `4g` | advanced | DuckDB pod memory. Auto-sized to `16g` on the financial schema when unset (less on a node with under 24 GiB allocatable). |
 | `architecture.query_engine.duckdb.catalog_name` | string | `lakehouse` | advanced | Iceberg catalog name for DuckDB. |
-| `architecture.query_engine.duckdb.version` | string | `1.5.6` | advanced | DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes whatever is current, so two runs weeks apart can query with different engines and the difference would read as a result. |
+| `architecture.query_engine.duckdb.version` | string | `1.5.6` | advanced | DuckDB version installed at deploy time. Keep it pinned: an unpinned install takes whatever is current, so two runs weeks apart can query with different engines. |
 
 ### Architecture -- Pipeline
 
@@ -685,13 +684,13 @@ The legacy name `processing` is still accepted with a deprecation warning.
 | `architecture.pipeline.continuous.max_files_per_trigger` | integer or null | none | advanced | Max Parquet files bronze reads per trigger, a Lakebench cap on intake. Unset: no limit when the run starts its own datagen, which generates for the whole window. With --skip-generate (a finite corpus) unset is derived per run so data keeps arriving for about 1.2 x `run_duration`, capped at 50, and an explicit value that would offer the corpus before the window ends is refused at run start. |
 | `architecture.pipeline.continuous.silver_max_rows_per_trigger` | integer or null | `20000000` | advanced | Soft cap on bronze rows silver reads per trigger (Iceberg `streaming-max-rows-per-micro-batch`), so one micro-batch cannot swallow the whole backlog and run past the window. A batch always takes the next whole data file, then stops once the cap would be exceeded. `null` lifts the cap (each trigger takes every unprocessed bronze snapshot). For a financial continuous run that leaves this unset, auto-sizing raises the cap to what the silver executors can hold in memory at the scale (always at least this default), so a larger batch amortizes the world-sized dimension MERGE; an explicit value is used as given. |
 | `architecture.pipeline.continuous.silver_write_mode` | one of `copy_on_write`, `merge_on_read` | `merge_on_read` | advanced | Iceberg write mode for the update-heavy silver tables (entities, accounts, account_statements, entity_profiles) in continuous AML. `merge_on_read` (default) writes position-delete files on every MERGE, so a batch's write cost tracks the rows it changes rather than the table size, and added silver executors scale throughput; readers merge the deletes and maintenance compacts them. `copy_on_write` rewrites the touched data files instead, so the write cost tracks table size. Append-only silver tables (transactions, edges, pairs) are unaffected. |
-| `architecture.pipeline.continuous.silver_reuse_bronze_projection` | boolean | `false` | advanced | Continuous AML only. When true, a silver micro-batch reads the party, account and country columns it needs for the entities and accounts dimensions from one shared projection of the batch's bronze rows, instead of scanning and parsing the bronze slice once per dimension. Off by default: a default run scans per dimension, exactly as before, so its results and memory are unchanged. The dimension rows are identical either way; reuse trades a cached projection for the repeated scans, which pays when the per-batch bronze read dominates. |
+| `architecture.pipeline.continuous.silver_reuse_bronze_projection` | boolean | `false` | advanced | Continuous AML only. When true, a silver micro-batch reads the party, account and country columns it needs for the entities and accounts dimensions from one shared projection of the batch's bronze rows, instead of scanning and parsing the bronze slice once per dimension. Off by default: a default run scans per dimension. The dimension rows are identical either way; reuse trades a cached projection for the repeated scans, which pays when the per-batch bronze read dominates. |
 | `architecture.pipeline.continuous.bronze_target_file_size_mb` | integer | `512` | advanced | Target Iceberg file size for bronze writes (MB) |
 | `architecture.pipeline.continuous.silver_target_file_size_mb` | integer | `512` | advanced | Target Iceberg file size for silver writes (MB) |
 | `architecture.pipeline.continuous.silver_bronze_wait_seconds` | integer or null | `null` | advanced | Customer360 only: seconds silver-stream waits for the bronze table to appear before it stops the run. Unset (auto): the run's window (`--duration` or run_duration) / 4, floored at 600 s. The wait runs before the window opens: datagen starts once the streams run, and bronze creates its table with its first batch. |
 | `architecture.pipeline.continuous.gold_target_file_size_mb` | integer | `128` | advanced | Target Iceberg file size for gold writes (MB) |
 | `architecture.pipeline.continuous.retention_interval` | integer or null | auto | advanced | Seconds between table maintenance rounds during a continuous run: Iceberg `expire_snapshots` + `remove_orphan_files`, or Delta `VACUUM` (Trino only). Unset: `run_duration / 3`, within 300--7200, resolved at run start (600 s for the default 1800 s window), so a default run maintains inside its window. An explicit value too long for the first round to run inside the window is refused at run start unless `--skip-maintenance` is given. While streams are live Delta `VACUUM` keeps Delta's 7-day default retention, so a continuous Delta run shorter than 7 days removes no files. Range: 300--7200. |
-| `architecture.pipeline.continuous.retention_threshold` | string | `30m` | advanced | Iceberg snapshot retention threshold. Snapshots older than this are expired. A whole number and one unit, `s`, `m`, `h` or `d` (e.g., `30m`, `1h`, `7d`); anything else is rejected at load. While streams are live, Iceberg expiry is floored at `1h` and, for the bronze streaming source, also at the snapshot the live silver stream's committed offset references, so a maintenance round never expires the snapshot the stream resumes from. A continuous Iceberg config on Trino or Spark Thrift that sets a lower value prints a warning when it loads. The `30m` default does not warn: every continuous maintenance round runs beside live streams, so it expires at `1h`, and the run records the applied values in `continuous.retention` of `metrics.json`. Delta has no effective table maintenance in continuous mode (v1.6). Orphan-file removal never uses less than 24 h 10 min, on any engine. |
+| `architecture.pipeline.continuous.retention_threshold` | string | `30m` | advanced | Iceberg snapshot retention threshold. Snapshots older than this are expired. A whole number and one unit, `s`, `m`, `h` or `d` (e.g., `30m`, `1h`, `7d`); anything else is rejected at load. While streams are live, Iceberg expiry is floored at `1h` and, for the bronze streaming source, also at the snapshot the live silver stream's committed offset references, so a maintenance round never expires the snapshot the stream resumes from. A continuous Iceberg config on Trino or Spark Thrift that sets a lower value prints a warning when it loads. The `30m` default does not warn: every continuous maintenance round runs beside live streams, so it expires at `1h`, and the run records the applied values in `continuous.retention` of `metrics.json`. Delta has no effective table maintenance in continuous mode. Orphan-file removal never uses less than 24 h 10 min, on any engine. |
 | `architecture.pipeline.continuous.compaction_enabled` | boolean | `true` | advanced | Run periodic Iceberg compaction (`rewrite_data_files` / `optimize`) during continuous runs. |
 | `architecture.pipeline.continuous.compaction_interval` | integer | `0` | advanced | Seconds between compaction rounds. `0` = 2x the effective `retention_interval` (1200 s for the default window). An explicit value that cannot run inside the window is refused at run start unless `compaction_enabled` is false or `--skip-maintenance` is given. Minimum 0; no upper bound in the schema. |
 | `architecture.pipeline.continuous.benchmark_interval` | integer | `300` | advanced | Seconds between in-stream benchmark rounds, 60--3600, counted from a round's end. With gold on a longer interval, raised to that interval so rounds do not overlap gold rewrites. |
@@ -701,7 +700,7 @@ The legacy name `processing` is still accepted with a deprecation warning.
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
-| `workload.schema` | one of `customer360`, `financial`, `custom` | `customer360` | first day | Workload schema: `customer360` or `financial`. `custom` is refused at load in v1.6. `financial` requires `table_format: iceberg`. The block was `architecture.workload` before v1.6; that location still loads with a deprecation warning, and setting both with different values is an error. |
+| `workload.schema` | one of `customer360`, `financial`, `custom` | `customer360` | first day | Workload schema: `customer360` or `financial`. `custom` is refused at load. `financial` requires `table_format: iceberg`. The block also loads from `architecture.workload` with a deprecation warning; setting both with different values is an error. |
 | `workload.datagen.scale` | number | `10` | first day | Scale factor (1 unit ~ 10 GB bronze). The schema accepts 0.01--10000, but datagen is banded per workload: Customer 360 supported to 300, unverified to 600, refused above; AML supported to 300, unverified to 800, refused above (see [Scale Factors](#scale-factors)). Values below 1 are intended for local mode. |
 | `workload.datagen.target_size` | string or null | `null` | advanced | **Deprecated.** Legacy size string (e.g., `100gb`). Converted to scale automatically. |
 | `workload.datagen.mode` | one of `batch`, `continuous`, `auto` | `auto` | advanced | S3 delivery pattern: `batch` = one PUT per file, `continuous` = S3 multipart upload as row-groups close, `auto` = `continuous` at every scale. Row content is byte-identical across modes at a fixed seed. Sizing is keyed on scale, not mode. |
@@ -876,7 +875,7 @@ The run record keeps it as `architecture.spark_conf_user`:
   difference in a value recorded as `<redacted>` (an environment
   variable's value, for example) is not in the identity.
 
-Job defaults (`SPARK_CONF_DEFAULTS`), which a `spark.conf` value replaces:
+Job defaults, which a `spark.conf` value replaces:
 
 | Key | Default | Description |
 |---|---|---|
@@ -888,10 +887,8 @@ Job defaults (`SPARK_CONF_DEFAULTS`), which a `spark.conf` value replaces:
 | `spark.memory.fraction` | `0.8` | Fraction of heap for execution + storage. |
 | `spark.memory.storageFraction` | `0.3` | Fraction of `memory.fraction` for storage. |
 
-Before 1.7 these defaults were the schema default of `spark.conf`, so
-setting any key there dropped all of them. They now stay. A config that
-still carries the 1.6 default map loads with a note for the Lakebench-set
-keys in it.
+Setting a key in `spark.conf` overrides that key only; the other defaults
+stay.
 
 ## Scale Factors
 
@@ -1171,9 +1168,8 @@ A recipe sets `architecture.catalog.type`, `architecture.table_format.type`,
 - Any other value is refused at load with both keys named, for example
   `architecture.catalog.type is 'hive' but recipe 'polaris-iceberg-spark-trino'
   sets 'polaris'; delete one of them`.
-- The message also names the recipe a 1.6 deployment from that file used
-  (1.6 let the written value win). Write that recipe to keep that
-  deployment.
+- The message also names the recipe an existing deployment from that file
+  used. Write that recipe to keep that deployment.
 - `deploy`, `run` and the other commands that change data refuse such a
   config. `destroy`, `status`, `report` and the inspect commands load it
   with the written value winning, with a note.

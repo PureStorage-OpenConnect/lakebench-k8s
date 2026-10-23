@@ -2,7 +2,7 @@
 
 Reference: the minimum cluster per workload, mode and scale, and how `lakebench` checks that a cluster has room.
 
-The table is for `hive-iceberg-spark-trino`. It comes from `lakebench.config.sizing.plan_requirements`, which also drives `lakebench config show`, `lakebench config recommend` and the `run` capacity preflight, and needs no cluster. On a real cluster the preflight first sizes datagen and Trino against that cluster, so its datagen figure can differ from the default-parallelism column.
+The table is for `hive-iceberg-spark-trino`. It comes from the same sizing model that drives `lakebench config show`, `lakebench config recommend` and the `run` capacity preflight, and needs no cluster. On a real cluster the preflight first sizes datagen and Trino against that cluster, so its datagen figure can differ from the default-parallelism column.
 
 A continuous row is the cluster that carries the scale's offered load balanced (see [Running Pipelines](running-pipelines.md)). A smaller cluster runs with fewer executors and a "cannot balance" warning naming the stage, and the run reports it as not balanced. Use the figure, or lower the scale.
 
@@ -40,8 +40,7 @@ A continuous row is the cluster that carries the scale's offered load balanced (
   - Continuous: the three stream jobs run at once. The minimum is their sum
     plus the always-on pods. Datagen counts in the always-on line while its
     Job runs.
-- **Spark peak** comes from the Spark job profiles
-  (`compute_peak_requirements()`).
+- **Spark peak** comes from the Spark job profiles.
   - Per-executor sizing is fixed. Executor counts grow with scale above
     scale 10, up to 28 per job.
   - In batch, `silver-build` sets the peak: 8 executors of 4 cores and 60 GB

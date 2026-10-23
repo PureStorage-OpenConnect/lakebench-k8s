@@ -80,14 +80,24 @@ def test_reset_drops_every_table_the_continuous_run_writes(spark, load_script, m
     assert left == [], f"the continuous reset left {left}"
 
 
-# The two tables the refusal once missed; one refusal path covers the list,
-# whose membership tests/test_aml_continuous_reset_tables.py pins.
-@pytest.mark.parametrize("table", ["silver.account_statements", "silver.entity_profiles"])
-def test_fresh_checkpoint_refuses_any_populated_stream_table(spark, load_script, tmp_path, table):
+# A table the refusal once missed; one refusal path covers the list, whose
+# membership tests/test_aml_continuous_reset_tables.py pins.
+def test_fresh_checkpoint_refuses_any_populated_stream_table(spark, load_script, tmp_path):
     ssf = load_script("silver_stream_financial")
     common = load_script("common")
     for t in STREAM_SILVER:
         spark.sql(f"DROP TABLE IF EXISTS {CAT}.{t}")
-    _populate(spark, [table])
+    _populate(spark, ["silver.account_statements"])
     with pytest.raises(common.SilverAbort):
         ssf.refuse_reused_silver(spark, str(tmp_path / "fresh-ckpt"))
+
+
+def test_refuse_no_op_when_all_tables_empty(spark, load_script, tmp_path):
+    """Empty tables + fresh checkpoint: no refusal."""
+    common = load_script("common")
+    tbl_a, tbl_b = f"{CAT}.silver.empty_a", f"{CAT}.silver.empty_b"
+    for t in (tbl_a, tbl_b):
+        spark.sql(f"DROP TABLE IF EXISTS {t}")
+        spark.sql(f"CREATE TABLE {t} (n BIGINT) USING iceberg")
+    # Should not raise:
+    common.refuse_fresh_checkpoint_over_data(spark, str(tmp_path / "empty-ckpt"), [tbl_a, tbl_b])

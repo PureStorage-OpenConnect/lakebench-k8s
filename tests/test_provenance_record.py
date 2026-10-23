@@ -1,9 +1,10 @@
-"""Run provenance is complete (EVD-5).
+"""Run provenance is complete.
 
 A pip-installed run names the commit its wheel was built from; the record
 says which install it was, re-reads the code at run end, names the config
 file, the scripts ConfigMaps, the dependency set (or that none was
 recorded), the image digests the pods ran and the scratch the cluster held.
+The recorded Hive version is the one the template renders.
 """
 
 from __future__ import annotations
@@ -242,20 +243,23 @@ def test_code_change_during_the_run_withdraws_support(monkeypatch, changed, stat
     assert support["state"] == state
     assert ("validation_runs" in support) is not changed
     assert d["experiment"]["support"]["state"] == state
-
-
-def test_support_state_refuses_supported_when_code_changed():
+    # The support lookup refuses "supported" for the same provenance.
     from lakebench.config.support import Validation, support_state
 
     key = ("customer360", "hive-iceberg-spark-trino", "batch", "4.1", "1.12.0")
-    record = {key: Validation(*key, runs=("r1",))}
-    clean = {"git_sha": SHA, "git_dirty": False}
-    args = ("customer360", "hive", "iceberg", "spark", "trino", "batch")
-    versions = {"spark": "4.1", "table_format_version": "1.12.0"}
-    assert support_state(*args, record=record, provenance=clean, **versions)["state"] == "supported"
-    changed = {**clean, "end_sample": {"git_sha": "f" * 40, "code_changed_during_run": True}}
-    out = support_state(*args, record=record, provenance=changed, **versions)
-    assert out["state"] == "unverified"
+    out = support_state(
+        "customer360",
+        "hive",
+        "iceberg",
+        "spark",
+        "trino",
+        "batch",
+        record={key: Validation(*key, runs=("r1",))},
+        provenance=run.provenance,
+        spark="4.1",
+        table_format_version="1.12.0",
+    )
+    assert out["state"] == state
 
 
 # --- config, scripts, deps ---------------------------------------------------
@@ -503,13 +507,8 @@ def _scratch_config(scale=1, silver_executors=None):
 @pytest.mark.parametrize(
     ("scale", "silver_executors", "size"),
     [
-        # silver-build: 60 GiB per scale unit shared by its executors, between
-        # 50 Gi and the profile's 300 Gi.
-        (1, None, "50Gi"),
+        # silver-build: 60 GiB per scale unit shared by its executors.
         (10, None, "75Gi"),  # 600 / 8
-        (10, 16, "50Gi"),  # 600 / 16 = 38, the floor
-        (50, None, "250Gi"),  # 3,000 / 12
-        (100, None, "300Gi"),  # 6,000 / 18 = 334, the ceiling
     ],
 )
 def test_scratch_as_ran_from_manifest(scale, silver_executors, size):
@@ -631,3 +630,56 @@ def test_observed_digests_compare_over_roles_both_sides_saw():
     assert _arch_diff(full, {**full, "spark_driver": "mirror/spark@sha256:1"}) == []
     (d,) = _arch_diff(full, {**full, "spark_executor": "r/spark@sha256:9"})
     assert d.key == "observed image digests"
+
+
+# --- the recorded Hive is the Hive the template deploys ----------------------
+
+
+def test_recorded_hive_is_the_rendered_hive_not_images_hive():
+    import time
+    import warnings
+
+    from lakebench.deploy.engine import DeploymentEngine, DeploymentStatus
+    from lakebench.k8s import WaitResult, WaitStatus
+    from lakebench.metrics.experiment import _stackable_hive
+    from lakebench.modules.catalogs.hive.deployer import HiveDeployer
+    from tests.conftest import make_config
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        cfg = make_config(images={"hive": "apache/hive:4.0.1"})
+    k8s = MagicMock()
+    k8s.namespace_exists.return_value = True
+    k8s.apply_manifest.return_value = True
+    k8s.get_cluster_capacity.return_value = None
+    with patch(
+        "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+        return_value=False,
+    ):
+        engine = DeploymentEngine(config=cfg, k8s_client=k8s, dry_run=True)
+
+    deployer = HiveDeployer(engine)
+    with (
+        patch.object(
+            deployer,
+            "_wait_for_hivecluster",
+            return_value=WaitResult(
+                status=WaitStatus.READY, message="ok", elapsed_seconds=0, attempts=1
+            ),
+        ),
+        patch.object(deployer, "_get_hive_pod_name", return_value="hive-0"),
+    ):
+        result = deployer._deploy_stackable(cfg.get_namespace(), time.time())
+
+    assert result.status == DeploymentStatus.SUCCESS
+    applied = [c.args[0] for c in engine.k8s.apply_manifest.call_args_list]
+    clusters = [d for d in applied if d.get("kind") == "HiveCluster"]
+    assert len(clusters) == 1
+    rendered = clusters[0]["spec"]["image"]["productVersion"]
+    assert rendered != "4.0.1"
+    # The deploy result and the run provenance name what was applied.
+    assert result.detail == rendered
+    assert "4.0.1" not in result.message
+    recorded = _stackable_hive(cfg)
+    assert f"hive:{rendered}-stackable" in recorded
+    assert "4.0.1" not in recorded

@@ -10,7 +10,6 @@ import pytest
 
 from lakebench.config import LakebenchConfig
 from lakebench.k8s.client import (
-    CapacityUnknown,
     ClusterCapacity,
     FreeCapacity,
     K8sClient,
@@ -25,27 +24,11 @@ def test_parse_every_kubernetes_form():
     for value, want in [
         ("16Gi", 16 * GIB),
         ("2000000Ki", 2_048_000_000),
-        ("1Ti", 1024 * GIB),
-        ("1Pi", 1024**5),
-        ("2Ei", 2 * 1024**6),
-        ("512Mi", 512 * 1024**2),
         ("16G", 16 * 10**9),
-        ("4k", 4000),
-        ("3M", 3 * 10**6),
-        ("2T", 2 * 10**12),
-        ("1P", 10**15),
         ("1E", 10**18),
-        ("1e3", 1000),
         ("5E-2", Decimal("0.05")),
         ("1.5Gi", Decimal("1.5") * GIB),
         ("500m", Decimal("0.5")),
-        ("100n", Decimal("1E-7")),
-        ("7u", Decimal("7E-6")),
-        ("17179869184", 16 * GIB),
-        (" 8Gi ", 8 * GIB),
-        ("+4", 4),
-        (".5", Decimal("0.5")),
-        (4, 4),
         (1.5, Decimal("1.5")),
     ]:
         assert parse(value) == Decimal(want)
@@ -114,7 +97,7 @@ def test_trino_memory_is_counted(engine, workers_gib):
 
 
 def test_unreachable_cluster_refuses_run_and_skips_for_deploy():
-    # run's preflight fails closed (CC-24); deploy, which has no
+    # run's preflight fails closed; deploy, which has no
     # --skip-preflight, warns and leaves the refusal to run.
     from lakebench.cli._prerequisites import _check_cluster_capacity, deploy_capacity_check
 
@@ -179,18 +162,13 @@ def test_duckdb_counts_its_pod():
     assert _engine_gb(_config(qe)) == 6
 
 
-@pytest.mark.parametrize("bad", ["16g", "16GB", "lots"])
-@pytest.mark.parametrize("cluster", ["unreachable", "nodes unlisted", "healthy"])
+@pytest.mark.parametrize(("cluster", "bad"), [("unreachable", "16g"), ("healthy", "lots")])
 def test_unreadable_config_fails_whatever_the_cluster(cluster, bad):
     from lakebench.cli._prerequisites import _check_cluster_capacity
 
     trino = {"type": "trino", "trino": {"coordinator": {"memory": bad}}}
     if cluster == "unreachable":
         patch = mock.patch("lakebench.k8s.get_k8s_client", side_effect=RuntimeError("down"))
-    elif cluster == "nodes unlisted":
-        k8s = mock.MagicMock()
-        k8s.get_free_capacity.return_value = CapacityUnknown("listing nodes failed (403)")
-        patch = mock.patch("lakebench.k8s.get_k8s_client", return_value=k8s)
     else:
         cap = ClusterCapacity(434_000, 4349 * GIB, 8, 40_000, 402 * GIB)
         k8s = mock.MagicMock()

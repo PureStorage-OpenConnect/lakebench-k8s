@@ -60,6 +60,6 @@ If the corpus runs out after half the window, the run passes (`window_arrival_fr
 
 - Only an executor override that ran with fewer executors is a mismatch.
 - An unmet request is a qualifier (`verdict.qualifiers.requested_effective`) and a report warning, such as "gold_strategy: requested two_phase_agg, ran simple_agg (auto)".
-- Incremental gold a job chose automatically is labelled even under `auto` (it aggregates part of silver; current gold jobs no longer make that choice). Incremental gold for a multi-cycle cycle is by design and is not.
+- Incremental gold a job chose automatically is labelled even under `auto` (it aggregates part of silver). Incremental gold for a multi-cycle cycle is not labelled.
 - Mismatches are decided at read; `experiment.requested_effective_mismatches` keeps the run's list.
 - A mismatch never fails a run or enters the experiment identity. Other caps are in `experiment.limits` and `limits.bound`.

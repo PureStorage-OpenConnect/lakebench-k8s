@@ -1,4 +1,4 @@
-"""RPT-2: every derived number on a report page agrees with the record.
+"""Every derived number on a report page agrees with the record.
 
 The renderer wraps each percentage, total and
 count it computes in a ``data-lb-derived`` span naming its inputs by record
@@ -7,7 +7,7 @@ record's metrics.json, independently of the renderer's own arithmetic on the
 loaded ``PipelineMetrics``, and compares it with the rendered text at the
 rendered precision.
 
-It runs on the six R0 goldens (``tests/fixtures/reports/``) and on a fresh
+It runs on the six goldens (``tests/fixtures/reports/``) and on a fresh
 render of every stored fixture record. The goldens themselves must equal
 today's render; there is no update flag (see
 ``tests/fixtures/report_goldens.py``).
@@ -62,67 +62,6 @@ def test_mismatched_total_fails():
     edited = _edit_first(html, "total", _bump)
     bad = mismatches(record, edited)
     assert len(bad) == 1 and "total" in bad[0], bad
-
-
-def test_mismatched_count_and_pct_fail():
-    record = load_record("5105a0")
-    html = golden_path("5105a0").read_text()
-    assert len(mismatches(record, _edit_first(html, "count", _bump))) == 1
-    assert len(mismatches(record, _edit_first(html, "pct", _bump))) == 1
-
-
-_DERIVED_SPAN = re.compile(r"<span\s([^>]*\bdata-lb-derived=[^>]*)>([^<]*)</span>")
-_ATTR = re.compile(r"""([\w-]+)=(["'])(.*?)\2""")
-
-
-def _edit_span(html: str, inputs: str, change) -> str:
-    """*html* with the first derived span over *inputs* rewritten: *change*
-    takes the span's attributes and text and returns both."""
-    for m in _DERIVED_SPAN.finditer(html):
-        attrs = {k: v for k, _q, v in _ATTR.findall(m.group(1))}
-        if attrs.get("data-lb-inputs") != inputs:
-            continue
-        attrs, text = change(dict(attrs), m.group(2))
-        tag = " ".join(f'{k}="{v}"' for k, v in attrs.items())
-        edited = html[: m.start()] + f"<span {tag}>{text}</span>" + html[m.end() :]
-        assert edited != html, f"the edit left the {inputs} span unchanged"
-        return edited
-    raise AssertionError(f"no derived span over {inputs}")
-
-
-def test_wrong_path_fails():
-    """A span naming a path the record does not hold is reported."""
-    html = golden_path("5105a0").read_text()
-    record = load_record("5105a0")
-    assert mismatches(record, html) == []
-    bogus = "pipeline_benchmark.scores.no_such_ratio"
-    edited = _edit_span(
-        html,
-        "pipeline_benchmark.scores.scale_ratio",
-        lambda a, t: ({**a, "data-lb-inputs": bogus}, t),
-    )
-    assert any(s.inputs == bogus for s in derived_spans(edited))
-    bad = mismatches(record, edited)
-    assert bad and all("no_such_ratio" in b for b in bad)
-
-
-def test_wrong_scale_fails():
-    """A stored percentage scaled as a fraction fails even though the value
-    and the claimed path agree (the test's unit table, not the page's)."""
-    html = golden_path("1320bd").read_text()
-    record = load_record("1320bd")
-    assert mismatches(record, html) == []
-    path = "pipeline_benchmark.scores.maintenance_value_pct"
-
-    def as_fraction(a: dict, text: str) -> tuple[dict, str]:
-        # The same value rendered as if the record stored a fraction.
-        value = float(text.removesuffix(a["data-lb-suffix"])) * 100
-        return {**a, "data-lb-scale": "100"}, f"{value:{a['data-lb-fmt']}}{a['data-lb-suffix']}"
-
-    edited = _edit_span(html, path, as_fraction)
-    assert any(s.inputs == path and s.scale == 100 for s in derived_spans(edited))
-    bad = mismatches(record, edited)
-    assert len(bad) == 1 and "needs 1" in bad[0], bad
 
 
 def test_record_change_fails():

@@ -456,13 +456,12 @@ def _context_conflict():
 @pytest.mark.parametrize(
     ("make_exc", "code", "reason"),
     [
-        (KeyboardInterrupt, 130, "interrupted"),
         (lambda: RuntimeError("boom"), 1, "RuntimeError"),
         # An escaping refusal (kubeconfig changed between repetitions) is
         # recorded with the code the CLI exits with, not 1.
         (_context_conflict, 3, "ContextConflictError"),
     ],
-    ids=["interrupt", "error", "refusal"],
+    ids=["error", "refusal"],
 )
 def test_repeat_exception_escaping_a_repetition_keeps_its_code(
     tmp_path, monkeypatch, make_exc, code, reason

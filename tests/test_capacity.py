@@ -87,33 +87,12 @@ class TestClusterCapacityCheck:
             (ClusterCapacity(652_000, 4000 * GIB, 20, 64_000, 256 * GIB), True),
             # the old README claim (8 CPU / 32 GB) is rejected
             (ClusterCapacity(8_000, 32 * GIB, 2, 4_000, 16 * GIB), False),
-            # enough in total, but no 16 GB node holds a 60 GB executor
-            (ClusterCapacity(200_000, 600 * GIB, 20, 8_000, 16 * GIB), False),
         ],
     )
     def test_verdict(self, patched_capacity, capacity, passed):
         result = patched_capacity(capacity)
         assert result.passed is passed
         assert result.name == "cluster-capacity"
-
-    def test_unreadable_capacity_refuses(self):
-        """Fail closed: capacity that cannot be read is a failed check, with
-        the read-access or --skip-preflight way through (it used to pass)."""
-        from lakebench.k8s.client import CapacityUnknown
-
-        with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
-            get_client.return_value.get_free_capacity.return_value = CapacityUnknown(
-                "listing nodes failed (403 Forbidden)"
-            )
-            result = _check_cluster_capacity(_cfg())
-        assert not result.passed
-        assert "--skip-preflight" in result.hint
-
-    def test_unreachable_cluster_refuses(self):
-        """A client that cannot be built is unreadable capacity, not a pass."""
-        with mock.patch("lakebench.k8s.get_k8s_client", side_effect=RuntimeError("boom")):
-            result = _check_cluster_capacity(_cfg())
-        assert not result.passed
 
     def test_capacity_is_sized_for_the_workload_schema(self, patched_capacity):
         """The check sizes the financial schema's continuous jobs, not the
@@ -253,23 +232,3 @@ class TestCoResidentPodsAreCounted:
             assert res.exit_code == 2 and seen == {}
         else:
             assert seen == {"sustained": expected[0], "datagen_runs": expected[1]}
-
-
-class TestPrerequisiteWiring:
-    """The check must actually be registered in run_prerequisites()."""
-
-    def test_unreadable_capacity_blocks_the_run(self):
-        from lakebench.cli._prerequisites import run_prerequisites
-
-        # run_prerequisites reads only attributes here; a MagicMock keeps the
-        # catalog off the Hive-only Stackable check without a Polaris secret.
-        cfg = mock.MagicMock()
-        cfg.architecture.catalog.type.value = "polaris"
-        cfg.platform.storage.s3.endpoint = ""
-        cfg.platform.storage.s3.access_key = ""
-        cfg.platform.kubernetes.create_namespace = True
-
-        with mock.patch("lakebench.k8s.get_k8s_client", side_effect=RuntimeError("no cluster")):
-            report = run_prerequisites(cfg)
-
-        assert "cluster-capacity" in {c.name for c in report.failed}

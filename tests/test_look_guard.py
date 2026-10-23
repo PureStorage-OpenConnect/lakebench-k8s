@@ -1,4 +1,4 @@
-"""The protected AML corpus guard (SAF-5).
+"""The protected AML corpus guard.
 
 Every command that reads or scores data refuses a protected corpus (the
 evaluation or robustness one, by role or by a seed that hashes to a held-out
@@ -112,8 +112,13 @@ VERBS = [
 ]
 
 
-@pytest.mark.parametrize("verb", VERBS)
-@pytest.mark.parametrize("kw", PROTECTED)
+# Every verb on the evaluation corpus; the robustness one takes the same
+# guard, so it runs on `run` alone.
+@pytest.mark.parametrize(
+    ("verb", "kw"),
+    [*((v, PROTECTED[0].values[0]) for v in VERBS), ("run", PROTECTED[1].values[0])],
+    ids=[*(f"{v}-evaluation" for v in VERBS), "run-robustness"],
+)
 def test_verb_refuses_a_protected_config(tmp_path, monkeypatch, held, no_cluster, verb, kw):
     monkeypatch.chdir(tmp_path)
     if verb == "query --interactive":
@@ -128,8 +133,11 @@ def test_verb_refuses_a_protected_config(tmp_path, monkeypatch, held, no_cluster
 # -- refused at load ---------------------------------------------------------
 
 
-@pytest.mark.parametrize("role", [None, "calibration"], ids=["no-role", "calibration-role"])
-@pytest.mark.parametrize("seed", [pc.EV, pc.RB], ids=["evaluation-seed", "robustness-seed"])
+@pytest.mark.parametrize(
+    ("role", "seed"),
+    [(None, pc.EV), ("calibration", pc.RB)],
+    ids=["no-role-evaluation-seed", "calibration-role-robustness-seed"],
+)
 def test_development_config_with_a_held_out_seed_refused_at_load(
     tmp_path, monkeypatch, held, no_cluster, role, seed
 ):
@@ -192,24 +200,7 @@ def _cfg(seed=None, role=None, schema="financial"):
 
 def test_protected_corpus_reason(held):
     assert lg.protected_corpus_reason(_cfg(role="evaluation")) == "corpus_role evaluation"
-    assert "robustness" in lg.protected_corpus_reason(_cfg(seed=pc.RB))
-    assert "evaluation" in lg.protected_corpus_reason(_cfg(seed=pc.EV, role="calibration"))
-    assert lg.protected_corpus_reason(_cfg(seed=pc.CALIBRATION)) is None
-    assert lg.protected_corpus_reason(_cfg()) is None
-    assert lg.protected_corpus_reason(_cfg(seed=42, schema="customer360")) is None
     assert lg.protected_corpus_reason(_cfg(seed=pc.EV, schema="customer360"))
-    for v in (lg.protected_corpus_reason(_cfg(seed=s)) for s in (pc.EV, pc.RB)):
-        assert pc.seed_tokens(v) == []
-
-
-def test_protected_corpus_reason_fails_closed_for_aml(monkeypatch):
-    def gone():
-        raise ValueError("the compiled held-out floor is not initialised")
-
-    monkeypatch.setattr(ds, "_heldout", gone)
-    assert "cannot be read" in lg.protected_corpus_reason(_cfg(seed=pc.CALIBRATION))
-    # Customer 360 corpora are not AML data: no refusal when the record is gone.
-    assert lg.protected_corpus_reason(_cfg(seed=42, schema="customer360")) is None
 
 
 def _role_broken(seed, h=None):
@@ -442,11 +433,13 @@ def _calls(fn: ast.AST) -> set[str]:
 
 def test_every_data_command_is_guarded():
     unguarded = []
+    names = set()
     for path in sorted((ROOT / "src/lakebench/cli").glob("*.py")):
         tree = ast.parse(path.read_text())
         for fn in ast.walk(tree):
             if not isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef):
                 continue
+            names.add((path.name, fn.name))
             if not _loads_to_change(fn) or (path.name, fn.name) in ALLOWED:
                 continue
             if fn.name == "_load_config" and path.name == "_financial.py":
@@ -456,14 +449,7 @@ def test_every_data_command_is_guarded():
             if not guarded:
                 unguarded.append(f"{path.name}:{fn.lineno} {fn.name}")
     assert unguarded == [], unguarded
-
-
-def test_allowlist_names_real_functions():
-    names = set()
-    for path in (ROOT / "src/lakebench/cli").glob("*.py"):
-        for fn in ast.walk(ast.parse(path.read_text())):
-            if isinstance(fn, ast.FunctionDef):
-                names.add((path.name, fn.name))
+    # The allowlist names real functions.
     assert ALLOWED <= names, ALLOWED - names
 
 

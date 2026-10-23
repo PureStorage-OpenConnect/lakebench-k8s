@@ -68,7 +68,14 @@ def _run(jars):
 
         import common
 
+        from lakebench.modules.table_formats.iceberg import maintenance
         from lakebench.modules.table_formats.iceberg.maintenance import build_maintenance_sql
+
+        # The production floor sits STREAM_OFFSET_PROTECT_MARGIN_SECONDS (600 s,
+        # pinned in tests/test_maintenance_stream_offset.py) before the
+        # stream's snapshot. This test checks the floor on a real table with a
+        # 2 s gap, so it runs with a 1 s margin rather than waiting 10 minutes.
+        maintenance.STREAM_OFFSET_PROTECT_MARGIN_SECONDS = 1
 
         spark.sql("CREATE NAMESPACE IF NOT EXISTS lh.db")
         spark.sql("CREATE TABLE lh.db.src (id BIGINT) USING iceberg")

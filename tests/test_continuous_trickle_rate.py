@@ -34,6 +34,7 @@ def _pb(
     trailing_idle=0,
     bronze_span=None,
     window=_WINDOW,
+    bronze_max_batch_id_gap=None,
 ):
     # A trickle-held bronze logs one batch per trigger: first to last is
     # (batches - 1) triggers apart.
@@ -49,6 +50,7 @@ def _pb(
             latency_ms=bronze_ms,
             total_batches=bronze_batches,
             batch_span_seconds=bronze_span,
+            max_batch_id_gap=bronze_max_batch_id_gap,
         ),
         StageMetrics(
             stage_name="silver",
@@ -462,3 +464,43 @@ def test_logs_with_a_stall_parse_to_saturated():
     assert bronze.total_batches == 60
     assert pb.intake_limit == "below_bronze_capacity"
     assert pb.pipeline_saturated is True
+
+
+# -- 1.7.11: a severed driver-log capture must not be scored as a shortfall ----
+
+
+def test_bronze_log_gap_refuses_to_score_ingest_ratio():
+    """kubectl logs -f is cut at the kubelet idle timeout (~4h), so a long
+    run's record holds only the batches before the cut: one long run of
+    consecutive ids is absent. ingest_ratio must be reported not-scored, never
+    as a quarter-ingest verdict on a kept-up bronze.
+
+    A severance leaves thousands of consecutive ids missing in one run; a gap
+    of 240 is far past the 50-id bound.
+    """
+    pb = _live_s100(bronze_max_batch_id_gap=240)
+    assert pb.bronze_log_incomplete is True
+    assert pb.ingest_ratio is None
+    assert pb.pipeline_saturated is None
+    assert pb.ingest_ratio_unscored_reason
+    scores = pb.to_dict()["scores"]
+    assert scores["bronze_log_incomplete"] is True
+    assert "incomplete" in scores["ingest_ratio_unscored_reason"]
+
+
+def test_complete_bronze_log_scores_normally():
+    """No gap (or an unmeasured gap) is a complete capture: the guard stays out
+    of the way and ingest_ratio keeps its value."""
+    pb = _live_s100(bronze_max_batch_id_gap=0)
+    assert pb.bronze_log_incomplete is False
+    assert pb.ingest_ratio == pytest.approx(0.1875, abs=1e-4)
+
+
+def test_scattered_empty_batches_do_not_false_trip():
+    """Bronze empty/replay batches log an id but no 'writing' line, so a
+    perfectly complete log can be sparse: many gaps of 1, never one long run.
+    The largest run is what the guard reads, so a sparse log still scores. A
+    gap of 1 (an empty batch between two committed ones) must not trip it."""
+    pb = _live_s100(bronze_max_batch_id_gap=1)
+    assert pb.bronze_log_incomplete is False
+    assert pb.ingest_ratio == pytest.approx(0.1875, abs=1e-4)

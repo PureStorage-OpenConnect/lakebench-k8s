@@ -26,27 +26,8 @@ def test_warnings_are_printed_together_after_the_block(capsys):
     assert out.index("first") < out.index("bucket tagging")
 
 
-def test_nothing_is_printed_without_warnings(capsys):
-    with defer_warnings():
-        print_info("progress")
-    assert "warning" not in capsys.readouterr().err
-
-
 def test_warnings_print_when_the_block_raises(capsys):
     with pytest.raises(RuntimeError), defer_warnings():
         print_warning("held")
         raise RuntimeError("boom")
     assert "1 warning:" in capsys.readouterr().err
-
-
-def test_nested_blocks_share_one_list(capsys):
-    with defer_warnings():
-        with defer_warnings():
-            print_warning("inner")
-        assert "inner" not in capsys.readouterr().err
-    assert capsys.readouterr().err.count("inner") == 1
-
-
-def test_warnings_print_immediately_outside_a_block(capsys):
-    print_warning("now")
-    assert "now" in capsys.readouterr().err

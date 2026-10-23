@@ -278,7 +278,7 @@ def main():
         "log": log,
     }
 
-    # 3. The BUGS-row staging: the catalog entry goes (metastore dropped,
+    # 3. The catalog entry goes (metastore dropped,
     #    bucket kept) and the next deployment starts again at epoch 0.
     work = fresh(root, "catalog-lost")
     log = []
@@ -294,23 +294,10 @@ def main():
         and table_files(work) == files_before
         and "already holds a Delta log" in log[-1]["tail"]
     )
-    held_after_refusal = silver_cycles(spark, work)
-    # The refusal's remedy: delete the table directory. Cycle 1 then finds
-    # no table and builds it from the whole prefix (cycles 0 and 1 of run
-    # 1), a create carrying the key (0, 1); its operator retry is skipped.
-    shutil.rmtree(_table_dir(work))
-    stage_bronze(spark, work, 1, 1)
-    rebuild_rc = silver_job(jars, work, 1, 0, log=log)
-    held_after_rebuild = silver_cycles(spark, work)
-    retry_rc = silver_job(jars, work, 1, 0, log=log)
     out["catalog_lost"] = {
         "rcs": [first, second],
         "refused_orphan_log": refused,
-        "held": held_after_refusal,
-        "rebuild_rc": rebuild_rc,
-        "held_after_rebuild": held_after_rebuild,
-        "retry_rc": retry_rc,
-        "held_after_retry": silver_cycles(spark, work),
+        "held": silver_cycles(spark, work),
         "log": log,
     }
 

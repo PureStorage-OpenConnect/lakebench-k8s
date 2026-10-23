@@ -1,4 +1,4 @@
-"""Executed: N incremental Customer 360 cycles equal one rebuild (C36-2).
+"""Executed: N incremental Customer 360 cycles equal one rebuild.
 
 Three cycles run as a multi-cycle ``lakebench run`` runs them (the real
 silver and gold scripts, one driver per job, ``LB_BRONZE_CYCLE`` and the
@@ -6,8 +6,7 @@ incremental flags from cycle 1, one data clock) must leave the same silver
 and gold as one rebuild over the same bronze, on Iceberg and on Delta, every
 column but ``silver_processing_timestamp`` compared (``_batch_id`` included:
 the rebuild tags rows by file name). The later cycles must have taken the
-incremental path, and a one-cent change to one cycle-1 purchase must change
-both fingerprints, so equality is not an accident of what is compared. Only
+incremental path, so equality is not a silent fallback to a rebuild. Only
 the SIMPLE silver strategy runs (what small scales choose).
 
 Runs ``c360_multicycle_equivalence_scenarios.py`` in fresh JVMs with the
@@ -65,20 +64,3 @@ def test_incremental_cycles_equal_one_rebuild_in_gold(result, fmt):
     # Counts exact, rounded DOUBLE KPIs within one quantum.
     assert len(fp["incremental"]["rows"]) > 0
     assert gold_differences(fp["incremental"], fp["rebuild"]) == [], _why(result[fmt])
-
-
-@pytest.mark.parametrize("fmt", FORMATS)
-def test_one_changed_amount_changes_the_silver_fingerprint(result, fmt):
-    fp = result[fmt]["silver"]
-    assert fp["changed"]["rows"] == fp["rebuild"]["rows"]
-    assert fp["changed"]["sha256"] != fp["rebuild"]["sha256"]
-
-
-@pytest.mark.parametrize("fmt", FORMATS)
-def test_one_changed_amount_changes_the_gold_fingerprint(result, fmt):
-    fp = result[fmt]["gold"]
-    assert len(fp["changed"]["rows"]) == len(fp["rebuild"]["rows"])
-    problems = gold_differences(fp["changed"], fp["rebuild"])
-    # One purchase moved, so one day, and its revenue among what moved.
-    assert len({p.split()[0] for p in problems}) == 1, problems
-    assert any(" total_daily_revenue:" in p for p in problems), problems

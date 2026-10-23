@@ -420,7 +420,7 @@ class ImagesConfig(ConfigModel):
     """Container image configuration for all Lakebench components."""
 
     _removed_keys: ClassVar[dict[str, str]] = {
-        "pull_secrets": "No deployer ever applied it; removed in v1.5.",
+        "pull_secrets": "nothing applied it; delete the key.",
         "hive": (
             f"the Stackable HiveCluster always runs Hive {STACKABLE_HIVE_VERSION} "
             "(Hive 4 breaks Iceberg and Trino ANALYZE), whatever images.hive named, and run "
@@ -597,7 +597,7 @@ class ScratchStorageConfig(ConfigModel):
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "create_storage_class": (
-            "lakebench no longer creates StorageClasses; a cluster admin runs "
+            "lakebench creates no StorageClass; a cluster admin runs "
             "'lakebench admin install --component scratch-storage-class' once."
         ),
         # Nothing sized a PVC from it: each executor's scratch volume is the
@@ -692,7 +692,8 @@ class SparkOperatorConfig(ConfigModel):
     #: Refused when true (see OPERATOR_INSTALL_KEYS); kept so ``false`` loads.
     install: bool = False
     """Refused when `true`: deploy never installs the shared operator; a cluster admin runs
-    `lakebench admin install --component spark-operator`. `false` loads as before.
+    `lakebench admin install --component spark-operator`. `false` is accepted and does
+    nothing.
     """
     namespace: str = "spark-operator"
     """Namespace for the Spark Operator."""
@@ -1039,7 +1040,8 @@ class StackableOperatorConfig(ConfigModel):
     #: Refused when true (see OPERATOR_INSTALL_KEYS); kept so ``false`` loads.
     install: bool = False
     """Refused when `true`: deploy never installs the Stackable operators; a cluster admin runs
-    `lakebench admin install --component stackable`. `false` loads as before.
+    `lakebench admin install --component stackable`. `false` is accepted and does
+    nothing.
     """
     namespace: str = "stackable"
     """Namespace for Stackable operators."""
@@ -1187,7 +1189,7 @@ class TableFormatConfig(ConfigModel):
     """Table format configuration."""
 
     _removed_keys: ClassVar[dict[str, str]] = {
-        "hudi": "Hudi is not a supported table format; removed in v1.2.",
+        "hudi": "Hudi is not a supported table format; use iceberg or delta.",
     }
 
     type: TableFormatType = TableFormatType.ICEBERG
@@ -1320,9 +1322,8 @@ class DuckDBConfig(ConfigModel):
     # result. Measured local run-to-run spread is 0.9%, well below what an
     # engine change would move, so the drift was invisible to the noise floor.
     version: str = "1.5.6"
-    """DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes
-    whatever is current, so two runs weeks apart can query with different engines and the
-    difference would read as a result.
+    """DuckDB version installed at deploy time. Keep it pinned: an unpinned install takes
+    whatever is current, so two runs weeks apart can query with different engines.
     """
 
 
@@ -1456,8 +1457,8 @@ class SustainedConfig(ConfigModel):
             "Continuous AML only. When true, a silver micro-batch reads the party, account and "
             "country columns it needs for the entities and accounts dimensions from one shared "
             "projection of the batch's bronze rows, instead of scanning and parsing the bronze "
-            "slice once per dimension. Off by default: a default run scans per dimension, exactly "
-            "as before, so its results and memory are unchanged. The dimension rows are identical "
+            "slice once per dimension. Off by default: a default run scans per dimension. "
+            "The dimension rows are identical "
             "either way; reuse trades a cached projection for the repeated scans, which pays when "
             "the per-batch bronze read dominates."
         ),
@@ -1520,7 +1521,7 @@ class SustainedConfig(ConfigModel):
             "continuous maintenance round runs beside live streams, so it expires at `1h`, and "
             "the run records the applied values in `continuous.retention` of `metrics.json`. "
             "Delta has no "
-            "effective table maintenance in continuous mode (v1.6). Orphan-file removal never "
+            "effective table maintenance in continuous mode. Orphan-file removal never "
             "uses less than 24 h 10 min, on any engine."
         ),
     )
@@ -1795,11 +1796,11 @@ class DatagenConfig(ConfigModel):
 
     _removed_keys: ClassVar[dict[str, str]] = {
         "checkpoint": (
-            "The Rust generator never implemented checkpoint-resume; "
-            "removed 2026-09-28. Re-run generation from the start on failure."
+            "the generator has no checkpoint-resume; delete the key and re-run "
+            "generation from the start on failure."
         ),
         "uploaders": (
-            "Never forwarded to the Rust generator; removed 2026-09-28. "
+            "the generator never read it; delete the key. "
             "Uploader concurrency is fixed inside the S3 sink."
         ),
     }
@@ -1986,9 +1987,9 @@ class Customer360Config(ConfigModel):
     """
 
     _removed_keys: ClassVar[dict[str, str]] = {
-        "channels": "The customer360 generator never read it; removed in v1.5.",
-        "event_types": "The customer360 generator never read it; removed in v1.5.",
-        "quality_distribution": "The customer360 generator never read it; removed in v1.5.",
+        "channels": "the customer360 generator never read it; delete the key.",
+        "event_types": "the customer360 generator never read it; delete the key.",
+        "quality_distribution": "the customer360 generator never read it; delete the key.",
         "date_range_days": (
             "the customer360 generator never read it: the event window is "
             "datagen.timestamp_start and datagen.timestamp_end."
@@ -2112,10 +2113,10 @@ class WorkloadConfig(ConfigModel):
         return data
 
     schema_type: WorkloadSchema = Field(default=WorkloadSchema.CUSTOMER360, alias="schema")
-    """Workload schema: `customer360` or `financial`. `custom` is refused at load in v1.6.
-    `financial` requires `table_format: iceberg`. The block was `architecture.workload`
-    before v1.6; that location still loads with a deprecation warning, and setting both with
-    different values is an error.
+    """Workload schema: `customer360` or `financial`. `custom` is refused at load.
+    `financial` requires `table_format: iceberg`. The block also loads from
+    `architecture.workload` with a deprecation warning; setting both with different values is
+    an error.
     """
     datagen: DatagenConfig = Field(default_factory=DatagenConfig)
     """Data generation: scale, seed, delivery mode, pod sizing and event window."""
@@ -2932,7 +2933,7 @@ class ObservabilityConfig(ConfigModel):
         "s3_metrics_enabled": "PodMonitor deployment is not gated on it.",
         "spark_metrics_enabled": "PodMonitor deployment is not gated on it.",
         "chart_version": (
-            "observability no longer deploys the kube-prometheus-stack Helm chart; "
+            "observability deploys no Helm chart; "
             "pin the images with observability.prometheus_image and "
             "observability.grafana_image."
         ),
@@ -3264,10 +3265,7 @@ class LakebenchConfig(ConfigModel):
     """
 
     _removed_keys: ClassVar[dict[str, str]] = {
-        "version": (
-            "there is one config schema and nothing read the number; a removed key is "
-            "named in the upgrade notes instead."
-        ),
+        "version": "there is one config schema and nothing read the number; delete the key.",
         "description": "nothing read it; keep notes in a YAML comment.",
         # The v1.6 flat spelling of platform.storage.s3.secret_ref.
         "secret_ref": (

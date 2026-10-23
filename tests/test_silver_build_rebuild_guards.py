@@ -1,8 +1,8 @@
-"""Iceberg c360 silver-build: the table-existence check fails closed, and a
-rebuild at a later cycle refuses when it cannot tag rows by cycle.
+"""Iceberg c360 silver-build: a rebuild at a later cycle refuses when it
+cannot tag rows by cycle.
 
-``silver_build.py`` runs a Spark job at import, so the two functions are
-lifted out of its source and run with stand-ins. The executed scenarios are
+``silver_build.py`` runs a Spark job at import, so the function is lifted
+out of its source and run with stand-ins. The executed scenarios are
 in tests/spark/test_silver_build_rebuild_spark.py.
 """
 
@@ -11,7 +11,6 @@ from __future__ import annotations
 import ast
 import re
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -30,22 +29,6 @@ def _lift(names, **ns):
     ns.setdefault("SilverAbort", _Abort)
     exec(compile(ast.Module(keep, []), str(_SCRIPT), "exec"), ns)  # noqa: S102
     return ns
-
-
-def _spark_raising(exc):
-    def table(name):
-        raise exc
-
-    return SimpleNamespace(table=table)
-
-
-def test_table_exists_raises_on_an_error_that_is_not_not_found(load_script):
-    """A metastore or metadata read failure is not "no table": counting it as
-    missing sent a populated table down the full-rebuild path."""
-    common = load_script("common")
-    fn = _lift(["_table_exists"], table_exists=common.table_exists)["_table_exists"]
-    with pytest.raises(RuntimeError, match="metastore timed out"):
-        fn(_spark_raising(RuntimeError("metastore timed out")), "ice.silver.t")
 
 
 class _Col:

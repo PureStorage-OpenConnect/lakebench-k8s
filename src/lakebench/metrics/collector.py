@@ -7,7 +7,7 @@ import logging
 import math
 import re
 import statistics
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -204,6 +204,9 @@ class StreamingJobMetrics:
     median_batch_duration_ms: float | None = None
     batch_size: int = 0
     total_batches: int = 0
+    # Largest run of consecutive missing batch ids. One long run = a truncated
+    # log; scattered 1s = normal empty/replay batches (see parse).
+    max_batch_id_gap: int | None = None
     total_rows_processed: int = 0
     # Distinct input rows: bronze and silver take each row once. None on gold,
     # which re-reads silver every cycle (total_rows_processed amplifies).
@@ -345,6 +348,11 @@ class BenchmarkRoundMeta:
     silver_snapshot_count: int | None = None
     gold_data_file_count: int | None = None
     gold_snapshot_count: int | None = None
+    # 1.7.11: names of queries that crossed their time limit in this round
+    # after passing in an earlier round -- a measured SLA crossing (the corpus
+    # grew past what the engine answers inside the limit), recorded here with
+    # this round's silver_data_file_count rather than failing the run.
+    query_sla_crossings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -359,6 +367,8 @@ class BenchmarkRoundMeta:
             "q9_contention_observed": self.q9_contention_observed,
             "q9_retry_used": self.q9_retry_used,
         }
+        if self.query_sla_crossings:
+            d["query_sla_crossings"] = list(self.query_sla_crossings)
         # Only the counts the probe measured.
         health = {
             k: v
@@ -886,6 +896,9 @@ class StageMetrics:
     ttd_p95_seconds: float | None = None
     ttd_max_seconds: float | None = None
     total_batches: int = 0
+    # Largest run of consecutive batch ids missing from the log: one long run
+    # distinguishes a severed capture from scattered empty/replay gaps.
+    max_batch_id_gap: int | None = None
     batch_size: int = 0
     unique_rows_processed: int | None = 0  # distinct input rows; None = unknown (gold re-reads)
     # Continuous only: the measurement window (metrics/continuous_window.py).
@@ -1331,6 +1344,22 @@ class PipelineBenchmark:
         # inside the window (throughput).
         bronze_stages = [s for s in streaming if s.stage_name == "bronze"]
         total_bronze_rows = sum(s.input_rows for s in bronze_stages)
+        # A driver log with a long gap in its batch ids undercounts
+        # total_bronze_rows: kubectl logs -f is severed at the kubelet idle
+        # timeout and the record then holds only the batches before the cut,
+        # reading a kept-up bronze as a fraction of itself. Detect it so
+        # ingest_ratio is not scored off a partial numerator. The signal is ONE
+        # long run of consecutive missing ids (every batch after the cut absent
+        # at once), not the total missing count: bronze empty and replay-skipped
+        # batches log an id but no "writing" line, so a sparse run has many gaps
+        # of 1 on a complete log. _BRONZE_LOG_GAP_BOUND is the shortest run that
+        # means a severance rather than scatter.
+        self.bronze_log_incomplete = False
+        self.ingest_ratio_unscored_reason: str | None = None
+        for s in bronze_stages:
+            if s.max_batch_id_gap is not None and s.max_batch_id_gap >= _BRONZE_LOG_GAP_BOUND:
+                self.bronze_log_incomplete = True
+                break
         run_duration = max((s.elapsed_seconds for s in streaming), default=0.0)
         datagen_rows = self.config_snapshot.get("datagen_output_rows", 0)
         sustained = self.config_snapshot.get("sustained") or {}
@@ -1428,10 +1457,22 @@ class PipelineBenchmark:
                     round(datagen_rows / dg_elapsed * max(0.0, run_duration - trigger)),
                 )
             self.released_rows = released
-            self.ingest_ratio = (
-                total_bronze_rows / released if released else self.corpus_ingest_ratio
-            )
-            self.pipeline_saturated = self.ingest_ratio < 0.95
+            if self.bronze_log_incomplete:
+                # The numerator is built from a truncated driver log, so the
+                # ratio would read a kept-up bronze as a shortfall. Report it
+                # as not scored rather than publish a false quarter-ingest.
+                self.ingest_ratio = None
+                self.corpus_ingest_ratio = None
+                self.pipeline_saturated = None
+                self.ingest_ratio_unscored_reason = (
+                    "bronze driver log incomplete (capture severed mid-window); "
+                    "rows ingested cannot be counted from the log"
+                )
+            else:
+                self.ingest_ratio = (
+                    total_bronze_rows / released if released else self.corpus_ingest_ratio
+                )
+                self.pipeline_saturated = self.ingest_ratio < 0.95
         else:
             self.ingest_ratio = None
             self.corpus_ingest_ratio = None
@@ -1726,13 +1767,20 @@ class PipelineBenchmark:
         allowed_lag = self.sustained_throughput_rps * (2 * silver_trigger_s + bronze_trigger_s)
         return bronze_rows - silver_committed <= allowed_lag
 
+    def _scorable_rounds(self) -> list[BenchmarkMetrics]:
+        """Rounds with a QpH and no real query failure (``round_is_scorable``)."""
+        passed_ever = rounds_passed_ever(self.benchmark_rounds)
+        return [r for r in self.benchmark_rounds if round_is_scorable(r, passed_ever)]
+
     def composite_rounds(self) -> list[BenchmarkMetrics]:
         """In-stream rounds behind the continuous composite QpH: rounds with a
-        QpH (a round whose every query failed has none). AML: only rounds
-        that executed the fixed full query set (``composite_query_set``);
-        its rounds before the first case run a smaller set and stay in
+        QpH and no real query failure (a round whose every query failed has
+        none; a round that lost queries to a time-limit crossing is excluded so
+        a degrading series does not read as improving). AML: only rounds that
+        executed the fixed full query set (``composite_query_set``); its rounds
+        before the first case run a smaller set and stay in
         ``composite_qph_by_set``."""
-        rounds = [r for r in self.benchmark_rounds if r.qph > 0]
+        rounds = self._scorable_rounds()
         fixed = composite_query_set(self.config_snapshot)
         if fixed is None or self.blended_composite_recorded:
             return rounds
@@ -1757,7 +1805,7 @@ class PipelineBenchmark:
         state; the first and last rounds and the silver data file count at
         each end show whether it was one. None when no round has a QpH.
         """
-        rounds = [r for r in self.benchmark_rounds if r.qph > 0]
+        rounds = self._scorable_rounds()
         if not rounds:
             return None
         first, last = rounds[0].qph, rounds[-1].qph
@@ -1887,6 +1935,9 @@ class PipelineBenchmark:
             if self.corpus_ingest_ratio is not None:
                 scores["corpus_ingest_ratio"] = round(self.corpus_ingest_ratio, 4)
                 scores["released_rows"] = self.released_rows
+            if getattr(self, "bronze_log_incomplete", False):
+                scores["bronze_log_incomplete"] = True
+                scores["ingest_ratio_unscored_reason"] = self.ingest_ratio_unscored_reason
             if self.datagen_ahead is not None:
                 scores["backlog_rows"] = self.backlog_rows
                 scores["datagen_ahead"] = self.datagen_ahead
@@ -2491,6 +2542,7 @@ def build_pipeline_benchmark(
             ttd_p95_seconds=sj.ttd_p95_seconds,
             ttd_max_seconds=sj.ttd_max_seconds,
             total_batches=sj.total_batches,
+            max_batch_id_gap=sj.max_batch_id_gap,
             batch_size=sj.batch_size,
             executor_count=_s_execs,
             executor_cores=_s_cores,
@@ -2684,6 +2736,46 @@ def composite_qph_basis(rounds: list[BenchmarkMetrics]) -> tuple[dict[str, Any],
     return basis, by_set
 
 
+def rounds_passed_ever(rounds) -> set[str]:
+    """Query names that succeeded in some round: the set a time-limit
+    crossing is judged against. The CLI gate, the verdict and the QpH median
+    all build it here."""
+    out: set[str] = set()
+    for r in rounds or []:
+        for q in r.queries or []:
+            if isinstance(q, Mapping) and q.get("success"):
+                name = q.get("name") or q.get("query_name")
+                if name:
+                    out.add(str(name))
+    return out
+
+
+def round_is_scorable(rnd, passed_ever: set) -> bool:
+    """A round counts toward the QpH median/trend only when it has a QpH AND no
+    real query failure. QpH is computed over the queries that passed, so a
+    round that lost its heavy queries to a time-limit crossing keeps a (higher)
+    QpH over the survivors -- counting it would read a degrading system as
+    improving. A Q9 contention failure and a demoted SLA crossing (a query that
+    timed out but passed in some round, named in *passed_ever*) are tolerated;
+    any other failed query drops the round."""
+    if (rnd.qph or 0) <= 0:
+        return False
+    from lakebench.benchmark.result import is_sla_crossing
+
+    for q in rnd.queries or []:
+        if not isinstance(q, dict) or q.get("success", True):
+            continue
+        name = str(q.get("name") or "")
+        if name.startswith("Q9"):
+            continue
+        if is_sla_crossing(
+            timed_out=bool(q.get("timed_out", False)), name=name, passed_ever=passed_ever
+        ):
+            continue
+        return False
+    return True
+
+
 def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetrics:
     """Aggregate multiple in-stream benchmark rounds into a single result.
 
@@ -2703,10 +2795,13 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
     if not rounds:
         raise ValueError("Cannot aggregate zero benchmark rounds")
 
-    # The rounds the median stands for: those with a QpH (a round whose every
-    # query failed has none), and, when the rounds ran the AML fixed full
-    # set beside a smaller one, that set's rounds only (composite_rounds).
-    timed = [r for r in rounds if (r.qph or 0) > 0]
+    # The rounds the median stands for: those with a QpH and no real failure (a
+    # round whose every query failed has no QpH; a round that lost queries to a
+    # time-limit crossing is excluded so a degrading series does not read as
+    # improving), and, when the rounds ran the AML fixed full set beside a
+    # smaller one, that set's rounds only (composite_rounds).
+    passed_ever = rounds_passed_ever(rounds)
+    timed = [r for r in rounds if round_is_scorable(r, passed_ever)]
     groups = rounds_by_query_set(timed)
     fixed = aml_fixed_query_set()
     set_id: str | None = None
@@ -2769,65 +2864,6 @@ CONTINUOUS_ROUND_BENCHMARK: dict[str, Any] = {
     "cache": "hot",
     "iterations": 1,
 }
-
-
-# The config fields build_config_snapshot records, as dotted schema paths.
-# tests/test_schema_walk.py derives the same set from the function and fails
-# when they differ, and every one of them must have a reader outside the
-# recording modules: a recorded setting nothing honours fails the walk.
-SNAPSHOT_SOURCE_FIELDS: frozenset[str] = frozenset(
-    {
-        "architecture.benchmark.iterations",
-        "architecture.benchmark.maintenance_settle.enabled",
-        "architecture.benchmark.maintenance_settle.interval_seconds",
-        "architecture.benchmark.maintenance_settle.max_seconds",
-        "architecture.benchmark.maintenance_settle.probe_query",
-        "architecture.benchmark.maintenance_settle.probe_samples",
-        "architecture.benchmark.maintenance_settle.tolerance_pct",
-        "architecture.catalog.type",
-        "architecture.pipeline.mode",
-        "architecture.pipeline.pattern",
-        "architecture.pipeline.pre_benchmark_maintenance",
-        "architecture.pipeline.sustained.benchmark_interval",
-        "architecture.pipeline.sustained.benchmark_warmup",
-        "architecture.pipeline.sustained.bronze_target_file_size_mb",
-        "architecture.pipeline.sustained.bronze_trigger_interval",
-        "architecture.pipeline.sustained.compaction_enabled",
-        "architecture.pipeline.sustained.gold_refresh_interval",
-        "architecture.pipeline.sustained.gold_target_file_size_mb",
-        "architecture.pipeline.sustained.retention_threshold",
-        "architecture.pipeline.sustained.run_duration",
-        "architecture.pipeline.sustained.silver_target_file_size_mb",
-        "architecture.pipeline.sustained.silver_trigger_interval",
-        "architecture.pipeline_engine",
-        "architecture.query_engine.trino.coordinator.cpu",
-        "architecture.query_engine.trino.coordinator.memory",
-        "architecture.query_engine.trino.worker.cpu",
-        "architecture.query_engine.trino.worker.memory",
-        "architecture.query_engine.trino.worker.replicas",
-        "architecture.query_engine.type",
-        "architecture.table_format.type",
-        "architecture.workload.datagen.file_size",
-        "architecture.workload.datagen.mode",
-        "architecture.workload.datagen.parallelism",
-        "architecture.workload.datagen.scale",
-        "architecture.workload.schema_type",
-        "images.datagen",
-        "images.spark",
-        "images.trino",
-        "name",
-        "platform.compute.spark.bronze_executors",
-        "platform.compute.spark.gold_executors",
-        "platform.compute.spark.silver_executors",
-        "platform.storage.s3.buckets.bronze",
-        "platform.storage.s3.buckets.gold",
-        "platform.storage.s3.buckets.silver",
-        "platform.storage.s3.endpoint",
-        "platform.storage.scratch.enabled",
-        "platform.storage.scratch.storage_class",
-        "spark.conf",
-    }
-)
 
 
 def build_config_snapshot(
@@ -3006,6 +3042,12 @@ def build_config_snapshot(
 # A bronze that cannot keep up starts each micro-batch as the last ends and
 # sits near 1.0; startup and idle triggers only pull the share down.
 _BRONZE_BUSY_BOUND = 0.8
+
+# Shortest run of consecutive missing bronze batch ids that means the driver
+# log was truncated (a severed capture drops thousands of batches in one run)
+# rather than merely sparse (empty/replay batches leave gaps of 1). 50 is far
+# above any scatter and far below a multi-hour severance.
+_BRONZE_LOG_GAP_BOUND = 50
 
 # Share of the window's bronze triggers that must have run a micro-batch for
 # intake to count as held to the trickle rate. The shortfall allowed covers
@@ -4004,6 +4046,17 @@ class MetricsCollector:
             _apply_ttd(metrics, ttd_lines, batch_ids)
             _apply_ttd_detail(metrics, ttd_detail)
         metrics.total_batches = len(batch_ids)
+        # The largest run of consecutive batch ids missing from the log. A
+        # severed capture (kubectl logs -f cut at the kubelet idle timeout)
+        # leaves ONE long hole -- every batch after the cut is absent at once.
+        # Scattered single gaps (bronze empty/replay batches log an id but no
+        # "writing" line, so they are not counted) make many runs of 1, not one
+        # long run, so this distinguishes a truncated log from a sparse one.
+        if batch_ids:
+            ordered = sorted(batch_ids)
+            metrics.max_batch_id_gap = max(
+                (b - a - 1 for a, b in zip(ordered, ordered[1:], strict=False)), default=0
+            )
         metrics.total_rows_processed = total_rows
         if len(write_times) >= 2:
             metrics.batch_span_seconds = (max(write_times) - min(write_times)).total_seconds()

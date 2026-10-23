@@ -94,6 +94,5 @@ With `max_files_per_trigger` set (the trickle) and the pipeline keeping pace, or
 - `limits.bound` line: `trickle: max_files_per_trigger N (auto), the pipeline kept pace`. Not in `limits.bound_kinds`, so not in the experiment identity.
 - Capped rows (`capped_by` names the trickle): `sustained_throughput_rps`, `pipeline_throughput_gb_per_second`, compute efficiency, `corpus_drain_seconds`.
 - The report labels those rows/s, GB/s and efficiency figures "BOUNDED BY: trickle (offered load, not capacity)", with the tooltip "trickle N files per trigger; this is the offered load, not infrastructure capacity".
-- Pre-1.7 records get this when read.
 
 AML continuous recall is scored over covered instances: planted cases whose every transaction and participant reached the scored [tick](../glossary.md#tick)'s tables. See [AML spec 8.4](../benchmarks/aml/scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails).

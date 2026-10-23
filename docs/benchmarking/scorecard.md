@@ -25,7 +25,6 @@ Typical time to value: 200-600 s at scale 10 (~100 GB), 1200-3600 s at scale 100
 - Times are mapped to the Lakebench host's clock through the API server's clock offset.
 - `timing_source`: `driver_container`, `spark_application`, or `poll` when no consistent cluster time could be read.
 - `timing_resolution_seconds`: 2 s from the cluster, else the poll interval.
-- Records before 1.6 ended every stage on the 15 s job-monitor poll: stage seconds and time to value read up to 15 s per stage late and include the gold driver-log fetch. Do not compare them with later records.
 
 ## Per-stage metrics
 

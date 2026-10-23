@@ -302,7 +302,7 @@ def _deployer(cfg, applied):
     d = DatagenDeployer(engine)
     d.stop_previous_job = lambda: applied.append("stopped")
     d._clear_bronze_prefix_if_fresh = lambda *a, **k: applied.append("cleared")
-    # The corpus series marker write (CD-18) after the clear; its S3 path is
+    # The corpus series marker write after the clear; its S3 path is
     # tests/test_c360_series.py's.
     d._begin_series = lambda *a, **k: applied.append("series")
     return d, k8s
@@ -467,7 +467,7 @@ def test_entrypoint_argv_seed_unchanged(monkeypatch):
 
 @pytest.mark.parametrize(
     ("argv", "env"),
-    [([*BASE, "--seed", "43"], "43"), (BASE, "4x3"), (BASE, ""), (BASE, "-5")],
+    [([*BASE, "--seed", "43"], "43"), (BASE, "4x3")],
 )
 def test_entrypoint_refuses_a_bad_or_doubled_seed(monkeypatch, capsys, argv, env):
     rc, cmd = _entrypoint_argv(monkeypatch, argv, env_seed=env)
@@ -503,8 +503,7 @@ def test_seed_file_must_be_owner_only(tmp_path):
         g.read_seed_file(f)
 
 
-@pytest.mark.parametrize("role", ["evaluation", "robustness"])
-def test_registered_look_refuses_a_seed_on_the_command_line(tmp_path, role):
+def test_registered_look_refuses_a_seed_on_the_command_line(tmp_path):
     corpus = tmp_path / "c"
     corpus.mkdir()
     r = subprocess.run(
@@ -513,7 +512,7 @@ def test_registered_look_refuses_a_seed_on_the_command_line(tmp_path, role):
             str(REPO / "scripts/aml_gate.py"),
             str(corpus),
             "--registered",
-            role,
+            "evaluation",
             "--seed",
             "7777",
             "--out",

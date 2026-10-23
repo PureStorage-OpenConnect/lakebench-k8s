@@ -159,9 +159,10 @@ class TestSchemaProfileOverrides:
     """The scorecard path resolves the same profile and executor count that
     deploy puts in the manifest, per schema."""
 
-    @pytest.mark.parametrize("schema", ["customer360", "financial"])
-    @pytest.mark.parametrize("job", [JobType.BRONZE_VERIFY, JobType.SILVER_BUILD])
-    @pytest.mark.parametrize("scale", [10, 100])
+    @pytest.mark.parametrize(
+        ("job", "schema", "scale"),
+        [(JobType.BRONZE_VERIFY, "financial", 100), (JobType.SILVER_BUILD, "customer360", 10)],
+    )
     def test_get_job_profile_is_schema_aware(self, job, schema, scale):
         cfg = make_config(
             architecture={"workload": {"schema": schema, "datagen": {"scale": scale}}}
@@ -196,37 +197,3 @@ class TestSchemaProfileOverrides:
         aml_500 = compute_peak_requirements(500, "batch", "financial")
         aml_500_bronze = next(r for r in aml_500.per_job if r.job_type == "bronze-verify")
         assert aml_500_bronze.executors <= 28
-
-
-class TestReferencePyDeps:
-    """D9: the reference-detector job installs pinned scikit-learn/pandas into a
-    driver-only emptyDir; no other job pays for it."""
-
-    def _mgr(self):
-        config = _make_config(
-            architecture={"workload": {"schema": "financial", "datagen": {"scale": 1}}}
-        )
-        return SparkJobManager(config, _mock_k8s())
-
-    def test_reference_job_installs_pinned_deps_on_driver_only(self):
-        from lakebench.deps import manifest as dm
-        from lakebench.modules.pipeline_engines.spark.job import REFERENCE_PY_DEPS_DIR
-
-        mgr = self._mgr()
-        m = mgr._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
-        drv = m["spec"]["driver"]["template"]["spec"]
-        init = {c["name"]: c for c in drv["initContainers"]}
-        assert "install-pydeps" not in init
-        cmd = init["lb-deps-py-reference"]["command"][-1]
-        # From the deployment's set only, hash-checked against the manifest.
-        for flag in ("--no-index", "--require-hashes"):
-            assert flag in cmd
-        mounts = drv["containers"][0]["volumeMounts"]
-        assert any(v["mountPath"] == REFERENCE_PY_DEPS_DIR for v in mounts)
-        vols = {v["name"]: v for v in drv["volumes"]}
-        assert vols["lb-deps-manifest"]["configMap"]["name"] == dm.MANIFEST_CONFIGMAP
-        exe = m["spec"]["executor"]["template"]["spec"]
-        assert not any(v["name"] in ("lb-pydeps", "lb-deps-manifest") for v in exe["volumes"])
-        assert not any(
-            v["mountPath"] == REFERENCE_PY_DEPS_DIR for v in exe["containers"][0]["volumeMounts"]
-        )

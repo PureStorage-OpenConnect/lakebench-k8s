@@ -164,6 +164,6 @@ cannot prove it owns, datagen refuses to start (exit 3).
   `--generate`) is refused (exit 3, `run.series_mismatch`) when the marker is
   unfinished or names another cycle count, window or generation than the
   config's.
-- A single-cycle run over a corpus with no marker (1.6) proceeds, unless the
+- A single-cycle run over a corpus with no marker proceeds, unless the
   prefix holds later-cycle files.
 - No stage reads `_corpus/`.

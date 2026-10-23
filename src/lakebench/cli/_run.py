@@ -1090,7 +1090,21 @@ def _settle_after_maintenance(
     return result
 
 
-def _benchmark_gate_problems(cfg, queries, check_empty: bool = True) -> list[str]:
+def bench_query_timeout(cfg) -> int:
+    """Per-query benchmark timeout in seconds for *cfg*'s workload.
+
+    AML analytical queries (full scans, running-balance windows) exceed the
+    300 s default at scale >= 5; a timeout there reads as a failed query. Both
+    the batch benchmark and the continuous in-stream rounds use this, so the
+    limit a query is held to -- and the limit a crossing is measured against --
+    is one value, not 900 for batch and a silently-defaulted 300 for
+    continuous."""
+    return 900 if cfg.architecture.workload.schema_type.value == "financial" else 300
+
+
+def _benchmark_gate_problems(
+    cfg, queries, check_empty: bool = True, passed_ever: set[str] | None = None
+) -> list[str]:
     """Reasons the benchmark result is not a valid score.
 
     QpH is computed over the queries that succeeded, so a run where most
@@ -1099,7 +1113,17 @@ def _benchmark_gate_problems(cfg, queries, check_empty: bool = True) -> list[str
     fails the run. With *check_empty* (the default), so does a successful
     query that returned no rows and is not declared allow_empty; the
     continuous path turns it off for rounds before its last.
+
+    *passed_ever* (continuous only) is the set of query names that succeeded in
+    some round of this run. A query that failed only by exceeding its time
+    limit AND passed earlier is a measured SLA crossing (the corpus grew past
+    what this engine answers inside the limit), not a defect: it is recorded,
+    not failed. A timeout on a query that never passed still measured nothing
+    and fails; every non-timeout error still fails. In batch mode *passed_ever*
+    is None and a timeout fails as before -- there is no earlier round.
     """
+    from lakebench.benchmark.result import is_sla_crossing
+
     fmt = cfg.architecture.table_format.type.value
     engine = cfg.architecture.query_engine.type.value
 
@@ -1110,8 +1134,20 @@ def _benchmark_gate_problems(cfg, queries, check_empty: bool = True) -> list[str
     def _ok(q):
         return bool(q["success"] if isinstance(q, dict) else q.success)
 
+    def _timed_out(q):
+        return bool(
+            q.get("timed_out", False) if isinstance(q, dict) else getattr(q, "timed_out", False)
+        )
+
+    def _is_crossing(q):
+        return is_sla_crossing(timed_out=_timed_out(q), name=_name(q), passed_ever=passed_ever)
+
     bad = [
-        q for q in queries if not _ok(q) and (fmt, engine, _name(q)) not in _KNOWN_QUERY_FAILURES
+        q
+        for q in queries
+        if not _ok(q)
+        and (fmt, engine, _name(q)) not in _KNOWN_QUERY_FAILURES
+        and not _is_crossing(q)
     ]
     # A query that "succeeded" with no rows measured nothing (invariant 3):
     # an empty table, a filter that matched nothing, or a reader that read
@@ -3354,9 +3390,7 @@ def _run_once(
                     # and 900 s there, a query that timed out before counted
                     # only after, and the maintenance delta read -40% on a
                     # run where every query got faster.
-                    _pre_timeout = (
-                        900 if cfg.architecture.workload.schema_type.value == "financial" else 300
-                    )
+                    _pre_timeout = bench_query_timeout(cfg)
                     print_info("Warm-up pass (not measured)...")
                     _warm_benchmark(_pre_runner, _pre_timeout)
                     _pre_result = _pre_runner.run_power(
@@ -3577,9 +3611,7 @@ def _run_once(
                 # AML analytical queries (aggregate_typology_coverage etc)
                 # can exceed the 300 s default at scale >= 5; a timeout here
                 # masquerades as a failed query and drops QpH to 0.
-                _bench_timeout = (
-                    900 if cfg.architecture.workload.schema_type.value == "financial" else 300
-                )
+                _bench_timeout = bench_query_timeout(cfg)
                 if collector.current_run is not None:
                     # Per-query limit of the timed benchmark: its headroom.
                     collector.current_run.benchmark_query_timeout_seconds = _bench_timeout

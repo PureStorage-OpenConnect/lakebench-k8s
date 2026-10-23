@@ -23,8 +23,9 @@ from tests.fixtures.comparability_helpers import SYSID, _fresh
 from tests.fixtures.corpus_identity_helpers import observe
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED = sr.expected("records")["records"]
-EXP1_RECORDS = sorted(r for r, w in EXPECTED.items() if w["generation"] == "exp1")
+#: One exp1 record per compaction shape: Trino ran, Spark Thrift ran, not ran.
+EXP1_TRINO = "20260929-212900-5105a0"
+EXP1_RECORDS = [EXP1_TRINO, "20260928-102711-8387da", "20260927-011043-e338c5"]
 
 
 def _load(record: dict):
@@ -183,15 +184,13 @@ def test_stored_block_never_rebuilt(caller):
     assert got == want
 
 
-@pytest.mark.parametrize("run_id", EXP1_RECORDS)
-def test_resave_keeps_exp1(run_id):
-    """S1, the failing case: a v1.6 record loaded and saved by v1.7 keeps
-    its block byte for byte (schema exp1, no id_v2, the same digest)."""
-    rec = sr.load_record(run_id)
+def test_resave_keeps_exp1():
+    """A v1.6 record loaded and saved by v1.7 keeps its block byte for
+    byte (schema exp1, no id_v2)."""
+    rec = sr.load_record(EXP1_TRINO)
     saved = _load(rec).to_dict()["experiment"]
     assert saved == rec["experiment"]
     assert saved["schema"] == "exp1" and "id_v2" not in saved["corpus"]
-    assert ex.identity_hash(saved) == EXPECTED[run_id]["identity_digest"]
 
 
 def test_record_without_block_is_built_once():
@@ -246,11 +245,10 @@ def test_compaction_operation_recorded_wins():
     assert cmp.compaction_operation(exp) == "trino_optimize:64MB"
 
 
-@pytest.mark.parametrize("run_id", EXP1_RECORDS)
-def test_stored_records_gain_no_optional_or_pinset_key(run_id):
-    """Every stored record is 1.6, single-cycle, with null overrides: no
-    derived key appears, so no stored verdict moves through them."""
-    rec = sr.load_record(run_id)
+def test_stored_records_gain_no_optional_or_pinset_key():
+    """A stored 1.6, single-cycle record with null overrides gains no
+    derived key, so no stored verdict moves through it."""
+    rec = sr.load_record(EXP1_TRINO)
     c = cmp.classify(rec["experiment"], rec)
     assert cmp.optional_keys(rec["experiment"], rec) == {}
     assert "dependency pinset" not in c.keys(cmp.ARCHITECTURE)

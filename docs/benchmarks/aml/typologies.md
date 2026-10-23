@@ -2,11 +2,11 @@
 
 ## 3.6 Typologies
 
-Fifteen typologies are planted (`datagen_rs/src/typology.rs`): `bipartite`,
+Fifteen typologies are planted: `bipartite`,
 `cycle`, `fan_in`, `fan_out`, `gather_scatter`, `random`, `scatter_gather`,
 `stack`, `synthetic_identity`, `corridor_high_risk`, `cross_border_cycle`,
 `dormant_reactivation`, `micro_structuring`, `rapid_layering`,
-`tbml_repeated_invoice`. The screening track (`datagen_rs/src/screening.rs`)
+`tbml_repeated_invoice`. The screening track
 adds `sanctions_match` and `pep_match`: 17 manifest types.
 
 - Each typology gets an equal share of a row budget of 0.1% of base payments,
@@ -15,9 +15,7 @@ adds `sanctions_match` and `pep_match`: 17 manifest types.
 - Nine typologies have a designated rule ([4.2](rules.md#42-detection-rules)).
   Eight have none: `bipartite`, `cross_border_cycle`, `fan_in`, `fan_out`,
   `random`, `scatter_gather`, `synthetic_identity`, `tbml_repeated_invoice`.
-  `benchmark/aml_queries.py` lists each with a one-line reason
-  (`UNMAPPED_TYPOLOGIES`). Recall for an unmapped typology is untestable, not
-  zero.
+  Recall for an unmapped typology is untestable, not zero.
 - `random` is a control: its hit rate is the chance floor
   ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)).
 - The pre-registered behavioural subset: `gather_scatter`, `rapid_layering`,
@@ -68,12 +66,12 @@ entity whose name sits near a list entry (world persons carry a middle initial,
 list entries a full middle name) can dominate it, so read it beside the alert
 count.
 
-**W7 corridors.** The high-risk corridor list W7 uses beside the FATF list
-(`synthetic_corridors.json`) is synthetic: it is the country pool the generator draws
+**W7 corridors.** The high-risk corridor list W7 uses beside the FATF list is
+synthetic: it is the country pool the generator draws
 `corridor_high_risk` participants from, since no generator home country is on
 the June 2026 FATF lists. W7's recall on that typology is partly by
 construction: the rule uses the generator's corridor list, as a bank uses its
-own. Neither its recall nor its alert volume is comparable with 1.5.
+own.
 
 ## 3.9 Planting shapes and baseline timing
 
@@ -87,8 +85,7 @@ from a detection rule's threshold; rule recall is reported, not targeted.
 | `dormant_reactivation` | Dormancy log-uniform 45 to 365 days. Two thirds of reactivations are sudden (2 days); one third return to use over 4 to 10 days (short, so few straddle a month boundary, where the monthly unit would see the burst without its gap). Amounts stay the account's own draws | An account sending about monthly goes 45 days without a send about one time in five, so the short end overlaps normal gaps. Not every reactivation is one burst |
 | `corridor_high_risk` | 2 to 4 payments from the subject to one counterparty in the higher-risk pool over 2 to 5 weeks, amounts from the sender's own distribution | W7's "corridors to high-risk jurisdictions" is about where an account's money goes; one payment cannot show that. About 38% of runs span two months; the monthly unit labels the last month and excludes the earlier, so a split run shows fewer corridor payments in its labelled month |
 
-These three draw amounts from an instance-keyed stream
-(`amounts::own_amount_stream`), so other typologies keep their amounts, times
+These three draw amounts from an instance-keyed stream, so other typologies keep their amounts, times
 and participants.
 
 **Scheduled and bursty senders.** Real accounts mix steady cadences
@@ -96,18 +93,15 @@ and participants.
 pre-registered target: at least 15% of accounts with a gap coefficient of
 variation below 0.5, and at least 15% above 1.0.
 
-- `datagen_rs/src/regular.rs` makes 30% of accounts "scheduled": 75 to 95%
+- The generator makes 30% of accounts "scheduled": 75 to 95%
   of their expected sends follow a steady cadence (one payment every 1/K of
   calendar mass, rolled to the next business day); the rest stay random.
 - The cadence is spaced in calendar mass, not wall-clock time, so scheduled
   rows keep the corpus's day-of-week, salary-day and quarter-end shape, which
-  typology rows share. Even wall-clock spacing would shift rows off salary days
-  onto Mondays and make planted rows stand out by date.
+  typology rows share.
 - Only timing changes. Expected total sends, amounts (persona draws),
   counterparty draws (the same ring and extended-band draw as a random row),
   every typology's rows and the corpus row count are unchanged.
 - A dormant account's cadence stops during its dormancy.
 - Scheduled events are computed per file from (seed, uid): memory stays
   O(accounts) at any scale and files depend only on (seed, file).
-- Parameters are self-chosen. The primary source for the mixture split still
-  awaits a citation.

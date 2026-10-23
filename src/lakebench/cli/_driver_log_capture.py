@@ -277,12 +277,29 @@ class DriverLogCapturer:
                 continue
             if phase and phase not in ("Running", "Succeeded", "Failed"):
                 continue
-            # If we already captured THIS uid, skip. If the uid is new, start
-            # a new capture (resubmit).
+            # If we already captured THIS uid, the tail for it may still be
+            # live, or it may have died while the pod kept running: a
+            # ``kubectl logs -f`` is severed at the kubelet's
+            # streamingConnectionIdleTimeout (4h on this cluster), after which
+            # nothing restarts it and the file stops at ~4h of a long window
+            # (the 18h-blind-record bug). Restart a severed tail in place with
+            # --since-time so the file is continuous; a still-live tail is left
+            # alone. A new uid is a resubmit and starts a new file below.
             with self._lock:
                 existing = self._captures.get(app, [])
-                if any(u == pod_uid for u, _p, _f in existing):
-                    continue
+                known = next(
+                    ((i, p) for i, (u, p, _f) in enumerate(existing) if u == pod_uid),
+                    None,
+                )
+            if known is not None:
+                idx, known_proc = known
+                if known_proc.poll() is None:
+                    continue  # tail still live
+                if phase == "Running":
+                    self._resume_tail(app, idx, pod_name)
+                continue
+            with self._lock:
+                existing = self._captures.get(app, [])
                 suffix = "" if not existing else f".r{len(existing)}"
             path = self._drivers_dir / f"{app}.driver{suffix}.log"
             # Final check right before the Popen: close() may have landed
@@ -341,26 +358,78 @@ class DriverLogCapturer:
             return (None, None, None)
         return (parts[0] or None, parts[1] or None, parts[2] or None)
 
-    def _start_tail(self, pod_name: str, path: Path) -> subprocess.Popen | None:
+    def _resume_tail(self, app: str, idx: int, pod_name: str) -> None:
+        """Restart a tail that the kubelet severed while the pod kept running.
+
+        ``kubectl logs -f`` is cut at the kubelet streamingConnectionIdleTimeout
+        (4h here). The capture file then stops mid-window with no restart, so a
+        24h record is built from ~4h of logs (ingest ratio read 0.24 on a run
+        where bronze kept up). Resume by appending a fresh ``-f`` from the last
+        timestamp already in the file (``--since-time``), so the file stays one
+        continuous log per pod. Best-effort: a failure leaves the file as-is.
+        """
+        with self._lock:
+            entry = self._captures.get(app, [])
+            if idx >= len(entry):
+                return
+            _uid, _old, path = entry[idx]
+        since = self._last_stamp(path)
+        proc = self._start_tail(pod_name, path, since=since, append=True)
+        if proc is None:
+            return
+        with self._lock:
+            entry = self._captures.get(app, [])
+            if idx < len(entry) and entry[idx][2] == path:
+                entry[idx] = (entry[idx][0], proc, path)
+            else:
+                # close() cleared captures between the Popen and here; do not
+                # leak the child into a drain that has already run.
+                self._terminate(proc)
+
+    @staticmethod
+    def _last_stamp(path: Path) -> str | None:
+        """The RFC3339 timestamp of the last ``--timestamps`` line in *path*,
+        for ``kubectl logs --since-time``. None if the file has no stamped
+        line (then the resumed tail falls back to the whole available log)."""
+        try:
+            raw = path.read_text(errors="replace")
+        except OSError:
+            return None
+        for line in reversed(raw.splitlines()):
+            if _STAMP.match(line):
+                return line.split(" ", 1)[0]
+        return None
+
+    def _start_tail(
+        self, pod_name: str, path: Path, *, since: str | None = None, append: bool = False
+    ) -> subprocess.Popen | None:
         try:
             # Open the file ourselves so Popen inherits a real fd (not a pipe
             # we would need to drain). --timestamps so a FAIL log is directly
-            # comparable to run.log timestamps.
-            fh = open(path, "wb")  # noqa: SIM115
+            # comparable to run.log timestamps. append=True resumes a severed
+            # tail without truncating what was already captured.
+            fh = open(path, "ab" if append else "wb")  # noqa: SIM115
         except OSError as e:
             logger.warning("driver log capture: cannot open %s: %s", path, e)
             return None
+        args = [
+            "logs",
+            "-f",
+            "--timestamps",
+            "-n",
+            self._namespace,
+            pod_name,
+        ]
+        if since is not None:
+            # --since-time has 1s granularity, so the seam may repeat up to a
+            # second of lines. Downstream consumers key on distinct batch
+            # numbers / stamps, so a few repeated lines are harmless; a gap
+            # would not be. Prefer the small overlap.
+            args += [f"--since-time={since}"]
         try:
             proc = pinned_kubectl_popen(
                 self._context,
-                [
-                    "logs",
-                    "-f",
-                    "--timestamps",
-                    "-n",
-                    self._namespace,
-                    pod_name,
-                ],
+                args,
                 stdout=fh,
                 stderr=subprocess.STDOUT,
             )

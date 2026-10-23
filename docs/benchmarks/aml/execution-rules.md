@@ -5,7 +5,7 @@
 | Item | Rule | Enforced by |
 |---|---|---|
 | Composition | Iceberg and one of the 8 Iceberg 4-tuples ([11](../AML.md#11-supported-compositions)); `custom` refused | config load |
-| Scale | above 800 refused; above 300 up to 800 runs as unverified, with a note ([3.2](generation.md#32-scale-factor)) | config load, run start (`config/support.py`) |
+| Scale | above 800 refused; above 300 up to 800 runs as unverified, with a note ([3.2](generation.md#32-scale-factor)) | config load, run start |
 | Support state | `unsupported` refused at run start (exit 2); `--local` refused for AML | `lakebench run` |
 | Stages | batch: bronze-verify, silver-build, gold-finalize, then scoring and the AML gates; continuous: bronze-ingest, silver-stream, gold-refresh, then covered scoring over the last tick inside the window | `run`; scoring and gates only on a full run (no `--stage`) whose stages succeeded |
 | Corpus | batch datagen only with `--generate` (a multi-cycle run generates in its cycles and refuses the flag); continuous always generates unless `--skip-generate` | `run` |
@@ -26,7 +26,7 @@ ticks ran, so it cannot show matching answers.
 ## 7.2 Permitted tuning (still publishable)
 
 None of these changes the Workload or Corpus identity keys, so runs differing
-only here stay comparable (`metrics/comparability.py`):
+only here stay comparable:
 
 - **Architecture keys**: catalog (Hive or Polaris) and query engine within
   the Iceberg recipes; component versions; query access path (catalog or
@@ -57,7 +57,7 @@ These change the identity, so the runs are not comparable:
 
 - the workload version (`aml-3`; records at `aml-1` or `aml-2` are not
   comparable with it);
-- generator `MODEL_VERSION`;
+- generator model version;
 - workload parameters (`parameters_id` hashes every TM operations setting,
   `w1_max_vertices`, `retention_workload` and `retention_months`);
 - mode;
@@ -70,12 +70,12 @@ These change the identity, so the runs are not comparable:
 - a `lakebench benchmark` record (`record_kind: benchmark`), never a
   comparable run.
 
-**Corpus id** (`metrics/experiment.py`):
+**Corpus id:**
 
 - On an exp2 record it is v2, a hash of:
   - the generator's resolved arguments as each datagen node wrote them in its
     marker (schema, a salted seed reference, cycles, node count, file size,
-    delivery mode, `MODEL_VERSION`, Parquet writer settings, scale, corpus
+    delivery mode, generator model version, Parquet writer settings, scale, corpus
     months, mode, robustness flag, bytes per row);
   - the generator lineage;
   - the cycle count when above 1.
@@ -106,12 +106,12 @@ Also prohibited, not enforced:
 
 | Cap | Value | Effect | How a bound cap is reported |
 |---|---|---|---|
-| Executor ceiling | 28 (`_MAX_EXECUTORS_SAFE`); per AML job: bronze-verify 28, silver-build 28, gold-finalize 28, bronze-ingest 20, silver-stream 28, gold-refresh 28 | per-job executors are the profile's base at scale <= 10, else min(base + int((scale - 10) x per100 // 100), cap) | `experiment.limits.executors[].cap`, `cap_hit`, `override`, `override_bound`; `limits.bound`, `limits.bound_kinds` |
+| Executor ceiling | 28; per AML job: bronze-verify 28, silver-build 28, gold-finalize 28, bronze-ingest 20, silver-stream 28, gold-refresh 28 | per-job executors are the profile's base at scale <= 10, else min(base + int((scale - 10) x per100 // 100), cap) | `experiment.limits.executors[].cap`, `cap_hit`, `override`, `override_bound`; `limits.bound`, `limits.bound_kinds` |
 | Continuous concurrent budget | 90% of the cluster CPU (and memory) left after co-resident services, datagen while it runs, and the stream drivers; each executor goes to the stream with the smallest share of its need | fewer executors per stream; a stream below its need cannot balance and the run fails | `limits.executors[].budget_cap` |
 | Streaming trigger intervals | back to back by default | freshness is measured at each write, so an interval is not in it | `limits.trigger_bound` (not a bound kind) |
 | Sizing cuts to fit the cluster | cluster-derived | smaller resources than requested | `limits.autosize_cuts`, `limits.bound` |
 | `w1_max_vertices` | 8,000,000 (`financial.w1_max_vertices`) | W1 skipped `vertex-cap` | `rules.skipped`; `limits.bound`; verdict `rule_caps` |
-| W1 giant-component share | 0.5 | W1 skipped `giant-component` | `rules.skipped` only, not `limits.bound`. Recorded at scale 1 and 10 (1.6 batch records, n=1 each) |
+| W1 giant-component share | 0.5 | W1 skipped `giant-component` | `rules.skipped` only, not `limits.bound` |
 | W3 and W17 path budget | executor count x scratch size x 0.7 / 260 bytes per row, or `LB_PATH_SEARCH_MAX_ROWS` when set. Without scratch PVCs each executor counts 20 GiB, too small at scale 10 (the search holds about 267M rows against a 231M budget), so run scale 10 with `platform.storage.scratch.enabled: true` | rule skipped `path-cap`, an allowed skip | `rules.skipped`, `limits.bound`; verdict `rule_caps` |
 | W3 and W17 edge cap | 3,000,000,000 flow edges | rule skipped `edge-cap`; not allowed, so the batch run fails | `rules.skipped`, `limits.bound`, `verdict.reasons` |
 | Per-alert evidence caps | table below | truncate `related_txn_ids` (and W4's `related_entity_ids`) | `financial_scoring.evidence_capped_alerts_by_rule`, `recall_bounded_by_evidence_cap`, per-typology `bounded_by_evidence_cap` |
@@ -124,7 +124,7 @@ Also prohibited, not enforced:
 a pipeline that keeps up reports `none`. `limits.trickle_bound` (`value`,
 `source`, `kept_pace`) says whether the trickle held intake; when it did,
 throughput figures measure the offered load the trickle set, not
-infrastructure capacity (`metrics/bounds.py`).
+infrastructure capacity.
 
 **Per-alert evidence caps** keep one alert row from growing with the corpus.
 They are not tuned to any result.

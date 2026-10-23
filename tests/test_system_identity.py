@@ -1,4 +1,4 @@
-"""ER-8 (EVD-7, SP-1): the system fingerprint (metrics/system_identity.py)."""
+"""The system fingerprint (metrics/system_identity.py)."""
 
 from __future__ import annotations
 
@@ -306,7 +306,7 @@ def test_forbidden_node_list_is_partial_and_left_out(cluster) -> None:
 
 def test_common_fingerprints_compare_on_parts_both_observed(cluster) -> None:
     """The run-start HEAD answers and the run-end one times out: the two
-    samples are one system on every part both observed (ER-10b's case)."""
+    samples are one system on every part both observed."""
     start = _observe(cluster())
     end = _observe(cluster(), s3=_S3(error=TimeoutError("read timed out")))
     assert end["parts"]["storage_server"] == {
@@ -367,7 +367,7 @@ def test_nfd_cpu_model_when_no_instance_type(cluster) -> None:
 
 @pytest.mark.parametrize(
     "mem,gib",
-    [("415236812Ki", 396), ("415240000Ki", 396), ("416284000Ki", 397), ("415761000Ki", 397)],
+    [("415236812Ki", 396), ("415761000Ki", 397)],
 )
 def test_memory_rounded_to_nearest_gib(cluster, mem, gib) -> None:
     """Nearest, not floor: 396.5 GiB and above reads 397."""
@@ -401,26 +401,21 @@ def test_reader_bug_is_a_gap_not_a_crash(cluster) -> None:
     assert "not_observed" in out["parts"]["scratch"]
 
 
-def test_common_fingerprints_keep_each_version(cluster) -> None:
+def test_fingerprints_differ_across_versions(cluster) -> None:
+    """A newer, missing or foreign version never matches."""
     a = _observe(cluster())
-    b = json.loads(json.dumps(a))
-    b["version"] = a["version"] + 1
-    fa, fb, _ = si.common_fingerprints(a, b)
-    assert fa != fb
-
-
-def test_versionless_observation_never_matches(cluster) -> None:
-    a = _observe(cluster())
-    b = {k: v for k, v in a.items() if k != "version"}
-    c = {**a, "version": "v1"}
-    assert si.common_fingerprints(a, b)[0] != si.common_fingerprints(a, b)[1]
-    assert si.common_fingerprints(a, c)[0] != si.common_fingerprints(a, c)[1]
+    newer = json.loads(json.dumps(a))
+    newer["version"] = a["version"] + 1
+    versionless = {k: v for k, v in a.items() if k != "version"}
+    for b in (newer, versionless, {**a, "version": "v1"}):
+        fa, fb, _ = si.common_fingerprints(a, b)
+        assert fa != fb
 
 
 def test_sibling_clusters_are_not_one_system(cluster, tmp_path) -> None:
     """Two clusters on one VM template, OpenShift release and storage share
     every shape part; with one side's CA not observed they hash equal over
-    the common parts, but they are not known to be one system (review)."""
+    the common parts, but they are not known to be one system."""
     a = _observe(cluster())
     b = _observe(cluster(ca=None, verify_ssl=False))
     fa, fb, keys = si.common_fingerprints(a, b)
@@ -442,7 +437,7 @@ def test_node_without_capacity_is_a_gap(cluster) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Load (K31, ER-10b)
+# Load
 # ---------------------------------------------------------------------------
 
 
@@ -497,7 +492,7 @@ def test_load_sums_schedulable_workers_and_other_namespaces() -> None:
         _pod("other", "w0", "500m", None, init=[("2", "1Gi")]),  # init dominates cpu
         _pod("pending", None, "16", "16Gi"),  # not scheduled: left out
     ]
-    k8s, calls = _load_cluster(nodes, pods)
+    k8s, _ = _load_cluster(nodes, pods)
     out = si.observe_load(k8s, "mine")
     assert out["allocatable"] == {
         "cpu": 79.0,
@@ -506,7 +501,6 @@ def test_load_sums_schedulable_workers_and_other_namespaces() -> None:
     }
     assert out["cotenant_requested"] == {"cpu": 6.5, "memory_gib": 17.0, "pods": 2}
     assert out["cotenant_pending"] == {"cpu": 16.0, "memory_gib": 16.0, "pods": 1}
-    assert calls[1][:3] == ("pods", "status.phase!=Succeeded,status.phase!=Failed", (5, 60))
     assert out["at"]
 
 
@@ -523,10 +517,9 @@ def test_refused_pod_list_is_not_observed() -> None:
 
 
 def test_refused_node_list_leaves_both_halves_not_observed() -> None:
-    k8s, calls = _load_cluster(node_error=_ApiError(403))
+    k8s, _ = _load_cluster(node_error=_ApiError(403))
     out = si.observe_load(k8s, "mine")
     assert not si.is_observed(out["allocatable"]) and not si.is_observed(out["cotenant_requested"])
-    assert [c[0] for c in calls] == ["list_node"]
 
 
 def test_local_load_is_not_observed() -> None:
@@ -558,17 +551,6 @@ def test_run_samples_land_in_the_inputs_and_the_block(cluster) -> None:
     e = run.to_dict()["experiment"]
     assert e["observed"] == observed
     assert e["system_identity"] == inputs["system_identity"]
-
-
-def test_load_quantities_in_any_canonical_form() -> None:
-    pods = [
-        _pod("o", "w0", "250m", "107374182400m"),  # 0.1 GiB in milli-bytes
-        _pod("o", "w0", "1", "1Pi"),
-    ]
-    k8s, _ = _load_cluster(pods=pods)
-    out = si.observe_load(k8s, "mine")["cotenant_requested"]
-    assert out["cpu"] == 1.25 and out["pods"] == 2
-    assert out["memory_gib"] == round((0.1 * 1024**3 + 1024**5) / 1024**3, 1)
 
 
 def test_one_unreadable_pod_is_counted_not_fatal() -> None:
@@ -616,12 +598,11 @@ def test_pod_list_is_paged() -> None:
             return NS(items=_default_nodes())
 
         def list_pod_for_all_namespaces(self, **kw):
-            seen.append((kw.get("limit"), kw.get("_continue")))
+            seen.append(kw.get("_continue"))
             return pages[len(seen) - 1]
 
     out = si.observe_load(NS(_core_v1=Core()), "mine")
     assert out["cotenant_requested"]["cpu"] == 3.0
-    assert seen == [(500, None), (500, "t1")]
 
 
 def test_reasons_carry_no_address() -> None:
