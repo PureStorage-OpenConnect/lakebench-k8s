@@ -209,12 +209,13 @@ def user_conf_digest(spark_conf: dict[str, Any], user: dict[str, str]) -> str | 
 
 
 def scratch_size_per_job(cfg: Any, continuous: bool) -> dict[str, Any]:
-    """``{job_type: scratch_size}`` from the job profiles, schema overrides applied."""
+    """``{job_type: scratch_size}``: the size the config sets, else the job
+    profile's, schema overrides applied."""
     from lakebench.modules.pipeline_engines.spark.job import (
         executor_count,
         executor_override,
+        executor_scratch_size,
         get_job_profile,
-        scratch_executor_size,
         stage_profile,
     )
 
@@ -229,7 +230,7 @@ def scratch_size_per_job(cfg: Any, continuous: bool) -> dict[str, Any]:
             continue
         # A batch stage's scratch follows its executor count.
         executors = executor_override(jt, cfg) or executor_count(profile, scale)
-        out[jt] = scratch_executor_size(profile, scale, executors)
+        out[jt] = executor_scratch_size(jt, profile, cfg, scale, executors)
     return out
 
 
@@ -287,13 +288,16 @@ def _catalog_block(cfg: Any) -> dict[str, Any]:
     return {"type": kind, "resources": resources.model_dump(mode="json") if resources else None}
 
 
-def _scratch_of(profile: dict[str, Any] | None, cfg: Any, executors: int) -> str | None:
-    """The scratch PVC each of *executors* executors gets under *profile*."""
-    from lakebench.modules.pipeline_engines.spark.job import scratch_executor_size
+def _scratch_of(
+    job_type: str, profile: dict[str, Any] | None, cfg: Any, executors: int
+) -> str | None:
+    """The scratch PVC each of *executors* executors of *job_type* gets."""
+    from lakebench.modules.pipeline_engines.spark.job import executor_scratch_size
 
     if not profile:
         return None
-    return scratch_executor_size(profile, float(cfg.architecture.workload.datagen.scale), executors)
+    scale = float(cfg.architecture.workload.datagen.scale)
+    return executor_scratch_size(job_type, profile, cfg, scale, executors)
 
 
 def _build(cfg: Any, continuous: bool) -> dict[str, Any]:
@@ -329,7 +333,7 @@ def _build(cfg: Any, continuous: bool) -> dict[str, Any]:
             "executor_memory_overhead": executor["memoryOverhead"],
             "executor_instances": executor["instances"],
             "scratch_size": _scratch_of(
-                get_job_profile(jt, schema), cfg, int(executor["instances"])
+                jt, get_job_profile(jt, schema), cfg, int(executor["instances"])
             ),
         }
         confs[jt] = owned_conf(spec["sparkConf"], user)

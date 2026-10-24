@@ -84,13 +84,15 @@ Spark settings live under `platform.compute.spark`, `platform.storage.scratch`, 
 | `bronze_executors`, `silver_executors`, `gold_executors` | `null` | Executor count of the stage's job in the run's mode (bronze-verify or bronze-ingest, silver-build or silver-stream, gold-finalize or gold-refresh). Set, it bypasses the scaling formula and, in continuous mode, the shared-cluster Lakebench cap. |
 | `bronze_executor_cores`, `silver_executor_cores`, `gold_executor_cores` | `null` | Continuous mode only: executor size, 1-16 cores. Memory and scratch per core follow the profile; the count is unchanged, so total cores grow. Batch jobs ignore it. |
 | `bronze_executor_memory`, `silver_executor_memory`, `gold_executor_memory` | `null` | Continuous mode only: heap per executor (e.g. `96g`), applied after the cores. The overhead keeps the profile's ratio to the heap; the capacity check and the node fit count the larger pod. Batch jobs ignore it. |
-| `platform.storage.scratch.enabled` | `false` | Portworx scratch PVCs for executors. Unset, a batch run at scale 50 and above turns it on. |
+| `executor_scratch` | `null` | Scratch PVC per executor for every Spark job, in whole gibibytes (e.g. `200Gi`). Replaces the profile's size outright, in either mode. |
+| `bronze_executor_scratch`, `silver_executor_scratch`, `gold_executor_scratch` | `null` | Scratch PVC per executor for the stage's job in the run's mode; wins over `executor_scratch` for that stage. |
+| `platform.storage.scratch.enabled` | `false` | Portworx scratch PVCs for executors. Unset, a batch run at scale 50 and above, or a config that sets a scratch size, turns it on. Set to `false` with a scratch size, the config is refused. |
 | `platform.storage.scratch.storage_class` | `px-csi-scratch` | Scratch StorageClass. Must be `repl=1`. |
 | `spark.conf` | `{}` | Spark conf merged over the job defaults (below). |
 
 - Executor count overrides above 28 are refused by the commands that change data; `destroy` and read commands drop them with a note.
 - Unset `<stage>_executor_cores`: bronze-ingest and silver-stream grow to 8 or 16 cores when the offered load needs more executors than the cap (keeping total cores), unless the stage's `<stage>_executors` count is set. gold-refresh is never grown.
-- Batch jobs take only a count override. The removed `platform.compute.spark.driver` and `.executor` blocks and `scratch.size` are listed under 1.7.0 in the [changelog](../CHANGELOG.md#170---2026-10-06).
+- Batch jobs take a count and a scratch size override. The removed `platform.compute.spark.driver` and `.executor` blocks and `scratch.size` are listed under 1.7.0 in the [changelog](../CHANGELOG.md#170---2026-10-06).
 
 ### Spark conf (S3A, shuffle, memory)
 
@@ -196,7 +198,7 @@ When enabled, each executor gets a dynamically provisioned PVC at `/tmp/spark-lo
 
 - **Batch, per-scale profile:** the stage's `scratch_gib_per_scale` x scale / executors, rounded up, between 50Gi and the profile's `scratch_size` (the ceiling). Examples: Customer 360 silver-build gets 8 x 50Gi at scale 1, 8 x 75Gi at scale 10 and 18 x 300Gi at scale 100; AML bronze-verify with 16 executors at scale 10 gets 50Gi each.
 - **No per-scale need** (c360 bronze-verify, 50Gi, and the streaming jobs): `scratch_size`. A widened streaming executor's PVC grows with its cores.
-- To change scratch, change the executor count (`platform.compute.spark.<stage>_executors`). There is no size field.
+- **Set in the config:** `platform.compute.spark.<stage>_executor_scratch`, else `executor_scratch`, replaces the size above for every executor of the job. It is exact: not scaled by cores, scale or executor count. `executor_scratch` is the only control for jobs outside the three stages, such as the AML scorer.
 - `metrics.json` records the size per job as `config_snapshot.scratch.size_per_job`.
 - The StorageClass must use `repl=1`; replication only doubles storage for recomputable shuffle data.
 - `lakebench deploy` only checks that the StorageClass exists. A cluster admin creates it once with `lakebench admin install --component scratch-storage-class`.

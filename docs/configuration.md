@@ -87,7 +87,7 @@ The removed keys, with what to do instead (generated from each model's
 | `platform.compute.spark.silver_stream_executors` | use silver_executors, which sizes silver-stream in continuous mode and silver-build in batch mode. |
 | `platform.storage.s3.secret_ref` | lakebench never reads an existing Secret: deploy writes the S3 Secret from access_key and secret_key. Set those instead (use ${VAR} substitution, for example access_key: "${S3_ACCESS_KEY}", to keep the keys out of the file). |
 | `platform.storage.scratch.create_storage_class` | lakebench creates no StorageClass; a cluster admin runs 'lakebench admin install --component scratch-storage-class' once. |
-| `platform.storage.scratch.size` | per-job scratch comes from the job profiles (silver-build: 60 GiB x scale / executors, 50-300Gi). |
+| `platform.storage.scratch.size` | each executor's scratch PVC is platform.compute.spark.executor_scratch (or a stage's *_executor_scratch), else its job profile's size. |
 | `secret_ref` | lakebench never reads an existing Secret: deploy writes the S3 Secret from access_key and secret_key. Set those instead. |
 | `version` | there is one config schema and nothing read the number; delete the key. |
 | `workload.customer360.channels` | the customer360 generator never read it; delete the key. |
@@ -287,7 +287,7 @@ platform:
 
     scratch:
       # enabled: true                 # Portworx scratch PVCs; unset, it turns on for a batch run at scale 50 and above
-      storage_class: px-csi-scratch   # PVC size per executor: the job profile's
+      storage_class: px-csi-scratch   # PVC size per executor: compute.spark.*executor_scratch, else the job profile's
 
   compute:
     spark:
@@ -301,8 +301,7 @@ platform:
 
       # Per-stage executor counts (null = auto). One key per stage; the run's
       # mode picks the job: bronze-verify or bronze-ingest, silver-build or
-      # silver-stream, gold-finalize or gold-refresh. Per-executor memory and
-      # PVC are fixed from proven profiles.
+      # silver-stream, gold-finalize or gold-refresh.
       bronze_executors: null
       silver_executors: null
       gold_executors: null
@@ -312,6 +311,12 @@ platform:
       bronze_executor_cores: null
       silver_executor_cores: null
       gold_executor_cores: null
+
+      # Scratch PVC per executor (null = the job profile's size). Exact, in
+      # either mode; a stage key wins for its stage. Setting one turns
+      # scratch on when platform.storage.scratch.enabled is unset.
+      executor_scratch: null          # e.g. 200Gi
+      silver_executor_scratch: null
 
       # Global driver overrides (null = profile default).
       driver_memory: null
@@ -588,6 +593,10 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `platform.compute.spark.bronze_executor_memory` | string or null | `null` | advanced | Continuous mode: override bronze-ingest heap per executor (a Spark size, for example `32g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size. |
 | `platform.compute.spark.silver_executor_memory` | string or null | `null` | advanced | Continuous mode: override silver-stream heap per executor (a Spark size, for example `96g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. For a financial run that leaves `silver_max_rows_per_trigger` unset, a larger heap raises the derived cap up to its measured bound. Null = the profile's per-core share of the executor size. |
 | `platform.compute.spark.gold_executor_memory` | string or null | `null` | advanced | Continuous mode: override gold-refresh heap per executor (a Spark size, for example `96g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size. |
+| `platform.compute.spark.executor_scratch` | string or null | `null` | advanced | Scratch PVC per executor for every Spark job (whole gibibytes, for example `200Gi`). A stage's `*_executor_scratch` wins for that stage's jobs. Setting any scratch size turns `platform.storage.scratch.enabled` on when it is unset; with it set to `false` the config is refused. Null = each job profile's size. |
+| `platform.compute.spark.bronze_executor_scratch` | string or null | `null` | advanced | Scratch PVC per executor for the bronze stage (for example `200Gi`): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = `executor_scratch`, else the profile's size. |
+| `platform.compute.spark.silver_executor_scratch` | string or null | `null` | advanced | Scratch PVC per executor for the silver stage (for example `300Gi`): silver-build in batch mode, silver-stream in continuous mode. Null = `executor_scratch`, else the profile's size. |
+| `platform.compute.spark.gold_executor_scratch` | string or null | `null` | advanced | Scratch PVC per executor for the gold stage (for example `200Gi`): gold-finalize in batch mode, gold-refresh in continuous mode. Null = `executor_scratch`, else the profile's size. |
 | `platform.compute.spark.driver_memory` | string or null | `null` | advanced | Global driver memory override (e.g., `16g`). Null = profile default. |
 | `platform.compute.spark.driver_cores` | integer or null | `null` | advanced | Override driver cores (1--16). Null = profile default (typically 4). |
 

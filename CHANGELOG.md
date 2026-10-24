@@ -4,6 +4,12 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.12] - 2026-10-23
+
+### Added
+
+- **`platform.compute.spark.executor_scratch` and the per-stage `bronze_executor_scratch`, `silver_executor_scratch` and `gold_executor_scratch` set each executor's scratch PVC (whole gibibytes, for example `200Gi`).** Every Spark job's scratch size was fixed by its built-in profile, with no key to raise it, so a job that outgrew its PVC could only fail: the AML scorer's 50Gi filled at scale 20 ("No space left on device" in the coverage aggregation's spill) and the run went unscored. A stage key sizes that stage's job in the run's mode; `executor_scratch` sizes every other job, including the scorer and time-travel reads. A set size is exact (not scaled by cores, scale or executor count), is counted by the capacity check and the scratch preflight, and is recorded in `config_snapshot.scratch.size_per_job` and the perf fingerprint, so runs with different scratch sizes do not compare as the same configuration. Setting one turns `platform.storage.scratch.enabled` on when it is unset; with it set to `false` the config is refused, since no executor would get a PVC. A config that sets none of these keys requests the same PVCs as before.
+
 ## [1.7.11] - 2026-10-23
 
 ### Breaking

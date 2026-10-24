@@ -872,6 +872,33 @@ def executor_override(job_type: str, config: Any | None) -> int | None:
     return int(value) if value is not None else None
 
 
+def scratch_override(job_type: str, config: Any | None) -> str | None:
+    """The scratch PVC *config* sets for each of *job_type*'s executors, or
+    None (the profile's size applies): the stage's ``*_executor_scratch``
+    where the stage key applies, else ``executor_scratch``."""
+    if config is None:
+        return None
+    spark = config.platform.compute.spark
+    if job_type in EXECUTOR_OVERRIDE_FIELDS and stage_key_applies(job_type, config):
+        stage = EXECUTOR_OVERRIDE_FIELDS[job_type][0].split("_")[0]
+        value = {
+            "bronze": spark.bronze_executor_scratch,
+            "silver": spark.silver_executor_scratch,
+            "gold": spark.gold_executor_scratch,
+        }[stage]
+        if value is not None:
+            return str(value)
+    return str(spark.executor_scratch) if spark.executor_scratch is not None else None
+
+
+def executor_scratch_size(
+    job_type: str, profile: dict[str, Any], config: Any | None, scale: float, executors: int
+) -> str:
+    """Each of *job_type*'s executors' scratch PVC: the size *config* sets,
+    else the profile's (``scratch_executor_size``)."""
+    return scratch_override(job_type, config) or scratch_executor_size(profile, scale, executors)
+
+
 def bronze_ingest_checkpoint_uri(cfg) -> str:
     """Checkpoint location of the continuous bronze-ingest stream.
 
@@ -1080,7 +1107,7 @@ def _job_requirement(
     gib = 1024**3
     memory_bytes = executors * exec_total_bytes + driver_mem
     scratch_gb = executors * int(
-        scratch_executor_size(profile, scale, executors).removesuffix("Gi") or 0
+        executor_scratch_size(job_type, profile, config, scale, executors).removesuffix("Gi") or 0
     )
 
     return JobRequirement(
@@ -3041,7 +3068,7 @@ class SparkJobManager:
         scratch = cfg.platform.storage.scratch
         if scratch.enabled and scratch.storage_class:
             # Dynamic PVC for executor local storage
-            pvc_size = scratch_executor_size(profile, scale, executor_count)
+            pvc_size = executor_scratch_size(job_type.value, profile, cfg, scale, executor_count)
             spark_conf.update(
                 {
                     "spark.kubernetes.executor.volumes.persistentVolumeClaim.spark-local-dir-1.options.claimName": "OnDemand",

@@ -2925,7 +2925,7 @@ def build_config_snapshot(
         "scratch": {
             "enabled": scratch.enabled,
             "storage_class": scratch.storage_class,
-            # Each executor's scratch PVC is its job profile's size.
+            # Each executor's scratch PVC: the configured size, else its job profile's.
             "size_per_job": scratch_size_per_job(cfg, _continuous),
         },
         "spark": {
