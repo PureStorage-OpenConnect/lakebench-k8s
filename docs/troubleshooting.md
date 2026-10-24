@@ -485,8 +485,11 @@ platform:
       storage_class: px-csi-scratch
 ```
 
-The per-executor scratch size comes from the job profile and should not be
-reduced; see [Job Profiles](component-spark.md#job-profiles). Silver-build
+The per-executor scratch size comes from the job profile unless
+`platform.compute.spark.executor_scratch` or a stage's `*_executor_scratch`
+sets it; do not set it below the profile's. To fix a "No space left on device"
+in one job, raise that stage's key, or `executor_scratch` for a job outside
+the three stages. See [Job Profiles](component-spark.md#job-profiles). Silver-build
 asks for 60 GiB x scale / executors per executor, between 50Gi and 300Gi.
 Raising `platform.compute.spark.silver_executors` makes each PVC smaller but
 does not shrink the total (scale 100: 28 x 215Gi = 6,020 Gi, against 18 x

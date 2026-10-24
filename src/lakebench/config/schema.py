@@ -600,9 +600,8 @@ class ScratchStorageConfig(ConfigModel):
             "lakebench creates no StorageClass; a cluster admin runs "
             "'lakebench admin install --component scratch-storage-class' once."
         ),
-        # Nothing sized a PVC from it: each executor's scratch volume is the
-        # job profile's scratch_size (modules/pipeline_engines/spark/job.py).
-        "size": "per-job scratch comes from the job profiles (silver-build: 60 GiB x scale / executors, 50-300Gi).",
+        # Nothing sized a PVC from it; the executor scratch keys do.
+        "size": "each executor's scratch PVC is platform.compute.spark.executor_scratch (or a stage's *_executor_scratch), else its job profile's size.",
     }
     _removed_defaults: ClassVar[dict[str, Any]] = {"size": "100Gi"}
 
@@ -715,6 +714,15 @@ class SparkOperatorConfig(ConfigModel):
 # Spark; a bare number (MiB to Spark) and 0 are refused here too, so the
 # capacity check never misreads one.
 _SPARK_MEMORY_SIZE = re.compile(r"[1-9][0-9]*[kmgt]b?", re.IGNORECASE)
+#: A scratch PVC size: whole gibibytes, as the job profiles write them.
+_SCRATCH_SIZE = re.compile(r"[1-9][0-9]*Gi")
+#: The ``platform.compute.spark`` keys that size an executor's scratch PVC.
+SCRATCH_OVERRIDE_KEYS = (
+    "executor_scratch",
+    "bronze_executor_scratch",
+    "silver_executor_scratch",
+    "gold_executor_scratch",
+)
 
 
 #: The largest per-job executor override: the proven executor ceiling (32
@@ -768,8 +776,7 @@ class SparkComputeConfig(ConfigModel):
 
     # Per-stage executor overrides (None = auto). A stage key sizes the stage's
     # job in the run's mode: bronze-verify or bronze-ingest, silver-build or
-    # silver-stream, gold-finalize or gold-refresh. Per-executor memory and
-    # scratch stay with the proven job profiles.
+    # silver-stream, gold-finalize or gold-refresh.
     bronze_executors: int | None = Field(
         default=None,
         ge=1,
@@ -821,6 +828,25 @@ class SparkComputeConfig(ConfigModel):
         description="Continuous mode: override gold-refresh heap per executor (a Spark size, for example `96g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size.",
     )
 
+    # Executor scratch PVC overrides (None = the job profile's size). A set
+    # value is each executor's PVC exactly, in either mode.
+    executor_scratch: str | None = Field(
+        default=None,
+        description="Scratch PVC per executor for every Spark job (whole gibibytes, for example `200Gi`). A stage's `*_executor_scratch` wins for that stage's jobs. Setting any scratch size turns `platform.storage.scratch.enabled` on when it is unset; with it set to `false` the config is refused. Null = each job profile's size.",
+    )
+    bronze_executor_scratch: str | None = Field(
+        default=None,
+        description="Scratch PVC per executor for the bronze stage (for example `200Gi`): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = `executor_scratch`, else the profile's size.",
+    )
+    silver_executor_scratch: str | None = Field(
+        default=None,
+        description="Scratch PVC per executor for the silver stage (for example `300Gi`): silver-build in batch mode, silver-stream in continuous mode. Null = `executor_scratch`, else the profile's size.",
+    )
+    gold_executor_scratch: str | None = Field(
+        default=None,
+        description="Scratch PVC per executor for the gold stage (for example `200Gi`): gold-finalize in batch mode, gold-refresh in continuous mode. Null = `executor_scratch`, else the profile's size.",
+    )
+
     # Driver resource overrides (None = use profile defaults).
     # These are global - they apply to all Spark jobs. Use when cluster nodes
     # have limited memory or when running at extreme scales (500+).
@@ -852,6 +878,30 @@ class SparkComputeConfig(ConfigModel):
             f"platform.compute.spark.{info.field_name} {value!r} is not a Spark memory size "
             "Lakebench can count: write a whole number above 0 with a unit, k, m, g or t "
             "(for example 16g)"
+        )
+        purpose = purpose_from_context(info.context)
+        if purpose is None or purpose in CHANGES_DATA:
+            raise ValueError(text)
+        emit_note(text + "; ignored. Commands that change data refuse it.", kind="removed")
+        return None
+
+    @field_validator(
+        "executor_scratch",
+        "bronze_executor_scratch",
+        "silver_executor_scratch",
+        "gold_executor_scratch",
+        mode="after",
+    )
+    @classmethod
+    def _scratch_is_whole_gi(cls, value: str | None, info: ValidationInfo) -> str | None:
+        """A scratch size the PVC request and the capacity check cannot both
+        read: commands that change data refuse it; teardown and read commands
+        drop it with a note."""
+        if value is None or _SCRATCH_SIZE.fullmatch(value.strip()):
+            return None if value is None else value.strip()
+        text = (
+            f"platform.compute.spark.{info.field_name} {value!r} is not a scratch size "
+            "Lakebench can request: write whole gibibytes above 0 (for example 200Gi)"
         )
         purpose = purpose_from_context(info.context)
         if purpose is None or purpose in CHANGES_DATA:
@@ -1015,6 +1065,29 @@ class PlatformConfig(ConfigModel):
     """Spark and PostgreSQL compute settings."""
     deps: DepsConfig = Field(default_factory=DepsConfig)
     """The deployment's dependency server, `lb-deps`."""
+
+    @model_validator(mode="after")
+    def _scratch_size_needs_scratch(self, info: ValidationInfo) -> PlatformConfig:
+        """A scratch size with scratch turned off would size nothing: the
+        executors spill to pod ephemeral storage. Commands that change data
+        refuse it; teardown and read commands note it."""
+        scratch = self.storage.scratch
+        if "enabled" not in scratch.model_fields_set or scratch.enabled:
+            return self
+        spark = self.compute.spark
+        set_keys = [k for k in SCRATCH_OVERRIDE_KEYS if getattr(spark, k) is not None]
+        if not set_keys:
+            return self
+        text = (
+            f"platform.compute.spark.{set_keys[0]} sizes a scratch PVC, but "
+            "platform.storage.scratch.enabled is false, so no executor gets one: "
+            "remove the size or turn scratch on"
+        )
+        purpose = purpose_from_context(info.context)
+        if purpose is None or purpose in CHANGES_DATA:
+            raise ValueError(text)
+        emit_note(text + ". Commands that change data refuse it.", kind="dead")
+        return self
 
 
 # =============================================================================

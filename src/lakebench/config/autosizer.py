@@ -426,10 +426,11 @@ def resolve_auto_sizing(
     # -- Schema-specific overrides --
     # Workload schemas that differ from Customer360 on baseline resource shape
     # override defaults here. Financial raises the Spark Thrift memory.
-    # Per-executor scratch PVCs are job.py:scratch_executor_size (the stage's
-    # scratch_gib_per_scale x scale over its executors, up to the profile's
-    # scratch_size) with _SCHEMA_PROFILE_OVERRIDES on top, applied at
-    # manifest-build time in modules/pipeline_engines/spark/job.py.
+    # Per-executor scratch PVCs are job.py:executor_scratch_size: the size the
+    # config sets, else the stage's scratch_gib_per_scale x scale over its
+    # executors, up to the profile's scratch_size, with
+    # _SCHEMA_PROFILE_OVERRIDES on top, applied at manifest-build time in
+    # modules/pipeline_engines/spark/job.py.
     # -- Spark Thrift on Delta --
     # Runs before the schema overrides so the financial 24g heap still wins.
     delta_change = _apply_delta_thrift_default(config, cluster_capacity)
@@ -587,10 +588,18 @@ _AUTOSCRATCH_MIN_SCALE = 50.0
 def _autoscratch_applies(config: LakebenchConfig) -> bool:
     from lakebench.config.schema import PipelineMode
 
-    return (
+    return _scratch_size_set(config) or (
         config.architecture.pipeline.mode == PipelineMode.BATCH
         and config.architecture.workload.datagen.scale >= _AUTOSCRATCH_MIN_SCALE
     )
+
+
+def _scratch_size_set(config: LakebenchConfig) -> bool:
+    """Whether the config sets a ``platform.compute.spark.*executor_scratch``."""
+    from lakebench.config.schema import SCRATCH_OVERRIDE_KEYS
+
+    spark = config.platform.compute.spark
+    return any(getattr(spark, key) is not None for key in SCRATCH_OVERRIDE_KEYS)
 
 
 def scratch_will_be_enabled(config: LakebenchConfig) -> bool:
@@ -602,7 +611,8 @@ def scratch_will_be_enabled(config: LakebenchConfig) -> bool:
 
 
 def _apply_scratch_autoenable(config: LakebenchConfig) -> str | None:
-    """Enable scratch PVCs on a batch run at scale 50 or above.
+    """Enable scratch PVCs on a batch run at scale 50 or above, or when the
+    config sets an executor scratch size.
 
     Only sets ``platform.storage.scratch.enabled`` when the user did not set
     it. ``storage_class`` and ``provisioner`` keep their defaults. ``plan``,
@@ -616,6 +626,11 @@ def _apply_scratch_autoenable(config: LakebenchConfig) -> str | None:
     scratch = config.platform.storage.scratch
     if not _set_if_default(scratch, "enabled", True):
         return None
+    if _scratch_size_set(config):
+        return (
+            "platform.storage.scratch.enabled=True (the config sets an executor "
+            "scratch size, which needs a scratch PVC per executor)"
+        )
     return (
         f"platform.storage.scratch.enabled=True (scale {scale:g}: "
         "silver-build shuffle exceeds pod ephemeral storage without a "

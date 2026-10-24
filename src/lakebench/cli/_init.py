@@ -217,6 +217,7 @@ _TUNED = frozenset(
         "platform.compute.spark.bronze_executor_memory",
         "platform.compute.spark.silver_executor_memory",
         "platform.compute.spark.gold_executor_memory",
+        "platform.compute.spark.executor_scratch",
         "platform.compute.spark.driver_memory",
         "platform.compute.spark.driver_cores",
         "platform.compute.postgres.storage",
