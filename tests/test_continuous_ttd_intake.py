@@ -238,33 +238,6 @@ def test_ttd_baseline_never_drops_an_unmeasured_tick(max_carry, steps):
             assert b.begin(*real(args)) == real(expected)
 
 
-def test_ttd_baseline_is_not_carried_past_its_age_bound():
-    """A carried or fallback baseline older than max_age_s is dropped before
-    the carry budget runs out: maintenance expires gold.alerts snapshots by
-    age, so slow ticks would otherwise read an expired one."""
-    c = _common()
-    now = [0.0]
-    b = c.TtdBaseline(max_carry=3, max_age_s=100.0, clock=lambda: now[0])
-    assert b.begin(1, 1.0) == (1, 1.0)
-    now[0] = 60.0
-    assert b.begin(2, 2.0) == (1, 1.0)  # carried: one carry, 60 s old
-    now[0] = 120.0
-    assert b.begin(3, 3.0) == (3, 3.0)  # 120 s old: dropped with carries left
-
-    b.measured(4)
-    now[0] = 180.0
-    assert b.begin(c.TTD_SNAPSHOT_UNKNOWN, 5.0) == (4, 5.0)  # fallback, 60 s old
-    now[0] = 250.0
-    # The fallback is aged from when it was read (130 s), not from the tick
-    # that fell back to it (70 s, which would still carry it).
-    assert b.begin(6, 6.0) == (6, 6.0)
-
-    b.measured(7)
-    now[0] = 500.0
-    unknown = c.TTD_SNAPSHOT_UNKNOWN
-    assert b.begin(unknown, 8.0) == (unknown, 8.0)  # fallback 210 s old: dropped
-
-
 def test_every_cycle_unmeasured_is_counted():
     log = _prefixed(
         [

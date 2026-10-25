@@ -871,13 +871,7 @@ def _keep_first_detection(spark, alerts, rule_id: str, spans=None):
         .select(*alerts.columns)
         .persist(StorageLevel.MEMORY_AND_DISK)
     )
-    try:
-        merged.count()
-    except Exception:
-        # Not returned, so the caller cannot drop it: its pinned gold.alerts
-        # read would stay cached for the rest of the run.
-        merged.unpersist()
-        raise
+    merged.count()
     return merged
 
 
