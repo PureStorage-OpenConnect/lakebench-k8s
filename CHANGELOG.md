@@ -4,6 +4,12 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Breaking
+
+- **Continuous financial gold no longer leaves a frame cached on each tick, so per-rule detection times stop growing over a run and a run past the one-hour expiry floor no longer fails a detection rule.** Each tick's time-to-detect step cached a frame that read `gold.alerts` at the previous tick's snapshot and never released it, and each rule's alerts frame stayed cached after its first-detection merge. Spark rebuilds every cached plan that reads `gold.alerts` on each write to it, so every rule's DELETE and INSERT replanned all the earlier ticks' frames: on a scale-20, two-hour AML run the time from those commits to the next Spark job grew from about 3 s on the first tick with new silver rows by about 10 s each tick, to 73 s per tick by the second hour, inside each rule's `elapsed_s` and its time to detect. Once in-stream maintenance expired the oldest of those snapshots (the floor is one hour while streams are live), the replan failed the next write with `NotFoundException: Location does not exist` on a `gold.alerts` manifest, the rule's alerts were dropped for that tick and the run was marked FAILED. Both frames, and the merge's own frame when its count fails, are now released when their step ends, also when it fails, newest first so a release never fails the tick, and a time-to-detect baseline is carried to a later tick for at most 30 minutes as well as at most three ticks. Per-rule detection times, gold tick time and time to detect of a continuous financial run are lower from the first tick with new silver rows on, by an amount that grows with each tick; batch runs and Customer 360 are unchanged.
+
 ## [1.7.12] - 2026-10-23
 
 ### Added
