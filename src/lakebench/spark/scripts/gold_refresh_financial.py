@@ -789,11 +789,18 @@ def _log_time_to_detect(
     follows the new rows, not the accumulated alerts and silver; None
     compares everything. Returns True when the line was logged. Best effort:
     a failure costs the measurement, never the tick; the collector counts
-    cycles without a line as unmeasured."""
+    cycles without a line as unmeasured.
+
+    Every frame persisted here is dropped before returning, also on failure.
+    Its plan reads gold.alerts at the baseline snapshot, and Spark rebuilds a
+    cached plan on every later write to gold.alerts: one left behind is
+    replanned by each rule's DELETE and INSERT for the rest of the run, and
+    once maintenance expires its snapshot that replan fails the write."""
     prior_sid, seen = base
     if prior_sid == TTD_SNAPSHOT_UNKNOWN:
         log(f"[metrics] time to detect unavailable on cycle {cycle}: no prior snapshot")
         return False
+    held = []
     try:
         fq_alerts = f"{CATALOG}.{GOLD_ALERTS}"
         current = spark.table(fq_alerts).where(col("run_id") == RUN_ID)
@@ -806,27 +813,25 @@ def _log_time_to_detect(
             current = _scoped(current, scope)
             prior = _scoped(prior, scope) if prior is not None else None
         new_txns = new_alert_txns(current, prior).persist(StorageLevel.MEMORY_AND_DISK)
-        try:
-            n = new_txns.count()
-            if n == 0:
-                stats = _empty_ttd_stats()
-            else:
-                # I10: the pinned frame (silver) is already filtered by
-                # _pin_silver; the fallback live read needs the same filter.
-                txns = (
-                    silver
-                    if silver is not None
-                    else sealed_txns_filter(
-                        spark,
-                        spark.table(f"{CATALOG}.{SILVER_TXNS}"),
-                        CATALOG,
-                        SILVER_BATCH_VERSIONS,
-                    )
+        held.append(new_txns)
+        n = new_txns.count()
+        if n == 0:
+            stats = _empty_ttd_stats()
+        else:
+            # The pinned frame (silver) is already filtered by
+            # _pin_silver; the fallback live read needs the same filter.
+            txns = (
+                silver
+                if silver is not None
+                else sealed_txns_filter(
+                    spark,
+                    spark.table(f"{CATALOG}.{SILVER_TXNS}"),
+                    CATALOG,
+                    SILVER_BATCH_VERSIONS,
                 )
-                arrivals = _scoped_arrivals(new_txns, txns, n, seen, scope)
-                stats = ttd_stats(arrivals, detected_s, detected_by_rule=detected_by_rule)
-        finally:
-            new_txns.unpersist(blocking=False)
+            )
+            arrivals = _scoped_arrivals(new_txns, txns, n, seen, scope, held)
+            stats = ttd_stats(arrivals, detected_s, detected_by_rule=detected_by_rule)
         log(ttd_line(cycle, stats))
         for line in ttd_detail_lines(cycle, stats):
             log(line)
@@ -834,15 +839,32 @@ def _log_time_to_detect(
     except Exception as e:  # noqa: BLE001
         log(f"[metrics] time to detect unavailable on cycle {cycle}: {one_line(e)}")
         return False
+    finally:
+        release_frames(held)
 
 
-def _scoped_arrivals(new_txns, txns, n, seen, scope):
+def release_frames(frames):
+    """Unpersist ``frames``, newest first, and never raise. Dropping a frame
+    makes Spark rebuild the cached frames built on it that are not yet
+    materialised, and the rebuild fails once a snapshot they read at has
+    expired; dropping those dependents first leaves nothing to rebuild. A
+    failure here would replace the caller's result, so it is logged."""
+    for frame in reversed(frames):
+        try:
+            frame.unpersist(blocking=False)
+        except Exception as e:  # noqa: BLE001
+            log(f"[metrics] cached frame not released: {one_line(e)}")
+
+
+def _scoped_arrivals(new_txns, txns, n, seen, scope, held):
     """new_alert_arrivals over the silver spans ``scope`` names (all of
     silver without one). An alert none of whose transactions lies there (a
     W2 burst rebuilt whole, a customer that arrived late) is looked up in
     all of silver; such alerts are few. Matching only inside the spans gives
     the same arrival: the newest transaction of a new alert is a new row,
-    inside its rule's read spans, and the old ones left out were all seen."""
+    inside its rule's read spans, and the old ones left out were all seen.
+    A frame persisted here is appended to ``held``, for the caller to drop
+    once the result is consumed."""
     from incremental_detection import _within, merge_spans
 
     small = n <= TTD_BROADCAST_ROWS
@@ -852,6 +874,7 @@ def _scoped_arrivals(new_txns, txns, n, seen, scope):
     arrivals = new_alert_arrivals(new_txns, _within(txns, read), small=small, seen=seen).persist(
         StorageLevel.MEMORY_AND_DISK
     )
+    held.append(arrivals)
     missing = arrivals.where(col("arrival_ts").isNull()).select("_key")
     if missing.limit(1).count() == 0:
         return arrivals

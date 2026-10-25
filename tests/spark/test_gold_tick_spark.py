@@ -323,6 +323,11 @@ def _check(spark):
     assert new, tick3
     ttd3 = [ln for ln in lines if "time to detect alerts=" in ln]
     assert len(ttd3) == 1 and f"alerts={len(new)} " in ttd3[0], (ttd3, new)
+    # A region tick with the per-tick frame cache and a scoped time to
+    # detect leaves nothing cached: a frame left behind is replanned by every
+    # later write to gold.alerts, and fails it once its snapshot expires.
+    assert any("per-tick frame cache:" in ln for ln in lines), lines
+    assert spark._jsparkSession.sharedState().cacheManager().isEmpty(), "frames left cached"
     # Content written on tick 1 keeps tick 1's detected_ts.
     for r in spark.table("lakehouse.gold.alerts").collect():
         k = (r["rule_id"], r["entity_id"], tuple(sorted(r["related_txn_ids"])))

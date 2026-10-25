@@ -26,13 +26,3 @@ data:
     # credentials from the default credential chain (AWS_ACCESS_KEY_ID env var).
     polaris.storage.aws.access-key={{ s3_access_key }}
     polaris.storage.aws.secret-key={{ s3_secret_key }}
-    # Allow per-namespace and per-table locations. The bootstrap creates the
-    # silver and gold namespaces with a location in their own bucket and the
-    # catalog allows all three bucket locations, but Polaris refuses a
-    # namespace or table location outside the catalog's default base unless
-    # these are enabled, so silver and gold tables inherited the bronze base
-    # and all three zones landed in the bronze bucket. Enabling them lets the
-    # per-zone namespace locations take effect, so each zone's data lands in
-    # its own bucket.
-    polaris.features."ALLOW_NAMESPACE_LOCATION_OVERRIDE"=true
-    polaris.features."ALLOW_TABLE_LOCATION_OVERRIDE"=true

@@ -262,20 +262,15 @@ class TestTemplateConditionals:
         env = {e["name"]: e.get("value") for e in spec["containers"][0]["env"]}
         assert f"-Djavax.net.ssl.trustStore={_TRUSTSTORE_PATH}" in env["JAVA_TOOL_OPTIONS"].split()
 
-    def test_polaris_config_allows_per_zone_locations(self, renderer: TemplateRenderer):
-        """The Polaris server config enables namespace and table location
-        overrides, so the bootstrap's per-zone namespace locations take effect
-        and silver and gold tables land in their own buckets instead of the
-        bronze base. Without these the server refuses a location outside the
-        catalog's default base and every zone roots in the bronze bucket."""
-        import yaml as _yaml
-
+    def test_polaris_catalog_allows_per_zone_namespace_locations(self, renderer: TemplateRenderer):
+        """The bootstrap creates the catalog with
+        namespace-custom-location enabled, so the silver and gold namespace
+        locations in their own buckets take effect. Without it Polaris refuses
+        a location outside the catalog's default base and every zone roots in
+        the bronze bucket."""
         ctx = _enrich_context(_make_engine(recipe="polaris-iceberg-spark-trino"))
-        rendered = renderer.render("polaris/configmap.yaml.j2", ctx)
-        cm = _yaml.safe_load(rendered)
-        props = cm["data"]["application.properties"]
-        assert 'polaris.features."ALLOW_NAMESPACE_LOCATION_OVERRIDE"=true' in props
-        assert 'polaris.features."ALLOW_TABLE_LOCATION_OVERRIDE"=true' in props
+        rendered = renderer.render("polaris/bootstrap-job.yaml.j2", ctx)
+        assert '"polaris.config.namespace-custom-location.enabled": "true"' in rendered
 
     def test_datagen_ca_cert_env_vars_when_set(self, renderer: TemplateRenderer, https_ctx):
         """Datagen job should have S3_CA_CERT env var when CA cert set."""

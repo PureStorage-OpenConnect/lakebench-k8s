@@ -1624,3 +1624,24 @@ def test_bronze_resume_seam_duplicate_counts_each_batch_once():
     assert st["window_input_rows"] == 4 * 26_000
     assert st["rows_to_end"] == 4 * 26_000
     assert st["write_batches"] == 4
+
+
+def test_live_lag_line_leaves_out_a_stream_whose_log_was_not_read():
+    """An unreadable silver log is not a silver that never started: the
+    handoffs it is part of are left out and named, instead of a bronze->silver
+    lag counted from bronze's first commit of the run."""
+    from lakebench.cli._sustained import _live_lag_line
+
+    logs = {
+        "lakebench-bronze-ingest": bronze_log([(0, 100), (60, 100)]),
+        "lakebench-silver-stream": None,
+        "lakebench-gold-refresh": "",
+    }
+    monitor = MagicMock()
+    monitor._get_driver_logs.side_effect = lambda job, tail_lines=None: logs[job]
+    submitted = [(None, "bronze-ingest"), (None, "silver-stream"), (None, "gold-refresh")]
+
+    line = _live_lag_line(monitor, submitted)
+
+    assert "bronze->silver" not in line and "silver->gold" not in line, line
+    assert line.endswith("(silver-stream log not read)"), line

@@ -676,8 +676,12 @@ def run_detection_rules(
                 rule_frame = alerts
                 alert_count = write_count = alerts.count()
             if first_detection:
-                alerts = _keep_first_detection(spark, alerts, rule_id, spans)
-                rule_frame = alerts
+                merged = _keep_first_detection(spark, alerts, rule_id, spans)
+                # ``merged`` is materialised, and only it is unpersisted
+                # below: drop the frame it was built from now, or it stays
+                # cached for the rest of the run.
+                alerts.unpersist()
+                alerts = rule_frame = merged
             _write_rule_alerts(spark, alerts, rule_id, write_count, spans)
             committed_s = time.time()
             if incremental is not None and rule_id in INCREMENTAL_RULES:

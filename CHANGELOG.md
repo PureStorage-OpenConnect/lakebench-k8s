@@ -4,6 +4,17 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.13] - 2026-10-24
+
+### Breaking
+
+- **Continuous financial gold releases the frames each tick caches, so per-rule detection times no longer grow over a run and a run past the one-hour expiry floor no longer fails a detection rule.** The time-to-detect step and the first-detection merge left frames that read `gold.alerts` cached, and every later write to `gold.alerts` replanned them: on a scale-20, two-hour AML run that added up to 73 s per tick to rule times and time to detect, and once maintenance expired a pinned snapshot the replan failed a rule's write with `NotFoundException` and the run was marked FAILED. Continuous financial per-rule times, gold tick time and time to detect are lower from the first tick with new silver rows, by an amount that grows each tick; batch runs and Customer 360 are unchanged.
+
+### Fixed
+
+- **The live `lag:` line of a continuous run leaves out a handoff when a stream's driver log could not be read, and names the stream, instead of printing a lag counted from the run's first upstream commit.** A failed log read was taken as a stream that had never started, so a two-hour run printed bronze->silver lags of 3,369 s to 6,807 s between normal readings. The lag samples and balance in the run record come from the logs captured after the window and are unchanged.
+- **Under Polaris, silver and gold tables now land in their own buckets; the 1.7.8 fix for this did not take effect.** It set two Polaris server settings that do not exist, so Polaris still refused the silver and gold namespace locations, the bootstrap only warned, and both layers' tables went to the bronze bucket. The bootstrap now enables custom namespace locations on the catalog and fails the deploy when a namespace location is refused. A deployment created before this release keeps its namespaces in the bronze bucket until it is destroyed and redeployed. Per-table storage figures were already correct; per-bucket sizes were not.
+
 ## [1.7.12] - 2026-10-23
 
 ### Added

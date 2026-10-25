@@ -465,11 +465,12 @@ def test_bootstrap_job_polls_health_on_the_management_port():
     assert '"$POLARIS_URI/q/health' not in text
 
 
-def _run_setup_catalog(tmp_path, grant_code: str):
+def _run_setup_catalog(tmp_path, grant_code: str, namespace_code: str = "200"):
     """Run the rendered setup-catalog script against a fake curl.
 
-    The fake answers the token call, reports `grant_code` for the grant PUTs and
-    200 for every other call that asks for a status, and logs each call.
+    The fake answers the token call, reports `grant_code` for the grant PUTs,
+    `namespace_code` for the namespace POSTs and 200 for every other call that
+    asks for a status, and logs each call.
     """
     import os
     import subprocess
@@ -489,7 +490,8 @@ def _run_setup_catalog(tmp_path, grant_code: str):
         'echo "$*" >> "$CALLS"\n'
         'case "$*" in *oauth/tokens*) echo \'{"access_token":"tok"}\'; exit 0;; esac\n'
         'case "$*" in *"-w"*) ;; *) exit 0;; esac\n'
-        'case "$*" in *"-X PUT"*) printf "%s" "$GRANT_CODE";; *) printf 200;; esac\n'
+        'case "$*" in *"-X PUT"*) printf "%s" "$GRANT_CODE";;'
+        ' */namespaces*) printf "%s" "$NAMESPACE_CODE";; *) printf 200;; esac\n'
     )
     (bindir / "curl").chmod(0o755)
     env = {
@@ -497,6 +499,7 @@ def _run_setup_catalog(tmp_path, grant_code: str):
         "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
         "CALLS": str(calls),
         "GRANT_CODE": grant_code,
+        "NAMESPACE_CODE": namespace_code,
         **{e["name"]: e.get("value", "x") for e in container["env"]},
     }
     done = subprocess.run(
@@ -518,6 +521,16 @@ def test_bootstrap_job_grants_the_data_privileges_that_authorize_metrics_reports
     # After the catalog and its namespaces exist, and before the job ends.
     last_namespace = max(i for i, c in enumerate(calls) if "/namespaces" in c)
     assert calls.index(grants[0]) > last_namespace
+
+
+def test_a_refused_namespace_location_fails_the_bootstrap(tmp_path):
+    """Polaris refuses a namespace location outside the catalog's default
+    base; the namespace would then root in the bronze bucket, so the job
+    fails instead of reporting success."""
+    done, _ = _run_setup_catalog(tmp_path, "201", namespace_code="400")
+    assert done.returncode != 0
+    assert "ERROR: Namespace 'default' creation returned HTTP 400" in done.stdout
+    assert "Polaris bootstrap complete" not in done.stdout
 
 
 def test_a_refused_grant_warns_and_does_not_fail_the_deploy(tmp_path):
