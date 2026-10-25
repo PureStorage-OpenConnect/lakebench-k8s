@@ -558,14 +558,13 @@ def _splitmix64(x: int) -> int:
 
 def subject_index(typ: str, n: int, inst_seed: int) -> int:
     """datagen_rs::typology::subject_index: the participant the typology's
-    scenario fires on (always a customer, typology::enforce_subject)."""
-    if typ in ("fan_in", "micro_structuring"):
-        return n - 1
-    if typ in ("stack", "rapid_layering"):
-        return min(1, n - 1)
-    if typ == "corridor_high_risk":
-        return _splitmix64(inst_seed & _MASK64) & 1
-    return 0
+    scenario fires on. The package copy in tests, the flat copy (mounted
+    beside this script) on the driver."""
+    try:
+        from lakebench.config.datagen_seed import subject_index as _si
+    except ImportError:
+        from datagen_seed import subject_index as _si
+    return _si(typ, n, inst_seed)
 
 
 def labels_from_subjects(spark, manifest: DataFrame, id_map: DataFrame) -> DataFrame:

@@ -841,6 +841,20 @@ def recover_corpus_seeds(rows: Iterable[tuple[str, int]]) -> set[int]:
     return seeds
 
 
+def subject_index(typ: str, n: int, inst_seed: int) -> int:
+    """datagen_rs::typology::subject_index: which of an instance's ``n``
+    participants the scenario fires on (always a customer,
+    typology::enforce_subject). ``inst_seed`` is the manifest instance seed,
+    which only ``corridor_high_risk`` reads."""
+    if typ in ("fan_in", "micro_structuring"):
+        return n - 1
+    if typ in ("stack", "rapid_layering"):
+        return min(1, n - 1)
+    if typ == "corridor_high_risk":
+        return _splitmix64(inst_seed & _MASK64) & 1
+    return 0
+
+
 #: corpus_verdict roles, strictest first: a spent seed is refused for every
 #: use, a held-out one only outside its registered run.
 VERDICT_ROLES = ("spent", "evaluation", "robustness")

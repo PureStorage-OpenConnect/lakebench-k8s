@@ -26,6 +26,31 @@ def _cfg(schema: str, seed: int | None = None):
     return make_config(architecture={"workload": {"schema": schema, "datagen": dg}})
 
 
+@pytest.mark.parametrize(
+    "typ,n,expected",
+    [
+        ("fan_in", 5, 4),
+        ("micro_structuring", 3, 2),
+        ("stack", 4, 1),
+        ("rapid_layering", 1, 0),
+        ("cycle", 6, 0),
+    ],
+)
+def test_subject_index_fixed_branches(typ, n, expected):
+    # The seed-independent branches: subject role is a fixed position.
+    assert ds.subject_index(typ, n, 123456789) == expected
+
+
+def test_subject_index_corridor_flips_on_the_instance_seed():
+    # corridor_high_risk picks the subject by the low bit of splitmix64(seed),
+    # so it depends on the instance seed and only ever returns 0 or 1.
+    vals = {ds.subject_index("corridor_high_risk", 3, s) for s in range(64)}
+    assert vals == {0, 1}
+    # Pinned against the generator's derivation for two seeds.
+    assert ds.subject_index("corridor_high_risk", 3, 0) == ds._splitmix64(0) & 1
+    assert ds.subject_index("corridor_high_risk", 3, 43) == ds._splitmix64(43) & 1
+
+
 def test_prereg_spent_list_holds_no_unlooked_heldout_seed():
     # The calibration seed is never spent; the held-out seeds are known only by
     # hash, and a spent seed hashes to one only when its look or burn is recorded.
