@@ -136,7 +136,8 @@ spec:
                       "region": "'"$S3_REGION"'"
                     },
                     "properties": {
-                      "default-base-location": "s3://'"$BUCKET_BRONZE"'/"
+                      "default-base-location": "s3://'"$BUCKET_BRONZE"'/",
+                      "polaris.config.namespace-custom-location.enabled": "true"
                     }
                   }
                 }' 2>/dev/null || echo "000")
@@ -152,7 +153,10 @@ spec:
               # Create namespaces with per-layer storage locations.
               # "default" and "bronze" map to the bronze bucket; silver/gold
               # map to their respective buckets. Both s3:// and s3a:// schemes
-              # are covered by catalog allowedLocations above.
+              # are covered by catalog allowedLocations above. Polaris refuses
+              # a location outside the default base unless the catalog sets
+              # namespace-custom-location; a refused namespace would put its
+              # layer's tables in the bronze bucket, so it fails the job.
               create_ns() {
                 local NS="$1" LOCATION="$2"
                 local BODY
@@ -171,7 +175,8 @@ spec:
                 elif [ "$NS_CODE" = "409" ]; then
                   echo "Namespace '$NS' already exists (OK)"
                 else
-                  echo "WARNING: Namespace '$NS' creation returned HTTP $NS_CODE"
+                  echo "ERROR: Namespace '$NS' creation returned HTTP $NS_CODE"
+                  exit 1
                 fi
               }
 
