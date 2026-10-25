@@ -3388,21 +3388,31 @@ LIVE_LAG_SECONDS = 120.0
 
 def _live_lag_line(monitor, submitted: list) -> str:
     """Each handoff's lag now, from the streams' driver logs (the window
-    line). Never raises: a log that cannot be read
-    leaves its handoff out."""
-    from lakebench.metrics.continuous_window import handoff_lags, lag_line
+    line). Never raises: a log that cannot be read leaves out every handoff
+    its stream is part of, and the line names it. Read as no events, it made
+    a consumer look as if it had never started, so the lag counted from the
+    upstream's first commit of the run."""
+    from lakebench.metrics.continuous_window import HANDOFFS, handoff_lags, lag_line
 
     events = {}
+    unread = []
     for _, name in submitted:
         try:
             logs = monitor._get_driver_logs(f"lakebench-{name}", tail_lines=None)
         except Exception:  # noqa: BLE001
             logs = None
+        if logs is None:
+            unread.append(name)
         events[name] = parse_events(logs, name)
     try:
-        return lag_line(handoff_lags(events, utc_naive(datetime.now(timezone.utc))))
+        lags = handoff_lags(events, utc_naive(datetime.now(timezone.utc)))
     except Exception as e:  # noqa: BLE001
         return f"not measured ({e})"
+    for handoff, upstream, consumer in HANDOFFS:
+        if upstream in unread or consumer in unread:
+            lags[handoff] = None
+    line = lag_line(lags)
+    return f"{line} ({', '.join(unread)} log not read)" if unread else line
 
 
 def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
