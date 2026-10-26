@@ -662,7 +662,8 @@ class ReportGenerator:
         duration_m = int(metrics.total_elapsed_seconds // 60)
         duration_s = int(metrics.total_elapsed_seconds % 60)
 
-        storage_segment = f" | {storage}" if storage else ""
+        e = _html_escape
+        storage_segment = f" | {e(str(storage))}" if storage else ""
         domain_label = get_scorecard_block(cs.get("workload_schema")).domain_label
         kind_note = ""
         if getattr(metrics, "record_kind", "run") == "benchmark":
@@ -676,8 +677,8 @@ class ReportGenerator:
         return f"""
         <div style="margin-bottom: 1.5rem; color: var(--text-muted); font-size: 0.875rem;">
             {kind_note}<strong>{mode}</strong> pipeline |
-            {domain_label} at scale {scale} |
-            {catalog}-{table_fmt}-{pipe_engine}-{engine}{storage_segment} |
+            {domain_label} at scale {e(str(scale))} |
+            {e(str(catalog))}-{e(str(table_fmt))}-{e(str(pipe_engine))}-{e(str(engine))}{storage_segment} |
             {duration_m}m {duration_s}s
         </div>
         """
@@ -1574,7 +1575,7 @@ class ReportGenerator:
             meta = r.round_meta
             if not meta.q9_contention_observed:
                 continue
-            ts = meta.timestamp or "-"
+            ts = _html_escape(str(meta.timestamp or "-"))
             freshness = (
                 f"{meta.gold_event_age_seconds / 86400:.1f} d"
                 if (meta.gold_event_age_seconds or 0) > 0
@@ -3179,7 +3180,7 @@ class ReportGenerator:
                 rows.append(f"""
                 <tr>
                     <td><strong>{_html_escape(str(stage.stage_name))}</strong></td>
-                    <td>{stage.engine}</td>
+                    <td>{_html_escape(str(stage.engine))}</td>
                     <td>{elapsed}</td>
                     <td>{in_rows}</td>
                     <td>{rows_s}</td>
@@ -3196,7 +3197,7 @@ class ReportGenerator:
                 rows.append(f"""
                 <tr>
                     <td><strong>{_html_escape(str(stage.stage_name))}</strong></td>
-                    <td>{stage.engine}</td>
+                    <td>{_html_escape(str(stage.engine))}</td>
                     <td>{stage.elapsed_seconds:.1f}s</td>
                     <td>{in_gb}</td>
                     <td>{out_gb}</td>
@@ -3766,7 +3767,7 @@ class ReportGenerator:
                 items.append(f"""
                 <div class="config-item">
                     <span class="config-key">{label}</span>
-                    <span class="mono">{value}</span>
+                    <span class="mono">{_html_escape(str(value))}</span>
                 </div>
                 """)
 
@@ -4122,7 +4123,7 @@ class ReportGenerator:
         error_note = ""
         collection_error = platform_metrics.get("collection_error")
         if collection_error:
-            error_note = f'<p style="color: var(--warning); font-size: 0.875rem;">Not collected or partial: {collection_error}</p>'
+            error_note = f'<p style="color: var(--warning); font-size: 0.875rem;">Not collected or partial: {_html_escape(str(collection_error))}</p>'
 
         # Tier 2 status indicator
         engine = platform_metrics.get("engine")
@@ -4171,8 +4172,8 @@ class ReportGenerator:
 
         for pod in active_pods:
             detail_rows.append(
-                f'<tr><td class="mono">{pod.get("pod_name", "unknown")}</td>'
-                f"<td>{pod.get('component', 'unknown')}</td>"
+                f'<tr><td class="mono">{_html_escape(str(pod.get("pod_name", "unknown")))}</td>'
+                f"<td>{_html_escape(str(pod.get('component', 'unknown')))}</td>"
                 f"<td>{_cores(pod.get('cpu_avg_cores'))}</td>"
                 f"<td>{_cores(pod.get('cpu_max_cores'))}</td>"
                 f"<td>{_gib(pod.get('memory_avg_bytes'))}</td>"

@@ -410,3 +410,21 @@ def test_continuous_qph_rounds_are_not_runs():
     text = _text("1d17f4")
     assert f"n={runs} run, {len(rounds)} rounds" in text
     assert f"n={len(rounds)}" not in text
+
+
+_SCRIPT = "<script>alert(1)</script>"
+
+
+def test_record_and_config_values_are_escaped():
+    """A value from the record or its config is page text, never markup."""
+    record = load_record("5105a0")
+    record["config_snapshot"]["name"] = _SCRIPT
+    record["config_snapshot"]["catalog"] = _SCRIPT
+    record["pipeline_benchmark"]["stages"][1]["engine"] = _SCRIPT
+    record["platform_metrics"] = {
+        "pods": [{"pod_name": _SCRIPT, "component": _SCRIPT, "cpu_avg_cores": 1.0}],
+        "collection_error": _SCRIPT,
+    }
+    html = _render_dict(record)
+    assert _SCRIPT not in html
+    assert html.count("&lt;script&gt;alert(1)&lt;/script&gt;") >= 6
