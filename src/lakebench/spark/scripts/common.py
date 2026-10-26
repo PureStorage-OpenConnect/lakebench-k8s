@@ -278,26 +278,26 @@ def _is_concurrent_modification(exc):
     )
 
 
-def ensure_column_with_retry(
-    spark, fq_table, name, sql_type, *, max_attempts=3, backoff_seconds=0.5
-):
-    """I9: ``ensure_column`` with bounded retry across concurrent writers.
+def ensure_column(spark, fq_table, name, sql_type, *, max_attempts=3, backoff_seconds=0.5):
+    """Add a nullable column to an existing table when it is missing.
 
-    Multiple silver drivers (batch + stream, or several stream instances on a
+    Reads the live schema first: Spark has no ``ADD COLUMN IF NOT EXISTS``
+    for columns (that clause is for partitions). For a reused catalog whose
+    table predates the column, the next write would otherwise fail on a
+    schema mismatch. Returns True when the column was added.
+
+    Several silver drivers (batch + stream, or several stream instances on a
     reused catalog) race on ``ALTER TABLE ... ADD COLUMNS`` at startup. The
     loser's commit fails with a Java ``ConcurrentModificationException``
     (Iceberg) or a Delta metadata-conflict exception, and the whole silver run
     then crashes before it processes a batch.
 
     Retries up to ``max_attempts`` times on that error surface only, with
-    ``backoff_seconds`` (linear) between attempts. Between attempts we re-read
-    the schema: if the concurrent writer already added the column, we return
-    ``False`` (column-already-present branch) rather than re-issuing the
-    ``ALTER``. Any other exception surfaces immediately -- a wrong-type ALTER
-    is a code bug, not a race.
+    ``backoff_seconds`` between attempts. Between attempts the schema is
+    re-read: if the concurrent writer already added the column, returns
+    False rather than re-issuing the ``ALTER``. Any other exception
+    surfaces immediately -- a wrong-type ALTER is a code bug, not a race.
     """
-    import time as _time
-
     if name in spark.table(fq_table).columns:
         return False
     last_exc = None
@@ -327,29 +327,11 @@ def ensure_column_with_retry(
                     f"(attempt {attempt}/{max_attempts}); retrying"
                 )
                 if backoff_seconds > 0:
-                    _time.sleep(backoff_seconds)
+                    time.sleep(backoff_seconds)
     # Bounded retries exhausted; propagate the last conflict so the caller
     # sees a real failure instead of a silent no-op.
     assert last_exc is not None
     raise last_exc
-
-
-def ensure_column(spark, fq_table, name, sql_type):
-    """Add a nullable column to an existing table when it is missing.
-
-    Reads the live schema first: Spark has no ``ADD COLUMN IF NOT EXISTS``
-    for columns (that clause is for partitions), so the unconditional form
-    failed with a parse error on every run and was silently swallowed. For a
-    reused catalog whose table predates the column, that left the next write
-    to fail on a schema mismatch. Returns True when the column was added.
-
-    Delegates to ``ensure_column_with_retry`` so every runtime caller inherits
-    the I9 race guard: two silver drivers starting against the same catalog
-    (batch + stream, or two streams post-restart) can both call this and only
-    one issues the ``ALTER``. The retry is bounded (3 attempts, 0.5s backoff),
-    then propagates.
-    """
-    return ensure_column_with_retry(spark, fq_table, name, sql_type)
 
 
 # ---------------------------------------------------------------------------
@@ -791,13 +773,14 @@ def apply_silver_write_mode(spark, fq_table, mode):
     return True
 
 
-def _path_size_gb_impl(spark, uri):
+def path_size_gb_strict(spark, uri):
     """Total bytes under a Hadoop-FS path or glob, in GiB.
 
     The file system comes from ``Path.getFileSystem``: ``java.net.URI(uri)``
     rejects glob characters such as ``[0-9]`` (common.c360_bronze_path).
-    Raises the underlying Hadoop exception on listing failure; wrappers decide
-    whether to swallow it (path_size_gb) or propagate it (path_size_gb_strict).
+    Raises the underlying Hadoop exception on listing failure, so silver
+    mains surface an S3 outage as a retryable driver error rather than as
+    an "empty bronze" exit; ``path_size_gb`` swallows it and returns 0.0.
     """
     jvm = spark._jvm
     hconf = spark._jsc.hadoopConfiguration()
@@ -821,22 +804,10 @@ def path_size_gb(spark, uri):
     ``path_size_gb_strict`` instead.
     """
     try:
-        return _path_size_gb_impl(spark, uri)
+        return path_size_gb_strict(spark, uri)
     except Exception as e:  # noqa: BLE001
         log(f"[metrics] size of {uri} unavailable: {one_line(e)}")
         return 0.0
-
-
-def path_size_gb_strict(spark, uri):
-    """Total bytes under a Hadoop-FS path or glob, in GiB.
-
-    A6 (silver-plan): silver mains call this variant so an S3 outage surfaces
-    as a retryable driver error rather than as an "empty bronze" exit-1. The
-    non-strict ``path_size_gb`` returns 0.0 on any exception, which made a
-    transient listing failure indistinguishable from a truly empty bronze
-    path and led to a silent no-op silver run.
-    """
-    return _path_size_gb_impl(spark, uri)
 
 
 def _describe_table(spark, fq_table):
@@ -865,8 +836,6 @@ def _describe_table(spark, fq_table):
 def _norm_uri(uri):
     """One spelling per location: s3a:// and s3:// compare equal, and so do
     file:/x and file:///x (Hadoop reports either)."""
-    import re
-
     m = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*):/*(.*)$", uri.strip())
     if not m:
         return uri.rstrip("/") + "/"
@@ -1110,8 +1079,6 @@ def _push_stage_metrics(job, input_size_gb, input_rows, output_rows, elapsed_sec
     slow or unresolvable gateway can never stall the streaming trigger. All
     errors are swallowed.
     """
-    import os
-
     url = os.environ.get("LB_PUSHGATEWAY_URL", "").strip()
     if not url:
         return
@@ -1838,7 +1805,6 @@ def await_stream(spark, query):
     Kubernetes job reports the real outcome instead of a pass with no data.
     """
     import signal
-    import time
 
     stop = {"signal": None}
 
@@ -2410,7 +2376,6 @@ def log_c360_check(spark, silver_tbl, gold_tbl):
     lakebench's own check. ``LB_C360_CHECK=false`` skips it.
     """
     import json
-    import time
 
     if os.environ.get("LB_C360_CHECK", "true").lower() == "false":
         log(C360_CHECK_TAG + " " + json.dumps({"version": 1, "skipped": "LB_C360_CHECK=false"}))
@@ -3338,7 +3303,7 @@ def ensure_alert_columns(spark, fq_table, columns):
     """Bring alerts table *fq_table* up to *columns* ((name, type, ...) in
     table order, detection_rules.ALERT_COLUMNS): when the table's columns
     are a leading part of *columns*, append the missing trailing ones in
-    order through ensure_column_with_retry. Then the table must hold exactly
+    order through ensure_column. Then the table must hold exactly
     those (name, type) pairs in that order.
 
     A reused catalog's table from an older release lacks only trailing
@@ -3367,7 +3332,7 @@ def ensure_alert_columns(spark, fq_table, columns):
         raise _refuse(got)
     added = []
     for name, sql_type, *_ in columns[len(got) :]:
-        if ensure_column_with_retry(spark, fq_table, name, sql_type):
+        if ensure_column(spark, fq_table, name, sql_type):
             added.append(name)
     got = _got()
     if got != want:
