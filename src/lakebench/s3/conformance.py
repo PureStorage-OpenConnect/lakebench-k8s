@@ -88,14 +88,6 @@ class ConformanceReport:
     def blocking_failures(self) -> list[CheckResult]:
         return [c for c in self.checks if c.blocking]
 
-    @property
-    def advisories(self) -> list[CheckResult]:
-        return [
-            c
-            for c in self.checks
-            if c.status is CheckStatus.FAIL and c.severity is Severity.ADVISORY
-        ]
-
     def summary(self) -> str:
         p = sum(1 for c in self.checks if c.status is CheckStatus.PASS)
         f = sum(1 for c in self.checks if c.status is CheckStatus.FAIL)
@@ -103,40 +95,12 @@ class ConformanceReport:
         return f"{p} passed, {f} failed, {s} skipped"
 
 
-# Backends whose behaviour has been verified against this suite.
-# Presence here is a fast path, not a gate: an unlisted backend is checked
-# at runtime rather than refused.
+# Notes printed after a conformance run, keyed by ``detect_backend``'s answer.
 KNOWN_BACKENDS: dict[str, dict[str, Any]] = {
-    "flashblade": {
-        "label": "Pure Storage FlashBlade",
-        "verified": "2026-07-25",
-        "region_strict": False,
-        "notes": "Reference platform. Multipart ghost objects are async GC'd; "
-        "empty_bucket() retries until list_objects_v2 and "
-        "list_multipart_uploads both return empty.",
-    },
-    "garage": {
-        "label": "Garage",
-        "verified": "2026-07-25",
-        "region_strict": True,
-        "notes": "Local/laptop default. Requires spark.hadoop.fs.s3a.endpoint.region "
-        "because it validates the sigv4 region scope.",
-    },
     "aws": {
         "label": "AWS S3",
-        "verified": "",
-        "region_strict": True,
         "notes": "Not validated against this suite. Uses virtual-hosted addressing "
         "by default (set path_style: false).",
-    },
-    "seaweedfs": {
-        "label": "SeaweedFS",
-        "verified": "2026-07-25",
-        "region_strict": False,
-        "unsupported": True,
-        "notes": "NOT SUPPORTED. Returns an empty ListAllMyBucketsResult while "
-        "head_bucket returns 200, so bucket enumeration is silently broken "
-        "and destroy cannot clean up reliably.",
     },
 }
 

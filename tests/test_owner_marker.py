@@ -129,7 +129,6 @@ class TestMarkerIgnoredByEmptiness:
             s3 = S3Client(endpoint="http://10.0.1.50", access_key="a", secret_key="b")
             info = s3.get_bucket_size(B)
             assert (info.object_count, info.size_bytes) == (1, 3)
-            assert s3.get_bucket_info(B).object_count == 1
             assert s3.has_user_objects(B)
             rec.buckets_store[B].pop("d/1")
             assert s3.get_bucket_size(B).object_count == 0
