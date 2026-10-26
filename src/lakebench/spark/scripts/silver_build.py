@@ -324,15 +324,8 @@ def rows_added_by_last_commit(spark, silver_tbl):
     return None
 
 
-# G4: shared property set for the Iceberg C360 silver table. CREATE below sets
-# these on cycle 0; cycles 1+ (append path) re-assert them before the write so
-# an in-place ALTER (or an older table missing a property) does not silently
-# fall back to defaults. Cheap; metadata only, no data touched. Excludes
-# `write.distribution-mode` and `write.spark.fanout.enabled` because those are
-# operator-overridable per Spark conf -- the helper reads them at
-# call time so a scale-5TB+ deployment that set
-# `spark.lb.silver.distribution_mode=none` on cycle 0 keeps that setting on
-# cycle 1+ instead of being silently reverted to `hash`.
+# Properties of the Iceberg silver table other than the distribution mode and
+# fanout, which silver_iceberg_props reads from spark.conf on every write.
 _SILVER_ICEBERG_STATIC_PROPS: tuple[tuple[str, str], ...] = (
     ("write.format.default", "parquet"),
     ("write.parquet.compression-codec", "snappy"),
@@ -342,27 +335,38 @@ _SILVER_ICEBERG_STATIC_PROPS: tuple[tuple[str, str], ...] = (
 )
 
 
-def reassert_silver_iceberg_props(spark, silver_tbl) -> None:
-    """G4: re-run the create-time TBLPROPERTIES before an append cycle.
-
-    Iceberg's ``writeTo(...).append()`` does not carry TBLPROPERTIES, so a
-    table that lost a property (via an ALTER, a fresh CREATE by an older
-    script, or a schema evolution) would keep the wrong defaults for the
-    lifetime of the deployment. This ALTER is idempotent and cheap.
-
-    Distribution mode and fanout are honoured from ``spark.conf`` (escape
-    hatch), so a cycle-1+ append cannot silently overwrite an
-    operator's scale-5TB+ ``distribution_mode=none`` choice with the
-    ``hash`` default.
-    """
+def silver_iceberg_props(spark) -> list[tuple[str, str]]:
+    """The silver table's properties: the static set plus the distribution
+    mode and fanout from ``spark.lb.silver.distribution_mode`` (default
+    hash) and ``spark.lb.silver.fanout_enabled`` (default false)."""
     dist_mode = spark.conf.get("spark.lb.silver.distribution_mode", "hash")
     fanout = spark.conf.get("spark.lb.silver.fanout_enabled", "false")
-    props: list[tuple[str, str]] = list(_SILVER_ICEBERG_STATIC_PROPS)
-    props.append(("write.distribution-mode", dist_mode))
+    props = [*_SILVER_ICEBERG_STATIC_PROPS, ("write.distribution-mode", dist_mode)]
     if str(fanout).lower() == "true":
         props.append(("write.spark.fanout.enabled", "true"))
-    props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in props)
+    return props
+
+
+def reassert_silver_iceberg_props(spark, silver_tbl) -> None:
+    """Set the silver table's properties again before an append.
+
+    ``writeTo(...).append()`` does not carry TBLPROPERTIES, so a table that
+    lost a property (an ALTER, a table an older script created) would keep
+    the wrong defaults for the life of the deployment. The ALTER is
+    idempotent and touches metadata only.
+    """
+    props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in silver_iceberg_props(spark))
     spark.sql(f"ALTER TABLE {silver_tbl} SET TBLPROPERTIES ({props_sql})")
+
+
+def create_silver_table(spark, silver_df, silver_tbl) -> None:
+    """Full build: replace the silver table with *silver_df*, partitioned by
+    day, with ``silver_iceberg_props``."""
+    drop_if_columns_move(spark, silver_tbl, silver_df)
+    writer = silver_df.writeTo(silver_tbl).partitionedBy("interaction_date")
+    for key, value in silver_iceberg_props(spark):
+        writer = writer.tableProperty(key, value)
+    writer.createOrReplace()
 
 
 def tag_batch(df_bronze, cycle, appending):
@@ -459,18 +463,7 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0):
         reassert_silver_iceberg_props(spark, silver_tbl)
         silver_df.writeTo(silver_tbl).append()
     else:
-        drop_if_columns_move(spark, silver_tbl, silver_df)
-        (
-            silver_df.writeTo(silver_tbl)
-            .tableProperty("write.format.default", "parquet")
-            .tableProperty("write.parquet.compression-codec", "snappy")
-            .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
-            .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
-            .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
-            .tableProperty("write.distribution-mode", "hash")
-            .partitionedBy("interaction_date")
-            .createOrReplace()
-        )
+        create_silver_table(spark, silver_df, silver_tbl)
 
     return silver_count
 
@@ -532,20 +525,7 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
         reassert_silver_iceberg_props(spark, silver_tbl)
         silver_df.writeTo(silver_tbl).append()
     else:
-        drop_if_columns_move(spark, silver_tbl, silver_df)
-        writer = (
-            silver_df.writeTo(silver_tbl)
-            .tableProperty("write.format.default", "parquet")
-            .tableProperty("write.parquet.compression-codec", "snappy")
-            .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
-            .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
-            .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
-            .tableProperty("write.distribution-mode", dist_mode)
-            .partitionedBy("interaction_date")
-        )
-        if fanout.lower() == "true":
-            writer = writer.tableProperty("write.spark.fanout.enabled", "true")
-        writer.createOrReplace()
+        create_silver_table(spark, silver_df, silver_tbl)
 
     silver_count = rows_added_by_last_commit(spark, silver_tbl)
     log(
