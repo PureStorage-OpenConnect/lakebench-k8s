@@ -124,7 +124,6 @@ spec:
             limits:
               cpu: "{{ trino_coordinator_cpu }}"
               memory: "{{ trino_coordinator_memory }}"
-          # Readiness: HTTP endpoint responding
           readinessProbe:
             httpGet:
               path: /v1/info
