@@ -10,8 +10,8 @@ Usage::
     executor = get_executor(config, namespace)
     result = executor.execute_query("SELECT 1", timeout=30)
 
-Executor implementations live in ``lakebench.modules.query_engines.*``.
-This module re-exports them for backward compatibility.
+Executor implementations live in ``lakebench.modules.query_engines.*``;
+``get_executor`` imports them here.
 """
 
 from __future__ import annotations
@@ -51,8 +51,6 @@ class QueryExecutor(Protocol):
 
     def adapt_query(self, sql: str) -> str: ...
 
-
-# -- Backward-compat re-exports from module locations ------------------------
 
 from lakebench.modules.query_engines.duckdb.executor import DuckDBExecutor  # noqa: E402
 from lakebench.modules.query_engines.spark_thrift.executor import SparkThriftExecutor  # noqa: E402
@@ -114,27 +112,9 @@ def get_executor(config: LakebenchConfig, namespace: str | None = None) -> Query
                 "silver": s3.buckets.silver,
                 "gold": s3.buckets.gold,
             },
-            # Financial FQ3/FQ4/FQ5/FQ8 reference silver_entities /
-            # silver_counterparty_edges / silver_account_statements /
-            # gold_alerts placeholders; without them in table_names the
-            # DuckDB adapter can't rewrite the placeholder to
-            # iceberg_scan(...) and every financial FQ that hits an
-            # extra table fails on DuckDB. Populate every table name
-            # here so the adapter has a full lookup.
-            table_names={
-                "silver": tables.silver,
-                "gold": tables.gold,
-                "silver_entities": tables.silver_entities,
-                "silver_accounts": tables.silver_accounts,
-                "silver_account_statements": tables.silver_account_statements,
-                "silver_counterparty_edges": tables.silver_counterparty_edges,
-                "gold_alerts": tables.gold_alerts,
-                "gold_risk_scores": tables.gold_risk_scores,
-                "gold_entity_clusters": tables.gold_entity_clusters,
-                "gold_daily_dashboards": tables.gold_daily_dashboards,
-                "gold_alert_dispositions": tables.gold_alert_dispositions,
-                "gold_cases": tables.gold_cases,
-            },
+            # The C360 tables only: the financial workload is refused on
+            # duckdb at config load.
+            table_names={"silver": tables.silver, "gold": tables.gold},
             table_format=table_format,
             catalog_type=catalog_type,
             kube_context=kube_context,
