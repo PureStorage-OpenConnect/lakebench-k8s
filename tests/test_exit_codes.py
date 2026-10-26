@@ -1245,3 +1245,25 @@ def test_any_click_abort_is_not_confirmed(module):
 def test_non_click_runtime_error_is_failed():
     exc = _foreign_class("somelib.errors", "UsageError", RuntimeError)("x")
     assert cli_exit.exit_code_for(exc) == ExitCode.FAILED
+
+
+def test_a_failed_stage_whose_log_holds_brackets_exits_failed(monkeypatch, tmp_path):
+    """A driver log line such as ``[/tmp/...]`` is printed as text. Read as
+    Rich markup it raised MarkupError before the failure was recorded, and
+    the run ended on that error instead of exit 1."""
+    from tests.harness import run_harness
+
+    real = run_harness.FakeMonitor.wait_for_completion
+
+    def wait(self, *a, **k):
+        result = real(self, *a, **k)
+        result.driver_logs += "\nspark-submit [/tmp/spark-1234] [main] exited\n"
+        return result
+
+    monkeypatch.setattr(run_harness.FakeMonitor, "wait_for_completion", wait)
+    result, _rec = run_harness.invoke_scenario(
+        run_harness.SCENARIOS["batch_c360_silver_fails"], tmp_path, monkeypatch
+    )
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert result.exit_code == 1, result.output
+    assert "[/tmp/spark-1234] [main] exited" in result.output

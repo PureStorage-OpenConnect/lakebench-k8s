@@ -1054,7 +1054,7 @@ def _settle_after_maintenance(
 
     def _show(p) -> None:
         if p.seconds is None:
-            console.print(f"  +{p.offset_seconds:.0f}s probe [red]FAIL[/red] ({p.error[:60]})")
+            console.print(f"  +{p.offset_seconds:.0f}s probe [red]FAIL[/red] ({esc(p.error[:60])})")
         else:
             console.print(f"  +{p.offset_seconds:.0f}s probe {p.seconds:.1f}s")
 
@@ -1367,10 +1367,16 @@ def _held_out_check_only(
         raise typer.Exit(ExitCode.USAGE)
     print_error(f"The held-out check failed: {esc(result.message)}")
     if getattr(result, "driver_logs", None):
-        console.print("[dim]Driver logs (last 20 lines):[/dim]")
-        for line in result.driver_logs.split("\n")[-20:]:
-            console.print(f"  {esc(line)}")
+        _print_driver_tail(result.driver_logs)
     raise typer.Exit(ExitCode.FAILED)
+
+
+def _print_driver_tail(logs: str) -> None:
+    """The last 20 lines of a driver log, escaped: a line such as
+    ``[/tmp/...]`` is not Rich markup."""
+    console.print("[dim]Driver logs (last 20 lines):[/dim]")
+    for line in logs.split("\n")[-20:]:
+        console.print(f"  {esc(line)}")
 
 
 _PY_ERROR_LINE = re.compile(r"^(?:[A-Za-z_][\w.]*\.)?[A-Za-z_]\w*(?:Error|Exception|Abort): \S")
@@ -3111,9 +3117,7 @@ def _run_once(
                         cause = driver_error_line(result.driver_logs)
                         if cause:
                             print_error(f"Cause: {esc(cause)}")
-                        console.print("[dim]Driver logs (last 20 lines):[/dim]")
-                        for line in result.driver_logs.split("\n")[-20:]:
-                            console.print(f"  {line}")
+                        _print_driver_tail(result.driver_logs)
                     results.append((stage_name, False, job_metrics.elapsed_seconds))
                     _journal_safe(
                         j.record,
@@ -3332,7 +3336,7 @@ def _run_once(
                         console.print(f"[green]{elapsed:.1f}s OK[/green]{_sample_note(kwargs)}")
                     else:
                         short_err = (error[:60] + "...") if len(error) > 60 else error
-                        console.print(f"[red]FAIL[/red] ({short_err})")
+                        console.print(f"[red]FAIL[/red] ({esc(short_err)})")
 
             _scale = cfg.architecture.workload.datagen.get_effective_scale()
 
@@ -3574,7 +3578,7 @@ def _run_once(
                             console.print(f"[green]{elapsed:.1f}s OK[/green]{_sample_note(kwargs)}")
                         else:
                             short_err = (error[:60] + "...") if len(error) > 60 else error
-                            console.print(f"[red]FAIL[/red] ({short_err})")
+                            console.print(f"[red]FAIL[/red] ({esc(short_err)})")
 
                 bench_runner = BenchmarkRunner(cfg, tm_run_id=_tm_run_id)
                 # AML analytical queries can exceed the 300 s default at
