@@ -60,19 +60,20 @@ def _cumulative(
     pods: Sequence[list[tuple[float, float]]], t0: float, t1: float, step: float
 ) -> list[list[float]]:
     """``[[offset_s, bytes], ...]``: the sum over *pods* of each pod's last
-    value at or before each grid time; 0 for a pod not yet seen."""
+    value at or before each grid time; 0 for a pod not yet seen. Each pod's
+    points are sorted, so one forward index per pod serves the whole grid."""
     n = int((t1 - t0) // step) + 1
+    seen = [0] * len(pods)
     out: list[list[float]] = []
     for k in range(n):
         t = t0 + k * step
         total = 0.0
-        for pts in pods:
-            last = 0.0
-            for ts, val in pts:
-                if ts > t:
-                    break
-                last = val
-            total += last
+        for p, pts in enumerate(pods):
+            i = seen[p]
+            while i < len(pts) and not pts[i][0] > t:
+                i += 1
+            seen[p] = i
+            total += pts[i - 1][1] if i else 0.0
         out.append([round(k * step, 3), total])
     return out
 
