@@ -87,6 +87,7 @@ from lakebench.k8s.lease_state import (
 __all__ = [
     "ADMIN_MAX_HOLD_S",
     "LEASE_MAX_HOLD_S",
+    "WATCH_LIST_LOCK_TIMEOUT_S",
     "LEASE_REQUEST_TIMEOUT",
     "ClusterLockError",
     "ClusterLockHeld",
@@ -127,6 +128,10 @@ _POLL_MAX_SEC = 4.0
 # the remaining waits and sleeps are to move onto lease_clamp.
 LEASE_MAX_HOLD_S = 750
 ADMIN_MAX_HOLD_S = 1800
+
+#: How long a watch-list change (deploy, destroy) waits for the lease: three
+#: holders at LEASE_MAX_HOLD_S ahead of it, the four-deployment limit.
+WATCH_LIST_LOCK_TIMEOUT_S = 3 * LEASE_MAX_HOLD_S
 
 # Signals deferred while the lease is held. SIGHUP is absent on Windows.
 _DEFERRED_SIGNALS: tuple[int, ...] = tuple(

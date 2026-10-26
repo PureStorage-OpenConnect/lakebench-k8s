@@ -71,7 +71,7 @@ EXIT_USAGE = ExitCode.USAGE
 EXIT_REFUSED = ExitCode.REFUSED
 
 #: How long ``admin install`` waits for the cluster lease. Deploys and destroys
-#: hold it for a watch-list change (a few minutes at most).
+#: hold it for a watch-list change, up to ``cluster_lock.LEASE_MAX_HOLD_S``.
 LEASE_WAIT_S = 600
 
 #: ``--version`` takes an exact chart version, never a range.
@@ -1071,6 +1071,7 @@ def run_install(
     """
     from lakebench.deploy.cluster_lock import (
         ADMIN_MAX_HOLD_S,
+        WATCH_LIST_LOCK_TIMEOUT_S,
         ClusterLockError,
         LeaseHoldExceeded,
         cluster_lock,
@@ -1114,8 +1115,8 @@ def run_install(
         return Report(0, plans, {p.component: p.status for p in plans}, False)
     prompt = (
         "admin install holds the cluster lease while it installs; deploys and destroys on this "
-        f"cluster wait for it, up to {LEASE_WAIT_S // 60} minutes each, and one that waits "
-        "longer fails without changing anything shared. Continue?"
+        f"cluster wait for it, up to {WATCH_LIST_LOCK_TIMEOUT_S / 60:g} minutes each, and one "
+        "that waits longer fails without changing anything shared. Continue?"
     )
     if confirm is not None and not confirm(prompt):
         say("error", "aborted; nothing was changed")
