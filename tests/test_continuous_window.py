@@ -282,6 +282,26 @@ def test_stage_fields_are_measured_or_absent():
     assert gold.output_rows == 14
 
 
+@pytest.mark.parametrize("job", sorted(HEALTHY))
+def test_duplicated_lines_from_a_resumed_capture_count_once(job):
+    """A capture resumed after the kubelet severed it re-fetches an overlap:
+    the repeated lines add no rows and no batch times."""
+    lines = HEALTHY[job].splitlines()
+    cut = len(lines) // 2
+    resumed = "\n".join(lines[:cut] + lines[cut - 4 :]) + "\n"
+    c = MetricsCollector()
+    once, twice = c.parse_streaming_logs(HEALTHY[job], job), c.parse_streaming_logs(resumed, job)
+    for key in (
+        "total_rows_processed",
+        "total_batches",
+        "batch_size",
+        "micro_batch_duration_ms",
+        "median_batch_duration_ms",
+        "batch_span_seconds",
+    ):
+        assert getattr(twice, key) == getattr(once, key), key
+
+
 def test_gold_freshness_comes_from_cycles_inside_the_window():
     logs = gold_log([(-300, 100, 900, False), (60, 200, 40, False), (360, 300, 45, False)])
     g = StreamingJobMetrics(job_name="g", job_type="gold-refresh")

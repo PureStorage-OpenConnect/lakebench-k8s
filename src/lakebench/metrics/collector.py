@@ -16,6 +16,7 @@ from typing import Any, ClassVar
 from lakebench._clock import utc_now
 from lakebench.config.schema import interval_seconds
 from lakebench.metrics import provenance as _prov
+from lakebench.metrics.continuous_window import _AGGREGATE, _TRANSFORM, _WRITE, _num
 from lakebench.metrics.experiment import effective_trickle, experiment_inputs
 from lakebench.metrics.io import build_io
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
@@ -3070,6 +3071,34 @@ _TRIGGER_REGULARITY = 0.95
 # Timestamp of common.log's "[lb] <iso> - msg" prefix.
 _LOG_TS = re.compile(r"\[lb\] (\d{4}-\d\d-\d\dT[\d:.]+) - ")
 
+# The driver-log lines parse_streaming_logs reads, beside those
+# continuous_window shares with it (_WRITE, _TRANSFORM, _AGGREGATE).
+_SILVER_EMPTY = re.compile(r"Batch (\d+): empty")
+_GOLD_EMPTY = re.compile(r"Cycle (\d+): Silver table is empty")
+_GOLD_REFRESHED = re.compile(r"Cycle (\d+): refreshed .+ in ([\d.]+)s")
+_GOLD_TICK_TOTAL = re.compile(r"Cycle (\d+): tick timing .* total=([\d.]+)s")
+_BRONZE_COMMITTED = re.compile(r"Batch (\d+): committed in (\d+\.?\d*)s")
+_SILVER_COMMITTED = re.compile(r"Batch (\d+): committed to .+ in (\d+\.?\d*)s")
+_GOLD_FRESHNESS = re.compile(r"Cycle \d+: data freshness ([\d.]+)s( \(silver idle\))?")
+
+# The `<key>: <val>` labels the silver jobs emit through log(), one per call:
+# silver_* (per-layer counters and mode labels), dim_merge_* (dimension
+# MERGE), kyc_* (KYC refresh state) and data_clock_* (data-clock source). A
+# new label under one of these prefixes lands without an edit here; a new
+# family is a visible change to this pattern.
+#   * One label per line: the value is a single non-whitespace token, so a
+#     second label on the same line is dropped, never swallowed.
+#   * The key tail is lowercase snake_case, so a typo in case or a hyphen
+#     does not become a metric name.
+#   * The [lb] timestamp prefix is optional: log() writes it, print() does not.
+# Any streaming job may emit any family (extra_metrics is one bag keyed by
+# name); a per-batch label keeps the last value logged.
+_STREAM_LABEL = re.compile(
+    r"^(?:\[lb\]\s+\S+\s+-\s+)?"
+    r"(?P<key>(?:silver|dim_merge|kyc|data_clock)_[a-z0-9_]+)"
+    r":\s*(?P<val>\S+)\s*$"
+)
+
 
 def _stage_capacity(streaming: list, snapshot: dict) -> dict[str, dict[str, float]]:
     """Per stage, busy fraction and raw MB/s per core at full busy, and
@@ -3220,9 +3249,6 @@ _TICK_TIMING_LINE = re.compile(
 _TICK_PHASE = re.compile(r"(\w+)=(\d+(?:\.\d+)?)s\b")
 
 
-_LB_LOG_TS = re.compile(r"\[lb\] (\d{4}-\d\d-\d\dT[\d:.]+) - ")
-
-
 def parse_tick_timing(line: str) -> dict[str, Any] | None:
     """{"cycle", "silver_rows", "phases", "started_at", "ended_at"} from a
     tick timing line, else None. ``ended_at`` is the line's ``[lb]``
@@ -3233,7 +3259,7 @@ def parse_tick_timing(line: str) -> dict[str, Any] | None:
     if not m:
         return None
     phases = {k: float(v) for k, v in _TICK_PHASE.findall(m["phases"])}
-    ts = _LB_LOG_TS.search(line)
+    ts = _LOG_TS.search(line)
     ended = started = None
     if ts:
         ended = ts.group(1) + "Z"
@@ -3864,62 +3890,25 @@ class MetricsCollector:
             job_type=job_type,
         )
 
-        total_rows = 0
         batch_ids: set[int] = set()
-        batch_durations: list[float] = []
+        # Rows and batch seconds keyed by batch id (gold: cycle), so a line a
+        # resumed log capture fetched twice is counted once.
+        batch_seconds: dict[tuple[str, int], float] = {}
         gold_cycle_s: dict[int, float] = {}
-        freshness_values: list[float] = []
+        gold_rows: dict[int, int] = {}
         # (value, idle) per gold cycle, in log order.
         freshness_cycles: list[tuple[float, bool]] = []
         # Silver: rows per batch id, and the batch ids that logged a commit.
         batch_rows: dict[int, int] = {}
         committed_batches: set[int] = set()
-        # Bronze: log timestamps of the batches that wrote rows.
-        write_times: list[datetime] = []
+        # Bronze: rows and log timestamp of each committed batch that wrote.
+        bronze_rows: dict[int, tuple[int, datetime | None]] = {}
         pending_writes: dict[int, tuple[int, datetime | None]] = {}
         ttd_lines: list[re.Match[str]] = []
         ttd_detail: list[re.Match[str]] = []
 
-        # Per-batch and per-run streaming labels lakebench silver jobs
-        # emit through log() as `<key>: <val>`. Accepted key families:
-        #   silver_*        per-layer counters and mode labels
-        #   dim_merge_*     E1 dimension MERGE metrics
-        #   kyc_*           I7 KYC refresh state
-        #   data_clock_*    C2 data-clock source
-        #
-        # Prefix families instead of enumerated names: a new label under
-        # an accepted prefix lands automatically. Adding a NEW subsystem
-        # (say ``tm_*``) is the only edit that requires touching this
-        # regex, and adding it is a review-visible signal.
-        #
-        # Contract with emitters (silver_stream* scripts):
-        #   * One label per log() call.  Two labels on one line means
-        #     the second one is silently dropped -- the value pattern
-        #     below is `\S+` (single non-whitespace token), refusing to
-        #     swallow the next key. Reviewer-caught silent-drop shape
-        #     (2026-09-28): the four multi-label emissions in
-        #     silver_stream_financial.py have been split to one-per-line.
-        #   * Value is a single non-whitespace token. A value that would
-        #     contain a space needs to be sanitised or split into two
-        #     labels; a value with a colon is accepted as a token.
-        #   * Key tail is lowercase snake_case ([a-z0-9_]+); uppercase or
-        #     hyphen keys are rejected by design so lane-specific typos
-        #     do not become metric names.
-        #
-        # The [lb] timestamp prefix is optional because our log() helper
-        # emits with the prefix but raw print() in scripts emits without.
-        # No job-type gate: any streaming job can emit any prefix-family
-        # label; extra_metrics is a shared bag, disambiguated by the key.
-        # Per-batch labels are LAST-write-wins so extra_metrics carries
-        # the most recent micro-batch's value.
-        _stream_label_re = re.compile(
-            r"^(?:\[lb\]\s+\S+\s+-\s+)?"
-            r"(?P<key>(?:silver|dim_merge|kyc|data_clock)_[a-z0-9_]+)"
-            r":\s*(?P<val>\S+)\s*$"
-        )
-
         for line in logs.split("\n"):
-            m = _stream_label_re.match(line.strip())
+            m = _STREAM_LABEL.match(line.strip())
             if m:
                 metrics.extra_metrics[m.group("key")] = m.group("val").strip()
                 continue
@@ -3927,7 +3916,7 @@ class MetricsCollector:
             # Bronze: "Batch N: writing X rows to ...", counted once the
             # batch's "committed in" line follows: a stream stopped mid-write
             # logs the first and never commits.
-            m = re.search(r"Batch (\d+): writing ([\d,]+) rows", line)
+            m = _WRITE.search(line)
             if m:
                 ts = _LOG_TS.search(line)
                 at = None
@@ -3936,36 +3925,35 @@ class MetricsCollector:
                         at = datetime.fromisoformat(ts.group(1))
                     except ValueError:
                         pass
-                pending_writes[int(m.group(1))] = (int(m.group(2).replace(",", "")), at)
+                pending_writes[int(m.group(1))] = (_num(m.group(2)), at)
                 continue
 
             # Silver: "Batch N: transforming X rows"
-            m = re.search(r"Batch (\d+): transforming ([\d,]+) rows", line)
+            m = _TRANSFORM.search(line)
             if m:
                 batch_ids.add(int(m.group(1)))
-                total_rows += int(m.group(2).replace(",", ""))
-                batch_rows[int(m.group(1))] = int(m.group(2).replace(",", ""))
+                batch_rows[int(m.group(1))] = _num(m.group(2))
                 continue
 
             # Silver: "Batch N: empty, skipping" (no data in micro-batch).
             # Only count empty batches for silver -- bronze uses the same
             # log format but empty bronze batches are not meaningful.
             if job_type == "silver-stream":
-                m = re.search(r"Batch (\d+): empty", line)
+                m = _SILVER_EMPTY.search(line)
                 if m:
                     batch_ids.add(int(m.group(1)))
                     continue
 
             # Gold: "Cycle N: aggregating X Silver records"
-            m = re.search(r"Cycle (\d+): aggregating ([\d,]+) Silver records", line)
+            m = _AGGREGATE.search(line)
             if m:
                 batch_ids.add(int(m.group(1)))
-                total_rows += int(m.group(2).replace(",", ""))
+                gold_rows[int(m.group(1))] = _num(m.group(2))
                 continue
 
             # Gold: "Cycle N: Silver table is empty, skipping"
             if job_type == "gold-refresh":
-                m = re.search(r"Cycle (\d+): Silver table is empty", line)
+                m = _GOLD_EMPTY.search(line)
                 if m:
                     batch_ids.add(int(m.group(1)))
                     continue
@@ -3973,39 +3961,39 @@ class MetricsCollector:
             # Gold: "Cycle N: refreshed ... in X.Xs (Y KPI records)"; an AML
             # cycle's "tick timing ... total=X.Xs" replaces it, as it also
             # covers the time to detect and TM pass after detection.
-            m = re.search(r"Cycle (\d+): refreshed .+ in ([\d.]+)s", line)
+            m = _GOLD_REFRESHED.search(line)
             if m:
                 gold_cycle_s.setdefault(int(m.group(1)), float(m.group(2)))
                 continue
-            m = re.search(r"Cycle (\d+): tick timing .* total=([\d.]+)s", line)
+            m = _GOLD_TICK_TOTAL.search(line)
             if m:
-                # Not consumed: the tick timing parse below reads it too.
                 gold_cycle_s[int(m.group(1))] = float(m.group(2))
+                # AML gold: "Cycle N: tick timing silver_rows=R probe=Xs ...".
+                if job_type == "gold-refresh" and (tt := parse_tick_timing(line)) is not None:
+                    metrics.tick_timings.append(tt)
+                continue
 
             # Bronze: "Batch N: committed in X.Xs"
-            m = re.search(r"Batch (\d+): committed in (\d+\.?\d*)s", line)
+            m = _BRONZE_COMMITTED.search(line)
             if m:
-                batch_durations.append(float(m.group(2)))
+                batch_seconds["bronze", int(m.group(1))] = float(m.group(2))
                 written = pending_writes.pop(int(m.group(1)), None)
                 if written is not None:
                     batch_ids.add(int(m.group(1)))
-                    total_rows += written[0]
-                    if written[1] is not None:
-                        write_times.append(written[1])
+                    bronze_rows[int(m.group(1))] = written
                 continue
 
             # Silver: "Batch N: committed to ... in X.Xs"
-            m = re.search(r"Batch (\d+): committed to .+ in (\d+\.?\d*)s", line)
+            m = _SILVER_COMMITTED.search(line)
             if m:
-                batch_durations.append(float(m.group(2)))
+                batch_seconds["silver", int(m.group(1))] = float(m.group(2))
                 committed_batches.add(int(m.group(1)))
                 continue
 
             # Gold: "Cycle N: data freshness Xs", optionally tagged
             # " (silver idle)" when silver had not moved since the last cycle.
-            m = re.search(r"Cycle \d+: data freshness ([\d.]+)s( \(silver idle\))?", line)
+            m = _GOLD_FRESHNESS.search(line)
             if m:
-                freshness_values.append(float(m.group(1)))
                 freshness_cycles.append((float(m.group(1)), bool(m.group(2))))
                 continue
 
@@ -4021,7 +4009,6 @@ class MetricsCollector:
                 if m:
                     ttd_detail.append(m)
                     continue
-                # AML gold: "Cycle N: tick timing silver_rows=R probe=Xs ...".
                 tt = parse_tick_timing(line)
                 if tt is not None:
                     metrics.tick_timings.append(tt)
@@ -4042,17 +4029,23 @@ class MetricsCollector:
             metrics.max_batch_id_gap = max(
                 (b - a - 1 for a, b in zip(ordered, ordered[1:], strict=False)), default=0
             )
+        total_rows = (
+            sum(n for n, _ in bronze_rows.values())
+            + sum(batch_rows.values())
+            + sum(gold_rows.values())
+        )
         metrics.total_rows_processed = total_rows
+        write_times = [at for _, at in bronze_rows.values() if at is not None]
         if len(write_times) >= 2:
             metrics.batch_span_seconds = (max(write_times) - min(write_times)).total_seconds()
 
-        batch_durations += list(gold_cycle_s.values())
+        batch_durations = [*batch_seconds.values(), *gold_cycle_s.values()]
         if batch_durations:
             metrics.micro_batch_duration_ms = (sum(batch_durations) / len(batch_durations)) * 1000
             metrics.median_batch_duration_ms = statistics.median(batch_durations) * 1000
 
-        if freshness_values:
-            metrics.freshness_seconds = max(freshness_values)
+        if freshness_cycles:
+            metrics.freshness_seconds = max(v for v, _ in freshness_cycles)
         # Split off the trailing idle run: cycles after silver last moved.
         cut = len(freshness_cycles)
         while cut > 0 and freshness_cycles[cut - 1][1]:
@@ -4066,9 +4059,8 @@ class MetricsCollector:
         if metrics.total_batches > 0:
             metrics.batch_size = total_rows // metrics.total_batches
 
-        # For bronze/silver, unique rows = total (no re-reads).
-        # For gold, leave as 0 -- gold re-reads silver each cycle so
-        # total_rows_processed includes amplification.
+        # For bronze/silver, unique rows = total (no re-reads). Gold re-reads
+        # silver each cycle, so its total is not distinct rows: None.
         if job_type in ("bronze-ingest", "silver-stream"):
             metrics.unique_rows_processed = metrics.total_rows_processed
         else:
