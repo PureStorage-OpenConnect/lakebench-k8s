@@ -2713,11 +2713,8 @@ def w7_cross_border_high_risk(
     originator alerts. The beneficiary's country comes from every entity,
     customer or not (the high-risk counterparty is usually not one).
 
-    Historically this rule crashed inside the driver when the caller did
-    NOT pass silver_entities AND the reference JSON was not mounted --
-    the ImportError from ``import lakebench.spark.data`` surfaced as a
-    hard failure of the whole job. A missing reference JSON now
-    degrades to an empty alerts DF with a stderr note.
+    A missing or empty high_risk_jurisdictions.json raises RuleSkipped
+    ("no-reference"), like every other missing input.
     """
     from pyspark.sql.functions import broadcast
 
@@ -2730,8 +2727,7 @@ def w7_cross_border_high_risk(
         "country_code string, country_name string, risk_tier string",
     )
     if raw is None:
-        print("[W7] high_risk_jurisdictions.json not available; skipping.")
-        return _empty_alerts_df(spark, run_id)
+        raise RuleSkipped("no-reference", "W7: high_risk_jurisdictions.json not available")
     # The FATF list names none of the generator's home countries (June 2026),
     # so on its own W7 could never fire on this corpus. The synthetic
     # corridor list is the set corridor_high_risk plants against, labelled
