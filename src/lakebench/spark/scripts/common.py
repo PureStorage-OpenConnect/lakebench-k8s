@@ -53,22 +53,20 @@ def assert_progress(rows_written, job_type):
 
 
 def assert_preflight_rows(df, name, minimum=1):
-    """A1-atomic + F2: assert a silver DataFrame has at least ``minimum`` rows
-    BEFORE any silver table has been written for the cycle.
+    """Assert a silver DataFrame has at least ``minimum`` rows BEFORE any
+    silver table has been written for the cycle.
 
     ``df`` is a lazily-built Spark DataFrame; ``name`` is the target silver
-    table (used verbatim in the abort message). ``minimum`` defaults to 1 so
-    the assertion enforces the F2 ">= 1 rows per silver frame" contract; a
-    caller with a known lower bound (e.g. entities >= unique parties count
-    from bronze) may pass a tighter minimum.
+    table (used verbatim in the abort message). ``minimum`` defaults to 1
+    (every silver frame has rows); a caller with a known lower bound (e.g.
+    entities >= unique parties count from bronze) may pass a tighter minimum.
 
     Raises ``SilverAbort`` if the row count is below ``minimum``. The caller
     is expected to run this against every bronze-derived silver frame in a
     pre-flight pass so that any failure aborts the run before the first
-    ``_replace_data`` write -- the whole point of A1-atomic is that a run
-    that would produce an empty silver table for any frame refuses to
-    write ANY silver table, so downstream consumers never see a partial
-    silver set.
+    ``_replace_data`` write: a run that would produce an empty silver table
+    for any frame writes no silver table at all, so downstream consumers
+    never see a partial silver set.
 
     Returns the observed row count so the caller can log a per-table
     "staged N rows" line before the writes begin.
@@ -83,20 +81,19 @@ def assert_preflight_rows(df, name, minimum=1):
 
 
 def emit_stream_scale_admission(measured_envelope_scale=10):
-    """Emit the G5 scale cap and admission labels (invariant 6).
+    """Emit the stream scale cap and admission labels.
 
     ``silver_stream_scale_cap`` names the measured envelope this profile
-    was tuned against (v1.6: scale 10 for all three silver streams, see
-    the ``_JOB_PROFILES["silver-stream"]`` docstring in
+    was tuned against (scale 10 for all three silver streams, see the
+    ``_JOB_PROFILES["silver-stream"]`` docstring in
     ``modules/pipeline_engines/spark/job.py``). ``silver_stream_scale_admission``
     is a decision, not a static string:
 
     - ``ok`` when the deployment scale (LB_SCALE, threaded from
       job.py._build_env_vars) is <= the measured envelope;
     - ``labelled_beyond_measured_envelope`` when it exceeds it. The stream
-      still runs -- refusal is the responsibility of D-safe (AML) or a
-      future config gate -- but downstream reports MUST NOT read the
-      numbers as infrastructure performance without the label.
+      still runs, but downstream reports must not read the numbers as
+      infrastructure performance without the label.
 
     A parse error on LB_SCALE (unset, non-numeric) falls to ``labelled``
     on the safe side: an unknown scale should not silently look like an
@@ -117,7 +114,7 @@ def emit_stream_scale_admission(measured_envelope_scale=10):
 
 
 # ---------------------------------------------------------------------------
-# E1: shared entity_type derivation used by both batch and stream silver.
+# Shared entity_type derivation used by both batch and stream silver.
 # ---------------------------------------------------------------------------
 #
 # The regex is a corporate-suffix heuristic applied to the END of the upper-
@@ -130,8 +127,8 @@ def emit_stream_scale_admission(measured_envelope_scale=10):
 # One constant, two call sites: ``derive_entity_type`` returns a pyspark
 # Column expression (batch ``build_entities``); ``entity_type_from_name_sql``
 # returns a SQL fragment (the stream MERGE that re-derives entity_type from
-# ``LEAST(target.name, source.name)``). Sharing the constant is what E1's
-# unit test asserts, so batch and stream cannot drift.
+# ``LEAST(target.name, source.name)``). Sharing the constant keeps batch and
+# stream from drifting.
 _ENTITY_TYPE_COMPANY_SUFFIX_REGEX = (
     r"(LTD|LIMITED|INC|CORP|LLC|GMBH|AG|PLC|SA|SARL|BV|BANK|CAPITAL|"
     r"HOLDINGS|GROUP|INTERNATIONAL|COMPANY|CO)$"
@@ -167,8 +164,7 @@ def entity_type_from_name_sql(name_sql_expr):
     ``name_sql_expr`` is any SQL expression that evaluates to the entity's
     name (e.g. ``LEAST(t.name, s.name)`` inside a MERGE UPDATE). The
     returned string is a CASE expression that reduces to 'Company' or
-    'Person' using the same regex ``derive_entity_type`` applies. E1's
-    unit test asserts both helpers reference ``_ENTITY_TYPE_COMPANY_SUFFIX_REGEX``.
+    'Person' using the same regex ``derive_entity_type`` applies.
     """
     regex = _ENTITY_TYPE_COMPANY_SUFFIX_REGEX
     return f"CASE WHEN upper({name_sql_expr}) RLIKE '{regex}' THEN 'Company' ELSE 'Person' END"
@@ -554,44 +550,17 @@ def check_bronze_fingerprint(
         log(f"[b5] sidecar write failed at {sidecar_path}: {one_line(e)}; fail-open")
 
 
-# H4: silver-batch fat-finger guard.
+# Silver-batch guard against overwriting a live stream.
 #
 # silver_build_financial's batch overwrite of silver.transactions et al. wipes
-# every row silver_stream_financial has written so far (docstring warning at
-# ``silver_stream_financial.py:46-53``). H4 converts that warning into a
-# runtime refusal: the stream writes a ``_STARTED`` marker into its
-# checkpoint directory on start-up and removes it on clean shutdown; the
-# batch main checks for the marker at start-up and raises ``SilverAbort``
-# when it is present, unless ``--force-rebuild`` (LB_FORCE_REBUILD=1) is
-# passed.
-#
-# Design choice: a plain marker file, not an extension of the B5 sidecar
-# with a ``last_batch_at`` heartbeat. Reasoning:
-#
-# * A heartbeat needs a threshold, per-micro-batch writes into a JSON
-#   sidecar shared with B5's fingerprint contract, and separate reader
-#   logic that reasons about "still running vs. crashed a while ago".
-#   Three moving parts (writer + threshold + reader) instead of one.
-# * The marker file is a single existence probe. Stream writes on
-#   startup, removes on clean shutdown; anything else (crash, kill -9,
-#   pod eviction) leaves it in place, which is the desired semantics --
-#   the batch operator should not silently overwrite tables the stream
-#   was in the middle of writing. ``--force-rebuild`` is the escape
-#   hatch after the operator has cleaned up.
-# * Independent of B5's semantics: extending the sidecar would couple
-#   the fingerprint check (whether bronze was reset) with the fat-finger
-#   check (whether a stream is live) in one file, and every change to
-#   either would touch the other.
-#
-# Fail-open policy (mirrors B5):
-#
-# * marker present -> ``SilverAbort`` naming the checkpoint path.
-# * marker absent, or checkpoint directory absent -> proceed. Fresh
-#   deployment, or the stream shut down cleanly.
-# * probe raises (transient FS failure) -> log a warning and proceed.
-#   H4 is defense-in-depth, not the only guard; a broken S3 listing
-#   during startup MUST NOT convert a batch outage into a chain of
-#   batch outages.
+# every row silver_stream_financial has written so far. The stream writes a
+# ``_STARTED`` marker into its checkpoint directory on start-up and removes it
+# on clean shutdown; a crash, kill -9 or eviction leaves it in place. The
+# batch main refuses to run while the marker is present unless
+# ``--force-rebuild`` (LB_FORCE_REBUILD=1) is passed. A plain marker, not a
+# heartbeat in the bronze-reset sidecar: one existence probe, no staleness
+# threshold. A failed probe logs and lets the batch proceed, so a broken S3
+# listing at start-up does not block every later batch.
 
 
 def _stream_started_marker_path(checkpoint_location):
@@ -599,7 +568,7 @@ def _stream_started_marker_path(checkpoint_location):
     return checkpoint_location.rstrip("/") + "/_STARTED"
 
 
-def mark_stream_started(spark, checkpoint_location, *, fs=None, payload=None):
+def mark_stream_started(spark, checkpoint_location):
     """Write the ``_STARTED`` marker on stream start-up. Fail-open on error.
 
     Called from the stream main after the Structured Streaming query has
@@ -610,17 +579,15 @@ def mark_stream_started(spark, checkpoint_location, *, fs=None, payload=None):
     """
     if not checkpoint_location:
         return
-    sidecar_fs = fs if fs is not None else _HadoopSidecarFS(spark)
     marker_path = _stream_started_marker_path(checkpoint_location)
-    body = payload if payload is not None else b"lakebench-silver-stream-financial"
     try:
-        sidecar_fs.write(marker_path, body)
+        _HadoopSidecarFS(spark).write(marker_path, b"lakebench-silver-stream-financial")
         log(f"[h4] wrote stream-started marker at {marker_path}")
     except Exception as e:  # noqa: BLE001
         log(f"[h4] marker write failed at {marker_path}: {one_line(e)}; continuing")
 
 
-def clear_stream_started_marker(spark, checkpoint_location, *, fs=None):
+def clear_stream_started_marker(spark, checkpoint_location):
     """Remove the ``_STARTED`` marker on clean shutdown. Fail-open on error.
 
     Called from the stream main's shutdown path (SIGTERM / SIGINT handler
@@ -631,10 +598,9 @@ def clear_stream_started_marker(spark, checkpoint_location, *, fs=None):
     """
     if not checkpoint_location:
         return
-    sidecar_fs = fs if fs is not None else _HadoopSidecarFS(spark)
     marker_path = _stream_started_marker_path(checkpoint_location)
     try:
-        removed = sidecar_fs.delete(marker_path)
+        removed = _HadoopSidecarFS(spark).delete(marker_path)
         if removed:
             log(f"[h4] cleared stream-started marker at {marker_path}")
     except Exception as e:  # noqa: BLE001
@@ -648,7 +614,7 @@ def refuse_batch_while_stream_active(
     force_rebuild,
     fs=None,
 ):
-    """H4 fat-finger guard called from ``silver_build_financial.main()``.
+    """Live-stream guard called from ``silver_build_financial.main()``.
 
     Raises ``SilverAbort`` when the AML stream's ``_STARTED`` marker is
     present at ``checkpoint_location`` and ``force_rebuild`` is False.
@@ -1441,14 +1407,14 @@ def data_clock_date(df, ts_col="event_timestamp"):
 
 
 SILVER_STATE_CONFIGMAP_NAME = "lakebench-silver-state"
-"""C2 (silver-plan): per-deployment ConfigMap that carries the bronze-side
+"""Per-deployment ConfigMap that carries the bronze-side
 data clock (``bronze_data_clock``) that bronze-verify writes and job.py
 reads to build the silver env bundle. The deployer creates it on greenfield
 deploy so bronze-verify's write is a plain update, not a first create."""
 
 
 def write_bronze_data_clock(namespace, bronze_max_ts):
-    """C2 (silver-plan): record bronze's newest observed event date to the
+    """Record bronze's newest observed event date to the
     ``lakebench-silver-state`` ConfigMap so job.py can resolve LB_DATA_CLOCK
     for silver jobs without a Spark session in the submit path.
 
@@ -1456,8 +1422,8 @@ def write_bronze_data_clock(namespace, bronze_max_ts):
     holds (``datetime.datetime`` or ``datetime.date``); this function
     computes the ISO date and stores it under the ``bronze_data_clock`` key.
 
-    A failure to write is logged and swallowed. Silver's C2 resolver falls
-    back through ``datagen.timestamp_start`` and today at 00:00 UTC when the
+    A failure to write is logged and swallowed. job.py's data-clock
+    resolution falls back through ``datagen.timestamp_start`` and today at 00:00 UTC when the
     key is missing, so a transient K8s error at bronze-verify time never
     blocks a silver run.
     """
@@ -1516,7 +1482,7 @@ def write_bronze_data_clock(namespace, bronze_max_ts):
                 log(f"[silver-state] patch failed ({e.status}): {e.reason}; skipping")
                 return
         # Not found: create it. The deployer normally seeds this on greenfield;
-        # a create here is a safety net for pre-C2 deployments.
+        # a create here covers a deployment made before the deployer did.
         from kubernetes.client.models import V1ConfigMap, V1ObjectMeta
 
         body = V1ConfigMap(
@@ -1557,9 +1523,9 @@ def resolve_data_clock(df_fallback=None, strict=False):
     rerun reproduces the same scores (GOALS P4.2). Only when it is unset is
     it measured as max(event date) of ``df_fallback``. Logs which was used.
 
-    ``strict=True`` (C1, silver-plan): C360 silver mains use this. C2 sets
-    LB_DATA_CLOCK unconditionally in the silver env bundle (with a today
-    fallback), so seeing it unset here means the env plumbing broke -- a
+    ``strict=True``: C360 silver mains use this. job.py sets LB_DATA_CLOCK
+    unconditionally in the silver env bundle (with a today fallback), so
+    seeing it unset here means the env plumbing broke -- a
     silent fallback would ship a NULL or measured-per-batch anchor,
     invalidating cross-cycle recency scoring. Raise ``SilverAbort`` instead.
     AML mains keep ``strict=False``: they do not use customer_recency_score,
@@ -1768,11 +1734,9 @@ def refuse_fresh_checkpoint_over_data(spark, checkpoint_location, fq_table):
     checkpoints are deleted but tables are not. Clear both, or neither.
 
     ``fq_table`` accepts a single fully-qualified table name (str) or a list
-    of them; any populated table on the list triggers the refusal. B3
-    uniform silver exit contract: the refusal raises ``SilverAbort`` so the
-    driver terminates with the same exception class every other silver
-    invariant does (A1, F1). Existing callers already let unhandled
-    exceptions terminate main().
+    of them; any populated table on the list triggers the refusal. The
+    refusal raises ``SilverAbort``, like every other silver invariant, and
+    callers let it terminate main().
     """
     if not checkpoint_is_fresh(spark, checkpoint_location):
         return
@@ -2097,7 +2061,7 @@ def get_daily_kpi_aggregations():
 
 
 # ---------------------------------------------------------------------------
-# c360 correctness facts (reported after gold-finalize, D6: reporting only)
+# c360 correctness facts (reported after gold-finalize, reporting only)
 # ---------------------------------------------------------------------------
 
 C360_CHECK_TAG = "[c360-check]"
@@ -2368,7 +2332,7 @@ def gold_date_coverage_problem(gold_rows: int, distinct_silver_dates: int) -> st
 def log_c360_check(spark, silver_tbl, gold_tbl):
     """Log the ``[c360-check] {json}`` line after gold is written.
 
-    Reporting only (owner decision D6): an error here is logged in the line
+    Reporting only: an error here is logged in the line
     and never fails the stage. It runs inside the gold-finalize pod, so the
     pod's wall clock includes it; the line records ``check_seconds`` and the
     CLI takes that off the stage's elapsed time and end time
@@ -2433,7 +2397,7 @@ def aml_opening_balance(account_id_col):
 
     ``abs(account_id) % 200_000 + 10_000`` in the (10000, 210000] range, cast
     to decimal(18, 2). Shared between ``silver_build_financial.build_statements``
-    (batch) and ``silver_stream_financial._maintain_statements`` (D-full) so a
+    (batch) and ``silver_stream_financial._maintain_statements`` (stream) so a
     future formula change cannot drift between the two write paths silently.
     Batch mode's ``xxhash64`` returns a signed BIGINT and Spark's ``%``
     preserves sign, so ``abs()`` is required to keep the result in the
@@ -2464,10 +2428,10 @@ def create_namespace(spark, catalog, namespace, location):
     A Hive catalog takes the location and puts the layer's tables in its own
     bucket. Polaris does not allow a namespace location by default ("Namespace
     silver has a custom location, which is not enabled") and derives one from
-    the catalog's base location. The streaming scripts used to log that refusal
-    and go on, so the first table create then failed with NoSuchNamespace and
-    stopped the stream. Returns the location in effect, None when the namespace
-    was created without one. Raises when the namespace cannot be created at all.
+    the catalog's base location; the namespace is then created without one,
+    so the first table create does not fail with NoSuchNamespace. Returns the
+    location in effect, None when the namespace was created without one.
+    Raises when the namespace cannot be created at all.
     """
     try:
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.{namespace} LOCATION '{location}'")
