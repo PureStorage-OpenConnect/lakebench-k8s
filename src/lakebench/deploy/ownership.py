@@ -7,9 +7,7 @@ mutation. If the stamp on a resource does not match the current
 deployment, we refuse rather than warn.
 
 This is the machinery behind the invariant "destroying deployment A does
-not affect deployment B running in parallel." See
-``docs/internal/namespace-isolation.md`` for the design rationale
-and category taxonomy this module enforces.
+not affect deployment B running in parallel."
 
 The pieces:
 
@@ -30,8 +28,8 @@ The pieces:
   S3 side: the tag is written unconditionally on every ensure_buckets
   call, the read verifies the round trip, and destroy refuses on mismatch.
 
-The failure modes this module explicitly forbids (silent-warn-and-proceed
-was the class the shared-cluster review caught last time):
+The failure modes this module forbids (each is a refusal, never a
+warn-and-proceed):
 
 - Cross-context destroy: the api-server fingerprint on the namespace does
   not match the current cluster.
@@ -39,8 +37,8 @@ was the class the shared-cluster review caught last time):
   match ``cfg.name``.
 - Cross-deployment bucket empty: bucket tag does not match ``cfg.name``.
 - Legacy namespace or bucket: no annotation / tag present, refuse by
-  default. Explicit opt-in flag on ``deploy`` re-stamps it; ``destroy``
-  never bypasses.
+  default. ``--force-legacy`` on ``deploy`` re-stamps it; on ``destroy`` it
+  is the operator's explicit assertion of ownership.
 """
 
 from __future__ import annotations
@@ -91,7 +89,7 @@ ANNOTATION_DEPLOY_NONCE = "lakebench.deployment/deploy-nonce"
 # nameless teardown of a namespace carrying it: the deployment moved on.
 ANNOTATION_STATE_SCHEMA = "lakebench.deployment/state-schema"
 # How this deployment's owner markers were written ("conditional" or
-# "unconditional"), so a backend that ignores IfNoneMatch is on record (R12).
+# "unconditional"), so a backend that ignores IfNoneMatch is on record.
 ANNOTATION_MARKER_WRITE = "lakebench.deployment/marker-write"
 
 # Namespace name max length (matches K8s + doubles as the bucket-tag length
@@ -115,16 +113,16 @@ class IdentityVerdict(str, Enum):
     #: Tag-based ownership is impossible; callers must fall back to a
     #: weaker check (name-prefix on buckets) or refuse.
     #: Among the ownership verdicts it means: tagless, no owner marker, and not
-    #: in this namespace's created or adopted-empty record (row 7 of the
-    #: matrix in ``verify_bucket_ownership``).
+    #: in this namespace's created record (row 7 of the matrix in
+    #: ``verify_bucket_ownership``).
     UNSUPPORTED = "unsupported"
     #: Ownership row 2 (and 5): the bucket is this deployment's by name but
     #: was claimed from another cluster (or this cluster's API-server CA
     #: changed). Refuse; never empty it.
     FOREIGN_CLUSTER = "foreign_cluster"
-    #: Ownership row 3: no cluster stamp, but this namespace's created or
-    #: adopted-empty record proves this cluster made or adopted it. Stamp
-    #: the cluster, then treat it as MATCH.
+    #: Ownership row 3: no cluster stamp, but this namespace's created
+    #: record proves this cluster made it. Stamp the cluster, then treat it
+    #: as MATCH.
     LEGACY_PROVEN = "legacy_proven"
     #: Ownership row 4: tagged with this deployment's name but no cluster stamp
     #: and not in the record (a bucket an earlier lakebench adopted). Usable
@@ -146,7 +144,7 @@ class BucketTaggingUnsupported(Exception):
 
 @dataclass(frozen=True)
 class IdentityReport:
-    """What a verify call found. All fields together, no dangling defaults.
+    """What a verify call found.
 
     ``verdict`` is the actionable answer. The rest is diagnostics for the
     caller to include in a user-visible refusal message.
@@ -156,8 +154,6 @@ class IdentityReport:
     resource_name: str
     expected_deployment: str
     found_deployment: str | None = None
-    found_api_server: str | None = None
-    current_api_server: str | None = None
     hint: str | None = None
     #: Buckets only: False when the backend has no bucket tagging (the
     #: verdict then came from the owner marker or the namespace record).
@@ -177,11 +173,10 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
     context names differ; more importantly, a workstation context and an
     in-cluster pod context targeting the same cluster ALSO produce the
     same fingerprint, because the cluster's CA is stable regardless of
-    how you reach it (F2a: earlier revision hashed server URL + CA,
-    which false-mismatched workstation vs in-cluster against the same
-    cluster because they see different server URLs).
+    how you reach it. The server URL is not hashed: a workstation and a pod
+    see different URLs for the same cluster.
 
-    **Known limitation (F-3)**: two clusters that share a CA
+    **Known limitation**: two clusters that share a CA
     (e.g. dev rings bootstrapped from the same self-signed org CA)
     collide on this fingerprint. If your workflow includes multiple
     clusters that share PKI, verify the current ``kubectl`` context
@@ -191,8 +186,8 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
     name AND the same CA would pass the check. Adding the API-server
     hostname would distinguish them, but hostnames differ between
     workstation and in-cluster reachability paths (external URL vs
-    KUBERNETES_SERVICE_HOST), so we cannot include it without
-    reintroducing F2a. This is a documented trade-off.
+    KUBERNETES_SERVICE_HOST), so including it would split one cluster
+    into two fingerprints. This is a documented trade-off.
 
     Returns None only when no CA material can be located at all. None is
     treated as "cannot verify" by callers; refusal on asymmetric None
@@ -287,7 +282,7 @@ def api_server_fingerprint(context: str | None = None) -> str | None:
             block = {}
         # Normalise to raw CA bytes so the workstation path and the
         # in-cluster path (which reads bytes off disk) hash the SAME
-        # material for the same cluster (F2a).
+        # material for the same cluster.
         ca_bytes = _load_ca_bytes(block)
         if not ca_bytes:
             return None
@@ -307,7 +302,7 @@ def _try_incluster_fingerprint() -> str | None:
     """Fingerprint an in-cluster (pod) context via the mounted service-account
     CA. Returns None if the path does not exist (running outside a pod).
 
-    Hashes ONLY the CA bytes -- same as the kubeconfig path (F2a) so a
+    Hashes ONLY the CA bytes -- same as the kubeconfig path, so a
     pod-context fingerprint matches the workstation fingerprint for the
     same cluster.
     """
@@ -347,8 +342,8 @@ def stamp_namespace(
 
     Legacy annotation-less namespaces are treated as UNSAFE by default:
     the caller must pass ``force_legacy=True`` to overwrite them. This
-    catches the "annotation-less namespace already has running lakebench
-    resources inside" case that revision-1 of the design missed.
+    catches an annotation-less namespace that already has running
+    lakebench resources inside.
     """
     if len(deployment_name) > DEPLOYMENT_NAME_MAX:
         raise ValueError(
@@ -384,8 +379,6 @@ def stamp_namespace(
                 resource_name=namespace,
                 expected_deployment=deployment_name,
                 found_deployment=existing_name,
-                found_api_server=existing_server,
-                current_api_server=api_server,
                 hint=(
                     f"namespace {namespace!r} is already claimed by "
                     f"deployment {existing_name!r}. Pick a different "
@@ -404,8 +397,6 @@ def stamp_namespace(
                     resource_name=namespace,
                     expected_deployment=deployment_name,
                     found_deployment=existing_name,
-                    found_api_server=existing_server,
-                    current_api_server=api_server,
                 )
             # Only that annotation, under the read's resourceVersion: a
             # strategic merge patch leaves the other keys alone and deletes a
@@ -437,8 +428,6 @@ def stamp_namespace(
                 resource_name=namespace,
                 expected_deployment=deployment_name,
                 found_deployment=existing_name,
-                found_api_server=existing_server,
-                current_api_server=api_server,
             )
 
         # Legacy annotation-less namespace: opt in explicitly.
@@ -496,8 +485,6 @@ def stamp_namespace(
             resource_name=namespace,
             expected_deployment=deployment_name,
             found_deployment=deployment_name,
-            found_api_server=api_server,
-            current_api_server=api_server,
         )
 
     # Exhausted retries -- last thing we saw. Report as mismatch so the
@@ -559,8 +546,6 @@ def verify_namespace_identity(
             resource_name=namespace,
             expected_deployment=expected_deployment,
             found_deployment=found_name,
-            found_api_server=found_server,
-            current_api_server=expected_api_server,
             hint=(
                 f"namespace {namespace!r} is owned by deployment "
                 f"{found_name!r}, not {expected_deployment!r}. Refusing."
@@ -569,10 +554,9 @@ def verify_namespace_identity(
 
     # Symmetric-both-present: enforce fingerprint match.
     # Asymmetric (one side None): refuse unless --allow-unverified-cluster.
-    # Symmetric-both-None: refuse unless --allow-unverified-cluster (F3:
-    # a fully-offline destroy against a fully-offline deploy would
-    # otherwise match by name alone -- and namespace-name collisions
-    # across clusters absolutely happen at Tier-1 shops).
+    # Symmetric-both-None: refuse unless --allow-unverified-cluster: a
+    # destroy and a deploy that both lack a fingerprint would otherwise
+    # match by name alone, and namespace names collide across clusters.
     if found_server is not None and expected_api_server is not None:
         if found_server != expected_api_server:
             return IdentityReport(
@@ -580,8 +564,6 @@ def verify_namespace_identity(
                 resource_name=namespace,
                 expected_deployment=expected_deployment,
                 found_deployment=found_name,
-                found_api_server=found_server,
-                current_api_server=expected_api_server,
                 hint=(
                     f"namespace {namespace!r} was deployed to cluster "
                     f"{found_server[:12]!r}, current context is "
@@ -589,8 +571,8 @@ def verify_namespace_identity(
                 ),
             )
     elif not allow_unverified_cluster:
-        # F2a/F3: asymmetric OR both-None. Cannot prove same cluster.
-        # F-5: split the hint so the user knows which side broke.
+        # Asymmetric OR both-None: cannot prove the same cluster. The hint
+        # says which side has no fingerprint.
         if found_server is None and expected_api_server is None:
             broken = (
                 "neither the deploy nor this destroy could compute a "
@@ -611,8 +593,6 @@ def verify_namespace_identity(
             resource_name=namespace,
             expected_deployment=expected_deployment,
             found_deployment=found_name,
-            found_api_server=found_server,
-            current_api_server=expected_api_server,
             hint=(
                 f"namespace {namespace!r}: {broken}. Cannot verify same "
                 "cluster. Pass --allow-unverified-cluster to override "
@@ -626,8 +606,6 @@ def verify_namespace_identity(
         resource_name=namespace,
         expected_deployment=expected_deployment,
         found_deployment=found_name,
-        found_api_server=found_server,
-        current_api_server=expected_api_server,
     )
 
 
@@ -719,12 +697,7 @@ def write_bucket_ownership_tag(
     # Read back and verify. If the backend does not support tagging, or
     # dropped the write, we surface it here instead of pretending the
     # bucket is now owned.
-    try:
-        got = read_bucket_ownership_tag(boto_client, bucket)
-    except BucketTaggingUnsupported:
-        # Should not happen if PUT succeeded above, but handle to keep
-        # the invariant "raise Unsupported, never lie about ownership."
-        raise
+    got = read_bucket_ownership_tag(boto_client, bucket)
     if got is None:
         raise BucketOwnershipError(
             f"bucket {bucket!r}: PutBucketTagging succeeded but "
@@ -937,9 +910,7 @@ def _marker_is_ours(marker: dict[str, Any] | None, identity: dict[str, Any]) -> 
     )
 
 
-def write_owner_marker(
-    boto_client: Any, bucket: str, identity: dict[str, Any], *, mode: str | None = None
-) -> MarkerResult:
+def write_owner_marker(boto_client: Any, bucket: str, identity: dict[str, Any]) -> MarkerResult:
     """Claim a tagless bucket with ``.lakebench/owner.json``.
 
     ``identity`` carries at least ``deployment`` and ``cluster`` (and the
@@ -953,19 +924,17 @@ def write_owner_marker(
     - ``unconditional`` (no conditional writes): read first and stop on a
       foreign marker, then a plain PUT, a read and compare, a
       ``MARKER_FALLBACK_WAIT_S`` wait and a second read. Two clusters writing
-      inside that window can both believe they won (open risk R12).
+      inside that window can both believe they won.
 
-    ``mode`` skips the probe (the caller's cached answer); otherwise the
-    answer is cached per endpoint for this process. Returns whose marker the
-    bucket carries afterwards. Read and write errors raise.
+    The probe's answer is cached per endpoint for this process. Returns whose
+    marker the bucket carries afterwards. Read and write errors raise.
     """
     import json
 
     from botocore.exceptions import ClientError
 
     endpoint = _endpoint_of(boto_client)
-    if mode is None:
-        mode = _MARKER_WRITE_MODE.get(endpoint)
+    mode = _MARKER_WRITE_MODE.get(endpoint)
     if mode is None:
         mode = "conditional" if probe_conditional_put(boto_client, bucket) else "unconditional"
         _MARKER_WRITE_MODE[endpoint] = mode
@@ -1190,7 +1159,6 @@ def _cluster_verdict(
                 resource_name=bucket,
                 expected_deployment=expected_deployment,
                 found_deployment=expected_deployment,
-                found_api_server=found_cluster,
                 tagged=tagged,
                 hint=(
                     f"bucket {bucket!r}: cannot compute this cluster's fingerprint; "
@@ -1203,8 +1171,6 @@ def _cluster_verdict(
                 resource_name=bucket,
                 expected_deployment=expected_deployment,
                 found_deployment=expected_deployment,
-                found_api_server=found_cluster,
-                current_api_server=mine,
                 tagged=tagged,
                 hint=(
                     f"bucket {bucket!r} belongs to deployment {expected_deployment!r} on "
@@ -1218,7 +1184,6 @@ def _cluster_verdict(
             resource_name=bucket,
             expected_deployment=expected_deployment,
             found_deployment=expected_deployment,
-            found_api_server=found_cluster,
             tagged=tagged,
         )
     if bucket in record and cluster_stamp(expected_cluster) is None:
@@ -1539,11 +1504,9 @@ def bucket_name_matches_deployment(
 def list_lakebench_deployment_names(core_v1: Any, exclude: str | None = None) -> list[str] | None:
     """Return the deployment names carried by other lakebench namespaces.
 
-    Mirrors the ``_is_other_lakebench`` pattern used elsewhere in
-    ``destroy.py``: reads the ``lakebench.deployment/name`` annotation
-    when present, and falls back to the namespace name for pre-PR-1
-    legacy namespaces that carry the ``managed-by=lakebench`` label
-    but no annotation. Legacy names still count as "another deployment
+    Reads the ``lakebench.deployment/name`` annotation when present, and
+    falls back to the namespace name for legacy namespaces that carry the
+    ``managed-by=lakebench`` label but no annotation. Legacy names still count as "another deployment
     on the cluster" for prefix-collision purposes.
 
     ``exclude`` skips the caller's own namespace name from the result.
@@ -1557,8 +1520,8 @@ def list_lakebench_deployment_names(core_v1: Any, exclude: str | None = None) ->
     - ``None`` when enumeration failed (RBAC denied, k8s API
       unreachable, kubeconfig missing). Callers MUST NOT treat this
       the same as an empty list: doing so would let the name-prefix
-      fallback fire under a namespace-scoped token, silently
-      re-opening the sibling-collision hole the round-2 fix closed.
+      fallback fire under a namespace-scoped token and let one
+      deployment claim a sibling's bucket by name.
       Callers should refuse the UNSUPPORTED verdict entirely unless
       the operator has opted in with ``--force-legacy``.
 
