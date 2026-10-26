@@ -356,7 +356,7 @@ def compute_badge_status(
     # Data completeness
     if pb is not None:
         if is_sustained and pb.ingest_ratio is None:
-            reason = getattr(pb, "ingest_ratio_unscored_reason", None)
+            reason = pb.ingest_ratio_unscored_reason
             warnings.append(
                 f"Ingest ratio not scored: {reason}"
                 if reason

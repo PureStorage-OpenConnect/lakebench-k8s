@@ -1081,6 +1081,10 @@ class PipelineBenchmark:
     # compute ratio. 0.0 would be a lie (says "no data ingested"), so the
     # unmeasurable case must be explicit.
     ingest_ratio: float | None = None
+    # A bronze driver log severed mid-window (one long run of missing batch
+    # ids): ingest_ratio is then not scored, and the reason says why.
+    bronze_log_incomplete: bool = False
+    ingest_ratio_unscored_reason: str | None = None
     pipeline_saturated: bool | None = None
     # True when the finite corpus was fully ingested and silver had caught up
     # before the window ended, so later gold cycles had nothing new to read.
@@ -1356,7 +1360,7 @@ class PipelineBenchmark:
         # of 1 on a complete log. _BRONZE_LOG_GAP_BOUND is the shortest run that
         # means a severance rather than scatter.
         self.bronze_log_incomplete = False
-        self.ingest_ratio_unscored_reason: str | None = None
+        self.ingest_ratio_unscored_reason = None
         for s in bronze_stages:
             if s.max_batch_id_gap is not None and s.max_batch_id_gap >= _BRONZE_LOG_GAP_BOUND:
                 self.bronze_log_incomplete = True
@@ -1936,7 +1940,7 @@ class PipelineBenchmark:
             if self.corpus_ingest_ratio is not None:
                 scores["corpus_ingest_ratio"] = round(self.corpus_ingest_ratio, 4)
                 scores["released_rows"] = self.released_rows
-            if getattr(self, "bronze_log_incomplete", False):
+            if self.bronze_log_incomplete:
                 scores["bronze_log_incomplete"] = True
                 scores["ingest_ratio_unscored_reason"] = self.ingest_ratio_unscored_reason
             if self.datagen_ahead is not None:
