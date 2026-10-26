@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import logging
 import math
@@ -97,7 +98,7 @@ class JobMetrics:
     # Seconds each rule's profile read took (Lakebench overhead inside the
     # job's elapsed time, never part of a rule's time).
     stage_profile_cost_s: dict[str, float] = field(default_factory=dict)
-    # TM operations layer (GOALS P10, AML gold only), from the driver's
+    # TM operations layer (AML gold only), from the driver's
     # ``[tm-invariant]`` and ``[tm-ops]`` lines. ``tm_invariants`` is keyed
     # by cycle (as a string, the JSON key) then invariant name, each value
     # {"status", "detail"}. ``tm_ops`` is the last operations summary.
@@ -121,17 +122,15 @@ class JobMetrics:
     # from bronze-verify. None on other jobs and workloads.
     c360_check: dict[str, Any] | None = None
     c360_bronze: dict[str, int] | None = None
-    # A2 gate metrics: per-silver-table row counts a silver-build
-    # job wrote (`silver_transactions_rows`, `silver_entities_rows`,
+    # Per-silver-table row counts a silver-build job wrote (`silver_transactions_rows`, `silver_entities_rows`,
     # `silver_accounts_rows`, `silver_statements_rows`, `silver_edges_rows`,
     # `silver_profiles_rows`). Empty on non-silver jobs; empty on c360 silver
     # (single silver table, tracked as `output_rows` already). The keys are
     # emitted by silver_build_financial.main() via log_job_metrics.
     silver_tables: dict[str, int] = field(default_factory=dict)
     # Any additional numeric/string metric a silver job emits via
-    # log_job_metrics(**extra) that is not otherwise recognised. Used for
-    # A5 (bronze_rows in STREAMING), G2 (input_size_gb_source label),
-    # G5 (silver_stream_scale_admission), and future one-off labels.
+    # log_job_metrics(**extra) that is not otherwise recognised (bronze_rows,
+    # the input_size_gb_source label, silver_stream_scale_admission).
     extra_metrics: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -240,11 +239,10 @@ class StreamingJobMetrics:
     submission_failures: list[dict[str, Any]] = field(default_factory=list)
     # UTC time the CLI first saw the driver RUNNING.
     running_at: str | None = None
-    # G5: labelled Lakebench-imposed scale envelope for silver streams
-    # (invariant 6). Populated by parse_streaming_logs from the
-    # `silver_stream_scale_cap` / `silver_stream_scale_admission` lines
-    # every silver_stream* main() emits at startup, and from any other
-    # stream-side label a future block adds.
+    # The `<key>: <val>` labels a stream logs (parse_streaming_logs), among
+    # them the Lakebench-imposed scale envelope every silver_stream* main()
+    # emits at startup (`silver_stream_scale_cap`,
+    # `silver_stream_scale_admission`).
     extra_metrics: dict[str, str] = field(default_factory=dict)
 
     def apply_window(self, logs: str | None, start: datetime, end: datetime) -> dict[str, Any]:
@@ -255,7 +253,8 @@ class StreamingJobMetrics:
         window's end too: rows that landed after it never count."""
         from lakebench.metrics.continuous_window import parse_events, window_stats
 
-        stats = window_stats(parse_events(logs, self.job_type), self.job_type, start, end)
+        events = parse_events(logs, self.job_type)
+        stats = window_stats(events, self.job_type, start, end)
         self.window_input_rows = stats["window_input_rows"]
         self.pre_window_input_rows = stats["pre_window_input_rows"]
         self.window_commits = stats["window_commits"]
@@ -270,9 +269,7 @@ class StreamingJobMetrics:
         elif self.job_type == "silver-stream":
             self.unique_rows_processed = self.total_rows_processed
             self.committed_rows = stats["committed_rows_to_end"]
-            self.window_rows_pro_rata = pro_rata_window_rows(
-                parse_events(logs, self.job_type), start, end
-            )
+            self.window_rows_pro_rata = pro_rata_window_rows(events, start, end)
         if self.job_type == "gold-refresh":
             self.freshness_seconds = stats["freshness_seconds"]
             self.freshness_active_seconds = stats["freshness_active_seconds"]
@@ -344,13 +341,13 @@ class BenchmarkRoundMeta:
     gold_event_age_seconds: float | None = None
     q9_contention_observed: bool = False
     q9_retry_used: bool = False
-    # Table health metrics (v1.1.0) -- captured at benchmark time. None: the
+    # Table health, captured at benchmark time. None: the
     # probe for that count failed (never a -1 or 0 stand-in).
     silver_data_file_count: int | None = None
     silver_snapshot_count: int | None = None
     gold_data_file_count: int | None = None
     gold_snapshot_count: int | None = None
-    # 1.7.11: names of queries that crossed their time limit in this round
+    # Names of queries that crossed their time limit in this round
     # after passing in an earlier round -- a measured SLA crossing (the corpus
     # grew past what the engine answers inside the limit), recorded here with
     # this round's silver_data_file_count rather than failing the run.
@@ -488,7 +485,7 @@ class PipelineMetrics:
     # per-rule recall/precision; None means recall was not computed.
     financial_scoring: dict[str, Any] | None = None
 
-    # P10 TM operations verdict for the run (metrics/tm_ops.tm_verdict), with
+    # The TM operations verdict for the run (metrics/tm_ops.tm_verdict), with
     # the invariants by cycle and the last operations summary. Batch also
     # keeps them per gold-finalize job; continuous has no job record, so this
     # is where its TM section comes from.
@@ -842,7 +839,8 @@ class StageMetrics:
       ``input_rows / elapsed_seconds``.  Call :meth:`compute_derived` after
       modifying input/elapsed values.
     - **Resources** (allocation): executor_count, executor_cores,
-      executor_memory_gb.  Sourced from ``_JOB_PROFILES`` in ``spark/job.py``.
+      executor_memory_gb.  Sourced from ``_JOB_PROFILES`` in
+      ``modules/pipeline_engines/spark/job.py``.
     - **Streaming** (zero for batch): latency_ms, freshness_seconds,
       total_batches, batch_size.
     - **Query** (zero for non-query): queries_executed, queries_per_hour.
@@ -1019,7 +1017,7 @@ class PipelineBenchmark:
     ----------------
     Each stage carries ``executor_count``, ``executor_cores``, and
     ``executor_memory_gb`` sourced from the job profiles in
-    ``spark/job.py:_JOB_PROFILES``.  These are **allocated** resources (what
+    ``modules/pipeline_engines/spark/job.py:_JOB_PROFILES``.  These are **allocated** resources (what
     was requested), not runtime utilization.  Per-job resource totals:
 
     - ``cpu_seconds_requested = executor_count × cores × elapsed``
@@ -1170,10 +1168,10 @@ class PipelineBenchmark:
     # failed or did not run.
     total_s3_objects: int | None = None
 
-    # Multi-cycle batch metrics (v1.1.0)
+    # Multi-cycle batch metrics
     cycles: list[CycleMetrics] = field(default_factory=list)
 
-    # QpH degradation (sustained mode, v1.1.0)
+    # QpH degradation (sustained mode)
     # Percent drop from first-half median to second-half median QpH.
     # Positive = degradation, negative = improvement, None = insufficient data.
     qph_degradation_pct: float | None = None
@@ -1184,7 +1182,7 @@ class PipelineBenchmark:
     # the same query still records a figure here.
     qph_degradation_withheld: str | None = None
 
-    # Maintenance cost metrics (v1.3)
+    # Maintenance cost metrics
     maintenance_elapsed_seconds: float = 0.0
     # Pre-benchmark maintenance stopped early (first statement timeout or
     # the overall cap): a statement may still run, so the post QpH is flagged.
@@ -1478,7 +1476,7 @@ class PipelineBenchmark:
                 self.ingest_ratio = (
                     total_bronze_rows / released if released else self.corpus_ingest_ratio
                 )
-                self.pipeline_saturated = self.ingest_ratio < 0.95
+                self.pipeline_saturated = self.ingest_ratio < RATIO_THRESHOLD
         else:
             self.ingest_ratio = None
             self.corpus_ingest_ratio = None
@@ -1505,7 +1503,7 @@ class PipelineBenchmark:
             )
         self.stage_capacity = _stage_capacity(streaming, self.config_snapshot) or None
         if self.ingest_ratio is not None:
-            if self.ingest_ratio >= 0.95:
+            if self.ingest_ratio >= RATIO_THRESHOLD:
                 self.intake_limit = "none"
             elif self.bronze_busy_fraction is not None:
                 # Trigger evidence first: a bronze that finishes each batch
@@ -1549,12 +1547,11 @@ class PipelineBenchmark:
             # what it wrote after the window, before its pods saw the stop
             # marker.
             offered = self.released_rows or datagen_rows
-            self.datagen_ahead = total_bronze_rows < 0.95 * offered
+            self.datagen_ahead = total_bronze_rows < RATIO_THRESHOLD * offered
         if windowed and run_duration > 0:
             # Silver rows in the window, a batch straddling either edge
-            # counted pro rata (owner, 2026-10-08): whole-batch counting
-            # moved the pace ~25% on which side of the edge one ~200 s batch
-            # committed. Records without the pro-rata count keep the
+            # counted pro rata: whole-batch counting moved the pace ~25% on
+            # which side of the edge one ~200 s batch committed. Records without the pro-rata count keep the
             # committed rows.
             silver_window = [
                 s.window_rows_pro_rata
@@ -1639,20 +1636,15 @@ class PipelineBenchmark:
             self.benchmark_rounds and composite_qph_basis(self.benchmark_rounds)[0]["blended"]
         )
         if blended and len(self.benchmark_rounds) >= 4:
-            self.qph_degradation_pct = None
             self.qph_degradation_withheld = QPH_DEGRADATION_BLENDED
-        elif self.benchmark_rounds and len(self.benchmark_rounds) >= 4:
-            # Over the composite's rounds (AML: the fixed full set only).
-            # Two or more rounds a half, as over every round before.
+        elif len(self.benchmark_rounds) >= 4:
+            # Over the composite's rounds (AML: the fixed full set only), two
+            # or more a half.
             series = self.composite_rounds()
-            if len(series) < 4:
-                series = []
-            mid = len(series) // 2
-            first_half = [r.qph for r in series[:mid]]
-            second_half = [r.qph for r in series[mid:]]
-            if first_half and second_half:
-                m1 = statistics.median(first_half)
-                m2 = statistics.median(second_half)
+            if len(series) >= 4:
+                mid = len(series) // 2
+                m1 = statistics.median([r.qph for r in series[:mid]])
+                m2 = statistics.median([r.qph for r in series[mid:]])
                 if m1 > 0:
                     self.qph_degradation_pct = round((1 - m2 / m1) * 100, 2)
 
@@ -2117,13 +2109,13 @@ class PipelineBenchmark:
             "end_time": self.end_time.isoformat() if self.end_time else None,
             "success": self.success,
             "scorecard": scores,
-            "scores": scores,  # backward compat alias
+            "scores": scores,  # the same block; older readers read this key
             "stages": [s.to_dict() for s in self.stages],
             "stage_matrix": self.to_matrix(),
             "bucket_sizes": self._bucket_sizes(),
             "config_snapshot": self.config_snapshot,
         }
-        # Mode-specific top-level flags (spec Section 7.1)
+        # Mode-specific top-level flags
         if self.pipeline_mode == "batch":
             d["scale_ratio"] = ratio_out(self.scale_ratio, 3)
         else:
@@ -2156,7 +2148,7 @@ class PipelineBenchmark:
             d["cycles"] = [c.to_dict() for c in self.cycles]
         # Include human-readable descriptions for every score key present
         d["score_descriptions"] = {k: v for k, v in self._SCORE_DESCRIPTIONS.items() if k in scores}
-        # Tier 2 advanced metrics placeholder (populated when Prometheus deployed)
+        # Always null; kept so the record keeps its keys.
         d["advanced_metrics"] = None
         return d
 
@@ -2277,6 +2269,20 @@ def _cycle_datagen_overlap(
     return total
 
 
+#: Batch job type -> (stage, the run's bucket-size field for its output).
+_STAGE_MAP: dict[str, tuple[str, str]] = {
+    "bronze-verify": ("bronze", "bronze_size_gb"),
+    "silver-build": ("silver", "silver_size_gb"),
+    "gold-finalize": ("gold", "gold_size_gb"),
+}
+#: Streaming job type -> stage.
+_STREAMING_MAP: dict[str, str] = {
+    "bronze-ingest": "bronze",
+    "silver-stream": "silver",
+    "gold-refresh": "gold",
+}
+
+
 def build_pipeline_benchmark(
     run: PipelineMetrics,
     datagen_elapsed: float = 0.0,
@@ -2314,7 +2320,8 @@ def build_pipeline_benchmark(
         - ``silver-stream``  → silver stage (type=streaming)
         - ``gold-refresh``   → gold stage (type=streaming)
 
-        Executor resource profiles are looked up from ``spark/job.py``.
+        Executor resource profiles are looked up from
+        ``modules/pipeline_engines/spark/job.py``.
 
     **Query** (benchmark populated):
         Appends a query stage with QpH and Trino benchmark seconds.
@@ -2390,12 +2397,6 @@ def build_pipeline_benchmark(
         dg.compute_derived()
         stages.append(dg)
 
-    # Batch stages from jobs
-    _STAGE_MAP: dict[str, tuple[str, str]] = {
-        "bronze-verify": ("bronze", "bronze_size_gb"),
-        "silver-build": ("silver", "silver_size_gb"),
-        "gold-finalize": ("gold", "gold_size_gb"),
-    }
     for job in run.jobs:
         stage_name, size_attr = _STAGE_MAP.get(job.job_type, (job.job_type, ""))
         fallback_size = (getattr(run, size_attr, None) or 0.0) if size_attr else 0.0
@@ -2430,10 +2431,13 @@ def build_pipeline_benchmark(
             executor_cores=job.executor_cores,
             executor_memory_gb=job.executor_memory_gb,
         )
-        # Backfill executor_cores from profile when progress callback missed it
+        # A job recorded without its profile (submit failed, interrupted):
+        # the stage still names the cores and memory it would have run with.
         if stage.executor_cores == 0:
             try:
-                from lakebench.spark.job import get_job_profile as _get_profile
+                from lakebench.modules.pipeline_engines.spark.job import (
+                    get_job_profile as _get_profile,
+                )
 
                 # Schema-aware so AML overrides (e.g. bronze-verify 20Gi) are
                 # reported, not the c360 base.
@@ -2452,20 +2456,21 @@ def build_pipeline_benchmark(
                 pass
         stages.append(stage)
 
-    # Streaming stages (sustained mode)
-    _STREAMING_MAP: dict[str, str] = {
-        "bronze-ingest": "bronze",
-        "silver-stream": "silver",
-        "gold-refresh": "gold",
-    }
     for sj in run.streaming:
         # Look up resource profile for streaming job type
         _s_cores = 0
         _s_mem = 0.0
         _s_execs = 0
         try:
-            from lakebench.spark.job import get_executor_count as _get_exec_count
-            from lakebench.spark.job import get_job_profile as _get_profile
+            from lakebench.modules.pipeline_engines.spark.job import (
+                EXECUTOR_OVERRIDE_FIELDS,
+            )
+            from lakebench.modules.pipeline_engines.spark.job import (
+                get_executor_count as _get_exec_count,
+            )
+            from lakebench.modules.pipeline_engines.spark.job import (
+                get_job_profile as _get_profile,
+            )
 
             _s_schema = run.config_snapshot.get("workload_schema")
             _s_profile = _get_profile(sj.job_type, _s_schema)
@@ -2482,10 +2487,6 @@ def build_pipeline_benchmark(
                     sj.job_type, _s_scale, _s_schema
                 )
                 # Check config overrides (streaming jobs may have explicit counts)
-                from lakebench.modules.pipeline_engines.spark.job import (
-                    EXECUTOR_OVERRIDE_FIELDS,
-                )
-
                 _override_key = EXECUTOR_OVERRIDE_FIELDS.get(sj.job_type, ("", ""))[1]
                 _overrides = run.config_snapshot.get("spark", {}).get("executor_overrides", {})
                 _override_val = _overrides.get(_override_key)
@@ -2562,9 +2563,8 @@ def build_pipeline_benchmark(
     # the bronze table, about twice the input). Gold re-reads silver every
     # cycle and reports no input bytes. Unmeasured (0) when datagen's bytes
     # per row are unknown.
-    _bpr = run.config_snapshot.get("datagen_bytes_per_row") or _datagen_bytes_per_row(
-        datagen_fleet if datagen_fleet is not None else getattr(run, "datagen_fleet", None)
-    )
+    _fleet = datagen_fleet if datagen_fleet is not None else run.datagen_fleet
+    _bpr = _datagen_bytes_per_row(_fleet)
     for stage in stages:
         if (
             stage.stage_type == "streaming"
@@ -2603,7 +2603,6 @@ def build_pipeline_benchmark(
         snapshot["datagen_output_files"] = datagen_output_files
     # Continuous datagen's wall time: with its rows it gives the rate, and so
     # the rows it had written by a point in the window (ingest_ratio).
-    _fleet = datagen_fleet if datagen_fleet is not None else getattr(run, "datagen_fleet", None)
     if snapshot.get("datagen_continuous") and isinstance(_fleet, dict):
         _elapsed = _fleet.get("wall_elapsed_max_s")
         if isinstance(_elapsed, (int, float)) and _elapsed > 0:
@@ -2661,23 +2660,6 @@ def executed_query_set(benchmark: BenchmarkMetrics) -> tuple[list[str], str | No
     return names, (query_set_id(names) if names else None)
 
 
-def round_label(benchmark: BenchmarkMetrics) -> str:
-    """How a round's query set reads in a report: ``<n>-query set``, with
-    "(before cases exist)" when the investigator queries were left out for
-    want of a case (AML continuous before its first TM pass). The label
-    the AML continuous report renders per round; nothing in this module
-    calls it."""
-    rec = benchmark.round_record or {}
-    executed = rec.get("executed_queries")
-    n = len(executed) if isinstance(executed, list) else len(executed_query_set(benchmark)[0])
-    label = f"{n}-query set"
-    if rec.get("investigator_queries") == "absent_no_cases":
-        label += " (before cases exist)"
-    elif rec.get("investigator_queries") == "probe_failed":
-        label += " (case probe failed)"
-    return label
-
-
 def rounds_by_query_set(rounds: list[BenchmarkMetrics]) -> dict[str, list[BenchmarkMetrics]]:
     """Rounds that measured a QpH, grouped by the query set each executed
     (``QUERY_SET_NOT_RECORDED`` for a round recorded before the field)."""
@@ -2694,6 +2676,7 @@ def rounds_by_query_set(rounds: list[BenchmarkMetrics]) -> dict[str, list[Benchm
     return groups
 
 
+@functools.cache
 def aml_fixed_query_set() -> str:
     """The AML continuous composite's query set id: the full Financial set
     (12 queries with the investigator class)."""
@@ -2705,7 +2688,7 @@ def aml_fixed_query_set() -> str:
 
 def composite_query_set(config_snapshot: dict[str, Any] | None) -> str | None:
     """The query set id a continuous composite QpH is over, or None for the
-    median over every round. AML (owner, 2026-10-08): the fixed full set,
+    median over every round. AML: the fixed full set,
     never a blend with the 8-query rounds that run before a case exists."""
     if (config_snapshot or {}).get("workload_schema") != "financial":
         return None
@@ -3175,15 +3158,13 @@ def _window_batches(stage: StageMetrics) -> int:
     return stage.total_batches
 
 
-def _cadence_seconds(interval: Any, stage: Any | None) -> float | None:
+def _cadence_seconds(interval: Any, stage: StageMetrics | None) -> float | None:
     """A streaming stage's cadence in seconds: its trigger interval, or, with
     none ("0 seconds": back to back), its median micro-batch time."""
     trigger = interval_seconds(interval)
-    if trigger:
+    if trigger or stage is None:
         return trigger
-    if stage is None:
-        return trigger
-    ms = getattr(stage, "median_batch_ms", None) or getattr(stage, "latency_ms", None)
+    ms = stage.median_batch_ms or stage.latency_ms
     return ms / 1000.0 if ms else trigger
 
 
@@ -3203,22 +3184,30 @@ _TTD_DETAIL_LINE = re.compile(
 )
 
 
-def _merge_hist(lines: list[re.Match[str]]) -> dict[str, Any] | None:
-    """{"alerts", "p50_seconds", "p95_seconds", "max_seconds"} merged over
-    ``lines`` (same bin width as the first), or None when nothing measured."""
-    if not lines:
-        return None
+def _hist(
+    lines: list[re.Match[str]],
+) -> tuple[int, dict[int, int], list[float], list[re.Match[str]]]:
+    """(bin width, merged {bin: count}, per-line maxima, the lines merged)
+    over the non-empty ``lines`` with the first line's bin width."""
     bin_s = int(lines[0]["bin"])
     bins: dict[int, int] = {}
     peaks: list[float] = []
-    for m in lines:
-        if int(m["bin"]) != bin_s:
-            continue
+    matched = [m for m in lines if int(m["bin"]) == bin_s]
+    for m in matched:
         if m["max"] != "-":
             peaks.append(float(m["max"]))
         for pair in filter(None, m["bins"].split(",")):
             b, n = pair.split(":")
             bins[int(b)] = bins.get(int(b), 0) + int(n)
+    return bin_s, bins, peaks, matched
+
+
+def _merge_hist(lines: list[re.Match[str]]) -> dict[str, Any] | None:
+    """{"alerts", "p50_seconds", "p95_seconds", "max_seconds"} merged over
+    ``lines`` (same bin width as the first), or None when nothing measured."""
+    if not lines:
+        return None
+    bin_s, bins, peaks, _ = _hist(lines)
     total = sum(bins.values())
     if total == 0 or not peaks:
         return {"alerts": total, "p50_seconds": None, "p95_seconds": None, "max_seconds": None}
@@ -3307,27 +3296,11 @@ def _apply_ttd(metrics: StreamingJobMetrics, lines: list[re.Match[str]], cycles:
         # stay None.
         metrics.ttd_unmeasured_cycles = len(cycles)
         return
-    bin_s = int(lines[0]["bin"])
-    bins: dict[int, int] = {}
-    unmatched = 0
-    late = 0
-    peaks: list[float] = []
-    measured: set[int] = set()
-    for m in lines:
-        if int(m["bin"]) != bin_s:
-            continue
-        measured.add(int(m["cycle"]))
-        unmatched += int(m["unmatched"])
-        late += int(m["late"])
-        if m["max"] != "-":
-            peaks.append(float(m["max"]))
-        for pair in filter(None, m["bins"].split(",")):
-            b, n = pair.split(":")
-            bins[int(b)] = bins.get(int(b), 0) + int(n)
+    bin_s, bins, peaks, matched = _hist(lines)
     metrics.ttd_alerts = sum(bins.values())
-    metrics.ttd_unmatched = unmatched
-    metrics.ttd_late = late
-    metrics.ttd_unmeasured_cycles = len(cycles - measured)
+    metrics.ttd_unmatched = sum(int(m["unmatched"]) for m in matched)
+    metrics.ttd_late = sum(int(m["late"]) for m in matched)
+    metrics.ttd_unmeasured_cycles = len(cycles - {int(m["cycle"]) for m in matched})
     if metrics.ttd_alerts > 0 and peaks:
         mx = max(peaks)
         metrics.ttd_max_seconds = mx
@@ -3507,15 +3480,6 @@ class MetricsCollector:
         if self.current_run:
             self.current_run.jobs.append(metrics)
 
-    def record_query(self, metrics: QueryMetrics) -> None:
-        """Record metrics for a query.
-
-        Args:
-            metrics: QueryMetrics to record
-        """
-        if self.current_run:
-            self.current_run.queries.append(metrics)
-
     def record_benchmark(self, benchmark: BenchmarkMetrics) -> None:
         """Record benchmark results.
 
@@ -3610,7 +3574,7 @@ class MetricsCollector:
                     logger.info(
                         f"Measured {layer} bucket: {info.object_count:,} objects, {size_gb:.2f} GB"
                     )
-                elif not getattr(info, "exists", True):
+                elif not info.exists:
                     logger.warning(
                         f"Bucket '{bucket}' does not exist -- "
                         f"check that config buckets match actual bucket names"
@@ -3709,17 +3673,6 @@ class MetricsCollector:
                     key, value = match.groups()
                     self._apply_metric(metrics, key, value)
 
-        # Fallback timing for scripts without a JOB METRICS block. The block's
-        # elapsed_seconds wins: this pattern is loose enough to match
-        # unrelated JVM log lines, so it must never override a measured value.
-        if metrics.elapsed_seconds <= 0:
-            time_match = re.search(
-                r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*completed? in (\d+\.?\d*)s",
-                logs,
-            )
-            if time_match:
-                metrics.elapsed_seconds = float(time_match.group(2))
-
         # Per-rule alert counts and per-rule errors, from the
         # driver log line ``[detection] {rule_id}: alerts=N ...``.
         # Emitter format is fixed with ``elapsed=Ns`` as the trailing token:
@@ -3785,7 +3738,7 @@ class MetricsCollector:
                 except ValueError:
                     pass
 
-        # AML-1: per-rule Spark stage profile (common.rule_stage_profile).
+        # AML: per-rule Spark stage profile (common.rule_stage_profile).
         from lakebench.metrics.stage_profile import parse_stage_profile
 
         (
@@ -3794,7 +3747,7 @@ class MetricsCollector:
             metrics.stage_profile_cost_s,
         ) = parse_stage_profile(logs)
 
-        # P10 TM operations lines (tm_operations.py).
+        # TM operations lines (tm_operations.py).
         from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_ops, parse_tm_status
 
         metrics.tm_invariants = {str(c): inv for c, inv in parse_tm_invariants(logs).items()}
@@ -3810,7 +3763,7 @@ class MetricsCollector:
             metrics.alert_set_unavailable,
         ) = parse_alert_set(logs)
 
-        # Customer 360 expected-result facts (reporting only, D6).
+        # Customer 360 expected-result facts.
         from lakebench.metrics.c360_correctness import parse_c360_bronze, parse_c360_check
 
         metrics.c360_check = parse_c360_check(logs)
@@ -3836,21 +3789,21 @@ class MetricsCollector:
         key_lower = key.lower()
 
         try:
-            if key_lower in ("total_size_gb", "bronze_size_gb", "input_size_gb"):
+            if key_lower == "input_size_gb":
                 metrics.input_size_gb = float(value)
             elif key_lower in ("output_size_gb",):
                 metrics.output_size_gb = float(value)
-            elif key_lower in ("estimated_rows", "input_rows", "estimated_input_rows"):
+            elif key_lower in ("estimated_rows", "input_rows"):
                 metrics.input_rows = int(float(value))
             elif key_lower in ("output_rows",):
                 metrics.output_rows = int(float(value))
             elif key_lower in ("elapsed_seconds",):
                 metrics.elapsed_seconds = float(value)
             elif key_lower.startswith("silver_") and key_lower.endswith("_rows"):
-                # A2: per-silver-table row counts from silver_build_financial.
-                # Keys like `silver_transactions_rows`, `silver_entities_rows`.
-                # Refuse to silently coerce a non-numeric here -- a garbled
-                # emit is more useful visible than as a zero.
+                # Per-silver-table row counts from silver_build_financial
+                # (`silver_transactions_rows`, `silver_entities_rows`). A
+                # non-numeric value is logged at debug and dropped, never
+                # coerced to zero.
                 metrics.silver_tables[key_lower] = int(float(value))
             else:
                 # Any other emitted metric is stashed as a string so it
@@ -4067,28 +4020,3 @@ class MetricsCollector:
             metrics.unique_rows_processed = None
 
         return metrics
-
-    def get_summary(self) -> dict[str, Any]:
-        """Get summary of current run metrics.
-
-        Returns:
-            Summary dict
-        """
-        if not self.current_run:
-            return {}
-
-        jobs = self.current_run.jobs
-        total_input_gb = sum(j.input_size_gb for j in jobs)
-        total_output_rows = sum(j.output_rows for j in jobs)
-        total_time = sum(j.elapsed_seconds for j in jobs)
-
-        return {
-            "run_id": self.current_run.run_id,
-            "deployment": self.current_run.deployment_name,
-            "total_jobs": len(jobs),
-            "successful_jobs": sum(1 for j in jobs if j.success),
-            "total_input_gb": total_input_gb,
-            "total_output_rows": total_output_rows,
-            "total_job_time_seconds": total_time,
-            "avg_throughput_gb_per_second": total_input_gb / total_time if total_time > 0 else 0,
-        }
