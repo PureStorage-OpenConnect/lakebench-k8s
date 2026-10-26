@@ -356,11 +356,6 @@ def _evidence_cap(
     return {_s(r[0]): _i(r[1]) for r in run_tsv(sql, timeout)}
 
 
-def _n_inst(run_tsv: RunTsv, catalog: str, pins: dict[str, str], timeout: int) -> dict[str, int]:
-    sql = _template("n_inst.sql.tmpl").format(catalog=catalog, manifest_pin=pins["manifest_pin"])
-    return {_s(r[0]): _i(r[1]) for r in run_tsv(sql, timeout)}
-
-
 def _workload_categories(
     run_tsv: RunTsv, catalog: str, pins: dict[str, str], timeout: int
 ) -> dict[str, str | None]:
@@ -671,7 +666,10 @@ def score(
         timeout=timeout,
     )
     capped = _evidence_cap(run_tsv, catalog, pins, status_run_id, timeout)
-    n_inst = _n_inst(run_tsv, catalog, pins, timeout)
+    # The recall_by_code denominator: instances per typology_type over the
+    # full manifest, which corpus_instances already counts (_guard_manifest
+    # refuses repeated typology_ids).
+    n_inst = {typ: c["corpus_instances"] for typ, c in cov.items()}
     workload = _workload_categories(run_tsv, catalog, pins, timeout)
     by_code = _by_code(
         run_tsv, catalog, pins, status_run_id, targets_sql, ran_targets, n_inst, meta, timeout

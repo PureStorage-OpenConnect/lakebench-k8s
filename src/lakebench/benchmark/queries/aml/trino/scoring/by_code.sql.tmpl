@@ -8,8 +8,9 @@
 --   hit_alerts  = distinct code-alerts that are on target
 -- Placeholders: {catalog}, {run_id}, {alerts_pin}, {manifest_pin},
 -- {targets_values} (VALUES of (rule_id, target_typology) for the designated
--- rules that ran). The assembler also needs the uncoded-alert count and the
--- per-typology instance counts; those come from by_code_meta.sql.tmpl.
+-- rules that ran). The assembler also needs the uncoded-alert count, from
+-- by_code_meta.sql.tmpl, and the per-typology instance counts, from
+-- coverage_recall.sql.tmpl.
 -- Memory shape: the alerts' payment lists are exploded once, as the probe
 -- side of the join to the manifest (build side); only on-target matches are
 -- fanned out over the codes and made distinct.
