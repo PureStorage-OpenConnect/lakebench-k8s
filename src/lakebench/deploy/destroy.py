@@ -1,7 +1,6 @@
 """Destroy logic for Lakebench deployments.
 
-Extracted from DeploymentEngine.destroy_all() to reduce engine.py LOC.
-Called by DeploymentEngine.destroy_all() -- not used directly.
+Called by DeploymentEngine.destroy_all(), not used directly.
 """
 
 from __future__ import annotations
@@ -48,12 +47,10 @@ DEFAULT_NAMESPACE_WAIT_TIMEOUT = 600
 _NAMESPACE_POLL_SECONDS = 3.0
 _NAMESPACE_PROGRESS_SECONDS = 30.0
 
-# Per-statement timeout for destroy's table maintenance and DROP. Maintenance
-# at 0s retention and remove_orphan_files on a large table run for minutes;
-# the 30 s exec default killed them client-side (and, before exec_sql checked
-# the exit code, reported them as done).
+# Per-statement timeout for destroy's unregister or DROP; a coordinator under
+# load can take minutes to answer.
 _TABLE_SQL_TIMEOUT = 600
-# Overall bound on destroy's table step (financial: 17 tables x 3 statements).
+# Overall bound on destroy's table step (one statement per table).
 _TABLE_STEP_CAP = 1800
 
 # Delays before each in-lease namespace delete attempt (seconds).
@@ -93,16 +90,8 @@ _sleep = time.sleep
 # - Spark (beeline): "[TABLE_OR_VIEW_NOT_FOUND]" and "[SCHEMA_NOT_FOUND]"
 #   error classes; Iceberg Spark procedures (CALL <cat>.system.*) wrap a
 #   NoSuchTableException as "Couldn't load table '<t>' in catalog '<c>'".
-# These shapes come from the engines' sources and are not yet confirmed
-# against live output; the release matrix (R14) confirms them per recipe.
+# These shapes come from the engines' sources.
 _TRINO_FAILED = r"Query \S+ failed: (?:line \d+:\d+: )?"
-_SCHEMA_MISSING_PATTERNS = (
-    _TRINO_FAILED + r"Schema '[^'\n]+' does not exist",
-    # SchemaNotFoundException from a table procedure (unregister_table).
-    _TRINO_FAILED + r"Schema [^\s']+ not found",
-    r"\[SCHEMA_NOT_FOUND\]",
-    r"\bSCHEMA_NOT_FOUND\b",
-)
 _TABLE_MISSING_RE = re.compile(
     "|".join(
         (
@@ -111,11 +100,14 @@ _TABLE_MISSING_RE = re.compile(
             r"Couldn't load table '[^'\n]+' in catalog '[^'\n]+'",
             r"\[TABLE_OR_VIEW_NOT_FOUND\]",
             r"\bTABLE_NOT_FOUND\b",
+            _TRINO_FAILED + r"Schema '[^'\n]+' does not exist",
+            # SchemaNotFoundException from a table procedure (unregister_table).
+            _TRINO_FAILED + r"Schema [^\s']+ not found",
+            r"\[SCHEMA_NOT_FOUND\]",
+            r"\bSCHEMA_NOT_FOUND\b",
         )
-        + _SCHEMA_MISSING_PATTERNS
     )
 )
-_SCHEMA_MISSING_RE = re.compile("|".join(_SCHEMA_MISSING_PATTERNS))
 
 
 def _operative_sql(sql: str) -> str:
@@ -126,10 +118,6 @@ def _operative_sql(sql: str) -> str:
 
 def _is_table_missing(e: Exception) -> bool:
     return bool(_TABLE_MISSING_RE.search(str(e)))
-
-
-def _is_schema_missing(e: Exception) -> bool:
-    return bool(_SCHEMA_MISSING_RE.search(str(e)))
 
 
 class _NamespaceReplaced(Exception):
@@ -503,12 +491,12 @@ def _delete_namespace_and_wait(
 
 
 def _stamp_legacy_proven(engine, s3, namespace: str, plan, guard) -> list[str]:
-    """Stamp this cluster on the plan's ownership-row-3 buckets; notes for failures.
+    """Stamp this cluster on the plan's LEGACY_PROVEN buckets; notes for failures.
 
     Tagged: the ownership tags rewritten with ``lakebench.cluster`` (the
     created flag and workload kept). Tagless: the owner marker. A failure
-    is a note, not a refusal: the bucket then reads row 4 on a later deploy
-    and is kept, never emptied by mistake.
+    is a note, not a refusal: the bucket then reads LEGACY_UNPROVEN on a
+    later deploy and is kept, never emptied by mistake.
     """
     from lakebench.deploy.ownership import (
         TAG_WORKLOAD_SCHEMA,
@@ -534,8 +522,8 @@ def _stamp_legacy_proven(engine, s3, namespace: str, plan, guard) -> list[str]:
                     bucket,
                     deployment,
                     workload_schema=prior.get(TAG_WORKLOAD_SCHEMA),
-                    # Row 3 means the created record lists it: keep that
-                    # proof on the bucket once the record goes.
+                    # LEGACY_PROVEN means the created record lists it: keep
+                    # that proof on the bucket once the record goes.
                     created=True,
                     cluster=stamp,
                 )
@@ -652,7 +640,7 @@ class _BucketPlan:
     owned_by_tag: list[str]
     owned_by_marker: list[str]
     unverified_cluster: list[str]
-    # Ownership row 3 buckets (name, tagged) the bucket step stamps.
+    # LEGACY_PROVEN buckets (name, tagged) the bucket step stamps.
     legacy_proven: list[tuple[str, bool]]
     cluster_fp: str | None
     absent_buckets: list[str]
@@ -669,8 +657,7 @@ def _files_left_in_refused_buckets(engine, refused: set[str], unregistered: list
 
     The table step removed these tables from the catalog only; their data
     and metadata files live in their layer's bucket, and a refused bucket is
-    not emptied. Without this the user learned only that the bucket was kept
-    (lb16-checks2).
+    not emptied, so the user is told which tables' files it still holds.
     """
     if not refused or not unregistered:
         return []
@@ -713,6 +700,8 @@ def _classify_buckets(
     """
     from kubernetes import client as k8s_client
 
+    from lakebench.k8s import get_k8s_client
+
     def _progress(component: str, status: DeploymentStatus, message: str) -> None:
         if report is not None:
             report(component, status, message)
@@ -721,6 +710,7 @@ def _classify_buckets(
 
     s3_cfg = engine.config.platform.storage.s3
     transient = False
+    # One bucket may back two layers; handle it once.
     buckets = list(
         dict.fromkeys(
             [
@@ -747,27 +737,23 @@ def _classify_buckets(
 
     identity_name = engine.config.name
     # The stamp a bucket must carry to be this deployment's on this
-    # cluster. None (no CA data) keeps every stamped bucket (row 8);
-    # --allow-unverified-cluster waives the namespace check, never this one.
+    # cluster. None (no CA data) keeps every stamped bucket
+    # (UNVERIFIED_CLUSTER); --allow-unverified-cluster waives the namespace
+    # check, never this one.
     my_cluster = api_server_fingerprint(engine.config.platform.kubernetes.context or "")
     # Cluster-scan other lakebench deployments so the
     # UNSUPPORTED fallback can enforce longest-prefix-wins.
     # ``None`` means "cannot know" and the UNSUPPORTED
     # branch below MUST refuse rather than fall back to
-    # naive prefix. F8 (round-3): load the kubeconfig via
-    # get_k8s_client(context=...) so a stale ambient
-    # KUBECONFIG cannot make CoreV1Api target the wrong
-    # cluster.
-    from kubernetes import client as _kclient
-
-    from lakebench.k8s import get_k8s_client as _get_k8s
-
-    _get_k8s(
+    # naive prefix. The kubeconfig is loaded for the config's context
+    # first, so a stale ambient KUBECONFIG cannot make CoreV1Api target
+    # the wrong cluster.
+    get_k8s_client(
         context=engine.config.platform.kubernetes.context or "",
         namespace=engine.config.get_namespace(),
     )
     other_deployments = list_lakebench_deployment_names(
-        _kclient.CoreV1Api(),
+        k8s_client.CoreV1Api(),
         exclude=engine.config.get_namespace(),
     )
     # The namespace records which buckets lakebench
@@ -789,7 +775,7 @@ def _classify_buckets(
     # Recorded-only buckets are not named by the current config.
     # On backends without tagging the only
     # ownership proof is the name, and another deployment may be
-    # using such a bucket now (S-P6 style shared bronze), so a
+    # using such a bucket now (a shared bronze bucket), so a
     # non-empty one is left in place, never emptied.
     held_recorded: list[str] = []
     # A recorded bucket another deployment's tag now claims is
@@ -814,24 +800,21 @@ def _classify_buckets(
     legacy_unproven: list[str] = []
     unverified_cluster: list[str] = []
     legacy_proven: list[tuple[str, bool]] = []
-    # Only the created record proves this cluster made a bucket; the
-    # adopted-empty record is what a 1.6 deploy wrote when it adopted another
-    # cluster's empty bucket (a 1.7 adoption carries an owner marker).
-    record = created_record
     for bucket in buckets:
+        # Only the created record proves this cluster made a bucket.
         v = verify_bucket_ownership(
             s3.raw_client,
             bucket,
             identity_name,
             expected_cluster=my_cluster,
-            created_record=record,
+            created_record=created_record,
         )
         if v.verdict is IdentityVerdict.LEGACY_PROVEN:
-            # Row 3: the created record proves this cluster made it. It is
-            # stamped by the bucket step (a bucket destroy keeps then stays
-            # this deployment's after the record goes with the namespace).
-            # A tagged one is ours as a MATCH is; a tagless one takes the
-            # record branch below, as before cluster stamps.
+            # The created record proves this cluster made it. It is stamped
+            # by the bucket step (a bucket destroy keeps then stays this
+            # deployment's after the record goes with the namespace). A
+            # tagged one is ours as a MATCH is; a tagless one takes the
+            # record branch below.
             legacy_proven.append((bucket, v.tagged))
             v = dataclasses.replace(
                 v,
@@ -889,7 +872,7 @@ def _classify_buckets(
             # ``other_deployments is None`` means the
             # enumeration itself failed and we cannot
             # enforce longest-prefix -- refuse rather than
-            # fall back to naive prefix (F2, round-3).
+            # fall back to naive prefix.
             prefix_ok = other_deployments is not None and bucket_name_matches_deployment(
                 bucket, identity_name, other_deployments
             )
@@ -955,10 +938,9 @@ def _classify_buckets(
                     bucket,
                     identity_name,
                 )
-                # F6: mirror the IN_PROGRESS report on the
-                # forced branch so a --force-legacy wipe is
-                # visible in the progress stream, not just
-                # in the final summary.
+                # Report the forced branch too, so a --force-legacy
+                # wipe is visible in the progress stream, not just in
+                # the final summary.
                 _progress(
                     "s3-buckets",
                     DeploymentStatus.IN_PROGRESS,
@@ -1125,30 +1107,47 @@ _S3_URI_RE = re.compile(r"\bs3[an]?://([^/\s|'\"]+)")
 
 
 def _table_location_bucket(
-    query_sql, maint_engine: str, k8s, pod_name: str, namespace: str, table: str
-) -> tuple[str | None, str]:
+    query_sql,
+    maint_engine: str,
+    k8s,
+    pod_name: str,
+    namespace: str,
+    table: str,
+    *,
+    missing_log_is_gone: bool = False,
+) -> tuple[str | None, str, str]:
     """The bucket holding a Delta table's location, from ``DESCRIBE DETAIL``.
 
-    Returns ``(bucket, "")``, ``(None, "missing")`` when the table (or its
-    schema) is not there, or ``(None, reason)`` when the location cannot be
-    read or is not a single S3 bucket.
+    Returns ``(bucket, "", "")``, ``(None, "missing", error)`` when the table
+    (or its schema) is not there, ``(None, "gone", error)`` when its
+    directory is already gone, or ``(None, reason, error)`` when the
+    location cannot be read or is not a single S3 bucket. ``error`` is the
+    engine's full error text, "" when the query succeeded.
+
+    ``missing_log_is_gone`` also reads DELTA_TABLE_NOT_FOUND (the log is
+    missing) as "gone"; destroy leaves it off and treats that error as an
+    unreadable location.
     """
     try:
         out = query_sql(maint_engine, k8s, pod_name, namespace, f"DESCRIBE DETAIL {table}")
     except Exception as e:  # noqa: BLE001
+        text = str(e)
         if _is_table_missing(e):
-            return None, "missing"
-        if _DELTA_PATH_GONE_RE.search(str(e)):
+            return None, "missing", text
+        if _DELTA_PATH_GONE_RE.search(text) or (
+            missing_log_is_gone and "[DELTA_TABLE_NOT_FOUND]" in text
+        ):
             # Registered, but its directory is already gone (an earlier run's
             # bucket step emptied it): a DROP deletes nothing now.
-            return None, "gone"
-        return None, f"location unreadable: {_one_line(e)}"
+            return None, "gone", text
+        return None, f"location unreadable: {_one_line(e)}", text
     buckets = set(_S3_URI_RE.findall(out or ""))
     if len(buckets) != 1:
         if not buckets:
-            return None, "no S3 location in DESCRIBE DETAIL output"
-        return None, "DESCRIBE DETAIL names more than one bucket: " + ", ".join(sorted(buckets))
-    return buckets.pop(), ""
+            return None, "no S3 location in DESCRIBE DETAIL output", ""
+        names = ", ".join(sorted(buckets))
+        return None, "DESCRIBE DETAIL names more than one bucket: " + names, ""
+    return buckets.pop(), "", ""
 
 
 def _trino_unregister_sql(table: str) -> str:
@@ -1201,9 +1200,9 @@ def _other_lakebench_namespaces(all_ns: list[Any], namespace: str) -> list[str]:
     """Names of the lakebench namespaces in ``all_ns`` other than ``namespace``.
 
     A namespace counts when it carries the ``lakebench.deployment/name``
-    annotation (PR-1 and later), or the ``app.kubernetes.io/managed-by`` or
-    ``app.kubernetes.io/name`` label set to ``lakebench`` (pre-PR-1
-    deployments predate the annotation). Every phase counts, Terminating
+    annotation, or the ``app.kubernetes.io/managed-by`` or
+    ``app.kubernetes.io/name`` label set to ``lakebench`` (deployments older
+    than the annotation). Every phase counts, Terminating
     included: a namespace still being torn down can still have pods that
     mount a legacy SecretClass, so counting it errs toward keeping the
     shared object. The one refcount for ``_legacy_secretclass_cleanup``.
@@ -1255,8 +1254,8 @@ def _legacy_secretclasses_present(custom_api: Any) -> bool:
 def _legacy_secretclass_cleanup(core_v1: Any, custom_api: Any, namespace: str) -> list[str]:
     """Delete the legacy fixed-name SecretClasses when no other deployment remains.
 
-    ADR-F6: ``lakebench-s3-credentials-class`` and
-    ``lakebench-s3-ca-cert-class`` belong to pre-PR-2 deployments. They exist
+    ``lakebench-s3-credentials-class`` and ``lakebench-s3-ca-cert-class``
+    belong to deployments older than per-namespace SecretClasses. They exist
     only if a deployment was migrated with ``admin migrate-deployment``,
     which copies them and does not delete them. They are cluster-scoped and
     shared, so they go only when no other lakebench namespace is left
@@ -1625,12 +1624,9 @@ def destroy_all(
 ) -> list[DeploymentResult]:
     """Destroy all deployed components.
 
-    Cleanup pattern:
-    1. Delete SparkApplications
-    2. Clean up orphaned Spark pods
-    3. Drop Iceberg tables (if Trino available)
-    4. Clean S3 buckets (optional)
-    5. Remove infrastructure in reverse order
+    Order: identity check; SparkApplications, Spark pods and datagen Jobs;
+    table unregister (Trino or Spark Thrift); S3 buckets (optional); then
+    the infrastructure in reverse deploy order and the namespace.
 
     Args:
         progress_callback: Optional callback for progress updates
@@ -1670,8 +1666,7 @@ def destroy_all(
             progress_callback(component, status, message)
 
     # Step 0: Identity check. Refuse if this namespace is owned by another
-    # lakebench deployment or targets a different cluster. See
-    # docs/internal/namespace-isolation.md.
+    # lakebench deployment or targets a different cluster.
     #
     # Legacy (annotation-less) namespaces are REFUSED unless the caller
     # passes ``force_legacy=True``. Warn-and-proceed on legacy state
@@ -1865,13 +1860,10 @@ def destroy_all(
     namespace_gone_midway = False
 
     def _namespace_step() -> list[DeploymentResult]:
-        # Un-watch then delete the namespace (only if lakebench created it).
-        # Finally, delete namespace if we created it
-        if (
-            engine.config.platform.kubernetes.create_namespace
-            and bucket_transient_failure
-            and not namespace_gone_midway
-        ):
+        # Un-watch then delete the namespace, only if lakebench created it.
+        if not engine.config.platform.kubernetes.create_namespace:
+            return results
+        if bucket_transient_failure and not namespace_gone_midway:
             # The namespace's identity annotations are the only proof that the
             # buckets belong to this deployment. Deleting it after the bucket step
             # failed would leave full buckets that no later destroy can prove it
@@ -1896,20 +1888,225 @@ def destroy_all(
             )
             report("namespace", DeploymentStatus.FAILED, keep_msg)
             return results
-        if engine.config.platform.kubernetes.create_namespace:
-            # A different, live incarnation of the name belongs to a redeploy
-            # that started after this destroy began (a concurrent destroy
-            # finished first, S-P3/S-P4). Un-watching or deleting it would break
-            # that deployment, so leave it alone.
-            try:
-                uid_now = _read_incarnation(engine, namespace)
-            except Exception as e:  # noqa: BLE001
-                # Fail closed: an unknown incarnation is never un-watched or deleted.
-                msg = (
-                    f"Namespace {namespace!r} NOT deleted: could not read its UID ({e}), "
-                    "so this destroy cannot tell it from a same-named redeploy. "
-                    "Re-run destroy when the API server is reachable."
+        # A different, live incarnation of the name belongs to a redeploy
+        # that started after this destroy began (a concurrent destroy
+        # finished first). Un-watching or deleting it would break
+        # that deployment, so leave it alone.
+        try:
+            uid_now = _read_incarnation(engine, namespace)
+        except Exception as e:  # noqa: BLE001
+            # Fail closed: an unknown incarnation is never un-watched or deleted.
+            msg = (
+                f"Namespace {namespace!r} NOT deleted: could not read its UID ({e}), "
+                "so this destroy cannot tell it from a same-named redeploy. "
+                "Re-run destroy when the API server is reachable."
+            )
+            results.append(
+                DeploymentResult(component="namespace", status=DeploymentStatus.FAILED, message=msg)
+            )
+            report("namespace", DeploymentStatus.FAILED, msg)
+            return results
+        # Gone ("") is fine: un-watching a deleted namespace is what we want.
+        if uid_now and uid_now != namespace_token_at_start:
+            msg = (
+                f"Destroy NOT completed: namespace {namespace} is now a newer "
+                "deployment with the same name (a redeploy); it was left alone"
+            )
+            logger.warning(msg)
+            results.append(
+                DeploymentResult(
+                    component="namespace",
+                    status=DeploymentStatus.FAILED,
+                    message=msg,
+                    details={REFUSAL_DETAIL: "destroy.redeployed"},
                 )
+            )
+            report("namespace", DeploymentStatus.FAILED, msg)
+            return results
+        # Drop the namespace from the Spark Operator's watch list FIRST. The
+        # operator crash-loops on a watched namespace that does not exist
+        # ("failed to wait for ... caches to sync"), which breaks
+        # SparkApplication reconciliation for every other namespace on the
+        # cluster. Doing this after the delete would leave exactly that
+        # window open.
+        #
+        # strict=True lease-gates the mutation against parallel destroys
+        # and raises WatchListMutationError on failure -- surfacing a
+        # crash-looping operator explicitly rather than swallowing it as
+        # a successful destroy. Any failure here is captured as a
+        # DeploymentResult and reported in the destroy summary.
+        from lakebench.modules.pipeline_engines.spark.operator import (
+            WatchListMutationError,
+        )
+        from lakebench.spark import SparkOperatorManager
+
+        def _same_incarnation_in_lease() -> None:
+            # Runs while the cluster lease is held, right before the helm
+            # upgrade. A redeploy's watch-list add takes the same lease, so a
+            # namespace re-created before this point is caught here and one
+            # re-created after it re-adds its entry once we release: the
+            # redeploy's entry is never the one removed. Gone ("") is fine.
+            try:
+                uid_in_lease = _read_incarnation(engine, namespace)
+            except Exception as e:  # noqa: BLE001
+                raise _NamespaceUnverifiable(
+                    f"could not read namespace {namespace} UID: {e}"
+                ) from e
+            if uid_in_lease and uid_in_lease != namespace_token_at_start:
+                raise _NamespaceReplaced(
+                    f"namespace {namespace} is now a newer deployment with the same name"
+                )
+
+        from lakebench.k8s.client import NamespaceReplacedError, NamespaceTerminatingError
+
+        in_lease: dict[str, object] = {}
+
+        def _delete_in_lease() -> None:
+            # Issue the delete before the lease is released. A deploy of
+            # the same name adding itself to the watch list takes this
+            # lease too, then finds the namespace Terminating and refuses;
+            # without this it could re-add the entry between our removal
+            # and our delete, and the operator would crash-loop on the
+            # deleted namespace. Errors fall back to the delete below.
+            if not namespace_uid_at_start:
+                return
+            # Never delete a namespace a live operator pod still
+            # lists; it would crash-loop on the missing namespace. The
+            # lease is held, so no deploy can re-add it meanwhile.
+            try:
+                watching = _await_operator_unwatch(
+                    k8s_client.CoreV1Api(),
+                    k8s_client.AppsV1Api(),
+                    spark_op_cfg.namespace,
+                    namespace,
+                    restart=op_mgr._restart_operator,  # noqa: SLF001
+                )
+            except _NamespaceUnverifiable as e:
+                in_lease["error"] = e
+                return
+            if watching:
+                in_lease["error"] = _OperatorStillWatching(watching)
+                return
+            errored = False
+            for attempt, delay in enumerate(_IN_LEASE_DELETE_BACKOFF, start=1):
+                if delay:
+                    # 429s under parallel load: back off before retrying.
+                    _sleep(delay)
+                # A same-namespace redeploy writes a new nonce without the
+                # lease (possibly during a backoff sleep); re-check right
+                # before every attempt, since the UID precondition cannot
+                # see it. On a change, fall through to the post-unwatch
+                # check, which keeps the namespace and points at
+                # repair-operator.
+                try:
+                    token_now = _read_incarnation(engine, namespace)
+                except Exception as e:  # noqa: BLE001
+                    in_lease["error"] = e
+                    continue
+                if token_now != namespace_token_at_start:
+                    if errored and not token_now:
+                        # Gone after a lost reply: our delete completed.
+                        in_lease.pop("error", None)
+                        in_lease["issued"] = False
+                    return
+                # Only the last attempt's outcome counts: a first attempt
+                # whose reply was lost can make the next see Terminating.
+                in_lease.pop("error", None)
+                try:
+                    in_lease["issued"] = bool(
+                        engine.k8s.delete_namespace(namespace, uid=namespace_uid_at_start)
+                    )
+                    return
+                except NamespaceReplacedError:
+                    in_lease["replaced"] = True
+                    return
+                except NamespaceTerminatingError:
+                    if errored:
+                        # Our earlier attempt was accepted; its reply was lost.
+                        in_lease["issued"] = True
+                    else:
+                        # Another destroy started it; a Terminating
+                        # namespace cannot be re-added, so waiting is safe.
+                        in_lease["terminating"] = True
+                    return
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("in-lease namespace delete attempt %d failed: %s", attempt, e)
+                    in_lease["error"] = e
+                    errored = True
+            # Every reply was lost or failed. If the namespace is already
+            # Terminating or gone, one of our deletes was accepted.
+            phase, _ = _namespace_state(engine, namespace)
+            if phase == "Terminating":
+                in_lease.pop("error", None)
+                in_lease["issued"] = True
+            elif phase == "":
+                in_lease.pop("error", None)
+                in_lease["issued"] = False
+
+        spark_op_cfg = engine.config.platform.compute.spark.operator
+        op_mgr = SparkOperatorManager(
+            namespace=spark_op_cfg.namespace,
+            version=spark_op_cfg.version,
+            job_namespace=namespace,
+            kube_context=engine.config.platform.kubernetes.context,
+        )
+        watch_list_ok = True
+        try:
+            op_mgr.remove_namespace_from_watch(
+                namespace,
+                strict=True,
+                precondition=_same_incarnation_in_lease,
+                then=_delete_in_lease,
+            )
+            report(
+                "spark-operator-watch",
+                DeploymentStatus.SUCCESS,
+                f"Dropped {namespace} from Spark Operator watch list",
+            )
+            if in_lease.get("replaced"):
+                raise _NamespaceReplaced(
+                    f"namespace {namespace} is now a newer deployment with the same name"
+                )
+            if "error" in in_lease and "issued" not in in_lease:
+                # Deleting outside the lease would let a same-name deploy
+                # re-add the entry first (operator crash loop). Keep the
+                # namespace: it is un-watched but intact, and a re-run of
+                # destroy deletes it.
+                err = in_lease["error"]
+                if isinstance(err, _OperatorStillWatching):
+                    if any(p.startswith("deployment/") for p in err.pods):
+                        hint = (
+                            "an operator Deployment's pod template still lists it, "
+                            "so the operator's helm release and its Deployments "
+                            "disagree (an upgrade that did not apply); check "
+                            f"`helm history spark-operator -n {spark_op_cfg.namespace}`. "
+                            "A cluster admin runs `lakebench admin repair-operator`, "
+                            "which sets the watch list from the helm values and both "
+                            "Deployments; then re-run destroy"
+                        )
+                    else:
+                        hint = (
+                            "they did not roll after a restart; check "
+                            f"`kubectl get pods -n {spark_op_cfg.namespace}` and re-run "
+                            "destroy when only new pods remain"
+                        )
+                    msg = (
+                        f"Namespace {namespace!r} NOT deleted: operator pods "
+                        f"[{', '.join(err.pods)}] still watch it; {hint}"
+                    )
+                elif isinstance(err, _NamespaceUnverifiable):
+                    msg = (
+                        f"Namespace {namespace!r} NOT deleted: {err}, so no running "
+                        "Spark Operator pod is proven to have stopped watching it. "
+                        "It is off the watch list; re-run destroy to delete it."
+                    )
+                else:
+                    msg = (
+                        f"Namespace {namespace!r} NOT deleted: the delete failed while "
+                        f"the watch-list lease was held ({err}). It is no longer "
+                        "watched by the Spark Operator; re-run destroy to delete it."
+                    )
+                logger.error(msg)
                 results.append(
                     DeploymentResult(
                         component="namespace", status=DeploymentStatus.FAILED, message=msg
@@ -1917,286 +2114,46 @@ def destroy_all(
                 )
                 report("namespace", DeploymentStatus.FAILED, msg)
                 return results
-            # Gone ("") is fine: un-watching a deleted namespace is what we want.
-            if uid_now and uid_now != namespace_token_at_start:
-                msg = (
-                    f"Destroy NOT completed: namespace {namespace} is now a newer "
-                    "deployment with the same name (a redeploy); it was left alone"
-                )
-                logger.warning(msg)
-                results.append(
-                    DeploymentResult(
-                        component="namespace",
-                        status=DeploymentStatus.FAILED,
-                        message=msg,
-                        details={REFUSAL_DETAIL: "destroy.redeployed"},
-                    )
-                )
-                report("namespace", DeploymentStatus.FAILED, msg)
-                return results
-        if engine.config.platform.kubernetes.create_namespace:
-            # Drop the namespace from the Spark Operator's watch list FIRST. The
-            # operator crash-loops on a watched namespace that does not exist
-            # ("failed to wait for ... caches to sync"), which breaks
-            # SparkApplication reconciliation for every other namespace on the
-            # cluster. Doing this after the delete would leave exactly that
-            # window open.
-            #
-            # strict=True lease-gates the mutation against parallel destroys
-            # and raises WatchListMutationError on failure -- surfacing a
-            # crash-looping operator explicitly rather than swallowing it as
-            # a successful destroy. Any failure here is captured as a
-            # DeploymentResult and reported in the destroy summary.
-            from lakebench.modules.pipeline_engines.spark.operator import (
-                WatchListMutationError,
-            )
-            from lakebench.spark import SparkOperatorManager
-
-            def _same_incarnation_in_lease() -> None:
-                # Runs while the cluster lease is held, right before the helm
-                # upgrade. A redeploy's watch-list add takes the same lease, so a
-                # namespace re-created before this point is caught here and one
-                # re-created after it re-adds its entry once we release: the
-                # redeploy's entry is never the one removed. Gone ("") is fine.
-                try:
-                    uid_in_lease = _read_incarnation(engine, namespace)
-                except Exception as e:  # noqa: BLE001
-                    raise _NamespaceUnverifiable(
-                        f"could not read namespace {namespace} UID: {e}"
-                    ) from e
-                if uid_in_lease and uid_in_lease != namespace_token_at_start:
-                    raise _NamespaceReplaced(
-                        f"namespace {namespace} is now a newer deployment with the same name"
-                    )
-
-            from lakebench.k8s.client import NamespaceReplacedError, NamespaceTerminatingError
-
-            in_lease: dict[str, object] = {}
-
-            def _delete_in_lease() -> None:
-                # Issue the delete before the lease is released. A deploy of
-                # the same name adding itself to the watch list takes this
-                # lease too, then finds the namespace Terminating and refuses;
-                # without this it could re-add the entry between our removal
-                # and our delete, and the operator would crash-loop on the
-                # deleted namespace. Errors fall back to the delete below.
-                if not namespace_uid_at_start:
-                    return
-                # Never delete a namespace a live operator pod still
-                # lists; it would crash-loop on the missing namespace. The
-                # lease is held, so no deploy can re-add it meanwhile.
-                try:
-                    watching = _await_operator_unwatch(
-                        k8s_client.CoreV1Api(),
-                        k8s_client.AppsV1Api(),
-                        spark_op_cfg.namespace,
-                        namespace,
-                        restart=op_mgr._restart_operator,  # noqa: SLF001
-                    )
-                except _NamespaceUnverifiable as e:
-                    in_lease["error"] = e
-                    return
-                if watching:
-                    in_lease["error"] = _OperatorStillWatching(watching)
-                    return
-                errored = False
-                for attempt, delay in enumerate(_IN_LEASE_DELETE_BACKOFF, start=1):
-                    if delay:
-                        # 429s under parallel load: back off before retrying.
-                        _sleep(delay)
-                    # A same-namespace redeploy writes a new nonce without the
-                    # lease (possibly during a backoff sleep); re-check right
-                    # before every attempt, since the UID precondition cannot
-                    # see it. On a change, fall through to the post-unwatch
-                    # check, which keeps the namespace and points at
-                    # repair-operator.
-                    try:
-                        token_now = _read_incarnation(engine, namespace)
-                    except Exception as e:  # noqa: BLE001
-                        in_lease["error"] = e
-                        continue
-                    if token_now != namespace_token_at_start:
-                        if errored and not token_now:
-                            # Gone after a lost reply: our delete completed.
-                            in_lease.pop("error", None)
-                            in_lease["issued"] = False
-                        return
-                    # Only the last attempt's outcome counts: a first attempt
-                    # whose reply was lost can make the next see Terminating.
-                    in_lease.pop("error", None)
-                    try:
-                        in_lease["issued"] = bool(
-                            engine.k8s.delete_namespace(namespace, uid=namespace_uid_at_start)
-                        )
-                        return
-                    except NamespaceReplacedError:
-                        in_lease["replaced"] = True
-                        return
-                    except NamespaceTerminatingError:
-                        if errored:
-                            # Our earlier attempt was accepted; its reply was lost.
-                            in_lease["issued"] = True
-                        else:
-                            # Another destroy started it; a Terminating
-                            # namespace cannot be re-added, so waiting is safe.
-                            in_lease["terminating"] = True
-                        return
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning(
-                            "in-lease namespace delete attempt %d failed: %s", attempt, e
-                        )
-                        in_lease["error"] = e
-                        errored = True
-                # Every reply was lost or failed. If the namespace is already
-                # Terminating or gone, one of our deletes was accepted.
-                phase, _ = _namespace_state(engine, namespace)
-                if phase == "Terminating":
-                    in_lease.pop("error", None)
-                    in_lease["issued"] = True
-                elif phase == "":
-                    in_lease.pop("error", None)
-                    in_lease["issued"] = False
-
-            spark_op_cfg = engine.config.platform.compute.spark.operator
-            op_mgr = SparkOperatorManager(
-                namespace=spark_op_cfg.namespace,
-                version=spark_op_cfg.version,
-                job_namespace=namespace,
-                kube_context=engine.config.platform.kubernetes.context,
-            )
-            watch_list_ok = True
-            try:
-                op_mgr.remove_namespace_from_watch(
-                    namespace,
-                    strict=True,
-                    precondition=_same_incarnation_in_lease,
-                    then=_delete_in_lease,
-                )
+            if "issued" in in_lease:
                 report(
-                    "spark-operator-watch",
-                    DeploymentStatus.SUCCESS,
-                    f"Dropped {namespace} from Spark Operator watch list",
+                    "namespace",
+                    DeploymentStatus.IN_PROGRESS,
+                    f"Deleting namespace {namespace}...",
                 )
-                if in_lease.get("replaced"):
-                    raise _NamespaceReplaced(
-                        f"namespace {namespace} is now a newer deployment with the same name"
-                    )
-                if "error" in in_lease and "issued" not in in_lease:
-                    # Deleting outside the lease would let a same-name deploy
-                    # re-add the entry first (operator crash loop). Keep the
-                    # namespace: it is un-watched but intact, and a re-run of
-                    # destroy deletes it.
-                    err = in_lease["error"]
-                    if isinstance(err, _OperatorStillWatching):
-                        if any(p.startswith("deployment/") for p in err.pods):
-                            hint = (
-                                "an operator Deployment's pod template still lists it, "
-                                "so the operator's helm release and its Deployments "
-                                "disagree (an upgrade that did not apply); check "
-                                f"`helm history spark-operator -n {spark_op_cfg.namespace}`. "
-                                "A cluster admin runs `lakebench admin repair-operator`, "
-                                "which sets the watch list from the helm values and both "
-                                "Deployments; then re-run destroy"
-                            )
-                        else:
-                            hint = (
-                                "they did not roll after a restart; check "
-                                f"`kubectl get pods -n {spark_op_cfg.namespace}` and re-run "
-                                "destroy when only new pods remain"
-                            )
-                        msg = (
-                            f"Namespace {namespace!r} NOT deleted: operator pods "
-                            f"[{', '.join(err.pods)}] still watch it; {hint}"
-                        )
-                    elif isinstance(err, _NamespaceUnverifiable):
-                        msg = (
-                            f"Namespace {namespace!r} NOT deleted: {err}, so no running "
-                            "Spark Operator pod is proven to have stopped watching it. "
-                            "It is off the watch list; re-run destroy to delete it."
-                        )
-                    else:
-                        msg = (
-                            f"Namespace {namespace!r} NOT deleted: the delete failed while "
-                            f"the watch-list lease was held ({err}). It is no longer "
-                            "watched by the Spark Operator; re-run destroy to delete it."
-                        )
-                    logger.error(msg)
-                    results.append(
-                        DeploymentResult(
-                            component="namespace", status=DeploymentStatus.FAILED, message=msg
-                        )
-                    )
-                    report("namespace", DeploymentStatus.FAILED, msg)
-                    return results
-                if "issued" in in_lease:
-                    report(
-                        "namespace",
-                        DeploymentStatus.IN_PROGRESS,
-                        f"Deleting namespace {namespace}...",
-                    )
-                    ns_result = _delete_namespace_and_wait(
-                        engine,
-                        namespace,
-                        namespace_wait_timeout,
-                        report,
-                        uid=namespace_uid_at_start,
-                        delete_issued=bool(in_lease["issued"]),
-                    )
-                    results.append(ns_result)
-                    report("namespace", ns_result.status, ns_result.message)
-                    return results
-                # The lease + helm call can take tens of seconds. If a redeploy
-                # re-created the name in that window, the entry just removed may
-                # have been the redeploy's: do not delete it, and say how to
-                # restore the watch.
-                try:
-                    uid_after_unwatch = _read_incarnation(engine, namespace)
-                except Exception as e:  # noqa: BLE001
-                    uid_after_unwatch = None
-                    unwatch_err: Exception | None = e
-                else:
-                    unwatch_err = None
-                if uid_after_unwatch is None or (
-                    uid_after_unwatch and uid_after_unwatch != namespace_token_at_start
-                ):
-                    msg = (
-                        f"Namespace {namespace!r} NOT deleted: "
-                        + (
-                            f"could not re-read its UID ({unwatch_err})"
-                            if uid_after_unwatch is None
-                            else "it is now a newer deployment with the same name"
-                        )
-                        + ". It may have lost its Spark Operator watch entry; run "
-                        "`lakebench admin repair-operator`."
-                    )
-                    logger.error(msg)
-                    results.append(
-                        DeploymentResult(
-                            component="namespace", status=DeploymentStatus.FAILED, message=msg
-                        )
-                    )
-                    report("namespace", DeploymentStatus.FAILED, msg)
-                    return results
-            except _NamespaceReplaced as e:
-                msg = (
-                    f"Destroy NOT completed: {e} (a redeploy). Its watch-list entry "
-                    "and the namespace were left alone"
+                ns_result = _delete_namespace_and_wait(
+                    engine,
+                    namespace,
+                    namespace_wait_timeout,
+                    report,
+                    uid=namespace_uid_at_start,
+                    delete_issued=bool(in_lease["issued"]),
                 )
-                logger.warning(msg)
-                results.append(
-                    DeploymentResult(
-                        component="namespace",
-                        status=DeploymentStatus.FAILED,
-                        message=msg,
-                        details={REFUSAL_DETAIL: "destroy.redeployed"},
-                    )
-                )
-                report("namespace", DeploymentStatus.FAILED, msg)
+                results.append(ns_result)
+                report("namespace", ns_result.status, ns_result.message)
                 return results
-            except _NamespaceUnverifiable as e:
+            # The lease + helm call can take tens of seconds. If a redeploy
+            # re-created the name in that window, the entry just removed may
+            # have been the redeploy's: do not delete it, and say how to
+            # restore the watch.
+            try:
+                uid_after_unwatch = _read_incarnation(engine, namespace)
+            except Exception as e:  # noqa: BLE001
+                uid_after_unwatch = None
+                unwatch_err: Exception | None = e
+            else:
+                unwatch_err = None
+            if uid_after_unwatch is None or (
+                uid_after_unwatch and uid_after_unwatch != namespace_token_at_start
+            ):
                 msg = (
-                    f"Namespace {namespace!r} NOT deleted and its watch-list entry NOT "
-                    f"changed: {e}. Re-run destroy when the API server is reachable."
+                    f"Namespace {namespace!r} NOT deleted: "
+                    + (
+                        f"could not re-read its UID ({unwatch_err})"
+                        if uid_after_unwatch is None
+                        else "it is now a newer deployment with the same name"
+                    )
+                    + ". It may have lost its Spark Operator watch entry; run "
+                    "`lakebench admin repair-operator`."
                 )
                 logger.error(msg)
                 results.append(
@@ -2206,76 +2163,103 @@ def destroy_all(
                 )
                 report("namespace", DeploymentStatus.FAILED, msg)
                 return results
-            except WatchListMutationError as e:
-                # ADR-F1: watch-list drop failed. Do NOT delete the namespace
-                # after this: the operator would crash-loop on a watched
-                # namespace that no longer exists ("failed to wait for
-                # spark-application-controller caches to sync"), taking down
-                # SparkApplication reconciliation for every namespace on the
-                # cluster -- the exact failure this whole path is written to
-                # prevent. Record the failure loudly and leave the namespace
-                # in place until `lakebench admin repair-operator` succeeds.
-                watch_list_ok = False
-                logger.error("Spark Operator watch-list mutation failed: %s", e)
-                from lakebench.deploy.cluster_lock import ClusterLockHeld
-
-                results.append(
-                    DeploymentResult(
-                        component="spark-operator-watch",
-                        status=DeploymentStatus.FAILED,
-                        message=str(e),
-                        # Another process holds the lease: a refusal, not a
-                        # broken watch list (the list was not touched).
-                        details=(
-                            {REFUSAL_DETAIL: "lease.held"}
-                            if isinstance(e.__cause__, ClusterLockHeld)
-                            else {}
-                        ),
-                    )
-                )
-                report(
-                    "spark-operator-watch",
-                    DeploymentStatus.FAILED,
-                    "Watch-list mutation failed; run admin repair-operator",
-                )
-
-            if not watch_list_ok:
-                # Preserve the invariant: never delete a namespace the operator
-                # still watches. The namespace stays, the user runs
-                # `admin repair-operator`, then re-runs destroy.
-                skip_msg = (
-                    f"Namespace {namespace!r} NOT deleted because the operator "
-                    "watch-list mutation failed. Run "
-                    "`lakebench admin repair-operator` first, then re-run destroy."
-                )
-                results.append(
-                    DeploymentResult(
-                        component="namespace",
-                        status=DeploymentStatus.SKIPPED,
-                        message=skip_msg,
-                    )
-                )
-                report("namespace", DeploymentStatus.SKIPPED, skip_msg)
-                return results
-
-            if not namespace_uid_at_start:
-                # Absent when destroy started: there is no incarnation of ours
-                # to delete, and an unconditional delete could hit a namespace
-                # a deploy created since.
-                msg = f"Namespace {namespace} was already gone when destroy started"
-                results.append(
-                    DeploymentResult(
-                        component="namespace", status=DeploymentStatus.SUCCESS, message=msg
-                    )
-                )
-                report("namespace", DeploymentStatus.SUCCESS, msg)
-                return results
-            report("namespace", DeploymentStatus.IN_PROGRESS, f"Deleting namespace {namespace}...")
-            ns_result = _delete_namespace_and_wait(
-                engine, namespace, namespace_wait_timeout, report, uid=namespace_uid_at_start
+        except _NamespaceReplaced as e:
+            msg = (
+                f"Destroy NOT completed: {e} (a redeploy). Its watch-list entry "
+                "and the namespace were left alone"
             )
-            results.append(ns_result)
-            report("namespace", ns_result.status, ns_result.message)
+            logger.warning(msg)
+            results.append(
+                DeploymentResult(
+                    component="namespace",
+                    status=DeploymentStatus.FAILED,
+                    message=msg,
+                    details={REFUSAL_DETAIL: "destroy.redeployed"},
+                )
+            )
+            report("namespace", DeploymentStatus.FAILED, msg)
+            return results
+        except _NamespaceUnverifiable as e:
+            msg = (
+                f"Namespace {namespace!r} NOT deleted and its watch-list entry NOT "
+                f"changed: {e}. Re-run destroy when the API server is reachable."
+            )
+            logger.error(msg)
+            results.append(
+                DeploymentResult(component="namespace", status=DeploymentStatus.FAILED, message=msg)
+            )
+            report("namespace", DeploymentStatus.FAILED, msg)
+            return results
+        except WatchListMutationError as e:
+            # The watch-list drop failed. Do NOT delete the namespace
+            # after this: the operator would crash-loop on a watched
+            # namespace that no longer exists ("failed to wait for
+            # spark-application-controller caches to sync"), taking down
+            # SparkApplication reconciliation for every namespace on the
+            # cluster -- the exact failure this whole path is written to
+            # prevent. Record the failure loudly and leave the namespace
+            # in place until `lakebench admin repair-operator` succeeds.
+            watch_list_ok = False
+            logger.error("Spark Operator watch-list mutation failed: %s", e)
+            from lakebench.deploy.cluster_lock import ClusterLockHeld
+
+            results.append(
+                DeploymentResult(
+                    component="spark-operator-watch",
+                    status=DeploymentStatus.FAILED,
+                    message=str(e),
+                    # Another process holds the lease: a refusal, not a
+                    # broken watch list (the list was not touched).
+                    details=(
+                        {REFUSAL_DETAIL: "lease.held"}
+                        if isinstance(e.__cause__, ClusterLockHeld)
+                        else {}
+                    ),
+                )
+            )
+            report(
+                "spark-operator-watch",
+                DeploymentStatus.FAILED,
+                "Watch-list mutation failed; run admin repair-operator",
+            )
+
+        if not watch_list_ok:
+            # Preserve the invariant: never delete a namespace the operator
+            # still watches. The namespace stays, the user runs
+            # `admin repair-operator`, then re-runs destroy.
+            skip_msg = (
+                f"Namespace {namespace!r} NOT deleted because the operator "
+                "watch-list mutation failed. Run "
+                "`lakebench admin repair-operator` first, then re-run destroy."
+            )
+            results.append(
+                DeploymentResult(
+                    component="namespace",
+                    status=DeploymentStatus.SKIPPED,
+                    message=skip_msg,
+                )
+            )
+            report("namespace", DeploymentStatus.SKIPPED, skip_msg)
+            return results
+
+        if not namespace_uid_at_start:
+            # Absent when destroy started: there is no incarnation of ours
+            # to delete, and an unconditional delete could hit a namespace
+            # a deploy created since.
+            msg = f"Namespace {namespace} was already gone when destroy started"
+            results.append(
+                DeploymentResult(
+                    component="namespace", status=DeploymentStatus.SUCCESS, message=msg
+                )
+            )
+            report("namespace", DeploymentStatus.SUCCESS, msg)
+            return results
+        report("namespace", DeploymentStatus.IN_PROGRESS, f"Deleting namespace {namespace}...")
+        ns_result = _delete_namespace_and_wait(
+            engine, namespace, namespace_wait_timeout, report, uid=namespace_uid_at_start
+        )
+        results.append(ns_result)
+        report("namespace", ns_result.status, ns_result.message)
 
         return results
 
@@ -2545,16 +2529,14 @@ def destroy_all(
             )
         )
 
-    time.sleep(2)
-
-    # Step 3: Drop tables via available engine (Trino or Spark Thrift)
+    # Step 3: Unregister tables via the available engine (Trino or Spark Thrift)
     stopped = _stop_if_changed("table cleanup")
     if stopped is not None:
         return stopped
     table_step_stopped = False
     # Tables removed from the catalog without touching their files (Trino
     # unregister, Spark Thrift Iceberg DROP): the bucket step names those
-    # whose bucket it refused, since their files stay there (lb16-checks2).
+    # whose bucket it refused, since their files stay there.
     unregistered_tables: list[str] = []
     if not data_steps_allowed:
         results.append(
@@ -2586,8 +2568,8 @@ def destroy_all(
                 failed_sql: list[str] = []
                 # Only catalog removal. Table maintenance (Iceberg
                 # expire_snapshots / remove_orphan_files, Delta VACUUM) is
-                # skipped (policy, 2026-09-26): the bucket step empties the
-                # buckets destroy owns, so it would only cost time.
+                # skipped: the bucket step empties the buckets destroy owns,
+                # so it would only cost time.
                 #
                 # This step must never delete files. Which statements
                 # delete what (Trino 479, Iceberg 1.10, Spark 4.0 sources):
@@ -2638,15 +2620,13 @@ def destroy_all(
                     )
                     for table in tables_to_drop:
                         drop_sql = build_drop_table_sql(maint_engine, table)
-                        if not drop_sql:
-                            continue
                         if emptied is None:
                             kept_unresolved.append((table, own_why))
                             continue
                         if not clean_buckets:
                             kept_registered.append((table, own_why))
                             continue
-                        bucket, err = _table_location_bucket(
+                        bucket, err, _ = _table_location_bucket(
                             query_sql, maint_engine, engine.k8s, pod_name, namespace, table
                         )
                         if err == "missing":
@@ -2664,10 +2644,7 @@ def destroy_all(
                                 (table, f"its data is in {bucket}, which destroy does not empty")
                             )
                 else:
-                    for table in tables_to_drop:
-                        drop_sql = build_drop_table_sql(maint_engine, table)
-                        if drop_sql:
-                            plan.append((table, drop_sql))
+                    plan = [(t, build_drop_table_sql(maint_engine, t)) for t in tables_to_drop]
                 # Polaris via Trino with the namespace deleted: no statements.
                 # The catalog's only state is its database in this
                 # deployment's PostgreSQL, whose PVC goes with the namespace
@@ -2914,33 +2891,20 @@ def destroy_all(
                     f"S3 init failed: {s3._init_error}",
                 )
             else:
-                # dict.fromkeys: one bucket may back two layers; handle it once.
                 plan_b = _classify_buckets(
                     engine, s3, namespace, namespace_present, force_legacy, report
                 )
                 if plan_b.transient:
                     bucket_transient_failure = True
                 buckets = plan_b.buckets
-                refused_set = plan_b.refused_set
-                refusal_msg = plan_b.refusal_msg
-                created_record = plan_b.created_record
-                record_unreadable = plan_b.record_unreadable
-                owned_by_tag = plan_b.owned_by_tag
-                owned_by_marker = plan_b.owned_by_marker
-                unverified_cluster = plan_b.unverified_cluster
-                absent_buckets = plan_b.absent_buckets
-                unsupported_by_prefix = plan_b.unsupported_by_prefix
-                unsupported_forced_unrecorded = plan_b.unsupported_forced_unrecorded
-                unsupported_forced = plan_b.unsupported_forced
                 disowned_recorded = plan_b.disowned_recorded
-                legacy = plan_b.legacy_forced  # preserved local name for summary below
                 # Re-check the namespace before touching data: a slow
                 # destroy that lost a race to a concurrent destroy plus a
                 # redeploy must not empty the redeploy's buckets, which
                 # reuse the names and pass the same ownership checks.
                 guard = partial(_check_same_namespace, engine, namespace, namespace_token_at_start)
                 guard()
-                # Ownership row 3: stamp this cluster on the recorded legacy
+                # LEGACY_PROVEN: stamp this cluster on the recorded legacy
                 # buckets before anything else, so one destroy keeps
                 # (--keep-buckets, create_buckets false) is still provably
                 # this deployment's after the namespace and its record go.
@@ -2949,15 +2913,15 @@ def destroy_all(
                 # record is the namespace annotation (all backends) plus
                 # the created tag where tagging works. An unreadable
                 # record keeps the buckets, never deletes them.
-                created_set: set[str] = set(created_record)
-                for tagged in owned_by_tag:
+                created_set: set[str] = set(plan_b.created_record)
+                for tagged in plan_b.owned_by_tag:
                     if tagged in created_set:
                         continue
                     try:
                         tags = read_bucket_ownership_tag(s3.raw_client, tagged) or {}
                     except Exception as e:  # noqa: BLE001
                         tags = {}
-                        record_unreadable.append(f"{tagged} tags: {e}")
+                        plan_b.record_unreadable.append(f"{tagged} tags: {e}")
                     if tags.get(TAG_CREATED_BY_LAKEBENCH) == "true":
                         created_set.add(tagged)
                 total_deleted = 0
@@ -3004,12 +2968,14 @@ def destroy_all(
                         s3,
                         buckets,
                         deletable=(
-                            set(owned_by_tag) | set(owned_by_marker) | set(unsupported_by_prefix)
+                            set(plan_b.owned_by_tag)
+                            | set(plan_b.owned_by_marker)
+                            | set(plan_b.unsupported_by_prefix)
                         )
                         & created_set,
                         enabled=delete_buckets,
                         create_buckets=bool(s3_cfg.create_buckets),
-                        absent=set(absent_buckets),
+                        absent=set(plan_b.absent_buckets),
                         guard=guard,
                         on_deleted=deleted_now.append,
                         on_gone=gone_now.append,
@@ -3079,7 +3045,7 @@ def destroy_all(
                             )
                             delete_failed = True
                     if (
-                        record_unreadable
+                        plan_b.record_unreadable
                         and delete_buckets
                         and s3_cfg.create_buckets
                         and not delete_failed
@@ -3089,7 +3055,7 @@ def destroy_all(
                         # namespace (the record) so a re-run can finish.
                         bucket_notes.append(
                             "created-bucket record unreadable ("
-                            + "; ".join(record_unreadable)
+                            + "; ".join(plan_b.record_unreadable)
                             + "); buckets it would list were kept and the "
                             "namespace is kept so a re-run can delete them"
                         )
@@ -3100,40 +3066,43 @@ def destroy_all(
                         # prove ownership and finish the delete.
                         bucket_transient_failure = True
                 notes = []
-                if legacy:
+                if plan_b.legacy_forced:
                     notes.append(
-                        f"WARN: {len(legacy)} legacy untagged buckets: {', '.join(legacy)}"
+                        f"WARN: {len(plan_b.legacy_forced)} legacy untagged buckets: "
+                        f"{', '.join(plan_b.legacy_forced)}"
                     )
-                if unsupported_by_prefix:
+                if plan_b.unsupported_by_prefix:
                     notes.append(
-                        f"{len(unsupported_by_prefix)} buckets emptied by "
+                        f"{len(plan_b.unsupported_by_prefix)} buckets emptied by "
                         "name-prefix and created-buckets record (backend does "
-                        "not support tagging): " + ", ".join(unsupported_by_prefix)
+                        "not support tagging): " + ", ".join(plan_b.unsupported_by_prefix)
                     )
-                if unsupported_forced_unrecorded:
+                if plan_b.unsupported_forced_unrecorded:
                     notes.append(
-                        f"WARN: {len(unsupported_forced_unrecorded)} buckets emptied by "
+                        f"WARN: {len(plan_b.unsupported_forced_unrecorded)} buckets emptied by "
                         "--force-legacy on a backend without tagging; the name matches "
                         "but no record shows this deployment created or adopted them "
-                        "empty (kept): " + ", ".join(unsupported_forced_unrecorded)
+                        "empty (kept): " + ", ".join(plan_b.unsupported_forced_unrecorded)
                     )
-                if unsupported_forced:
+                if plan_b.unsupported_forced:
                     notes.append(
-                        f"WARN: {len(unsupported_forced)} buckets emptied "
+                        f"WARN: {len(plan_b.unsupported_forced)} buckets emptied "
                         "by --force-legacy on a backend without tagging "
-                        "AND without name-prefix match: " + ", ".join(unsupported_forced)
+                        "AND without name-prefix match: " + ", ".join(plan_b.unsupported_forced)
                     )
                 notes.extend(bucket_notes)
                 notes.extend(f"WARN: {n}" for n in stamp_notes)
                 # The step is a refusal only when nothing else in it failed and
                 # nothing was transient: a retry can fix those, so they exit 1.
-                bucket_refused_only = bool(refusal_msg) and not (
+                bucket_refused_only = bool(plan_b.refusal_msg) and not (
                     delete_failed or bucket_transient_failure
                 )
-                if refusal_msg:
-                    notes.append(refusal_msg)
+                if plan_b.refusal_msg:
+                    notes.append(plan_b.refusal_msg)
                     notes.extend(
-                        _files_left_in_refused_buckets(engine, refused_set, unregistered_tables)
+                        _files_left_in_refused_buckets(
+                            engine, plan_b.refused_set, unregistered_tables
+                        )
                     )
                     delete_failed = True
                     if disowned_recorded and namespace_present:
@@ -3152,7 +3121,7 @@ def destroy_all(
                             logger.warning("could not drop disowned buckets from the record: %s", e)
                             disowned_recorded = []
                     recorded_refused = sorted(
-                        (refused_set & created_record) - set(disowned_recorded)
+                        (plan_b.refused_set & plan_b.created_record) - set(disowned_recorded)
                     )
                     if recorded_refused:
                         # Recorded as created by this deployment but not
@@ -3167,13 +3136,14 @@ def destroy_all(
                 bucket_status = (
                     DeploymentStatus.FAILED if delete_failed else DeploymentStatus.SUCCESS
                 )
-                # Ownership row 8 is a refusal with its own exit code
+                # UNVERIFIED_CLUSTER is a refusal with its own exit code
                 # (the REFUSAL_DETAIL key), when it is the only refusal.
                 bucket_details: dict = {}
                 if bucket_refused_only:
                     bucket_details[REFUSAL_DETAIL] = (
                         "destroy.unverified_cluster"
-                        if unverified_cluster and set(unverified_cluster) == refused_set
+                        if plan_b.unverified_cluster
+                        and set(plan_b.unverified_cluster) == plan_b.refused_set
                         else "deploy.identity_foreign"
                     )
                 results.append(
@@ -3239,7 +3209,6 @@ def destroy_all(
     # and a redeploy re-created the namespace. Every step below deletes
     # components by name inside the namespace, so stop here rather than tear
     # down the newer deployment.
-    unverifiable_msg = None
     if namespace_gone_midway:
         _note_secretclasses_left()
         return _namespace_step()
@@ -3247,35 +3216,27 @@ def destroy_all(
         stopped = _stop_if_changed("infrastructure teardown")
         if stopped is not None:
             return stopped
-    if replaced_msg or unverifiable_msg or stop_after_buckets:
+    if replaced_msg or stop_after_buckets:
         if replaced_msg:
             msg = (
                 "Destroy NOT completed: stopped before infrastructure teardown: "
                 f"{replaced_msg}; it was left alone"
             )
-            status = DeploymentStatus.FAILED
-        elif unverifiable_msg:
-            msg = (
-                f"Stopped before infrastructure teardown: {unverifiable_msg}. "
-                "Re-run destroy when the API server is reachable."
-            )
-            status = DeploymentStatus.FAILED
         else:
             msg = (
                 f"Stopped before infrastructure teardown: namespace {namespace} is "
                 "being cleaned up by a concurrent destroy; re-run destroy after it finishes"
             )
-            status = DeploymentStatus.FAILED
         logger.warning(msg)
         results.append(
             DeploymentResult(
                 component="namespace",
-                status=status,
+                status=DeploymentStatus.FAILED,
                 message=msg,
                 details={REFUSAL_DETAIL: "destroy.redeployed"} if replaced_msg else {},
             )
         )
-        report("namespace", status, msg)
+        report("namespace", DeploymentStatus.FAILED, msg)
         return results
 
     # Step 5: Observability. Prometheus, Grafana and the Pushgateway live
@@ -3674,11 +3635,11 @@ def destroy_all(
             )
         )
 
-    # Step 8: scripts ConfigMaps, RBAC and Secrets
+    # Step 9: scripts ConfigMaps, RBAC and Secrets
     stopped = _stop_if_changed("RBAC, secrets and SecretClass teardown")
     if stopped is not None:
         return stopped
-    # Step 8a: the scripts ConfigMaps, the per-role maps and the v1.6
+    # Step 9a: the scripts ConfigMaps, the per-role maps and the v1.6
     # single map, by this deployment's label in its own namespace. With
     # create_namespace=false the namespace survives destroy, so nothing else
     # removes them; with true the namespace delete would, so a failure to
@@ -3720,7 +3681,7 @@ def destroy_all(
         results.append(DeploymentResult(component="spark-scripts", status=status, message=msg))
         report("spark-scripts", status, msg)
 
-    # Step 8b: RBAC and Secrets
+    # Step 9b: RBAC and Secrets
     report("rbac", DeploymentStatus.IN_PROGRESS, "Removing RBAC and secrets...")
     try:
         rbac_v1 = k8s_client.RbacAuthorizationV1Api()
@@ -3788,7 +3749,7 @@ def destroy_all(
                 )
             except ApiException as e:
                 logger.debug("SecretClass %s delete skipped: %s", sc_name, e.reason)
-        # ADR-F6: the legacy fixed-name SecretClasses, only when no other
+        # The legacy fixed-name SecretClasses, only when no other
         # lakebench namespace remains.
         _legacy_secretclass_cleanup(core_v1, custom_api, namespace)
         results.append(
@@ -3808,7 +3769,7 @@ def destroy_all(
             )
         )
 
-    # Step 8c: the Category-1 registry: what no component
+    # Step 9c: the Category-1 registry: what no component
     # step deleted, and the Category-1 namespace annotations. It matters when
     # create_namespace=false keeps the namespace; with true it runs anyway
     # (one code path) and a failure is only a skip.
@@ -3826,7 +3787,7 @@ def destroy_all(
     results.append(cat1)
     report("category1", cat1.status, cat1.message)
 
-    # Step 9: StorageClass is Category 2 shared infrastructure. lakebench
+    # Step 10: StorageClass is Category 2 shared infrastructure. lakebench
     # never deletes it -- another parallel deployment on the same cluster
     # relies on it, and stripping it out from under them would break
     # every running Spark job that references it. A cluster admin who

@@ -78,17 +78,15 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
 
 
 @pytest.mark.parametrize(
-    ("output", "table_missing", "schema_missing"),
+    ("output", "table_missing"),
     [
         pytest.param(
             "Query q1 failed: line 1:13: Table 'lakehouse.gold.t' does not exist",
             True,
-            False,
             id="trino-table-missing",
         ),
         pytest.param(
             "Query q2 failed: line 1:13: Schema 'gold' does not exist",
-            True,
             True,
             id="trino-schema-missing",
         ),
@@ -96,19 +94,16 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
             _BEELINE + "[TABLE_OR_VIEW_NOT_FOUND] The table or view `lakehouse`.`gold`.`t` "
             "cannot be found. (state=42P01,code=0)",
             True,
-            False,
             id="beeline-table-missing",
         ),
         pytest.param(
             _BEELINE + "[SCHEMA_NOT_FOUND] The schema `lakehouse`.`gold` cannot be found. "
             "(state=42704,code=0)",
             True,
-            True,
             id="beeline-schema-missing",
         ),
         pytest.param(
             "Query q4 failed: line 1:13: Catalog 'lakehouse' does not exist",
-            False,
             False,
             id="trino-catalog-does-not-exist",
         ),
@@ -118,27 +113,23 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
             "ALTER TABLE lakehouse.gold.t EXECUTE remove_orphan_files -- table cleanup\n"
             "Query q5 failed: Catalog 'lakehouse' does not exist",
             False,
-            False,
             id="echoed-sql-then-catalog",
         ),
         pytest.param(
             "Query q6 failed: ALTER TABLE lakehouse.gold.t EXECUTE expire_snapshots: "
             "Catalog 'lakehouse' does not exist",
             False,
-            False,
             id="same-line-sql-then-catalog",
         ),
         pytest.param(
             "Query q7 failed: line 1:1: Table procedure not registered: remove_orphan_files",
             False,
-            False,
             id="trino-procedure-missing",
         ),
-        pytest.param(TRINO_METASTORE_DOWN, False, False, id="trino-metastore-down"),
+        pytest.param(TRINO_METASTORE_DOWN, False, id="trino-metastore-down"),
         pytest.param(
             _BEELINE + "[CATALOG_NOT_FOUND] The catalog `lakehouse` not found. "
             "(state=42P08,code=0)",
-            False,
             False,
             id="beeline-catalog-missing",
         ),
@@ -146,22 +137,19 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
             _BEELINE + "java.lang.IllegalArgumentException: Cannot find procedure: "
             "system.remove_orphan_filez",
             False,
-            False,
             id="beeline-procedure-missing",
         ),
         pytest.param(
             _BEELINE + "org.apache.thrift.transport.TTransportException: "
             "java.net.ConnectException: Connection refused (state=08S01,code=0)",
             False,
-            False,
             id="beeline-metastore-down",
         ),
-        pytest.param("Command timed out", False, False, id="timeout"),
+        pytest.param("Command timed out", False, id="timeout"),
         pytest.param(
             _BEELINE + "java.lang.IllegalArgumentException: Couldn't load table 'exp.nope' "
             "in catalog 'lakehouse'",
             True,
-            False,
             id="spark-procedure-table-missing",
         ),
         pytest.param(
@@ -170,14 +158,12 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
             "with iceberg.expire_snapshots_min_retention configuration property or "
             "iceberg.expire_snapshots_min_retention session property",
             False,
-            False,
             id="trino-min-retention",
         ),
         pytest.param(
             _BEELINE + "java.lang.IllegalArgumentException: Cannot remove orphan files with "
             "an interval less than 24 hours. Executing this procedure with a short interval "
             "may corrupt the table if other operations are happening at the same time.",
-            False,
             False,
             id="spark-orphan-interval",
         ),
@@ -186,15 +172,12 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
         pytest.param(
             "Query q10 failed: Table 'gold.customer_executive_dashboard' not found",
             True,
-            False,
             id="trino-procedure-table-missing",
         ),
     ],
 )
-def test_classifier(output, table_missing, schema_missing):
-    e = _err(output)
-    assert destroy_mod._is_table_missing(e) is table_missing
-    assert destroy_mod._is_schema_missing(e) is schema_missing
+def test_classifier(output, table_missing):
+    assert destroy_mod._is_table_missing(_err(output)) is table_missing
 
 
 # -- callers outside destroy: a failure is recorded, never fatal ---------------
