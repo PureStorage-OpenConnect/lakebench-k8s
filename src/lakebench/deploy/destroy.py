@@ -1007,10 +1007,9 @@ def _classify_buckets(
             )
         if unsupported_unrecorded:
             parts.append(
-                "backend does not support bucket tagging and this "
-                "deployment's record lists neither as created nor as "
-                "adopted while empty (so its data may not be "
-                "lakebench's): "
+                "backend does not support bucket tagging and the bucket "
+                "is not on this deployment's created-buckets record (so "
+                "its data may not be lakebench's): "
                 + ", ".join(unsupported_unrecorded)
                 + " (left in place, not emptied; pass --force-legacy "
                 "to empty it if you have confirmed it is yours; it is "
