@@ -30,10 +30,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from rich.console import Console
 from rich.table import Table
 
-from lakebench.cli._helpers import esc
+from lakebench.cli._helpers import console, esc
 from lakebench.exit_codes import ExitCode
 
 if TYPE_CHECKING:
@@ -41,7 +40,6 @@ if TYPE_CHECKING:
     from lakebench.config.sizing import CapacityVerdict, SizingPlan
     from lakebench.k8s.client import ClusterCapacity
 
-console = Console()
 
 _GIB = 1024**3
 _MILESTONES = (1, 10, 50, 100, 300, 500)

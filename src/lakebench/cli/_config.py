@@ -12,11 +12,10 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from lakebench.cli._helpers import esc, print_error
+from lakebench.cli._helpers import console, esc, print_error
 from lakebench.cli._json import json_option
 from lakebench.exit_codes import ExitCode
 
@@ -36,8 +35,6 @@ config_app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
-
-console = Console()
 
 
 @config_app.command("show")
