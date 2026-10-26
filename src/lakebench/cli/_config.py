@@ -7,7 +7,6 @@ refuses: it rewrote configs lossily and wrote secrets in plaintext.
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Annotated
 
@@ -18,8 +17,6 @@ from rich.table import Table
 from lakebench.cli._helpers import console, esc, print_error
 from lakebench.cli._json import json_option
 from lakebench.exit_codes import ExitCode
-
-logger = logging.getLogger(__name__)
 
 
 def _load_failure_code(exc: BaseException) -> ExitCode:
@@ -301,11 +298,7 @@ def config_storage(
     )
 
     # A bucket to fall back to when create-bucket is not permitted.
-    fallback = ""
-    try:
-        fallback = s3.buckets.bronze or ""
-    except Exception:
-        pass
+    fallback = s3.buckets.bronze or ""
 
     report = run_conformance(
         endpoint=s3.endpoint,
@@ -451,8 +444,9 @@ def config_recipes(
             available = ", ".join(sorted(n for n in RECIPES if n != "default"))
             print_error(f"Unknown recipe: {name}. Available: {available}")
             raise typer.Exit(ExitCode.USAGE)
-        _print_recipe_detail(name)
-        _json.set_data(_recipe_detail_data(name))
+        data = _recipe_detail_data(name)
+        _print_recipe_detail(data)
+        _json.set_data(data)
         return
 
     from lakebench.config.support import MODES, support_matrix, workloads
@@ -541,48 +535,38 @@ def _state_markup(state: str) -> str:
     return f"[{color}]{state}[/{color}]"
 
 
-def _print_recipe_detail(name: str) -> None:
-    """Print one recipe's components and caveats."""
-    from lakebench.config.recipes import RECIPES, get_recipe_note
-
-    recipe = RECIPES[name]
-    arch = recipe.get("architecture", {})
-    note = get_recipe_note(name)
+def _print_recipe_detail(data: dict) -> None:
+    """Print one recipe's components, support and caveats from
+    ``_recipe_detail_data``."""
+    from lakebench.config.support import WORKLOAD_LABELS
 
     lines = [
-        f"[bold]{name}[/bold]",
+        f"[bold]{data['recipe']}[/bold]",
         "",
-        f"  Catalog:      {arch.get('catalog', {}).get('type', '-')}",
-        f"  Table format: {arch.get('table_format', {}).get('type', '-')}",
-        f"  Query engine: {arch.get('query_engine', {}).get('type', '-')}",
+        f"  Catalog:      {data['catalog']}",
+        f"  Table format: {data['table_format']}",
+        f"  Query engine: {data['query_engine']}",
     ]
-    if note:
-        lines += ["", f"  {note.when}"]
-        if note.runs_locally:
+    if data["when"] is not None:
+        lines += ["", f"  {data['when']}"]
+        if data["local"]:
             lines.append("  Runs locally with --local.")
 
     console.print()
     console.print(Panel("\n".join(lines), expand=False))
 
-    from rich.markup import escape
-
-    from lakebench.config.support import WORKLOAD_LABELS, support_matrix
-
-    real = name if name != "default" else "hive-iceberg-spark-trino"
     console.print()
     console.print("[bold]Support[/bold]")
-    for row in support_matrix():
-        if row["recipe"] != real:
-            continue
+    for row in data["support"]:
         label = WORKLOAD_LABELS.get(row["workload"], row["workload"])
         console.print(
-            f"  {esc(label)} {esc(row['mode'])}: {_state_markup(row['state'])} -- {escape(row['basis'])}"
+            f"  {esc(label)} {esc(row['mode'])}: {_state_markup(row['state'])} -- {esc(row['basis'])}"
         )
 
-    if note and note.caveats:
+    if data["caveats"]:
         console.print()
         console.print("[bold]Caveats[/bold]")
-        for caveat in note.caveats:
+        for caveat in data["caveats"]:
             console.print(f"  [yellow]*[/yellow] {esc(caveat)}")
     console.print()
 
