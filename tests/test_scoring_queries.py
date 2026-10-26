@@ -201,6 +201,8 @@ def test_batch_run():
     assert t["workload_category"] == "W2_structuring"  # from the manifest, not null
     # The per-customer screening rate's denominator (scripts/aml_screen_rates.py).
     assert rec["customer_count"] == 4321
+    # Batch scores the whole manifest: no rescreen-only lookup.
+    assert not any("detectable_by" in sql for sql in exe.calls)
     assert rec["fp_rate"] == pytest.approx(7 / 25)
 
 
@@ -417,15 +419,16 @@ W5_META = sq.RulesMeta(
 
 
 def test_covered_rescreen_only_instances_leave_recall_and_the_subject_check():
-    # t_0 and t_1 are covered rescreen-only instances, both hit; t_9 is a
-    # rescreen-only instance that is not covered. Covered recall and
-    # incidental recall drop the two covered ones from numerator and
-    # denominator; covered_instances keeps them; the subject check reads
-    # t_2 and never t_0.
+    # t_0 and t_1 are covered rescreen-only instances with both hits, t_7 is
+    # a covered one with neither, and t_9 is a rescreen-only instance that is
+    # not covered. Covered recall and incidental recall drop the three covered
+    # ones from the denominator and only their own hits from the numerators;
+    # covered_instances keeps them; the subject check reads t_2, never t_0.
     exe = _covered_rescreen_exe(
         [
             ["sanctions_match_t_0", "sanctions_match"],
             ["sanctions_match_t_1", "sanctions_match"],
+            ["sanctions_match_t_7", "sanctions_match"],
             ["sanctions_match_t_9", "sanctions_match"],
         ]
     )
@@ -439,11 +442,13 @@ def test_covered_rescreen_only_instances_leave_recall_and_the_subject_check():
     )
     t = rec["covered"]["typologies"][0]
     assert t["covered_instances"] == 8
-    assert t["rescreen_only_excluded"] == 2
-    assert t["recall_covered"] == pytest.approx((6 - 2) / (8 - 2))
-    assert t["incidental_recall_covered"] == pytest.approx((7 - 2) / (8 - 2))
+    assert t["rescreen_only_excluded"] == 3
+    assert t["recall_covered"] == pytest.approx((6 - 2) / (8 - 3))
+    assert t["incidental_recall_covered"] == pytest.approx((7 - 2) / (8 - 3))
     subject_sql = [s for s in exe.calls if "Resolve a chunk of subject" in s]
     assert subject_sql and all("1002" in s and "1001" not in s for s in subject_sql)
+    # customer_count belongs to the batch record only.
+    assert "customer_count" not in rec["covered"] and "customer_count" not in rec
 
 
 def test_covered_recall_is_null_when_every_covered_instance_is_rescreen_only():
@@ -486,3 +491,28 @@ def test_rescreen_lookup_failure_is_never_read_as_zero(error, scored):
     else:
         with pytest.raises(RuntimeError, match="memory limit"):
             sq.score(exe.run_tsv, **kwargs)
+
+
+def test_unreadable_customer_count_is_null_not_zero():
+    rows, _ = _cov_instances({"micro_structuring": (10, 10, 0, 6, 7)})
+
+    class Exe(FakeExecutor):
+        def run_tsv(self, sql, timeout):
+            if "WHERE is_customer" in sql:
+                raise RuntimeError("Table 'lh.silver.entities' does not exist")
+            return super().run_tsv(sql, timeout)
+
+    exe = Exe(
+        {
+            "for the assembler's two guards": [["micro_structuring_1_0", "43"]],
+            "FROM lh.gold.detection_status": [
+                ["W2_structuring", "run-x", "ran", "micro_structuring", "5", ""],
+            ],
+            "Coverage and covered-recall": rows,
+            "Global alert counts": [["25", "18"]],
+            "Distinct instance count per typology_type": [["micro_structuring", "10"]],
+            "CARDINALITY(a.reason_codes)": [["0", "25"]],
+        }
+    )
+    rec = sq.score(exe.run_tsv, catalog="lh", snapshot_ids=None, run_id="run-x", meta=META)
+    assert rec["customer_count"] is None

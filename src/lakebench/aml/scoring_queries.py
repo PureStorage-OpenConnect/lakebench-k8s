@@ -980,7 +980,7 @@ def _rescreen_only(
     try:
         rows = run_tsv(sql, timeout)
     except RuntimeError as e:
-        if "injection_parameters" in str(e) and "cannot be resolved" in str(e):
+        if "Column 'injection_parameters' cannot be resolved" in str(e):
             return {}
         raise
     return {_s(tid): _s(typ) for tid, typ in rows if _s(tid) in covered_ids}
