@@ -3076,62 +3076,32 @@ class SparkJobManager:
             # Point spark.local.dir to the PVC mount
             spark_conf["spark.local.dir"] = "/tmp/spark-local"
 
-        _restart_policy: dict[str, Any] = (
-            # Streaming jobs: do NOT auto-rerun a failed driver.
-            # The continuous gate at cli/_sustained.py refuses the window on
-            # "driver was resubmitted inside the window; earlier driver's
-            # work is not in the log", so an uncapped "Always" guarantees any
-            # transient event becomes a silent FAIL with the diagnostic log
-            # lost to the operator's pod delete. OnFailure with 0 driver
-            # retries converts the same event into a definitive FAILED
-            # verdict whose first driver's log is still inspectable.
-            # Submission retries stay (they run before the driver starts and
-            # the submitting operator can be transiently busy).
-            {
-                "type": "OnFailure",
-                "onFailureRetries": 0,
-                "onSubmissionFailureRetries": 5,
-                "onSubmissionFailureRetryInterval": 60,
-            }
-            if job_type in _STREAMING_JOB_TYPES
-            else {
-                "type": "OnFailure",
-                "onFailureRetries": 2,
-                "onFailureRetryInterval": 30,
-                # Submission runs spark-submit inside the SHARED operator. It
-                # no longer resolves packages (the jars are lb-deps URLs), but
-                # a busy operator still fails submissions now and then; retry
-                # more, and wait longer between attempts.
-                "onSubmissionFailureRetries": 5,
-                "onSubmissionFailureRetryInterval": 60,
-            }
+        # A failed driver is not rerun for a stream, a time-travel read or a
+        # registered reference look. The continuous gate refuses a window
+        # whose driver was resubmitted, so a rerun stream turns a transient
+        # event into a FAIL with the first driver's log lost to the
+        # operator's pod delete; without the rerun the FAILED verdict keeps
+        # that log. A time-travel read writes one result: a rerun repeats a
+        # determined outcome or a crash and scans everything again inside the
+        # same budget. A registered look runs once: a rerun after the gate
+        # computed AP would look again. Submission retries stay for every job:
+        # they run before the driver starts, and the shared operator fails a
+        # submission now and then.
+        no_driver_retry = (
+            job_type in _STREAMING_JOB_TYPES
+            or job_type is JobType.TIME_TRAVEL_FINANCIAL
+            or (
+                job_type == JobType.SCORE_FINANCIAL_REFERENCE
+                and cfg.architecture.workload.datagen.corpus_role in ("evaluation", "robustness")
+            )
         )
-
-        if job_type is JobType.TIME_TRAVEL_FINANCIAL:
-            # One attempt: a time-travel read writes one result, and a retried
-            # driver would only repeat a determined outcome or a crash, and
-            # scan everything again inside the same job budget.
-            # Submission retries stay (they run before the driver starts).
-            _restart_policy = {
-                "type": "OnFailure",
-                "onFailureRetries": 0,
-                "onSubmissionFailureRetries": 5,
-                "onSubmissionFailureRetryInterval": 60,
-            }
-        if (
-            job_type == JobType.SCORE_FINANCIAL_REFERENCE
-            and cfg.architecture.workload.datagen.corpus_role in ("evaluation", "robustness")
-        ):
-            # A registered look runs once: an operator retry after the gate
-            # computed AP (a crash or an error verdict) would look again.
-            # Submission retries stay: they run before the driver starts,
-            # so no AP exists yet.
-            _restart_policy = {
-                "type": "OnFailure",
-                "onFailureRetries": 0,
-                "onSubmissionFailureRetries": 5,
-                "onSubmissionFailureRetryInterval": 60,
-            }
+        _restart_policy: dict[str, Any] = (
+            {"type": "OnFailure", "onFailureRetries": 0}
+            if no_driver_retry
+            else {"type": "OnFailure", "onFailureRetries": 2, "onFailureRetryInterval": 30}
+        )
+        _restart_policy["onSubmissionFailureRetries"] = 5
+        _restart_policy["onSubmissionFailureRetryInterval"] = 60
 
         env = self._build_env_vars(job_type, cycle_env=cycle_env)
         manifest = {
