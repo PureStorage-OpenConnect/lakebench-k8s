@@ -1250,14 +1250,17 @@ def test_non_click_runtime_error_is_failed():
 def test_a_failed_stage_whose_log_holds_brackets_exits_failed(monkeypatch, tmp_path):
     """A driver log line such as ``[/tmp/...]`` is printed as text. Read as
     Rich markup it raised MarkupError before the failure was recorded, and
-    the run ended on that error instead of exit 1."""
+    the run ended on that error instead of exit 1. The "Cause:" status line
+    prints its text verbatim: escaped first, it showed a backslash."""
     from tests.harness import run_harness
 
     real = run_harness.FakeMonitor.wait_for_completion
 
     def wait(self, *a, **k):
         result = real(self, *a, **k)
-        result.driver_logs += "\nspark-submit [/tmp/spark-1234] [main] exited\n"
+        result.driver_logs += (
+            "\nRuntimeError: cannot open [/tmp/x]\nspark-submit [/tmp/spark-1234] [main] exited\n"
+        )
         return result
 
     monkeypatch.setattr(run_harness.FakeMonitor, "wait_for_completion", wait)
@@ -1267,3 +1270,5 @@ def test_a_failed_stage_whose_log_holds_brackets_exits_failed(monkeypatch, tmp_p
     assert result.exception is None or isinstance(result.exception, SystemExit)
     assert result.exit_code == 1, result.output
     assert "[/tmp/spark-1234] [main] exited" in result.output
+    assert result.stderr.count("Cause: RuntimeError: cannot open [/tmp/x]") == 1, result.stderr
+    assert "\\[" not in result.stderr

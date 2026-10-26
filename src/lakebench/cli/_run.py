@@ -1349,7 +1349,7 @@ def _held_out_check_only(
     if interrupt is not None:
         interrupt.submitted(status)
     if status.state == JobState.FAILED:
-        print_error(f"Could not submit the held-out check: {esc(status.message)}")
+        print_error(f"Could not submit the held-out check: {status.message}")
         raise typer.Exit(ExitCode.FAILED)
     result = monitor.wait_for_completion(
         app, timeout_seconds=max(600, timeout or 0), poll_interval=15
@@ -1361,9 +1361,9 @@ def _held_out_check_only(
         return
     refused = refusal_in_log(getattr(result, "driver_logs", None))
     if refused:
-        print_error(f"Refused: the corpus is a protected AML corpus ({esc(refused)})")
+        print_error(f"Refused: the corpus is a protected AML corpus ({refused})")
         raise typer.Exit(ExitCode.USAGE)
-    print_error(f"The held-out check failed: {esc(result.message)}")
+    print_error(f"The held-out check failed: {result.message}")
     if getattr(result, "driver_logs", None):
         _print_driver_tail(result.driver_logs)
     raise typer.Exit(ExitCode.FAILED)
@@ -3032,7 +3032,7 @@ def _run_once(
                         # bronze-verify found a corpus from a held-out or spent
                         # AML seed and read nothing: the protected-corpus refusal.
                         print_error(
-                            f"Refused: {stage_name} found a protected AML corpus ({esc(_protected)})"
+                            f"Refused: {stage_name} found a protected AML corpus ({_protected})"
                         )
                         results.append((stage_name, False, job_metrics.elapsed_seconds))
                         _journal_safe(
@@ -3048,7 +3048,7 @@ def _run_once(
                     if result.driver_logs:
                         cause = driver_error_line(result.driver_logs)
                         if cause:
-                            print_error(f"Cause: {esc(cause)}")
+                            print_error(f"Cause: {cause}")
                         _print_driver_tail(result.driver_logs)
                     results.append((stage_name, False, job_metrics.elapsed_seconds))
                     _journal_safe(
