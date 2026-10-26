@@ -487,50 +487,70 @@ class SparkJobMonitor:
         """Wait until a long-lived (continuous) job's driver is running.
 
         Streaming jobs never complete, so wait_for_completion does not fit.
-        SUBMISSION_FAILED is waited through (the operator retries); any
-        settled failure, or a timeout, is returned as unsuccessful. ``success`` means RUNNING (or already
-        finished successfully). *on_status* is called with every polled
+        SUBMISSION_FAILED is waited through (the operator retries) and a
+        transient status read error is polled through, both within
+        *timeout_seconds*; any settled failure, or a timeout, is returned as
+        unsuccessful. ``success`` means RUNNING (or already finished
+        successfully). *on_status* is called with every polled
         status and the seconds waited, so the caller can report submission
         failures while the operator retries them instead of waiting silently.
         """
         start = time.time()
         sub_failed_since: float | None = None
+        last_state: JobState | None = None
+        failed_reads = 0
         while True:
             elapsed = time.time() - start
-            status = self.job_manager.get_job_status(job_name)
-            if on_status is not None:
-                on_status(status, elapsed)
-            if status.state == JobState.RUNNING or status.state in SUCCESS_STATES:
-                return JobResult(
-                    job_name=job_name,
-                    success=True,
-                    message=f"{job_name} running",
-                    elapsed_seconds=elapsed,
-                    final_status=status,
+            try:
+                status: JobStatus | None = self.job_manager.get_job_status(job_name)
+            except Exception as e:
+                if not is_transient_status_error(e):
+                    raise
+                failed_reads += 1
+                logger.warning(
+                    "status read for %s failed (%s: %s), %d in a row; polling on",
+                    job_name,
+                    type(e).__name__,
+                    e,
+                    failed_reads,
                 )
-            if status.state == JobState.SUBMISSION_FAILED:
-                sub_failed_since = sub_failed_since or time.time()
-                if time.time() - sub_failed_since < _SUBMISSION_FAILED_GRACE_S:
-                    time.sleep(poll_interval)
-                    continue
-            else:
-                sub_failed_since = None
-            if status.state in FAILURE_STATES:
-                return JobResult(
-                    job_name=job_name,
-                    success=False,
-                    message=f"Job failed: {status.message}",
-                    elapsed_seconds=elapsed,
-                    driver_logs=self._get_driver_logs(job_name),
+                status = None
+            if status is not None:
+                failed_reads = 0
+                last_state = status.state
+                if on_status is not None:
+                    on_status(status, elapsed)
+                if status.state == JobState.RUNNING or status.state in SUCCESS_STATES:
+                    return JobResult(
+                        job_name=job_name,
+                        success=True,
+                        message=f"{job_name} running",
+                        elapsed_seconds=elapsed,
+                        final_status=status,
+                    )
+                if status.state == JobState.SUBMISSION_FAILED:
+                    sub_failed_since = sub_failed_since or time.time()
+                else:
+                    sub_failed_since = None
+                retrying = (
+                    sub_failed_since is not None
+                    and time.time() - sub_failed_since < _SUBMISSION_FAILED_GRACE_S
                 )
+                if status.state in FAILURE_STATES and not retrying:
+                    return JobResult(
+                        job_name=job_name,
+                        success=False,
+                        message=f"Job failed: {status.message}",
+                        elapsed_seconds=elapsed,
+                        driver_logs=self._get_driver_logs(job_name),
+                    )
+            # The deadline holds while the operator retries a submission too.
             if elapsed > timeout_seconds:
+                state = last_state.value if last_state else "no state observed"
                 return JobResult(
                     job_name=job_name,
                     success=False,
-                    message=(
-                        f"{job_name} not running after {timeout_seconds}s "
-                        f"(state: {status.state.value!r})"
-                    ),
+                    message=f"{job_name} not running after {timeout_seconds}s (state: {state!r})",
                     elapsed_seconds=elapsed,
                     driver_logs=self._get_driver_logs(job_name),
                 )
