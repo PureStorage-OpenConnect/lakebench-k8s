@@ -36,7 +36,7 @@ class FakeExecutor:
 
 
 def _covered_ids():
-    return {n: i for i, (n, _) in enumerate(sq._COVERED, start=100)}
+    return {n: i for i, n in enumerate(sq._COVERED, start=100)}
 
 
 def _cov_instances(spec):
