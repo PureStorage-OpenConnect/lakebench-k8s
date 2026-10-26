@@ -207,6 +207,14 @@ def test_scale_and_workload_flags_are_written(tmp_path, creds):
     assert "parallelism" not in cfg.architecture.workload.datagen.model_fields_set
 
 
+def test_local_financial_is_refused_before_the_template(tmp_path):
+    out = tmp_path / "l.yaml"
+    r = runner.invoke(app, ["init", "-o", str(out), "--local", "-w", "financial"])
+    assert r.exit_code == 2
+    assert "--local runs DuckDB" in " ".join(r.output.split())
+    assert not out.exists()
+
+
 def test_existing_file_needs_overwrite(tmp_path):
     out = tmp_path / "x.yaml"
     out.write_text("old: true\n")

@@ -807,6 +807,11 @@ def init(
         _refuse(f"unknown workload {workload!r}; valid: {', '.join(workloads())}")
 
     if local:
+        if workload == "financial":
+            _refuse(
+                "nothing written: --local runs DuckDB, and the financial workload needs "
+                "Trino; drop --local and use a trino recipe, or pick --workload customer360"
+            )
         # 1 is the cluster default; a laptop gets 0.1 unless a scale was given.
         local_text = _local_config_text(
             output,
