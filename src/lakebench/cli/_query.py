@@ -149,6 +149,7 @@ def _run_query_repl(
     refuse_if_protected(cfg, "query")
 
     namespace = cfg.get_namespace()
+    engine = cfg.architecture.query_engine.type.value
 
     try:
         executor = get_executor(cfg, namespace)
@@ -205,20 +206,8 @@ def _run_query_repl(
         row_count = result.rows_returned
 
         if rows:
-            if output_format == "json":
-                import json
-
-                data = [row.split("\t") for row in rows]
-                emit_data(json.dumps({"rows": data, "count": len(data)}, indent=2))
-            elif output_format == "csv":
-                import csv
-                import io
-
-                buf = io.StringIO()
-                writer = csv.writer(buf)
-                for row in rows:
-                    writer.writerow(row.split("\t"))
-                emit_data(buf.getvalue())
+            if output_format in ("json", "csv"):
+                _emit_rows(engine, output, output_format)
             else:  # table
                 for line in rows[:50]:
                     console.print(line, markup=False, highlight=False)
@@ -228,18 +217,6 @@ def _run_query_repl(
         err_console.print(f"[green]{esc(row_count)} rows in {result.duration_seconds:.2f}s[/green]")
 
     console.print(f"\n[dim]Executed {esc(query_count)} queries. Goodbye![/dim]")
-
-
-def _rows_as_dicts(rows: list[str]) -> list[dict[str, str]]:
-    """Tab-separated result lines as dicts: the first line names the
-    columns; one line alone is keyed by position."""
-    parsed = [row.split("\t") for row in rows if row.strip()]
-    if len(parsed) > 1:
-        headers = [h.strip().strip('"') for h in parsed[0]]
-        return [
-            dict(zip(headers, [v.strip().strip('"') for v in r], strict=False)) for r in parsed[1:]
-        ]
-    return [{str(i): v.strip().strip('"') for i, v in enumerate(r)} for r in parsed]
 
 
 def _query_json_rows(engine: str, raw: str) -> tuple[list[str] | None, list[list[str]], str]:
@@ -266,6 +243,27 @@ def _query_json_rows(engine: str, raw: str) -> tuple[list[str] | None, list[list
         return lines[0].split("\t"), [ln.split("\t") for ln in lines[1:]], "tsv2"
     text = (raw or "").strip()
     return None, [list(r) for r in csv.reader(io.StringIO(text))], "csv"
+
+
+def _emit_rows(engine: str, raw: str, fmt: str) -> None:
+    """Print a result for ``--format json`` or ``csv``, parsed the way
+    *engine*'s executor prints it. JSON rows are dicts only when the engine
+    names its columns (Spark Thrift); otherwise they are lists of cells."""
+    import csv
+    import io
+    import json
+
+    columns, cells, _ = _query_json_rows(engine, raw)
+    if fmt == "json":
+        data: list[Any] = [dict(zip(columns, r, strict=False)) for r in cells] if columns else cells
+        emit_data(json.dumps({"rows": data, "count": len(data)}, indent=2))
+        return
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    if columns:
+        writer.writerow(columns)
+    writer.writerows(cells)
+    emit_data(buf.getvalue())
 
 
 def query(
@@ -504,21 +502,8 @@ def query(
             }
         )
     elif rows:
-        if output_format == "json":
-            import json
-
-            data = _rows_as_dicts(rows)
-            emit_data(json.dumps({"rows": data, "count": len(data)}, indent=2))
-        elif output_format == "csv":
-            import csv
-            import io
-
-            buf = io.StringIO()
-            writer = csv.writer(buf)
-            for row in rows:
-                if row.strip():
-                    writer.writerow([c.strip().strip('"') for c in row.split("\t")])
-            emit_data(buf.getvalue())
+        if output_format in ("json", "csv"):
+            _emit_rows(cfg.architecture.query_engine.type.value, output, output_format)
         else:  # table (default)
             console.print()
             for line in rows[:50]:
