@@ -1,7 +1,4 @@
-"""Query and benchmark CLI commands for Lakebench.
-
-Extracted from cli/__init__.py to reduce module size.
-"""
+"""Query and benchmark CLI commands for Lakebench."""
 
 from __future__ import annotations
 
@@ -32,6 +29,7 @@ from lakebench.config import (
     LoadPurpose,
     load_config,
 )
+from lakebench.config.schema import is_continuous_mode
 from lakebench.exit_codes import ExitCode
 from lakebench.journal import CommandName, EventType
 
@@ -140,7 +138,6 @@ def _run_query_repl(
         print_error("Interactive mode requires a terminal")
         raise typer.Exit(ExitCode.USAGE)
 
-    config_file = resolve_config_path(config_file)
     try:
         cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
     except ConfigError as e:
@@ -584,11 +581,11 @@ def _latest_tm_run_id(cfg) -> str | None:
 
 
 def _save_benchmark_record(
-    storage: Any, parent: Any, result: Any, *, started_at: str | None = None
+    storage: Any, record: Any, result: Any, *, started_at: str | None = None
 ) -> Path:
     """Save ``lakebench benchmark``'s record and return its path.
 
-    *parent* is the deployment's latest run record as loaded (a copy in
+    *record* is the deployment's latest run record as loaded (a copy in
     memory; its file is never opened for writing). The new record is that
     copy with *result* as its benchmark everywhere a reader takes a QpH
     from: ``benchmark``, the pipeline benchmark's ``query_benchmark`` and
@@ -613,8 +610,7 @@ def _save_benchmark_record(
     from lakebench.metrics.provenance import run_provenance
     from lakebench.metrics.storage import RecordExistsError
 
-    record = parent
-    parent_run_id = parent.run_id
+    parent_run_id = record.run_id
     bench = BenchmarkMetrics(
         mode=result.mode,
         cache=result.cache,
@@ -659,7 +655,7 @@ def _save_benchmark_record(
         pb.maintenance_value_reason = ""
         pb.maintenance_paired_queries = 0
         pb.pre_compaction_benchmark = None
-        if pb.pipeline_mode != "sustained":
+        if not is_continuous_mode(pb.pipeline_mode):
             # Batch elapsed is the run's wall clock, which held the parent's
             # benchmark: this benchmark's seconds replace it. Continuous
             # elapsed is the stream window's and does not include it.
@@ -829,9 +825,9 @@ def benchmark(
     # its results will not be recorded against the latest run (another
     # dependency set).
     from lakebench.deps import runtime as deps_runtime
-    from lakebench.metrics import MetricsStorage as _Storage
 
-    _latest = _Storage().get_latest_run_for_deployment(cfg.name, writable=True)
+    storage = MetricsStorage()
+    _latest = storage.get_latest_run_for_deployment(cfg.name, writable=True)
     early_refusal = deps_runtime.attach_refusal(cfg, _latest) if _latest else None
     if early_refusal and _latest is not None:
         print_warning(f"Results may not be recorded against run {_latest.run_id}: {early_refusal}")
@@ -900,13 +896,12 @@ def benchmark(
             _display_power_results(run_result)
         primary_result = run_result
 
-    # Benchmark gate (invariant 3: exit 0 is not a pass). Mirrors what
-    # `run` applies via _benchmark_gate_problems: any query failure
-    # outside the known-upstream allowlist, any zero-row query not
-    # declared allow_empty, and the empty-set / all-failed case all fail
-    # the run. Also refuse when composite mode's throughput half
-    # produced qph=0 (power passes, throughput is empty, composite
-    # headline is 0.0 but exit was previously 0).
+    # Benchmark gate: exit 0 is not a pass. The same checks `run` applies
+    # via _benchmark_gate_problems: any query failure outside the
+    # known-upstream allowlist, any zero-row query not declared
+    # allow_empty, and an empty or all-failed set fail the command. A
+    # composite whose throughput half scored qph=0 fails too, since its
+    # composite QpH of 0.0 is not a score.
     from lakebench.cli._run import _benchmark_gate_problems
 
     total_queries = len(primary_result.queries)
@@ -944,10 +939,7 @@ def benchmark(
     # run id, record_kind "benchmark" and parent_run_id. Scoped by deployment
     # name, with no fallback to a legacy record of unknown deployment, so a
     # parallel deployment's run is never the parent.
-    storage = MetricsStorage()
     parent = storage.get_latest_run_for_deployment(cfg.name, writable=True)
-    from lakebench.deps import runtime as deps_runtime
-
     refusal = deps_runtime.attach_refusal(cfg, parent) if parent else None
     if refusal:
         print_warning(f"Benchmark not recorded: {refusal}")
