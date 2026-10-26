@@ -244,46 +244,48 @@ def clean(
             print_warning(decision.hint)
 
     if bucket_targets:
+        from kubernetes import client as k8s_client
+        from kubernetes.client.rest import ApiException
+
+        from lakebench.cli._cluster_ops import (
+            FINISHED_APP_STATES,
+            SPARK_GROUP,
+            SPARK_PLURAL,
+            SPARK_VERSION,
+        )
+
+        def _unchecked(what: str, e: Exception) -> None:
+            # A 404 is no datagen Job or no Spark Operator CRD: no writer.
+            # Anything else (403, timeout) means writers were not checked.
+            if not (isinstance(e, ApiException) and e.status == 404):
+                print_warning(f"Could not check for running writers ({what}): {e}")
+
         active_writers: list[str] = []
+        ns = cfg.get_namespace()
         try:
-            from kubernetes import client as k8s_client
-
-            from lakebench.cli._cluster_ops import (
-                FINISHED_APP_STATES,
-                SPARK_GROUP,
-                SPARK_PLURAL,
-                SPARK_VERSION,
+            job = k8s_client.BatchV1Api().read_namespaced_job("lakebench-datagen", ns)
+            active_pods = job.status.active or 0
+            if active_pods > 0:
+                active_writers.append(f"datagen job ({active_pods} active pod(s))")
+        except Exception as e:  # noqa: BLE001
+            _unchecked("datagen job", e)
+        try:
+            apps = k8s_client.CustomObjectsApi().list_namespaced_custom_object(
+                group=SPARK_GROUP,
+                version=SPARK_VERSION,
+                namespace=ns,
+                plural=SPARK_PLURAL,
             )
-
-            ns = cfg.get_namespace()
-            try:
-                job = k8s_client.BatchV1Api().read_namespaced_job("lakebench-datagen", ns)
-                active_pods = job.status.active or 0
-                if active_pods > 0:
-                    active_writers.append(f"datagen job ({active_pods} active pod(s))")
-            except Exception:
-                pass  # no datagen job
-            try:
-                apps = k8s_client.CustomObjectsApi().list_namespaced_custom_object(
-                    group=SPARK_GROUP,
-                    version=SPARK_VERSION,
-                    namespace=ns,
-                    plural=SPARK_PLURAL,
-                )
-                for app in apps.get("items", []):
-                    state = ((app.get("status") or {}).get("applicationState") or {}).get(
-                        "state", ""
+            for app in apps.get("items", []):
+                state = ((app.get("status") or {}).get("applicationState") or {}).get("state", "")
+                # SUBMISSION_FAILED is not final: the operator resubmits
+                # it (restartPolicy), so the app may start writing.
+                if state not in FINISHED_APP_STATES:
+                    active_writers.append(
+                        f"Spark application {app['metadata']['name']} ({state or 'pending'})"
                     )
-                    # SUBMISSION_FAILED is not final: the operator resubmits
-                    # it (restartPolicy), so the app may start writing.
-                    if state not in FINISHED_APP_STATES:
-                        active_writers.append(
-                            f"Spark application {app['metadata']['name']} ({state or 'pending'})"
-                        )
-            except Exception:
-                pass  # no Spark Operator CRD or K8s unavailable
-        except Exception:
-            pass  # K8s client unavailable -- nothing to check
+        except Exception as e:  # noqa: BLE001
+            _unchecked("Spark applications", e)
         if active_writers:
             for w in active_writers:
                 print_warning(f"Still writing: {w}")

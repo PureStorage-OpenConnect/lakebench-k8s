@@ -166,3 +166,33 @@ def test_clean_refuses_when_namespace_absent(s3_cls, _k8s, tmp_path):
                 force_legacy=False,
             )
     s3.empty_bucket.assert_not_called()
+
+
+@pytest.mark.parametrize(("status", "warned"), [(404, False), (403, True)])
+@patch("lakebench.k8s.get_k8s_client")
+@patch("kubernetes.client.CustomObjectsApi")
+@patch("kubernetes.client.BatchV1Api")
+@patch("lakebench.s3.S3Client")
+def test_a_writer_check_that_fails_is_a_warning(s3_cls, batch, crd, _k8s, tmp_path, status, warned):
+    """No datagen Job or no Spark CRD (404) is no writer. Any other failure
+    means the writers were not checked, and clean says so."""
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+    s3_cls.return_value = _s3()
+    batch.return_value.read_namespaced_job.side_effect = ApiException(status=status)
+    crd.return_value.list_namespaced_custom_object.side_effect = ApiException(status=status)
+    not_found = IdentityReport(
+        verdict=IdentityVerdict.NOT_FOUND,
+        resource_name="b",
+        expected_deployment="my-clean",
+        hint="",
+    )
+    with (
+        patch("lakebench.deploy.ownership.verify_bucket_ownership", return_value=not_found),
+        patch("lakebench.cli._clean.print_warning") as warn,
+    ):
+        _clean(_cfg(tmp_path))
+    unchecked = [c.args[0] for c in warn.call_args_list if "running writers" in c.args[0]]
+    assert len(unchecked) == (2 if warned else 0), unchecked
