@@ -367,7 +367,7 @@ def _badge_status(
                 if reason
                 else "Ingest ratio unmeasurable (datagen row count unknown)"
             )
-        elif is_sustained and pb.ingest_ratio < 0.95:
+        elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio < 0.95:
             if pb.intake_limit == "trickle_rate" and pb.pipeline_saturated is False:
                 # The configured trickle bounded intake and the pipeline kept
                 # pace with it: a caveat on the ratio, not a failure.
@@ -386,7 +386,7 @@ def _badge_status(
                     "below_bronze_capacity": "bronze took in less than arrived without being at capacity",
                 }.get(pb.intake_limit or "", "pipeline saturated")
                 reasons.append(f"Ingest ratio {pb.ingest_ratio:.2f} < 0.95 ({cause})")
-        elif is_sustained and pb.ingest_ratio > 1.05:
+        elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio > 1.05:
             warnings.append(
                 f"Ingest ratio {pb.ingest_ratio:.2f} > 1.05 (gold re-reads exceed input)"
             )
@@ -1155,7 +1155,8 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
     if deps_reason is not None:
         gate_outcomes["dependency_set"] = "FAIL"
     for name, gate in gates.items():
-        gate_outcomes[name] = gate.outcome  # record_gates keeps only judged gates
+        if gate.outcome is not None:
+            gate_outcomes[name] = gate.outcome
 
     reasons: list[str] = []
     interrupted = _interrupt_record(metrics)
