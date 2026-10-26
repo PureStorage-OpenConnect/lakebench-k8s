@@ -2802,14 +2802,8 @@ def _run_once(
                     # Time to value leaves the cycle's datagen out (CycleMetrics).
                     _cycle_dg_start = utc_now().isoformat()
                     datagen_result = _cycle_datagen.deploy_cycle(cycle_idx, total_cycles)
-                    if datagen_result.status == DeploymentStatus.SUCCESS:
-                        _interrupt.datagen_created()
-                        if cycle_idx == 0:
-                            # The deployer wrote the marker unfinished.
-                            _cycle_series_after(collector.current_run, cfg, "begun")
-                    else:
-                        _interrupt.not_created("Job", DATAGEN_JOB)
                     if datagen_result.status != DeploymentStatus.SUCCESS:
+                        _interrupt.not_created("Job", DATAGEN_JOB)
                         # Fatal: continuing would rebuild this cycle from the
                         # previous cycle's bronze, and incremental silver would
                         # append it a second time.
@@ -2824,32 +2818,30 @@ def _run_once(
                             refused_result_code([datagen_result]) or _pipeline_exit_code
                         )
                         break
-                    else:
-                        ts_start = datagen_result.details.get("timestamp_start", "")
-                        ts_end = datagen_result.details.get("timestamp_end", "")
-                        _cycle_ts_start = ts_start
-                        _cycle_ts_end = ts_end
-                        print_info(f"Datagen: {ts_start} to {ts_end}")
+                    _interrupt.datagen_created()
+                    if cycle_idx == 0:
+                        # The deployer wrote the marker unfinished.
+                        _cycle_series_after(collector.current_run, cfg, "begun")
+                    _cycle_ts_start = datagen_result.details.get("timestamp_start", "")
+                    _cycle_ts_end = datagen_result.details.get("timestamp_end", "")
+                    print_info(f"Datagen: {_cycle_ts_start} to {_cycle_ts_end}")
 
-                        # Wait for datagen completion
-                        # The module's time: _time is bound only by Phase 3's
-                        # single-shot generate, which a multi-cycle run skips.
-                        _dg_start = time.time()
-                        dg_wait = _cycle_datagen.wait_for_completion(timeout_seconds=timeout)
-                        _cycle_dg_elapsed = time.time() - _dg_start
-                        if dg_wait.status != DeploymentStatus.SUCCESS:
-                            print_error(f"Datagen did not complete: {dg_wait.message}")
-                            pipeline_success = False
-                            break
-                        _interrupt.finished("Job", DATAGEN_JOB)
-                        _series_mark = _record_series_cycle(cfg, cycle_idx, total_cycles, run_id)
-                        # After the marker write, which is datagen's work too.
-                        _cycle_dg_end = utc_now().isoformat()
-                        _cycle_series_after(collector.current_run, cfg, _series_mark)
-                        if _series_mark == "conflict":
-                            pipeline_success = False
-                            _pipeline_exit_code = ExitCode.REFUSED
-                            break
+                    _dg_start = time.time()
+                    dg_wait = _cycle_datagen.wait_for_completion(timeout_seconds=timeout)
+                    _cycle_dg_elapsed = time.time() - _dg_start
+                    if dg_wait.status != DeploymentStatus.SUCCESS:
+                        print_error(f"Datagen did not complete: {dg_wait.message}")
+                        pipeline_success = False
+                        break
+                    _interrupt.finished("Job", DATAGEN_JOB)
+                    _series_mark = _record_series_cycle(cfg, cycle_idx, total_cycles, run_id)
+                    # After the marker write, which is datagen's work too.
+                    _cycle_dg_end = utc_now().isoformat()
+                    _cycle_series_after(collector.current_run, cfg, _series_mark)
+                    if _series_mark == "conflict":
+                        pipeline_success = False
+                        _pipeline_exit_code = ExitCode.REFUSED
+                        break
                 except Exception as e:
                     print_error(f"Cycle datagen failed: {e}")
                     pipeline_success = False
@@ -3155,6 +3147,11 @@ def _run_once(
                 )
                 if collector.current_run is not None:
                     collector.current_run.cycles.append(_cm)
+
+        if not pipeline_success:
+            # A cycle's datagen failed or was refused: the corpus is half
+            # built or replaced, so no maintenance or benchmark runs on it.
+            raise typer.Exit(_pipeline_exit_code)
 
         # Summary
         _stage = "pipeline"
