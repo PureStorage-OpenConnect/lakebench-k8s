@@ -1,5 +1,6 @@
 -- Coverage and covered-recall per typology, as integer counts only.
--- One statement so silver.transactions is scanned once (design finding 10).
+-- One statement, and silver.transactions appears in one CTE (sealed) that
+-- is referenced once, so it is scanned once (design finding 10).
 -- Placeholders: {catalog}; the table pins {txns_pin} {versions_pin}
 -- {accounts_pin} {entities_pin} {alerts_pin} {manifest_pin} each render as
 -- "FOR VERSION AS OF <id>" (covered mode) or "" (batch mode). bronze.accounts
@@ -38,12 +39,17 @@ manifest_uetrs AS (
   FROM manifest m
   LEFT JOIN UNNEST(m.participant_uetrs) AS u(uetr) ON TRUE
 ),
+-- The manifest's payments that are in the sealed silver transactions. Only
+-- membership of manifest uetrs is ever asked, so silver (the large side) is
+-- the probe of one join to the distinct manifest uetrs (the build side) and
+-- the DISTINCT runs over manifest-sized output, not over all of silver.
 sealed AS (
   SELECT DISTINCT t.uetr
   FROM {catalog}.silver.transactions {txns_pin} t
   JOIN {catalog}.silver.silver_batch_versions {versions_pin} v
     ON t._stream_id = v.stream_id AND t._batch_id = v.batch_id
-  WHERE t.uetr IS NOT NULL
+  JOIN (SELECT DISTINCT uetr FROM manifest_uetrs WHERE uetr IS NOT NULL) mu
+    ON mu.uetr = t.uetr
 ),
 -- datagen id -> silver entity key: bronze account IBAN -> silver account
 -- holder key, min(key) per dg_id (aml_features._account_id_map).
@@ -98,9 +104,12 @@ covered AS (
   LEFT JOIN by_uetr bu ON bu.typology_id = i.typology_id
   LEFT JOIN by_entity be ON be.typology_id = i.typology_id
 ),
--- Alerts of this run, exploded to (alert_id, rule_id, uetr), distinct.
+-- Alerts of this run, exploded to (rule_id, uetr). Not made distinct: the
+-- exploded set is hundreds of millions of rows after an hour at scale 20,
+-- and the hit sets below are DISTINCT over typology_id after the join, with
+-- the exploded alerts as the probe side and the manifest as the build side.
 alert_uetr AS (
-  SELECT DISTINCT a.alert_id, a.rule_id, u.uetr
+  SELECT a.rule_id, u.uetr
   FROM {catalog}.gold.alerts {alerts_pin} a
   CROSS JOIN UNNEST(a.related_txn_ids) AS u(uetr)
   WHERE a.run_id = '{run_id}'
@@ -108,25 +117,26 @@ alert_uetr AS (
 pairs AS (
   {pairs_values}
 ),
--- The manifest uetrs the recall numerator counts over. Covered mode scores
--- covered instances only (recall_covered); batch mode scores the whole
--- manifest (score_financial.compute_scores has no coverage gate), so
--- {hit_scope} is the covered join in covered mode and empty in batch.
+-- The manifest uetrs the hits are found over: the whole manifest. A hit and
+-- coverage are both per instance, so covered mode gates the hit flags on
+-- is_covered in the final SELECT ({hit_gate} renders "c.is_covered AND "
+-- there, and "" in batch mode, which has no coverage gate); that keeps the
+-- covered test, and so silver, out of the hit joins.
 scored_uetrs AS (
   SELECT mu.typology_id, mu.typology_type, mu.uetr
   FROM manifest_uetrs mu
-  {hit_scope}
+  WHERE mu.uetr IS NOT NULL
 ),
 designated_hit AS (
   SELECT DISTINCT cu.typology_id
-  FROM scored_uetrs cu
-  JOIN pairs p ON p.typology_type = cu.typology_type
-  JOIN alert_uetr au ON au.rule_id = p.rule_id AND au.uetr = cu.uetr
+  FROM alert_uetr au
+  JOIN scored_uetrs cu ON cu.uetr = au.uetr
+  JOIN pairs p ON p.typology_type = cu.typology_type AND p.rule_id = au.rule_id
 ),
 incidental_hit AS (
   SELECT DISTINCT cu.typology_id
-  FROM scored_uetrs cu
-  JOIN alert_uetr au ON au.uetr = cu.uetr
+  FROM alert_uetr au
+  JOIN scored_uetrs cu ON cu.uetr = au.uetr
 )
 -- One row per instance, with integer flags. The assembler groups these in
 -- Python (counts only) so it also holds which typology_ids are covered, the
@@ -135,8 +145,8 @@ SELECT c.typology_id,
        c.typology_type,
        CASE WHEN c.is_covered THEN 1 ELSE 0 END AS is_covered,
        CASE WHEN c.no_participant THEN 1 ELSE 0 END AS no_participant,
-       CASE WHEN dh.typology_id IS NOT NULL THEN 1 ELSE 0 END AS designated_hit,
-       CASE WHEN ih.typology_id IS NOT NULL THEN 1 ELSE 0 END AS incidental_hit
+       CASE WHEN {hit_gate}dh.typology_id IS NOT NULL THEN 1 ELSE 0 END AS designated_hit,
+       CASE WHEN {hit_gate}ih.typology_id IS NOT NULL THEN 1 ELSE 0 END AS incidental_hit
 FROM covered c
 LEFT JOIN designated_hit dh ON dh.typology_id = c.typology_id
 LEFT JOIN incidental_hit ih ON ih.typology_id = c.typology_id

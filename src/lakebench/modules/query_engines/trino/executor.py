@@ -337,6 +337,17 @@ class TrinoExecutor:
             source,
             "--session",
             f"query_max_run_time={server_run_time_limit(timeout)}s",
+            # The scoring statements put the large side (silver, exploded
+            # alerts) on the left of each join and the small, manifest-derived
+            # side on the right, the hash build. No reordering and a
+            # partitioned join keep that: the UNNEST outputs have no
+            # statistics, and a planner that guessed wrong would build on
+            # hundreds of millions of rows and exceed the cluster's query
+            # memory (a 60-minute scale-20 run did, at 143 GB).
+            "--session",
+            "join_reordering_strategy=NONE",
+            "--session",
+            "join_distribution_type=PARTITIONED",
             "--output-format",
             "TSV",
             "--execute",

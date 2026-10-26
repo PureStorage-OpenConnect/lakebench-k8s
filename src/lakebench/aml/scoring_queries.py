@@ -85,7 +85,25 @@ class NotScored(Exception):
 
 
 def _template(name: str) -> str:
-    return (_TEMPLATE_DIR / name).read_text()
+    """The template text, headed by a comment naming it, so a failure can be
+    attributed to the statement (``_named_failures``)."""
+    return f"-- {name}\n" + (_TEMPLATE_DIR / name).read_text()
+
+
+def _named_failures(run_tsv: RunTsv) -> RunTsv:
+    """Wrap *run_tsv* so an engine failure names the statement that failed
+    (its first line: the template name, or the text of an inline statement).
+    A 60-minute run reported only 'Query exceeded distributed total memory
+    limit' with no way to tell which of eleven statements it was."""
+
+    def run(sql: str, timeout: int) -> list[list[str | None]]:
+        try:
+            return run_tsv(sql, timeout)
+        except RuntimeError as e:
+            head = sql.lstrip().splitlines()[0].lstrip("- ").strip()[:72]
+            raise RuntimeError(f"{head}: {e}") from e
+
+    return run
 
 
 def _pins(snapshot_ids: dict[str, int] | None) -> dict[str, str]:
@@ -133,8 +151,9 @@ def _values(pairs: Sequence[tuple[str, ...]], columns: Sequence[str]) -> str:
     relation when there are no pairs (so a downstream JOIN yields nothing)."""
     cols = ", ".join(columns)
     if not pairs:
-        nulls = ", ".join("CAST(NULL AS VARCHAR)" for _ in columns)
-        return f"SELECT {nulls} WHERE 1 = 0"  # typed empty
+        # Typed and named: the statements reference the columns by name.
+        nulls = ", ".join(f"CAST(NULL AS VARCHAR) AS {c}" for c in columns)
+        return f"SELECT {nulls} WHERE 1 = 0"
     tuples = ", ".join("(" + ", ".join(_quote(v) for v in p) + ")" for p in pairs)
     return f"SELECT * FROM (VALUES {tuples}) AS t({cols})"
 
@@ -218,14 +237,12 @@ def _coverage_recall(
 ) -> tuple[dict[str, dict[str, int]], set[str]]:
     # Covered mode counts hits over covered instances only; batch mode counts
     # over the whole manifest (compute_scores has no coverage gate).
-    hit_scope = (
-        "JOIN covered c ON c.typology_id = mu.typology_id AND c.is_covered" if covered_pass else ""
-    )
+    hit_gate = "c.is_covered AND " if covered_pass else ""
     sql = _template("coverage_recall.sql.tmpl").format(
         catalog=catalog,
         run_id=run_id,
         pairs_values=pairs_sql,
-        hit_scope=hit_scope,
+        hit_gate=hit_gate,
         **pins,
     )
     rows = run_tsv(sql, timeout)
@@ -609,6 +626,7 @@ def score(
     rule/reason-code vocabulary. Raises NotScored with a reason a caller writes
     as ``status: not_scored``.
     """
+    run_tsv = _named_failures(run_tsv)
     pins = _pins(snapshot_ids)
     _guard_manifest(run_tsv, catalog, pins, timeout)
     status_rows = _status_rows(run_tsv, catalog, pins, timeout)
@@ -631,7 +649,7 @@ def score(
     }
     pairs = sorted((typ, rid) for rid, typ in ran_targets.items())
     pairs_sql = _values([(typ, rid) for typ, rid in pairs], ["typology_type", "rule_id"])
-    targets = sorted((rid, typ) for typ, rids in designated.items() for rid in rids)
+    targets = sorted({(rid, typ) for typ, rids in designated.items() for rid in rids})
     targets_sql = _values(targets, ["rule_id", "target"])
 
     cov, covered_ids = _coverage_recall(

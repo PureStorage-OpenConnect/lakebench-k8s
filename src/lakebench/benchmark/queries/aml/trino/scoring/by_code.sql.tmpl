@@ -10,26 +10,25 @@
 -- {targets_values} (VALUES of (rule_id, target_typology) for the designated
 -- rules that ran). The assembler also needs the uncoded-alert count and the
 -- per-typology instance counts; those come from by_code_meta.sql.tmpl.
+-- Memory shape: the alerts' payment lists are exploded once, as the probe
+-- side of the join to the manifest (build side); only on-target matches are
+-- fanned out over the codes and made distinct.
 WITH ran_targets AS (
   {targets_values}
 ),
-codes AS (
-  SELECT DISTINCT a.alert_id, a.rule_id, c.code
+alerts AS (
+  SELECT a.alert_id, a.rule_id, rt.target, a.reason_codes, a.related_txn_ids
   FROM {catalog}.gold.alerts {alerts_pin} a
-  CROSS JOIN UNNEST(a.reason_codes) AS c(code)
   JOIN ran_targets rt ON rt.rule_id = a.rule_id
   WHERE a.run_id = '{run_id}'
 ),
-alert_uetr AS (
-  SELECT DISTINCT a.alert_id, a.rule_id, u.uetr
-  FROM {catalog}.gold.alerts {alerts_pin} a
-  CROSS JOIN UNNEST(a.related_txn_ids) AS u(uetr)
-  WHERE a.run_id = '{run_id}'
-),
-code_uetrs AS (
-  SELECT c.alert_id, c.rule_id, c.code, au.uetr
-  FROM codes c
-  JOIN alert_uetr au ON au.alert_id = c.alert_id AND au.rule_id = c.rule_id
+-- with_txn: the alert has at least one related payment (an exploded form
+-- would give it at least one row).
+codes AS (
+  SELECT DISTINCT al.alert_id, al.rule_id, c.code,
+         CARDINALITY(al.related_txn_ids) > 0 AS with_txn
+  FROM alerts al
+  CROSS JOIN UNNEST(al.reason_codes) AS c(code)
 ),
 manifest_uetr AS (
   SELECT DISTINCT u.uetr, m.typology_type, m.typology_id
@@ -37,17 +36,21 @@ manifest_uetr AS (
   CROSS JOIN UNNEST(m.participant_uetrs) AS u(uetr)
   WHERE u.uetr IS NOT NULL
 ),
+-- (rule, code, alert, target instance) for every on-target payment of an
+-- alert, in one pass: the exploded alerts probe the manifest (build side),
+-- and only the matches are fanned out over the alert's codes.
 on_target AS (
-  SELECT cu.rule_id, cu.code, cu.alert_id, mu.typology_id
-  FROM code_uetrs cu
-  JOIN ran_targets rt ON rt.rule_id = cu.rule_id
-  JOIN manifest_uetr mu ON mu.uetr = cu.uetr AND mu.typology_type = rt.target
+  SELECT DISTINCT al.rule_id, c.code, al.alert_id, mu.typology_id
+  FROM alerts al
+  CROSS JOIN UNNEST(al.related_txn_ids) AS u(uetr)
+  JOIN manifest_uetr mu ON mu.uetr = u.uetr AND mu.typology_type = al.target
+  CROSS JOIN UNNEST(al.reason_codes) AS c(code)
 ),
 n_by AS (
   SELECT rule_id, code, COUNT(DISTINCT alert_id) AS n FROM codes GROUP BY rule_id, code
 ),
 n_with_txn AS (
-  SELECT rule_id, code, COUNT(DISTINCT alert_id) AS n FROM code_uetrs GROUP BY rule_id, code
+  SELECT rule_id, code, COUNT(DISTINCT alert_id) AS n FROM codes WHERE with_txn GROUP BY rule_id, code
 ),
 hit_inst AS (
   SELECT rule_id, code, COUNT(DISTINCT typology_id) AS n FROM on_target GROUP BY rule_id, code

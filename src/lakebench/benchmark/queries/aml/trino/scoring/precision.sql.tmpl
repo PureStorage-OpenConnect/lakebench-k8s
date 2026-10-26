@@ -5,19 +5,18 @@
 -- {targets_values} (VALUES of (rule_id, target_typology) for designated
 -- rules, or "" when none).
 -- Mirrors compute_scores FP half:
---  * refs = one row per (alert_id, rule_id, uetr) with on_target =
---    does the uetr belong to the alert rule's target typology (MAX over the
---    uetr's typologies);
---  * per_alert hit = MAX(on_target) over the alert; fp_by_rule = alerts with
---    hit=0; txn_precision = AVG(on_target) over (alert,uetr) rows;
+--  * one row per distinct (alert_id, rule_id, uetr) with on_target =
+--    does the uetr belong to the alert rule's target typology;
+--  * per_alert hit = any on-target uetr; fp_by_rule = alerts with no hit;
+--    txn_precision = on-target pairs / all pairs;
 --  * a rule with no target is left out (no FP meaning).
-WITH alert_uetr AS (
-  SELECT DISTINCT a.alert_id, a.rule_id, u.uetr
-  FROM {catalog}.gold.alerts {alerts_pin} a
-  CROSS JOIN UNNEST(a.related_txn_ids) AS u(uetr)
-  WHERE a.run_id = '{run_id}'
-),
-targets AS (
+-- Memory shape: the alerts' payment lists are never exploded into a DISTINCT
+-- or a GROUP BY at (alert, uetr) grain (hundreds of millions of rows at
+-- scale 20 after an hour). Per-alert pair counts come from the arrays; the
+-- exploded alerts are the probe side of one inner join to the manifest
+-- (small, the build side), so only on-target pairs reach an aggregation.
+-- alert_id is a uuid, one row per alert.
+WITH targets AS (
   {targets_values}
 ),
 -- manifest uetr -> its typology_type (distinct, non-null uetr).
@@ -27,25 +26,40 @@ manifest_uetr AS (
   CROSS JOIN UNNEST(m.participant_uetrs) AS u(uetr)
   WHERE u.uetr IS NOT NULL
 ),
-refs AS (
-  SELECT au.alert_id, au.rule_id, au.uetr,
-         MAX(CASE WHEN mu.typology_type = t.target THEN 1 ELSE 0 END) AS on_target
-  FROM alert_uetr au
-  JOIN targets t ON t.rule_id = au.rule_id
-  LEFT JOIN manifest_uetr mu ON mu.uetr = au.uetr
-  GROUP BY au.alert_id, au.rule_id, au.uetr
+-- Alerts of designated rules with at least one related payment (an alert
+-- with none has no pair and is not counted, as the exploded form had it).
+alerts AS (
+  SELECT a.alert_id, a.rule_id, t.target, ARRAY_DISTINCT(a.related_txn_ids) AS uetrs
+  FROM {catalog}.gold.alerts {alerts_pin} a
+  JOIN targets t ON t.rule_id = a.rule_id
+  WHERE a.run_id = '{run_id}'
+    AND CARDINALITY(a.related_txn_ids) > 0
 ),
-per_alert AS (
-  SELECT alert_id, rule_id, MAX(on_target) AS hit
-  FROM refs
-  GROUP BY alert_id, rule_id
+-- On-target distinct pairs per alert: manifest_uetr is distinct on
+-- (uetr, typology_type) and the target is one type, so each matching uetr
+-- joins once. An alert with a row here is a hit.
+hits AS (
+  SELECT al.alert_id, al.rule_id, COUNT(*) AS on_pairs
+  FROM alerts al
+  CROSS JOIN UNNEST(al.uetrs) AS u(uetr)
+  JOIN manifest_uetr mu ON mu.uetr = u.uetr AND mu.typology_type = al.target
+  GROUP BY al.alert_id, al.rule_id
+),
+per_rule AS (
+  SELECT rule_id, COUNT(*) AS rule_alerts, SUM(CARDINALITY(uetrs)) AS txn_pairs
+  FROM alerts
+  GROUP BY rule_id
+),
+hit_rule AS (
+  SELECT rule_id, COUNT(*) AS hit_alerts, SUM(on_pairs) AS on_pairs
+  FROM hits
+  GROUP BY rule_id
 )
-SELECT r.rule_id,
-       (SELECT COUNT(*) FROM per_alert pa WHERE pa.rule_id = r.rule_id) AS rule_alerts,
-       (SELECT SUM(CASE WHEN pa.hit = 0 THEN 1 ELSE 0 END)
-          FROM per_alert pa WHERE pa.rule_id = r.rule_id) AS off_alerts,
-       SUM(r.on_target) AS on_target_txn_pairs,
-       COUNT(*) AS txn_pairs
-FROM refs r
-GROUP BY r.rule_id
-ORDER BY r.rule_id;
+SELECT pr.rule_id,
+       pr.rule_alerts,
+       pr.rule_alerts - COALESCE(hr.hit_alerts, 0) AS off_alerts,
+       COALESCE(hr.on_pairs, 0) AS on_target_txn_pairs,
+       pr.txn_pairs
+FROM per_rule pr
+LEFT JOIN hit_rule hr ON hr.rule_id = pr.rule_id
+ORDER BY pr.rule_id;

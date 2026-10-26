@@ -9,12 +9,19 @@ WITH manifest AS (
   FROM {catalog}.bronze.manifest {manifest_pin}
   WHERE typology_type = 'random'
 ),
+-- Random-instance payments that are in the sealed silver transactions:
+-- silver is the probe side, the manifest uetrs the build side (see
+-- coverage_recall).
 sealed AS (
   SELECT DISTINCT t.uetr
   FROM {catalog}.silver.transactions {txns_pin} t
   JOIN {catalog}.silver.silver_batch_versions {versions_pin} v
     ON t._stream_id = v.stream_id AND t._batch_id = v.batch_id
-  WHERE t.uetr IS NOT NULL
+  JOIN (
+    SELECT DISTINCT u.uetr
+    FROM manifest m CROSS JOIN UNNEST(m.participant_uetrs) AS u(uetr)
+    WHERE u.uetr IS NOT NULL
+  ) mu ON mu.uetr = t.uetr
 ),
 id_map AS (
   SELECT dg_id, MIN(key) AS key
@@ -73,16 +80,18 @@ random_uetr AS (
   CROSS JOIN UNNEST(m.participant_uetrs) AS u(uetr)
   WHERE u.uetr IS NOT NULL
 ),
+-- Exploded alerts, not made distinct: they are the probe side of the join
+-- to the random instances' payments (the build side); hits is DISTINCT after.
 alert_uetr AS (
-  SELECT DISTINCT a.rule_id, u.uetr
+  SELECT a.rule_id, u.uetr
   FROM {catalog}.gold.alerts {alerts_pin} a
   CROSS JOIN UNNEST(a.related_txn_ids) AS u(uetr)
   WHERE a.run_id = '{run_id}'
 ),
 hits AS (
   SELECT DISTINCT au.rule_id, ru.typology_id
-  FROM random_uetr ru
-  JOIN alert_uetr au ON au.uetr = ru.uetr
+  FROM alert_uetr au
+  JOIN random_uetr ru ON ru.uetr = au.uetr
 )
 SELECT
   (SELECT COUNT(*) FROM covered_random) AS n_random,

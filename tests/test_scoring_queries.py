@@ -206,7 +206,7 @@ def test_batch_ignores_coverage():
     # manifest), so the assembler must run coverage_recall without the covered
     # join. The FakeExecutor returns the hit for an instance whose is_covered
     # flag is 0; batch recall must still count it. In the SQL this is the
-    # {hit_scope} placeholder rendering empty for batch; here we assert the
+    # {hit_gate} placeholder rendering empty for batch; here we assert the
     # assembler divides designated_hits by the full corpus regardless of the
     # is_covered flag on the rows.
     rows = [
@@ -351,3 +351,18 @@ def test_zero_alerts_fp_rate_none():
     assert rec["fp_rate"] is None
     assert rec["total_alerts"] == 0
     assert rec["fp_alerts"] == 0
+
+
+def test_empty_values_relation_names_its_columns():
+    # precision and coverage_recall reference t.rule_id / p.typology_type even
+    # when no designated rule ran, so the empty relation must carry the names.
+    sql = sq._values([], ["rule_id", "target"])
+    assert "AS rule_id" in sql and "AS target" in sql and "WHERE 1 = 0" in sql
+
+
+def test_engine_failure_names_the_statement():
+    def run_tsv(sql, timeout):
+        raise RuntimeError("Query exceeded distributed total memory limit")
+
+    with pytest.raises(RuntimeError, match=r"^manifest_guard\.sql\.tmpl: Query exceeded"):
+        sq.score(run_tsv, catalog="lh", snapshot_ids=None, run_id="run-x", meta=META)
