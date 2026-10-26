@@ -4563,10 +4563,10 @@ def _run_sustained(
                 window_stats_by_job, window_seconds, continuous_datagen=not skip_generate
             )
         )
-        # Balance: every stage's handoff lag stayed
-        # flat through the window, or the run failed and the bottleneck line
-        # names the stage and the knob. Overrun is a failure mode, and a
-        # growing backlog makes freshness and pace not steady-state numbers.
+        # Balance (advisory): every stage's handoff lag stayed flat through
+        # the window, or the record marks the run not balanced and the
+        # bottleneck line names the stage and the knob. A growing backlog
+        # makes freshness and pace not steady-state numbers.
         from lakebench.metrics.continuous_window import balance as _balance
 
         _snapshot = getattr(collector.current_run, "config_snapshot", None) or {}

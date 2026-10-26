@@ -41,11 +41,13 @@ ICEBERG_41 = {"spark": "4.1", "table_format_version": "1.12.0"}
 # -- declarations -----------------------------------------------------------
 
 
-def test_matrix_covers_every_workload_recipe_mode_and_refuses_only_aml_on_delta():
+def test_matrix_covers_every_workload_recipe_mode_and_refuses_only_aml_off_iceberg_trino():
     rows = support.support_matrix(record={})
     for r in rows:
-        fmt = support.components_of(r["recipe"])[1]
-        refused = r["workload"] == "financial" and fmt == "delta"
+        _, fmt, _, engine = support.components_of(r["recipe"])
+        # AML runs on Iceberg with a Trino query engine only (the scorer is
+        # SQL on Trino); every other cell is merely unverified.
+        refused = r["workload"] == "financial" and (fmt == "delta" or engine != "trino")
         assert (r["state"] == support.UNSUPPORTED) is refused, r
         if not refused:
             assert r["state"] == support.UNVERIFIED, r

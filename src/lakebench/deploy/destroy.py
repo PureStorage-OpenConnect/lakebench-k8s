@@ -1391,7 +1391,7 @@ def _no_engine_table_message(
     catalog = (
         "the catalog database goes with the namespace, deleted below"
         if ns_goes
-        else "create_namespace is false, so they stay registered in the catalog"
+        else "the catalog database goes with the PostgreSQL volume, deleted below"
     )
     files = (
         "their files are removed only by the bucket step, from buckets destroy owns"
@@ -2688,11 +2688,11 @@ def destroy_all(
                 # Polaris via Trino with the namespace deleted: no statements.
                 # The catalog's only state is its database in this
                 # deployment's PostgreSQL, whose PVC goes with the namespace
-                # (the postgres step's label selector does not match the
-                # StatefulSet's claim labels). With create_namespace=false the
-                # PVC survives into the next deploy, so the tables are
-                # unregistered (non-purge drop, which Polaris allows) and a
-                # failure fails the step.
+                # and is also deleted by name in the postgres step. With
+                # create_namespace=false only that by-name delete removes it,
+                # and a postgres-step failure is not fatal, so the tables are
+                # unregistered first (non-purge drop, which Polaris allows)
+                # and a failure fails this step.
                 polaris_skip = (
                     engine.config.architecture.catalog.type.value == "polaris"
                     and maint_engine == "trino"
@@ -2801,8 +2801,8 @@ def destroy_all(
                         table_msg = (
                             f"{len(kept)} {table_format.title()} table(s) left registered "
                             "(a Spark Thrift DROP deletes their files): " + listing + ". "
-                            "create_namespace is false, so the catalog keeps them; drop "
-                            "them by hand once their files may go"
+                            "their files stay until dropped by hand; the catalog "
+                            "database goes with the PostgreSQL volume"
                         )
                 else:
                     table_status = DeploymentStatus.SUCCESS

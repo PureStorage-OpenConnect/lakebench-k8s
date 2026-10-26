@@ -220,9 +220,9 @@ def _print_report_summary(metrics, judged: dict | None = None) -> None:
     table = Table(show_header=True, header_style="bold", expand=False)
     table.add_column("Stage", style="cyan")
     table.add_column("Time", justify="right")
-    table.add_column("In (GB)", justify="right")
-    table.add_column("Out (GB)", justify="right")
-    table.add_column("GB/s", justify="right")
+    table.add_column("In (GiB)", justify="right")
+    table.add_column("Out (GiB)", justify="right")
+    table.add_column("GiB/s", justify="right")
     table.add_column("Executors", justify="right")
 
     for stage in pb.stages:
@@ -274,12 +274,12 @@ def _print_report_summary(metrics, judged: dict | None = None) -> None:
         if pb.time_to_value_seconds > 0:
             scores.append(f"Time to Value:   {pb.time_to_value_seconds:>8.1f}s")
         if pb.pipeline_throughput_gb_per_second > 0:
-            scores.append(f"Throughput:      {pb.pipeline_throughput_gb_per_second:>8.3f} GB/s")
+            scores.append(f"Throughput:      {pb.pipeline_throughput_gb_per_second:>8.3f} GiB/s")
         if pb.total_data_processed_gb > 0:
-            scores.append(f"Data Processed:  {pb.total_data_processed_gb:>8.1f} GB")
+            scores.append(f"Data Processed:  {pb.total_data_processed_gb:>8.1f} GiB")
         if pb.compute_efficiency_gb_per_core_hour > 0:
             scores.append(
-                f"Efficiency:      {pb.compute_efficiency_gb_per_core_hour:>8.3f} GB/core-hr"
+                f"Efficiency:      {pb.compute_efficiency_gb_per_core_hour:>8.3f} GiB/core-hr"
             )
         if pb.scale_ratio > 0:
             pct = pb.scale_ratio * 100
@@ -1556,7 +1556,7 @@ def _print_stage_matrix(metrics, output_format: str) -> None:
             f"[bold]Pipeline Benchmark:[/bold] {esc(pb.deployment_name)} (run {esc(pb.run_id)})\n"
             f"Mode: {esc(pb.pipeline_mode)} | "
             f"Time-to-Value: {pb.time_to_value_seconds:.1f}s | "
-            f"Throughput: {pb.pipeline_throughput_gb_per_second:.3f} GB/s",
+            f"Throughput: {pb.pipeline_throughput_gb_per_second:.3f} GiB/s",
             expand=False,
         )
     )
@@ -1565,11 +1565,11 @@ def _print_stage_matrix(metrics, output_format: str) -> None:
     table.add_column("Stage", style="cyan")
     table.add_column("Engine")
     table.add_column("Time(s)", justify="right")
-    table.add_column("In(GB)", justify="right")
-    table.add_column("Out(GB)", justify="right")
+    table.add_column("In(GiB)", justify="right")
+    table.add_column("Out(GiB)", justify="right")
     table.add_column("In Rows", justify="right")
     table.add_column("Out Rows", justify="right")
-    table.add_column("GB/s", justify="right")
+    table.add_column("GiB/s", justify="right")
     table.add_column("Rows/s", justify="right")
     table.add_column("Execs", justify="right")
     table.add_column("Status")
@@ -1604,7 +1604,7 @@ def _print_stage_matrix(metrics, output_format: str) -> None:
     console.print(
         f"\n  Pipeline: {pb.total_elapsed_seconds:.1f}s total"
         f" | {pb.time_to_value_seconds:.1f}s time-to-value"
-        f" | {pb.pipeline_throughput_gb_per_second:.3f} GB/s"
+        f" | {pb.pipeline_throughput_gb_per_second:.3f} GiB/s"
     )
     console.print()
 

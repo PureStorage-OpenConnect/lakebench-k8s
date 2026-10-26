@@ -16,12 +16,12 @@ Rules implemented in this file:
 - W5_sanctions_match: payments whose beneficiary fuzzy-matches an entry on
   the corpus's dated synthetic sanctions list, screened at transaction time
   and rescreened when a list version is published.
-- W6_pep_counterparty: payments of $10,000 or more whose beneficiary
-  fuzzy-matches an entry on the corpus's synthetic PEP list.
+- W6_pep_counterparty: payments whose beneficiary fuzzy-matches an entry
+  on the corpus's synthetic PEP list (MED at $10,000 or more, LOW below).
 - W7_cross_border_high_risk: cross-border transactions to a FATF grey/
   black list jurisdiction or to one of the generator's synthetic high-risk
   corridor countries (synthetic_corridors.json, not a regulatory list).
-- W8_dormant_reactivation: originator account inactive > 90 days then
+- W8_dormant_reactivation: originator account inactive 90 days or more, then
   a transaction >= $5,000-equivalent.
 - W17_layering_chain: open chains of 3+ transfers where each hop forwards
   80-100% of the previous one within 7 days (temporal path search).
@@ -2827,7 +2827,7 @@ def w8_dormant_reactivation(
     """Flag reactivation of dormant originator accounts.
 
     An originator's transaction is flagged when:
-    - The gap to the originator's prior transaction exceeds dormant_days;
+    - The gap to the originator's prior transaction is at least dormant_days;
     - The current transaction's USD-equivalent amount >= threshold.
 
     First-ever activity for an originator is NOT flagged (no prior

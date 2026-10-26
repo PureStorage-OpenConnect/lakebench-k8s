@@ -4,7 +4,7 @@
 {# its own Grafana. `run_id` picks between runs in this namespace. Resource   #}
 {# panels come from cAdvisor and Trino from the JMX exporter, so they work    #}
 {# for batch and continuous runs; datagen and stage panels read Pushgateway   #}
-{# series, which batch stages push and continuous stages do not.              #}
+{# series, which only some stages push (docs/component-observability.md).     #}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -986,7 +986,7 @@ data:
         },
         {
           "id": 19,
-          "title": "Pipeline stages (batch stages push live; continuous stages do not push)",
+          "title": "Pipeline stages (only stages that push)",
           "type": "row",
           "collapsed": false,
           "gridPos": {

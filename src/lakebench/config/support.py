@@ -260,6 +260,13 @@ def compatibility_problem(
         )
     if workload not in WORKLOAD_TABLE_FORMATS:
         return f"workload {workload!r} declares no supported architecture."
+    if workload == "financial" and query_engine != "trino":
+        # The same rule config load applies (ArchitectureConfig
+        # .validate_financial_has_a_query_engine): scoring is SQL on Trino.
+        return (
+            "the financial workload scores recall and precision with SQL on Trino, "
+            f"so it needs query_engine trino, not {query_engine}."
+        )
     return workload_compatibility_problem(workload, table_format, canonical_mode(mode))
 
 
@@ -871,8 +878,6 @@ GENERATED_BLOCKS: dict[str, Callable[[], str]] = {
 #: docs file (relative to the repo root) -> generated blocks it carries.
 DOCS_WITH_BLOCKS: dict[str, tuple[str, ...]] = {
     "docs/compatibility-matrix.md": ("recipe-components", "support-states"),
-    "docs/recipes.md": ("support-states",),
-    "docs/architecture.md": ("recipe-components",),
 }
 
 
@@ -915,3 +920,10 @@ def regenerate_docs(root: Path) -> list[str]:
             p.write_text(new)
             changed.append(rel)
     return changed
+
+
+if __name__ == "__main__":
+    import sys
+
+    for rel in regenerate_docs(Path(sys.argv[1] if len(sys.argv) > 1 else ".")):
+        print(f"regenerated {rel}")

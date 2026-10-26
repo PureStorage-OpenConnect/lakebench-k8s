@@ -2738,8 +2738,8 @@ class BenchmarkConfig(ConfigModel):
     """AML continuous only: concurrent investigator sessions run once, as an extra round
     after the first in-stream round that had a case, each working one case of the run (IQ1
     to IQ4). Range: 1--32. Unset runs no such round. Refused at load unless the workload is
-    `financial`, `tm_operations.enabled` is true and the query engine is `trino` or
-    `spark-thrift`, and by `run` unless the run is continuous. The sessions that ran (fewer
+    `financial` with `tm_operations.enabled` true (the financial workload itself requires
+    the `trino` query engine), and by `run` unless the run is continuous. The sessions that ran (fewer
     when the run has fewer cases) are an outcome condition: two runs that differ in it
     are not like-for-like.
     """

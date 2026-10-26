@@ -76,8 +76,8 @@ UNITS = frozenset(
         "rows",
         # Pace: seconds per million rows.
         "s/M rows",
-        "GB/s",
-        "GB",
+        "GiB/s",
+        "GiB",
         "MB",
         "MB/s",
         "QpH",
@@ -87,7 +87,7 @@ UNITS = frozenset(
         "bool",
         "text",
         "core-h",
-        "GB/core-h",
+        "GiB/core-h",
         "cpu-h/TB",
         # A dict or list of figures (shown, never a delta).
         "struct",
@@ -191,7 +191,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
     ),
     MetricMeta(
         "compute_efficiency_gb_per_core_hour",
-        "GB/core-h",
+        "GiB/core-h",
         "higher",
         "performance",
         _BATCH,
@@ -201,7 +201,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
     ),
     MetricMeta(
         "compute_efficiency_gb_per_core_hour",
-        "GB/core-h",
+        "GiB/core-h",
         "higher",
         "performance",
         _CONT,
@@ -211,7 +211,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
     ),
     MetricMeta(
         "total_data_processed_gb",
-        "GB",
+        "GiB",
         "none",
         "diagnostic",
         _BOTH,
@@ -221,7 +221,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
     ),
     MetricMeta(
         "pipeline_throughput_gb_per_second",
-        "GB/s",
+        "GiB/s",
         "higher",
         "performance",
         _BATCH,
@@ -231,7 +231,7 @@ _ENTRIES: tuple[MetricMeta, ...] = (
     ),
     MetricMeta(
         "pipeline_throughput_gb_per_second",
-        "GB/s",
+        "GiB/s",
         "higher",
         "performance",
         _CONT,
