@@ -120,8 +120,11 @@ def test_delta_appid_moves_across_two_force_rebuilds(monkeypatch):
 def test_read_silver_state_epoch_404_still_returns_zero(monkeypatch):
     """job.py: a 404 on the ConfigMap read is the greenfield / pre-B1 case."""
     pytest.importorskip("kubernetes")
-    from lakebench.modules.pipeline_engines.spark.job import _read_silver_state_epoch
+    from lakebench.modules.pipeline_engines.spark.job import (
+        _read_silver_state,
+        _silver_state_epoch,
+    )
 
     fake = _FakeCoreV1(missing=True)
     monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **kw: fake)
-    assert _read_silver_state_epoch("test-ns", "rebuild_epoch_c360_delta") == 0
+    assert _silver_state_epoch(_read_silver_state("test-ns"), "rebuild_epoch_c360_delta") == 0

@@ -5,6 +5,8 @@ Handles SparkApplication submission and lifecycle.
 
 from __future__ import annotations
 
+import copy
+import functools
 import hashlib
 import logging
 import math
@@ -1582,41 +1584,45 @@ def _rebuild_epoch_key(cfg) -> str | None:
     return None
 
 
-def _read_silver_state_epoch(namespace: str, key: str) -> int:
-    """Read a rebuild-epoch counter from ``lakebench-silver-state``.
-
-    Falls back to 0 on any read failure -- the ConfigMap is per-deployment
-    and pre-B1 deployments do not have it. A missing key inside an existing
-    ConfigMap also returns 0. Log level is WARNING so a real ops issue is
-    visible even when the fallback is taken (e.g. unit tests running
-    without a live cluster context, or a manifest built out-of-cluster).
-
-    The CLI-side ``_bump_silver_rebuild_epoch`` is the load-bearing
-    defense against the collision surface this cache-line would otherwise
-    open: a failed bump refuses to submit silver (``cli/_run.py`` raises
-    ``typer.Exit(1)`` before the cycle loop), so the submit path only
-    runs after a bump the same process just observed to succeed. A
-    transient read failure here at submit-time (post-bump) is a very
-    narrow window against a cluster the CLI just talked to successfully.
-    """
+def _read_silver_state(namespace: str) -> dict[str, str] | Exception:
+    """The ``lakebench-silver-state`` ConfigMap's data, ``{}`` when it does
+    not exist, or the error of any other failed read."""
     try:
         from kubernetes import client as _kclient
         from kubernetes.client.exceptions import ApiException
 
-        core_v1 = _kclient.CoreV1Api()
         try:
-            cm = core_v1.read_namespaced_config_map("lakebench-silver-state", namespace)
+            cm = _kclient.CoreV1Api().read_namespaced_config_map(
+                "lakebench-silver-state", namespace
+            )
         except ApiException as e:
             if e.status == 404:
-                return 0
+                return {}
             raise
-        data = cm.data or {}
-        try:
-            return int(data.get(key, "0"))
-        except (TypeError, ValueError):
-            return 0
-    except Exception as e:  # noqa: BLE001
-        logger.warning("LB_REBUILD_EPOCH fallback to 0 for key %s: %s", key, e)
+        return dict(getattr(cm, "data", None) or {})
+    except Exception as e:  # noqa: BLE001 -- each reader picks its fallback
+        return e
+
+
+def _silver_state_epoch(state: dict[str, str] | Exception, key: str) -> int:
+    """A rebuild-epoch counter from the silver-state ConfigMap data.
+
+    0 when the ConfigMap or the key is missing (a deployment that never
+    bumped it) and on a failed read, which is logged at WARNING so a real
+    ops issue is visible even when the fallback is taken.
+
+    The CLI-side ``_bump_silver_rebuild_epoch`` is the load-bearing
+    defense against a stale epoch: a failed bump refuses to submit silver
+    (``cli/_run.py`` raises ``typer.Exit(1)`` before the cycle loop), so the
+    submit path only runs after a bump the same process just observed to
+    succeed.
+    """
+    if isinstance(state, Exception):
+        logger.warning("LB_REBUILD_EPOCH fallback to 0 for key %s: %s", key, state)
+        return 0
+    try:
+        return int(state.get(key, "0"))
+    except (TypeError, ValueError):
         return 0
 
 
@@ -3127,6 +3133,7 @@ class SparkJobManager:
                 "onSubmissionFailureRetryInterval": 60,
             }
 
+        env = self._build_env_vars(job_type, cycle_env=cycle_env)
         manifest = {
             "apiVersion": "sparkoperator.k8s.io/v1beta2",
             "kind": "SparkApplication",
@@ -3168,7 +3175,7 @@ class SparkJobManager:
                         "app": "lakebench-spark",
                         "component": "driver",
                     },
-                    "env": self._build_env_vars(job_type, cycle_env=cycle_env),
+                    "env": env,
                     "template": driver_pod_template,
                     "annotations": {deps_manifest.POD_ANNOTATION_SET: deps.pinset_sha256},
                 },
@@ -3189,7 +3196,7 @@ class SparkJobManager:
                         "app": "lakebench-spark",
                         "component": "executor",
                     },
-                    "env": self._build_env_vars(job_type, cycle_env=cycle_env),
+                    "env": copy.deepcopy(env),
                     "template": executor_pod_template,
                     "annotations": {deps_manifest.POD_ANNOTATION_SET: deps.pinset_sha256},
                 },
@@ -3199,7 +3206,11 @@ class SparkJobManager:
 
         return manifest
 
-    def _resolve_silver_data_clock(self, cfg: LakebenchConfig) -> tuple[str, str]:
+    def _resolve_silver_data_clock(
+        self,
+        cfg: LakebenchConfig,
+        silver_state: Callable[[], dict[str, str] | Exception],
+    ) -> tuple[str, str]:
         """C2 (silver-plan): resolve LB_DATA_CLOCK for a silver job.
 
         Returns ``(iso_date, source_label)`` where ``source_label`` is one of
@@ -3234,9 +3245,11 @@ class SparkJobManager:
             return str(_ts_end), "datagen_timestamp_end"
 
         # Rung 2: bronze-verify's max(event_ts).
-        bronze_clock = self._read_bronze_data_clock()
-        if bronze_clock:
-            return bronze_clock, "bronze_data_clock"
+        state = silver_state()
+        if isinstance(state, Exception):
+            logger.debug("silver-state ConfigMap read failed (%s); falling back", state)
+        elif (state.get("bronze_data_clock") or "").strip():
+            return state["bronze_data_clock"].strip(), "bronze_data_clock"
 
         # Rung 3: configured window start.
         _ts_start = cfg.architecture.workload.datagen.timestamp_start
@@ -3246,30 +3259,6 @@ class SparkJobManager:
         # Rung 4: today at 00:00 UTC.
         today = _dt.now(_tz.utc).date().isoformat()
         return today, "fallback_default"
-
-    def _read_bronze_data_clock(self) -> str | None:
-        """Best-effort read of ``lakebench-silver-state.bronze_data_clock``
-        from the deployment namespace. Returns None on any failure so the
-        resolver falls through to the next ladder rung."""
-        try:
-            from kubernetes import client as _kclient
-            from kubernetes.client.exceptions import ApiException
-        except ImportError:  # pragma: no cover
-            return None
-        try:
-            core = _kclient.CoreV1Api()
-            cm = core.read_namespaced_config_map("lakebench-silver-state", self.namespace)
-            data = getattr(cm, "data", None) or {}
-            val = data.get("bronze_data_clock", "")
-            return val.strip() or None
-        except ApiException as e:
-            if e.status == 404:
-                return None
-            logger.debug("silver-state ConfigMap read failed (%s); falling back", e.status)
-            return None
-        except Exception as e:  # noqa: BLE001
-            logger.debug("silver-state ConfigMap read error: %s; falling back", e)
-            return None
 
     def _build_env_vars(
         self,
@@ -3287,6 +3276,8 @@ class SparkJobManager:
         """
         cfg = self.config
         s3 = cfg.platform.storage.s3
+        # The silver-state ConfigMap, read at most once per build.
+        silver_state = functools.cache(lambda: _read_silver_state(self.namespace))
 
         env: list[dict[str, Any]] = [
             # PYTHONPATH for finding common.py
@@ -3372,7 +3363,7 @@ class SparkJobManager:
         _ts_end = cfg.architecture.workload.datagen.timestamp_end
         _is_silver_job = job_type in (JobType.SILVER_BUILD, JobType.SILVER_STREAM)
         if _is_silver_job:
-            _clock_value, _clock_source = self._resolve_silver_data_clock(cfg)
+            _clock_value, _clock_source = self._resolve_silver_data_clock(cfg, silver_state)
             env.append({"name": "LB_DATA_CLOCK", "value": _clock_value})
             env.append({"name": "LB_DATA_CLOCK_SOURCE", "value": _clock_source})
         elif _ts_end:
@@ -3423,7 +3414,7 @@ class SparkJobManager:
             JobType.SILVER_BUILD,
             JobType.SILVER_STREAM,
         ):
-            _epoch = _read_silver_state_epoch(self.namespace, _rebuild_key)
+            _epoch = _silver_state_epoch(silver_state(), _rebuild_key)
             env.append({"name": "LB_REBUILD_EPOCH", "value": str(_epoch)})
 
         # G5: silver streams label their admission decision against the
