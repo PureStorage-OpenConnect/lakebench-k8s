@@ -114,31 +114,30 @@ def _compute_leakage_bands(spark: SparkSession, silver_txns_name: str, manifest)
         when(col("t_uetr").isNotNull(), lit(1)).otherwise(lit(0)),
     ).drop("t_uetr")
 
-    rows: list[dict] = []
-    for currency, (band_lo, band_hi) in _STRUCTURING_BANDS.items():
-        in_band = tagged.filter(
-            (col("currency") == lit(currency))
-            & (col("amount") >= lit(band_lo))
-            & (col("amount") <= lit(band_hi))
-        )
-        counts = in_band.groupBy("is_typology").agg(count_("*").alias("n")).collect()
-        baseline_n = 0
-        typology_n = 0
-        for r in counts:
-            if r["is_typology"] == 1:
-                typology_n = int(r["n"])
-            else:
-                baseline_n = int(r["n"])
-        rows.append(
-            {
-                "currency": currency,
-                "band_lo": band_lo,
-                "band_hi": band_hi,
-                "baseline_count": baseline_n,
-                "typology_count": typology_n,
-            }
-        )
-    return rows
+    bands = spark.createDataFrame(
+        [(c, lo, hi) for c, (lo, hi) in _STRUCTURING_BANDS.items()],
+        "currency string, band_lo double, band_hi double",
+    )
+    # One job for every currency: the join is not cached, and a job per
+    # currency scanned silver once each.
+    counts = (
+        tagged.join(bands.hint("broadcast"), "currency")
+        .filter((col("amount") >= col("band_lo")) & (col("amount") <= col("band_hi")))
+        .groupBy("currency", "is_typology")
+        .agg(count_("*").alias("n"))
+        .collect()
+    )
+    n = {(r["currency"], r["is_typology"]): int(r["n"]) for r in counts}
+    return [
+        {
+            "currency": currency,
+            "band_lo": band_lo,
+            "band_hi": band_hi,
+            "baseline_count": n.get((currency, 0), 0),
+            "typology_count": n.get((currency, 1), 0),
+        }
+        for currency, (band_lo, band_hi) in _STRUCTURING_BANDS.items()
+    ]
 
 
 def _capped_pull(cap_rows: int, sampling: dict):
