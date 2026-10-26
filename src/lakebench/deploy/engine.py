@@ -1041,8 +1041,8 @@ class DeploymentEngine:
 
         # Stamp deployment identity onto the namespace. A pre-existing
         # legacy (annotation-less) namespace requires force_legacy=True to
-        # claim; otherwise deploy refuses and points at admin migration
-        # (which lands in PR-2). New namespaces we created ourselves are
+        # claim; otherwise deploy refuses and points at admin migration.
+        # New namespaces we created ourselves are
         # stamped unconditionally.
         from kubernetes import client as _kclient
 
@@ -1100,10 +1100,9 @@ class DeploymentEngine:
                     "context with `oc whoami && kubectl config "
                     "current-context` and confirm it matches the "
                     "expected cluster for this deployment. Only after "
-                    "that check, and only as a last resort, pass "
-                    "--force-legacy on `lakebench deploy` to claim it "
-                    "(destroy still refuses until the admin "
-                    "migrate-deployment command ships)."
+                    "that check, claim it with `lakebench admin "
+                    f"migrate-deployment {namespace}` or, as a last "
+                    "resort, pass --force-legacy on `lakebench deploy`."
                 ),
                 elapsed_seconds=time.time() - start,
                 details={REFUSAL_DETAIL: "deploy.identity_foreign"},

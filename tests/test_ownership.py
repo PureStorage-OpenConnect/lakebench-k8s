@@ -947,6 +947,24 @@ def test_engine_require_new_accepts_its_own_create_after_a_lost_response():
     assert nonce.call_args.kwargs["nonce"] == "mine"
 
 
+def test_engine_legacy_namespace_refusal_names_the_migrate_command():
+    """An annotation-less namespace is refused with the shipped admin command
+    to claim it."""
+    from lakebench.deploy.ownership import IdentityVerdict
+
+    eng, _ = _engine(require_new=False, exists=True)
+    with (
+        patch.object(eng, "_namespace_already_using_name", return_value=None),
+        patch("lakebench.deploy.ownership.stamp_namespace") as stamp,
+        patch("kubernetes.client.CoreV1Api"),
+    ):
+        stamp.return_value = MagicMock(verdict=IdentityVerdict.ABSENT)
+        result = eng._deploy_namespace()
+    assert result.status is DeploymentStatus.FAILED
+    assert f"`lakebench admin migrate-deployment {eng.config.get_namespace()}`" in result.message
+    assert "ships" not in result.message
+
+
 def test_engine_stamps_the_recorded_nonce_not_a_fresh_one():
     """The real namespace step writes engine.deploy_nonce (the one deploy
     recorded); --expect-incarnation and the nameless checks depend on it."""
