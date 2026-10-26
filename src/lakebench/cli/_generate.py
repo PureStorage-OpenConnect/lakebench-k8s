@@ -468,6 +468,9 @@ def _generate_loaded(
         },
     )
 
+    # The journal's end message for a failure exit below; every failure
+    # exit ends the command in the journal.
+    failure = ""
     try:
         # Share a run id with the datagen pods (live-observability grouping
         # label) so a standalone `generate` is correlatable in Grafana and a
@@ -518,7 +521,7 @@ def _generate_loaded(
 
         if result.status != DeploymentStatus.SUCCESS:
             print_error(f"Failed to submit job: {result.message}")
-            _journal_safe(j.end_command, success=False, message=result.message)
+            failure = result.message
             # A refusal (stale bronze, live datagen pods) exits 3.
             from lakebench.cli._exit import refused_result_code
 
@@ -587,7 +590,7 @@ def _generate_loaded(
                     progress_bar.stop()
                     print_error(f"OOMKilled: {', '.join(prog['oom_pods'])}")
                     print_info("Increase datagen memory or reduce parallelism")
-                    _journal_safe(j.end_command, success=False, message="OOMKilled pods detected")
+                    failure = "OOMKilled pods detected"
                     raise typer.Exit(ExitCode.FAILED)
                 if prog.get("crash_pods"):
                     # A crash-looping generator never finishes; waiting out the
@@ -600,9 +603,7 @@ def _generate_loaded(
                     print_info(
                         f"See why with: kubectl logs -n {ns} {prog['crash_pods'][0]} --previous"
                     )
-                    _journal_safe(
-                        j.end_command, success=False, message="Datagen pods crash-looping"
-                    )
+                    failure = "Datagen pods crash-looping"
                     raise typer.Exit(ExitCode.FAILED)
                 if prog.get("pending_pods"):
                     progress_bar.console.print(
@@ -699,7 +700,7 @@ def _generate_loaded(
                 from lakebench.metrics.datagen_aggregator import drop_sidecar
 
                 drop_sidecar(cfg.get_namespace())
-                _journal_safe(j.end_command, success=False, message="series marker conflict")
+                failure = "series marker conflict"
                 raise typer.Exit(ExitCode.REFUSED)
             if _mark != "written":
                 print_warning(
@@ -751,7 +752,7 @@ def _generate_loaded(
                     "elapsed_seconds": completion_result.elapsed_seconds,
                 },
             )
-            _journal_safe(j.end_command, success=False, message=completion_result.message)
+            failure = completion_result.message
 
             console.print(
                 Panel(
@@ -762,6 +763,10 @@ def _generate_loaded(
             )
             raise typer.Exit(ExitCode.FAILED)
 
+    except typer.Exit as e:
+        if e.exit_code:
+            _journal_safe(j.end_command, success=False, message=failure)
+        raise
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))
