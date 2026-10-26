@@ -34,7 +34,7 @@ from lakebench.metrics.metric_registry import direction_hint
 from lakebench.metrics.seed_record import seed_label as _seed_label
 from lakebench.reports import copy as _words
 from lakebench.reports.formatter import n_runs_of
-from lakebench.reports.front_matter import headline_reason
+from lakebench.reports.front_matter import headline_reason, safe_experiment
 
 logger = logging.getLogger(__name__)
 
@@ -101,11 +101,7 @@ def _query_engine_title(metrics) -> str:
     # experiment block's architecture, then the config snapshot.
     engine = getattr(getattr(metrics, "benchmark", None), "engine", None)
     if not engine:
-        try:
-            exp = metrics.experiment_block() or {}
-        except Exception:  # noqa: BLE001 -- a bad block must not break the render
-            exp = {}
-        qe = (exp.get("architecture") or {}).get("query_engine")
+        qe = (safe_experiment(metrics).get("architecture") or {}).get("query_engine")
         if isinstance(qe, dict):
             engine = qe.get("type")
     if not engine:
@@ -125,11 +121,7 @@ def _samples_per_query(bench) -> int | None:
 def _recorded_samples(metrics) -> int | None:
     """Samples per query the record states (``repetitions.
     benchmark_samples_per_query``, the fewest any successful query had)."""
-    try:
-        exp = metrics.experiment_block() or {}
-    except Exception:  # noqa: BLE001 -- a bad block must not break the render
-        return None
-    n = (exp.get("repetitions") or {}).get("benchmark_samples_per_query")
+    n = (safe_experiment(metrics).get("repetitions") or {}).get("benchmark_samples_per_query")
     return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else None
 
 
@@ -561,11 +553,9 @@ class ReportGenerator:
         return target
 
     def _is_sustained(self, metrics: PipelineMetrics) -> bool:
-        """Return True if this run used the sustained/streaming pipeline.
-
-        Accepts both ``"sustained"`` (current) and ``"continuous"`` (legacy
-        metrics.json files) for backward compatibility.
-        """
+        """Whether this run used the continuous pipeline (records store
+        ``pipeline_mode: sustained``); without a pipeline benchmark, whether it
+        recorded streaming jobs."""
         if metrics.pipeline_benchmark:
             return is_continuous_mode(metrics.pipeline_benchmark.pipeline_mode)
         return bool(metrics.streaming)
@@ -1731,7 +1721,7 @@ class ReportGenerator:
         # The chip counts independent runs only (invariant 7): in-stream
         # rounds and samples inside one run are never replication.
         _n_runs = n_runs_of(metrics) or 1
-        _confidence_chip = confidence_chip_html(_n_runs, spread=None)
+        _confidence_chip = confidence_chip_html(_n_runs)
 
         _read_first_html = self._generate_read_first_panel(metrics, fm=fm)
         pace = next((t for t in tiles or () if t.label == "Pace"), None)

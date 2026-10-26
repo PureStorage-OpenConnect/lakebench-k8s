@@ -622,12 +622,10 @@ def _rule_caps(metrics, rules_skipped: dict | None = None) -> list[tuple[str, st
     """(rule, reason) for each AML rule skipped on a Lakebench cap: a skip
     reason naming a cap, from the scorecard's own skip list and the stored
     experiment block, the rule metrics/bounds.py applies to limits.bound."""
+    from lakebench.reports.front_matter import safe_experiment
+
     found: dict[str, str] = {}
-    try:
-        exp = metrics.experiment_block() or {}
-    except Exception:  # noqa: BLE001 -- a bad block must not break the render
-        exp = {}
-    rules = exp.get("rules") if isinstance(exp, dict) else None
+    rules = safe_experiment(metrics).get("rules")
     stored = rules.get("skipped") if isinstance(rules, dict) else None
     for source in (rules_skipped, stored):
         if isinstance(source, dict):
