@@ -178,8 +178,8 @@ def score_financial_via_queries(
 
 
 def _not_scored_record(reason: str, covered: dict | None) -> dict[str, Any]:
-    """The not_scored record, matching score_financial._write_not_scored:
-    batch has no covered block; covered carries the tick's snapshot ids."""
+    """The not_scored record, in the shape the Spark scorer wrote: batch has
+    no covered block; covered carries the tick's snapshot ids."""
     if covered is None:
         return {"mode": "batch", "status": "not_scored", "reason": reason}
     body: dict[str, Any] = {

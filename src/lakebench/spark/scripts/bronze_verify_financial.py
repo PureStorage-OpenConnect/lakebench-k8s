@@ -62,8 +62,9 @@ MANIFEST_PATH = env(
 MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
 # The account master (one file, written once by cycle 0; same env override
 # as silver_build's ACCOUNT_PATH). The Trino scoring statements map a planted
-# participant's datagen id to its silver entity key through this table's
-# IBANs, so it is registered as an Iceberg table beside the manifest.
+# participant's datagen id to its silver entity key through its IBANs, so
+# its (holder_entity_id, iban) columns are registered as an Iceberg table
+# beside the manifest.
 ACCOUNT_URI = env(
     "LB_FINANCIAL_ACCOUNT_PATH",
     f"{BRONZE_URI}{BRONZE_ROOT_PREFIX.rstrip('/')}/bronze/account.parquet",
@@ -268,7 +269,9 @@ def register_manifest(spark) -> bool:
 
 
 def register_accounts(spark) -> bool:
-    """(Re)register the account master as an Iceberg table from its file.
+    """(Re)register the account master's (holder_entity_id, iban) columns as
+    an Iceberg table from its file: the map the scorer joins to silver, and
+    nothing more, so the copy stays small at every scale.
 
     Returns False, with a warning, when the file is not there or the CTAS
     fails. Not fatal here: the recall and precision scoring statements then
@@ -281,7 +284,7 @@ def register_accounts(spark) -> bool:
             CREATE OR REPLACE TABLE {CATALOG}.{ACCOUNTS_TABLE}
             USING iceberg
             TBLPROPERTIES ('format-version' = '2', {ICEBERG_METADATA_PROPS_SQL})
-            AS SELECT * FROM parquet.`{ACCOUNT_URI}`
+            AS SELECT holder_entity_id, iban FROM parquet.`{ACCOUNT_URI}`
         """)
         log(f"Registered account master Iceberg table: {CATALOG}.{ACCOUNTS_TABLE}")
         return True
@@ -728,9 +731,13 @@ def main() -> None:
         # the SparkSession are known good. Manifest failure is however
         # not fatal to bronze itself -- we log and continue so batch
         # can still emit alerts; the benchmark scoring queries will
-        # then fail loudly at their own `bronze.manifest` reads.
+        # then fail loudly at their own `bronze.manifest` reads. Dropped
+        # first: a failed CTAS leaves an existing table in place, and a
+        # previous corpus's manifest or accounts scored silently wrong.
+        spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{MANIFEST_TABLE}")
         register_manifest(spark)
-        # The account master, which the scoring statements join to silver.
+        # The account-to-holder map, which the scoring statements join to silver.
+        spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{ACCOUNTS_TABLE}")
         register_accounts(spark)
 
     elapsed = time.time() - start_time

@@ -296,10 +296,9 @@ RUN_RULES: tuple[RunRule, ...] = (
     RunRule(
         lambda a, c: c.investigators is not None,
         "architecture.benchmark.investigator_sessions runs only on an AML continuous run with "
-        "TM operations on a trino or spark-thrift query engine",
+        "TM operations on a trino query engine",
         "run it continuous on a financial config with tm_operations enabled, or delete the key",
-        "`benchmark.investigator_sessions` outside an AML continuous run with TM operations on "
-        "trino or spark-thrift",
+        "`benchmark.investigator_sessions` outside an AML continuous run with TM operations",
     ),
 )
 

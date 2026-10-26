@@ -339,8 +339,9 @@ def is_continuous_mode(mode: object) -> bool:
     return isinstance(value, str) and value.strip().lower() in ("continuous", "sustained")
 
 
-#: Query engines that run the investigator sessions (AML continuous).
-INVESTIGATOR_QUERY_ENGINES = ("trino", "spark-thrift")
+#: Query engines that run the investigator sessions (AML continuous). The
+#: financial workload itself requires Trino, so this is the same set.
+INVESTIGATOR_QUERY_ENGINES = ("trino",)
 
 
 def investigator_sessions_problem(
@@ -368,12 +369,12 @@ def investigator_sessions_problem(
         missing.append("workload.tm_operations.enabled is false")
     engine = arch.query_engine.type.value
     if engine not in INVESTIGATOR_QUERY_ENGINES:
-        missing.append(f"the query engine is {engine}, not trino or spark-thrift")
+        missing.append(f"the query engine is {engine}, not trino")
     if not missing:
         return None
     return (
         f"architecture.benchmark.investigator_sessions ({n}) runs only on an AML continuous run "
-        "with TM operations on a trino or spark-thrift query engine: " + "; ".join(missing)
+        "with TM operations on a trino query engine: " + "; ".join(missing)
     )
 
 
@@ -1373,7 +1374,7 @@ class SparkThriftConfig(ConfigModel):
     """Spark Thrift Server CPU cores. Auto-sized to `8` on Delta + Hive when unset."""
     memory: str = "4g"
     """Spark Thrift Server heap. The pod limit adds max(10% of heap, 1 GiB). Auto-sized to
-    `16g` on Delta + Hive and `24g` on the financial schema when unset.
+    `16g` on Delta + Hive when unset.
     """
     catalog_name: str = "lakehouse"
     """Iceberg catalog name for Spark Thrift Server."""
@@ -1385,8 +1386,7 @@ class DuckDBConfig(ConfigModel):
     cores: int = Field(default=2, ge=1)
     """DuckDB CPU cores."""
     memory: str = "4g"
-    """DuckDB pod memory. Auto-sized to `16g` on the financial schema when unset (less on a
-    node with under 24 GiB allocatable)."""
+    """DuckDB pod memory."""
     catalog_name: str = "lakehouse"
     """Iceberg catalog name for DuckDB."""
     # Pinned, not floating. Both install sites used a bare `pip install duckdb`,
@@ -2888,7 +2888,7 @@ class ArchitectureConfig(ConfigModel):
     @model_validator(mode="after")
     def validate_investigator_sessions(self) -> ArchitectureConfig:
         """Refuse ``benchmark.investigator_sessions`` outside AML with TM
-        operations on trino or spark-thrift. The mode is ``run``'s to check
+        operations on trino. The mode is ``run``'s to check
         (``RUN_RULES``, with the mode it resolves), so ``run --continuous`` on
         a batch config with the key runs, and ``run`` of it in batch is
         refused before any cluster call."""

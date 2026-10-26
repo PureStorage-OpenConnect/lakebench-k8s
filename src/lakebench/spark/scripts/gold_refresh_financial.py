@@ -105,6 +105,7 @@ import uuid
 from datetime import datetime, timezone
 
 from bronze_verify_financial import (
+    ACCOUNT_URI,
     ACCOUNTS_TABLE,
     BRONZE_URI,
     MANIFEST_PATH,
@@ -915,8 +916,10 @@ class TickState:
         accounts_ready=False,
     ):
         self.manifest_ready = manifest_ready
-        # bronze.accounts (the account master the scorer joins to silver) is
-        # registered once, as soon as datagen has written a manifest.
+        # bronze.accounts (the account-to-holder map the scorer joins to
+        # silver) is registered once, as soon as datagen has finished writing
+        # account.parquet (a multipart upload that lands after the first
+        # manifest).
         self.accounts_ready = accounts_ready
         # Per-rule detection state between ticks (incremental_detection);
         # None runs every rule as a full recompute.
@@ -1082,6 +1085,20 @@ def manifest_files(spark):
         return None
 
 
+def account_file_exists(spark) -> bool:
+    """Whether datagen has finished writing the account master (a completed
+    multipart upload is the only way the key exists); False when it cannot be
+    checked."""
+    try:
+        jvm = spark._jvm  # type: ignore[attr-defined]
+        hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+        path = jvm.org.apache.hadoop.fs.Path(ACCOUNT_URI)
+        return bool(path.getFileSystem(hconf).exists(path))
+    except Exception as e:  # noqa: BLE001
+        log(f"[accounts] could not check {ACCOUNT_URI}: {one_line(e)}")
+        return False
+
+
 def run_tick(spark, state, cycle) -> dict:
     """One detection tick. Returns its phase timings ({name: seconds}, in
     order, ``total`` last), which are also logged as the tick timing line.
@@ -1108,10 +1125,10 @@ def run_tick(spark, state, cycle) -> dict:
         if register_manifest(spark):
             state.manifest_ready = True
             state.manifest_files = files
-    # The account master is written once, before the first manifest, so it
-    # is registered as soon as a manifest file exists (the scoring statements
-    # map datagen ids to silver keys through it).
-    if not state.accounts_ready and files:
+    # The account master is written once, as a multipart upload that lands
+    # after the first manifest; register it when the key exists (the scoring
+    # statements map datagen ids to silver keys through it).
+    if not state.accounts_ready and account_file_exists(spark):
         state.accounts_ready = register_accounts(spark)
     # Pinned before anything reads silver, so every reader sees this corpus.
     pinned_at = time.time()

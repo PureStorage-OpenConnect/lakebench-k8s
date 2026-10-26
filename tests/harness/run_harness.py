@@ -40,8 +40,7 @@ Seams (each records its calls into one ordered list):
 - The storage settle wait's clock and sleep (``wait_for_settle``'s keyword
   defaults) advance a fake clock, so the wait costs no wall time.
 
-The batch AML scenario adds the score stage's recall.json sidecar, served by
-the fake boto client from the record, and the AML query set's row counts.
+The batch AML scenario adds the AML query set's row counts.
 
 The continuous scenarios (``lakebench.cli._sustained._run_sustained``) add:
 
@@ -1270,7 +1269,7 @@ class _FakeBoto:
 
     def get_object(self, Bucket, Key):  # noqa: N803 -- boto3 keywords
         """An object the scenario serves: the owner marker deploy writes on a
-        backend without tagging, and the AML recall.json sidecar."""
+        backend without tagging."""
         import io
 
         from lakebench.deploy.ownership import OWNER_MARKER_KEY, cluster_stamp
@@ -1979,10 +1978,6 @@ def install_fakes(monkeypatch, rec: Recorder, scenario: Scenario) -> None:
     rec.fresh_bronze = "--generate" in scenario.argv
     rec.datagen_running = scenario.datagen_running
     rec.interrupt_after_state = scenario.interrupt_after_state
-    recall = FIXTURES / scenario.logs / "recall.json"
-    if recall.exists():
-        # The score stage's sidecar, at the key the run reads.
-        rec.objects[(f"{NAME}-gold", "scoring/<run_id>/recall.json")] = recall.read_bytes()
     import kubernetes.client
     import kubernetes.config
 

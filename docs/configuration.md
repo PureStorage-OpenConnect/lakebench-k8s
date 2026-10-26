@@ -668,10 +668,10 @@ What `lb-deps` is and when it resolves again: see [Dependency server](#dependenc
 | `architecture.query_engine.trino.worker.storage_class` | string | `""` | advanced | Worker StorageClass. Empty = emptyDir (ephemeral, no PVC needed). Set a class name to use PVC-backed persistent volumes instead. |
 | `architecture.query_engine.trino.catalog_name` | string | `lakehouse` | advanced | Trino catalog name for the Iceberg connector. |
 | `architecture.query_engine.spark_thrift.cores` | integer | `2` | advanced | Spark Thrift Server CPU cores. Auto-sized to `8` on Delta + Hive when unset. |
-| `architecture.query_engine.spark_thrift.memory` | string | `4g` | advanced | Spark Thrift Server heap. The pod limit adds max(10% of heap, 1 GiB). Auto-sized to `16g` on Delta + Hive and `24g` on the financial schema when unset. |
+| `architecture.query_engine.spark_thrift.memory` | string | `4g` | advanced | Spark Thrift Server heap. The pod limit adds max(10% of heap, 1 GiB). Auto-sized to `16g` on Delta + Hive when unset. |
 | `architecture.query_engine.spark_thrift.catalog_name` | string | `lakehouse` | advanced | Iceberg catalog name for Spark Thrift Server. |
 | `architecture.query_engine.duckdb.cores` | integer | `2` | advanced | DuckDB CPU cores. |
-| `architecture.query_engine.duckdb.memory` | string | `4g` | advanced | DuckDB pod memory. Auto-sized to `16g` on the financial schema when unset (less on a node with under 24 GiB allocatable). |
+| `architecture.query_engine.duckdb.memory` | string | `4g` | advanced | DuckDB pod memory. |
 | `architecture.query_engine.duckdb.catalog_name` | string | `lakehouse` | advanced | Iceberg catalog name for DuckDB. |
 | `architecture.query_engine.duckdb.version` | string | `1.5.6` | advanced | DuckDB version installed at deploy time. Keep it pinned: an unpinned install takes whatever is current, so two runs weeks apart can query with different engines. |
 

@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace
 
 from lakebench.cli import _aml_post
+from lakebench.s3.client import S3Client
 
 
 def test_recall_json_is_put_under_the_gold_scoring_prefix(monkeypatch):
@@ -21,6 +22,8 @@ def test_recall_json_is_put_under_the_gold_scoring_prefix(monkeypatch):
     _aml_post._write_recall_json(cfg, "run-1", {"mode": "covered", "status": "scored"})
 
     assert len(calls) == 1
+    # The real client exposes raw_client as a property; the stub mirrors that.
+    assert isinstance(S3Client.__dict__["raw_client"], property)
     assert calls[0]["Bucket"] == "lb-gold"
     assert calls[0]["Key"] == "scoring/run-1/recall.json"
     assert json.loads(calls[0]["Body"]) == {"mode": "covered", "status": "scored"}

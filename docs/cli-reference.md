@@ -565,7 +565,7 @@ cluster call, and exits 2 (usage) naming the first refused one:
 - `--repeat` with a continuous run;
 - `--repeat` with `cycles` above 1;
 - `--repeat` with `--stage`, `--local`, `--deploy-only` or `--generate-only`;
-- `benchmark.investigator_sessions` outside an AML continuous run with TM operations on trino or spark-thrift.
+- `benchmark.investigator_sessions` outside an AML continuous run with TM operations.
 <!-- END GENERATED: cli run -->
 
 - `--timeout`, when omitted, is `max(3600, scale * 120)` seconds per job.
@@ -1096,7 +1096,7 @@ Components:
 - `datagen`: the datagen Job pods.
 - Each pipeline stage's Spark driver: `bronze-verify`, `silver-build`,
   `gold-finalize`, `bronze-ingest`, `silver-stream`, `gold-refresh`,
-  `score-financial`, `score-financial-reference`, `time-travel-financial`.
+  `score-financial-reference`, `time-travel-financial`.
 - `spark-driver`: every Spark driver.
 - `trino` (coordinator), `trino-worker`, `thrift`, `duckdb`, `hive`,
   `polaris` and `postgres`.

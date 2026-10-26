@@ -418,7 +418,7 @@ pub fn manifest_schema() -> SchemaRef {
             DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
             true,
         ),
-        // Downstream tooling (`score_financial.py`, `verify_run.py`) joins
+        // Downstream tooling (the scoring SQL, `verify_run.py`) joins
         // this against `gold.alerts.related_txn_ids` -- keep the name in
         // sync with those consumers, and keep the list populated (not just
         // the schema field).
@@ -454,7 +454,7 @@ pub fn manifest_schema() -> SchemaRef {
 /// pipeline seed so the UETR derivation here is bit-identical to the bronze
 /// emit's (see `emit::build_batch` -- same splitmix64 + uuid_v4_into with the
 /// same 0x0E7A / 0x5A1D salts). A drift in that derivation would silently
-/// break `score_financial.py`'s recall join, so any change here must be
+/// break the scoring SQL's recall join, so any change here must be
 /// mirrored in the bronze emit and vice versa; the `manifest_uetr_round_trip`
 /// regression test pins the identity.
 pub fn build_manifest(

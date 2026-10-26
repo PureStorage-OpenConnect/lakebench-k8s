@@ -1034,7 +1034,7 @@ fn pacs008_main(epoch: u64, first: bool, cont: Option<&Delivery>) -> EpochEnd {
     // Populated at typology-scheduling time so it's deterministic (both
     // bronze and reference pods build the identical map from the same
     // schedule, but only the reference pod writes the manifest that
-    // consumes it). Downstream (`score_financial.py`, `verify_run.py`)
+    // consumes it). Downstream (the scoring SQL, `verify_run.py`)
     // joins `manifest.participant_uetrs` against `gold.alerts.related_txn_ids`;
     // an empty list here was silently making recall = 0/0.
     let mut inst_uids: HashMap<String, Vec<u64>> = HashMap::new();

@@ -12,7 +12,7 @@ from __future__ import annotations
 # Map each W-rule to the typology_type in `bronze.manifest` that the
 # rule is supposed to detect. Several rules may target the same type;
 # each rule targets exactly one. A rule with no planted-typology target reports N/A for
-# precision/recall and only contributes a detect + volume query.
+# precision/recall.
 #
 # **Semantic contract for downstream consumers:** RULE_TARGETS is the
 # join key for computing rule precision/recall. `bronze.manifest` also

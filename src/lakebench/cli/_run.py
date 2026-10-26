@@ -1200,7 +1200,7 @@ def _aml_batch_gate_problems(
     count when scoring ran; per-rule counts parsed from driver logs are the
     fallback. Missing logs with no scoring result is unknown, a warning, not
     proof that nothing was detected. Scoring that did not produce a result
-    (``None``: the score job failed or refused the corpus, or ``not_scored``)
+    (``None``: the scoring queries failed or refused the corpus, or ``not_scored``)
     fails the run: its recall went unchecked.
     """
     if not gold_jobs:
@@ -1215,7 +1215,9 @@ def _aml_batch_gate_problems(
         "anything. Check the gold-finalize driver log."
     )
     if scoring is None or scoring.get("status") == "not_scored":
-        why = (scoring or {}).get("reason") or "the score job did not complete (see the run log)"
+        why = (scoring or {}).get(
+            "reason"
+        ) or "the scoring queries did not complete (see the run log)"
         problems.append(f"AML scoring did not produce a result: {why}")
     if scoring is not None and scoring.get("total_alerts") is not None:
         if int(scoring["total_alerts"]) == 0:
@@ -3606,8 +3608,8 @@ def _run_once(
                             console.print(f"[red]FAIL[/red] ({short_err})")
 
                 bench_runner = BenchmarkRunner(cfg, tm_run_id=_tm_run_id)
-                # AML analytical queries (aggregate_typology_coverage etc)
-                # can exceed the 300 s default at scale >= 5; a timeout here
+                # AML analytical queries can exceed the 300 s default at
+                # scale >= 5; a timeout here
                 # masquerades as a failed query and drops QpH to 0.
                 _bench_timeout = bench_query_timeout(cfg)
                 if collector.current_run is not None:
@@ -3907,7 +3909,7 @@ def _run_once(
                 run_metrics.financial_scoring = {
                     "mode": "batch",
                     "status": "not_scored",
-                    "reason": "the score job did not complete (see the run log)",
+                    "reason": "the scoring queries did not complete (see the run log)",
                 }
 
             # Collect platform metrics from Prometheus (best-effort)
