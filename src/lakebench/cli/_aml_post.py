@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from lakebench.cli._helpers import console, esc, print_info, print_success, print_warning
+from lakebench.cli._helpers import console, print_info, print_success, print_warning
 
 #: The covered-mode table names, in tick-record terms.
 COVERED_OPTIONS = (
@@ -103,7 +103,7 @@ def _write_recall_json(cfg, run_id: str, record: dict) -> None:
             Body=_json.dumps(record).encode(),
         )
     except Exception as e:  # noqa: BLE001 -- best effort, never fails the run
-        print_warning(f"Could not write recall.json: {esc(str(e))}")
+        print_warning(f"Could not write recall.json: {e}")
 
 
 def score_financial_via_queries(
@@ -160,7 +160,7 @@ def score_financial_via_queries(
         except RuntimeError as e:
             # An engine failure: said here, and its text is the record's
             # reason, in the record the callers write when no score came back.
-            print_warning(f"Financial scoring did not complete: {esc(str(e))}")
+            print_warning(f"Financial scoring did not complete: {e}")
             if covered is None:
                 reason = f"the scoring queries did not complete: {e}"
                 return {"mode": "batch", "status": "not_scored", "reason": reason}
@@ -170,7 +170,7 @@ def score_financial_via_queries(
         print_success(scoring_count_line(record))
         return record
     except Exception as e:  # noqa: BLE001 -- best effort, never fails the run
-        print_warning(f"Financial scoring did not complete: {esc(str(e))}")
+        print_warning(f"Financial scoring did not complete: {e}")
         return None
 
 

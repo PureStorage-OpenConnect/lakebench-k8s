@@ -80,7 +80,7 @@ def _preflight_check(cfg) -> None:
 
     capacity = deploy_capacity_check(cfg)
     if not capacity.passed:
-        print_error(f"cluster-capacity: {esc(capacity.message)}")
+        print_error(f"cluster-capacity: {capacity.message}")
         for line in (capacity.hint or "").split("\n"):
             if line:
                 console.print(f"  [dim]{esc(line)}[/dim]")
@@ -89,7 +89,7 @@ def _preflight_check(cfg) -> None:
     if capacity.message.startswith("WARNING"):
         print_warning(f"cluster-capacity: {capacity.message}")
     else:
-        print_info(f"cluster-capacity: {esc(capacity.message)}")
+        print_info(f"cluster-capacity: {capacity.message}")
 
     # 4. Check Stackable CRDs if catalog=hive
     if cfg.architecture.catalog.type.value == "hive":
@@ -576,7 +576,7 @@ def _deploy_impl(
 
         preview = deploy_capacity_check(cfg)
         print_info(
-            f"cluster-capacity: {esc(preview.message)}"
+            f"cluster-capacity: {preview.message}"
             + ("" if preview.passed else " (deploy would refuse it, exit 4)")
         )
 

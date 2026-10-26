@@ -56,3 +56,25 @@ def test_an_engine_failure_is_the_not_scored_reason(monkeypatch, covered):
         "status": "not_scored",
         "reason": f"{head}: alerts.sql: Query exceeded distributed total memory limit",
     }
+
+
+def test_a_bracketed_error_is_printed_without_an_escape(monkeypatch, capsys):
+    """print_warning prints its text verbatim: an escaped [x] would show
+    a stray backslash."""
+
+    def _fail(**kw):
+        raise OSError("bucket [lb-gold] is read-only")
+
+    raw = SimpleNamespace(put_object=_fail)
+    monkeypatch.setattr(_aml_post, "_s3_client", lambda cfg: SimpleNamespace(raw_client=raw))
+    cfg = SimpleNamespace(
+        platform=SimpleNamespace(
+            storage=SimpleNamespace(s3=SimpleNamespace(buckets=SimpleNamespace(gold="lb-gold")))
+        )
+    )
+
+    _aml_post._write_recall_json(cfg, "run-1", {})
+
+    err = capsys.readouterr().err
+    assert "bucket [lb-gold] is read-only" in err
+    assert "\\[" not in err
