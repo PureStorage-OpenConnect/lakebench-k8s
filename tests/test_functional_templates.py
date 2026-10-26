@@ -12,6 +12,7 @@ They catch:
 
 from __future__ import annotations
 
+import subprocess
 from unittest.mock import patch
 
 import pytest
@@ -271,6 +272,35 @@ class TestTemplateConditionals:
         ctx = _enrich_context(_make_engine(recipe="polaris-iceberg-spark-trino"))
         rendered = renderer.render("polaris/bootstrap-job.yaml.j2", ctx)
         assert '"polaris.config.namespace-custom-location.enabled": "true"' in rendered
+
+    def test_polaris_bootstrap_accepts_existing_catalog_and_namespaces(
+        self, renderer: TemplateRenderer, tmp_path
+    ):
+        """A rerun of the bootstrap sees HTTP 409 for the catalog and every
+        namespace and succeeds. With ``curl -f`` an HTTP error exits 22 after
+        printing the code, so a ``|| echo 000`` fallback read 409 as 409000
+        and the namespace step failed the Job."""
+        ctx = _enrich_context(_make_engine(recipe="polaris-iceberg-spark-trino"))
+        job = yaml.safe_load(renderer.render("polaris/bootstrap-job.yaml.j2", ctx))
+        script = job["spec"]["template"]["spec"]["containers"][0]["args"][0]
+        assert "curl -sf -o /dev/null" not in script
+        fake_curl = tmp_path / "curl"
+        fake_curl.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            '  *oauth/tokens*) echo \'{"access_token":"t"}\' ;;\n'
+            "  *grants*) printf 201 ;;\n"
+            '  *-w*) printf 409; case "$1" in -sf) exit 22 ;; esac ;;\n'
+            "esac\n"
+        )
+        fake_curl.chmod(0o755)
+        env = {"PATH": f"{tmp_path}:/usr/bin:/bin", "CATALOG_NAME": "lakehouse"}
+        result = subprocess.run(
+            ["/bin/sh", "-c", script], env=env, capture_output=True, text=True, timeout=30
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "Catalog 'lakehouse' already exists (OK)" in result.stdout
+        assert result.stdout.count("already exists (OK)") == 5
 
     def test_datagen_ca_cert_env_vars_when_set(self, renderer: TemplateRenderer, https_ctx):
         """Datagen job should have S3_CA_CERT env var when CA cert set."""

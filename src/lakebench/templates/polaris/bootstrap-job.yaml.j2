@@ -120,7 +120,7 @@ spec:
               echo "Token obtained successfully"
 
               echo "Creating catalog '$CATALOG_NAME'..."
-              HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X POST "$POLARIS_URI/api/management/v1/catalogs" \
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$POLARIS_URI/api/management/v1/catalogs" \
                 -H "Authorization: Bearer $TOKEN" \
                 -H "Content-Type: application/json" \
                 -d '{
@@ -140,7 +140,7 @@ spec:
                       "polaris.config.namespace-custom-location.enabled": "true"
                     }
                   }
-                }' 2>/dev/null || echo "000")
+                }' 2>/dev/null || true)
 
               if [ "$HTTP_CODE" = "201" ]; then
                 echo "Catalog '$CATALOG_NAME' created"
@@ -165,11 +165,11 @@ spec:
                 else
                   BODY='{"namespace": ["'"$NS"'"]}'
                 fi
-                NS_CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X POST \
+                NS_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
                   "$POLARIS_URI/api/catalog/v1/$CATALOG_NAME/namespaces" \
                   -H "Authorization: Bearer $TOKEN" \
                   -H "Content-Type: application/json" \
-                  -d "$BODY" 2>/dev/null || echo "000")
+                  -d "$BODY" 2>/dev/null || true)
                 if [ "$NS_CODE" = "200" ]; then
                   echo "Namespace '$NS' created in catalog '$CATALOG_NAME'"
                 elif [ "$NS_CODE" = "409" ]; then
@@ -198,7 +198,7 @@ spec:
                   "$POLARIS_URI/api/management/v1/catalogs/$CATALOG_NAME/catalog-roles/catalog_admin/grants" \
                   -H "Authorization: Bearer $TOKEN" \
                   -H "Content-Type: application/json" \
-                  -d '{"grant": {"type": "catalog", "privilege": "'"$PRIV"'"}}' 2>/dev/null || echo "000")
+                  -d '{"grant": {"type": "catalog", "privilege": "'"$PRIV"'"}}' 2>/dev/null || true)
                 if [ "$GRANT_CODE" = "200" ] || [ "$GRANT_CODE" = "201" ] || [ "$GRANT_CODE" = "204" ]; then
                   echo "Granted $PRIV to catalog_admin"
                 else
