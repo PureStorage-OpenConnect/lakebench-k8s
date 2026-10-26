@@ -181,6 +181,7 @@ def test_batch_run():
                 ["micro_structuring_t_0", "micro_structuring", "1001", "43"]
             ],
             "detectable_by": [],
+            "WHERE is_customer": [["4321"]],
         }
     )
     rec = sq.score(
@@ -198,6 +199,8 @@ def test_batch_run():
     assert t["recall"] == pytest.approx(6 / 10)
     assert t["instance_count"] == 10
     assert t["workload_category"] == "W2_structuring"  # from the manifest, not null
+    # The per-customer screening rate's denominator (scripts/aml_screen_rates.py).
+    assert rec["customer_count"] == 4321
     assert rec["fp_rate"] == pytest.approx(7 / 25)
 
 
@@ -366,3 +369,120 @@ def test_engine_failure_names_the_statement():
 
     with pytest.raises(RuntimeError, match=r"^manifest_guard\.sql\.tmpl: Query exceeded"):
         sq.score(run_tsv, catalog="lh", snapshot_ids=None, run_id="run-x", meta=META)
+
+
+def _covered_rescreen_exe(rescreen_rows, rescreen_error=None):
+    """A covered W5 run: sanctions_match has 10 instances, 8 covered, 6
+    designated and 7 incidental hits (on covered instances t_0..t_5 and
+    t_0..t_6). ``rescreen_rows`` are the manifest's detectable_by=rescreen
+    instances."""
+    rows, _ = _cov_instances({"sanctions_match": (10, 8, 0, 6, 7)})
+    canned = {
+        "for the assembler's two guards": [["sanctions_match_1_0", "43"]],
+        "FROM lh.gold.detection_status": [
+            ["W5_sanctions_match", "run-x", "ran", "sanctions_match", "5", ""],
+        ],
+        "Coverage and covered-recall": rows,
+        "Per-rule false positives": [["W5_sanctions_match", "20", "5", "30", "40"]],
+        "Global alert counts": [["25", "18"]],
+        "Per-rule chance": [],
+        "an evidence cap cut": [],
+        "Distinct instance count per typology_type": [["sanctions_match", "10"]],
+        "MAX(expected_workload)": [["sanctions_match", "W5_sanctions"]],
+        "Per-reason-code counts": [],
+        "CARDINALITY(a.reason_codes)": [["0", "25"]],
+        "Resolve a chunk of subject": [["1002", "1", "1"]],
+        "participant_entity_ids": [
+            ["sanctions_match_t_0", "sanctions_match", "1001", "43"],
+            ["sanctions_match_t_2", "sanctions_match", "1002", "43"],
+        ],
+        "detectable_by": rescreen_rows,
+    }
+
+    class Exe(FakeExecutor):
+        def run_tsv(self, sql, timeout):
+            if rescreen_error and "detectable_by" in sql:
+                raise RuntimeError(rescreen_error)
+            return super().run_tsv(sql, timeout)
+
+    return Exe(canned)
+
+
+W5_META = sq.RulesMeta(
+    reason_codes={},
+    reason_code_vocabulary="deadbeefdeadbeef",
+    customer_scoped_rules=frozenset({"W5_sanctions_match"}),
+    rule_target_typology={"W5_sanctions_match": "sanctions_match"},
+)
+
+
+def test_covered_rescreen_only_instances_leave_recall_and_the_subject_check():
+    # t_0 and t_1 are covered rescreen-only instances, both hit; t_9 is a
+    # rescreen-only instance that is not covered. Covered recall and
+    # incidental recall drop the two covered ones from numerator and
+    # denominator; covered_instances keeps them; the subject check reads
+    # t_2 and never t_0.
+    exe = _covered_rescreen_exe(
+        [
+            ["sanctions_match_t_0", "sanctions_match"],
+            ["sanctions_match_t_1", "sanctions_match"],
+            ["sanctions_match_t_9", "sanctions_match"],
+        ]
+    )
+    rec = sq.score(
+        exe.run_tsv,
+        catalog="lh",
+        snapshot_ids=_covered_ids(),
+        run_id="run-x",
+        meta=W5_META,
+        alert_set={"rows": 25, "digest": "abc"},
+    )
+    t = rec["covered"]["typologies"][0]
+    assert t["covered_instances"] == 8
+    assert t["rescreen_only_excluded"] == 2
+    assert t["recall_covered"] == pytest.approx((6 - 2) / (8 - 2))
+    assert t["incidental_recall_covered"] == pytest.approx((7 - 2) / (8 - 2))
+    subject_sql = [s for s in exe.calls if "Resolve a chunk of subject" in s]
+    assert subject_sql and all("1002" in s and "1001" not in s for s in subject_sql)
+
+
+def test_covered_recall_is_null_when_every_covered_instance_is_rescreen_only():
+    rows = [[f"sanctions_match_t_{i}", "sanctions_match"] for i in range(8)]
+    rec = sq.score(
+        _covered_rescreen_exe(rows).run_tsv,
+        catalog="lh",
+        snapshot_ids=_covered_ids(),
+        run_id="run-x",
+        meta=W5_META,
+        alert_set={"rows": 25, "digest": "abc"},
+    )
+    t = rec["covered"]["typologies"][0]
+    assert t["covered_instances"] == 8
+    assert t["rescreen_only_excluded"] == 8
+    assert t["recall_covered"] is None
+    assert t["incidental_recall_covered"] is None
+
+
+@pytest.mark.parametrize(
+    ("error", "scored"),
+    [
+        ("Column 'injection_parameters' cannot be resolved", True),
+        ("Query exceeded distributed total memory limit", False),
+    ],
+)
+def test_rescreen_lookup_failure_is_never_read_as_zero(error, scored):
+    exe = _covered_rescreen_exe([], rescreen_error=error)
+    kwargs = {
+        "catalog": "lh",
+        "snapshot_ids": _covered_ids(),
+        "run_id": "run-x",
+        "meta": W5_META,
+        "alert_set": {"rows": 25, "digest": "abc"},
+    }
+    if scored:
+        t = sq.score(exe.run_tsv, **kwargs)["covered"]["typologies"][0]
+        assert t["rescreen_only_excluded"] == 0
+        assert t["recall_covered"] == pytest.approx(6 / 8)
+    else:
+        with pytest.raises(RuntimeError, match="memory limit"):
+            sq.score(exe.run_tsv, **kwargs)

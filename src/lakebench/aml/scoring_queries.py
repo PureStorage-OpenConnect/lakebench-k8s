@@ -234,7 +234,7 @@ def _coverage_recall(
     pairs_sql: str,
     covered_pass: bool,
     timeout: int,
-) -> tuple[dict[str, dict[str, int]], set[str]]:
+) -> tuple[dict[str, dict[str, int]], dict[str, tuple[int, int]]]:
     # Covered mode counts hits over covered instances only; batch mode counts
     # over the whole manifest (compute_scores has no coverage gate).
     hit_gate = "c.is_covered AND " if covered_pass else ""
@@ -248,11 +248,10 @@ def _coverage_recall(
     rows = run_tsv(sql, timeout)
     # One row per instance: (typology_id, typology_type, is_covered,
     # no_participant, designated_hit, incidental_hit). Aggregate to per-type
-    # counts here, and keep the covered typology_ids for the subject check and
-    # the rescreen-only exclusion, which score_covered applies at instance
-    # grain (not per typology_type).
+    # counts here, and keep each covered instance's two hits: the subject
+    # check and the rescreen-only exclusion work at instance grain.
     out: dict[str, dict[str, int]] = {}
-    covered_ids: set[str] = set()
+    covered_hits: dict[str, tuple[int, int]] = {}
     for r in rows:
         tid, typ = _s(r[0]), _s(r[1])
         is_cov, no_part, dh, ih = _i(r[2]), _i(r[3]), _i(r[4]), _i(r[5])
@@ -272,8 +271,8 @@ def _coverage_recall(
         c["designated_hits"] += dh
         c["incidental_hits"] += ih
         if is_cov:
-            covered_ids.add(tid)
-    return out, covered_ids
+            covered_hits[tid] = (dh, ih)
+    return out, covered_hits
 
 
 def _precision(
@@ -652,7 +651,7 @@ def score(
     targets = sorted({(rid, typ) for typ, rids in designated.items() for rid in rids})
     targets_sql = _values(targets, ["rule_id", "target"])
 
-    cov, covered_ids = _coverage_recall(
+    cov, covered_hits = _coverage_recall(
         run_tsv,
         catalog,
         pins,
@@ -705,7 +704,7 @@ def score(
             pins,
             status_run_id,
             cov,
-            covered_ids,
+            set(covered_hits),
             summary,
             scoped,
             workload,
@@ -718,7 +717,7 @@ def score(
         snapshot_ids,
         status_run_id,
         cov,
-        covered_ids,
+        covered_hits,
         summary,
         designated,
         rule_status,
@@ -837,9 +836,23 @@ def _batch_record(
     record = dict(summary)
     record["run_id"] = run_id
     record["subject_customer_check"] = check
+    record["customer_count"] = _customer_count(run_tsv, catalog, pins, timeout)
     record["typologies"] = typologies
     record["computed_by"] = COMPUTED_BY
     return record
+
+
+def _customer_count(
+    run_tsv: RunTsv, catalog: str, pins: dict[str, str], timeout: int
+) -> int | None:
+    """Customers in silver.entities (is_customer): the denominator of the
+    per-customer non-planted alert rate (scripts/aml_screen_rates.py). A
+    diagnostic, so an unreadable table records None, never a guessed count."""
+    sql = f"SELECT COUNT(*) FROM {catalog}.silver.entities {pins['entities_pin']} WHERE is_customer"
+    try:
+        return _i(_one(run_tsv(sql, timeout))[0])
+    except (RuntimeError, NotScored):
+        return None
 
 
 def _covered_record(
@@ -849,7 +862,7 @@ def _covered_record(
     snapshot_ids: dict[str, int],
     run_id: str,
     cov: dict[str, dict[str, int]],
-    covered_ids: set[str],
+    covered_hits: dict[str, tuple[int, int]],
     summary: dict[str, Any],
     designated: dict[str, list[str]],
     rule_status: dict[str, str],
@@ -869,12 +882,22 @@ def _covered_record(
             if r.get("target_typology") == typ
         )
     }
-    # Rescreen-only exclusion is applied over the covered manifest (instance
-    # grain): covered instances whose injection_parameters['detectable_by'] is
-    # 'rescreen', counted per typology.
-    rescreen = _rescreen_only(run_tsv, catalog, pins, timeout, covered_ids)
-    # Covered subject check: subjects of covered instances only.
-    subj_rows = _manifest_subject_rows(run_tsv, catalog, pins, timeout, covered_ids)
+    # Continuous W5 is the transaction screen only: a covered sanctions
+    # instance paid before its listing is detectable by a rescreen alone, so
+    # it stays in covered_instances, is counted in rescreen_only_excluded, and
+    # is left out of covered recall, incidental recall and the subject check.
+    rescreen = _rescreen_only(run_tsv, catalog, pins, timeout, set(covered_hits))
+    excluded_n: dict[str, int] = {}
+    excluded_hits: dict[str, list[int]] = {}
+    for tid, typ in rescreen.items():
+        excluded_n[typ] = excluded_n.get(typ, 0) + 1
+        dh, ih = covered_hits[tid]
+        acc = excluded_hits.setdefault(typ, [0, 0])
+        acc[0] += dh
+        acc[1] += ih
+    # Covered subject check: subjects of scored covered instances only.
+    scored_ids = set(covered_hits) - set(rescreen)
+    subj_rows = _manifest_subject_rows(run_tsv, catalog, pins, timeout, scored_ids)
     check = _subject_check(run_tsv, catalog, pins, subj_rows, scoped, timeout)
 
     typologies = []
@@ -883,10 +906,14 @@ def _covered_record(
         state, des_rules = _typology_row_state(typ, designated, rule_status)
         covn = c["covered_instances"]
         corpus = c["corpus_instances"]
+        ex_dh, ex_ih = excluded_hits.get(typ, (0, 0))
+        scored_n = covn - excluded_n.get(typ, 0)
         recall_covered = (
-            (c["designated_hits"] / covn) if (covn and state in ("scored", "partial")) else None
+            ((c["designated_hits"] - ex_dh) / scored_n)
+            if (scored_n and state in ("scored", "partial"))
+            else None
         )
-        incidental_covered = (c["incidental_hits"] / covn) if covn else None
+        incidental_covered = ((c["incidental_hits"] - ex_ih) / scored_n) if scored_n else None
         typologies.append(
             {
                 "typology_type": typ,
@@ -896,7 +923,7 @@ def _covered_record(
                 "corpus_instances": corpus,
                 "coverage": (covn / corpus) if corpus else None,
                 "no_participant_txns": c["no_participant_txns"],
-                "rescreen_only_excluded": rescreen.get(typ, 0),
+                "rescreen_only_excluded": excluded_n.get(typ, 0),
                 "detection_status": state,
                 "designated_rules": des_rules,
                 "workload_category": workload.get(typ),
@@ -939,12 +966,12 @@ def _rescreen_only(
     pins: dict[str, str],
     timeout: int,
     covered_ids: set[str],
-) -> dict[str, int]:
-    """Covered instances whose injection_parameters.detectable_by = 'rescreen',
-    per typology; left out of covered recall and counted (score_covered). The
-    rescreen rows are selected in SQL, then restricted to covered instances in
-    Python at instance grain (a partially-covered typology must not count its
-    uncovered rescreen instances)."""
+) -> dict[str, str]:
+    """{typology_id: typology_type} of the covered instances whose
+    injection_parameters.detectable_by is 'rescreen'. The rescreen rows are
+    selected in SQL and restricted to covered instances in Python, at instance
+    grain. A manifest without injection_parameters has none; any other failure
+    is raised, never read as zero."""
     sql = (
         f"SELECT typology_id, typology_type FROM {catalog}.bronze.manifest "
         f"{pins['manifest_pin']} "
@@ -952,10 +979,8 @@ def _rescreen_only(
     )
     try:
         rows = run_tsv(sql, timeout)
-    except Exception:  # noqa: BLE001 -- a manifest without the column
-        return {}
-    out: dict[str, int] = {}
-    for tid, typ in rows:
-        if tid in covered_ids:
-            out[_s(typ)] = out.get(_s(typ), 0) + 1
-    return out
+    except RuntimeError as e:
+        if "injection_parameters" in str(e) and "cannot be resolved" in str(e):
+            return {}
+        raise
+    return {_s(tid): _s(typ) for tid, typ in rows if _s(tid) in covered_ids}
