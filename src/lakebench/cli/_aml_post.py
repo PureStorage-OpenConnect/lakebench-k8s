@@ -30,18 +30,9 @@ COVERED_OPTIONS = (
 
 
 def _s3_client(cfg):
-    from lakebench.s3 import S3Client
+    from lakebench.s3 import s3_client_from_config
 
-    s3 = cfg.platform.storage.s3
-    return S3Client(
-        endpoint=s3.endpoint,
-        access_key=s3.access_key,
-        secret_key=s3.secret_key,
-        region=s3.region,
-        path_style=s3.path_style,
-        ca_cert=s3.ca_cert,
-        verify_ssl=s3.verify_ssl,
-    )
+    return s3_client_from_config(cfg.platform.storage.s3)
 
 
 def scoring_count_line(summary: dict) -> str:

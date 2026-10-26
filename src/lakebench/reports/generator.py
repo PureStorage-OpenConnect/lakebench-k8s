@@ -26,6 +26,7 @@ from html import escape as _html_escape
 from pathlib import Path
 from typing import Any
 
+from lakebench.config.schema import is_continuous_mode
 from lakebench.metrics import MetricsStorage, PipelineMetrics
 from lakebench.metrics.bounds import binding_caps as _binding_caps
 from lakebench.metrics.maintenance_policy import LEGACY_MAINTENANCE_POLICY_ID
@@ -257,7 +258,7 @@ def _corpus_note(metrics) -> str:
     if bronze <= 0:
         return "corpus size not recorded"
     pb = getattr(metrics, "pipeline_benchmark", None)
-    if pb is not None and pb.pipeline_mode in ("sustained", "continuous"):
+    if pb is not None and is_continuous_mode(pb.pipeline_mode):
         return f"bronze bucket {bronze:.1f} GiB at run end: landing files plus the bronze table"
     return f"corpus {bronze:.1f} GiB in bronze"
 
@@ -626,7 +627,7 @@ class ReportGenerator:
         metrics.json files) for backward compatibility.
         """
         if metrics.pipeline_benchmark:
-            return metrics.pipeline_benchmark.pipeline_mode in ("sustained", "continuous")
+            return is_continuous_mode(metrics.pipeline_benchmark.pipeline_mode)
         return bool(metrics.streaming)
 
     @staticmethod

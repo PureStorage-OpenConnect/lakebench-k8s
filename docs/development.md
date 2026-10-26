@@ -13,8 +13,7 @@ src/lakebench/
   cli/          CLI package (Typer commands, helpers, continuous pipeline)
   config/       Pydantic config schema, YAML loader, cluster autosizer
   deps/         A deployment's dependency set: what it needs, resolved in its namespace
-  deploy/       Deployment engine, destroy, ownership records, cluster lease,
-                and re-export shims for deployers
+  deploy/       Deployment engine, destroy, ownership records, cluster lease
   engine/       PipelineEngine protocol and get_engine() factory
   journal/      Event logging (session-scoped JSONL provenance logs)
   k8s/          Kubernetes client wrapper and OpenShift security (SCC/RBAC)

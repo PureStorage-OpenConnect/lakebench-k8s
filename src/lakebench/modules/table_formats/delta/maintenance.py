@@ -1,7 +1,7 @@
 """Delta Lake table maintenance helpers.
 
-Parallel to ``deploy/iceberg.py`` for Iceberg tables.  Provides SQL
-generation for Delta-specific maintenance operations:
+Parallel to ``modules/table_formats/iceberg/maintenance.py`` for Iceberg
+tables. Provides SQL generation for Delta-specific maintenance operations:
 
 - VACUUM (analog of expire_snapshots + remove_orphan_files)
 - OPTIMIZE (analog of rewrite_data_files)
@@ -9,7 +9,7 @@ generation for Delta-specific maintenance operations:
 
 Engine discovery (``find_maintenance_engine``) and SQL execution
 (``exec_sql``, ``query_sql``) are format-agnostic and reused from
-``deploy/iceberg.py``.
+``modules/table_formats/iceberg/maintenance.py``.
 """
 
 from __future__ import annotations

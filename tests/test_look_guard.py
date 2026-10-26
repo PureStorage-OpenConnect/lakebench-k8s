@@ -413,9 +413,13 @@ ALLOWED = {
 _GUARDS = {"refuse_if_protected", "protected_corpus_reason", "_load_config"}
 
 
+#: The config loaders a command calls with ``purpose=``.
+_LOADERS = {"load_config", "load_config_or_exit"}
+
+
 def _loads_to_change(fn: ast.AST) -> bool:
     for node in ast.walk(fn):
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "load_config":
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) in _LOADERS:
             for kw in node.keywords:
                 if kw.arg == "purpose" and getattr(kw.value, "attr", None) in ("MUTATE", "RUN"):
                     return True

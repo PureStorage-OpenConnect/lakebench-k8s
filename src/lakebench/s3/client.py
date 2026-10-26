@@ -776,6 +776,27 @@ class S3Client:
         return results
 
 
+def s3_client_from_config(s3_cfg: Any) -> S3Client:
+    """An ``S3Client`` for a config's ``platform.storage.s3`` block.
+
+    The class is looked up on the ``lakebench.s3`` package at call time, so
+    a test that patches ``lakebench.s3.S3Client`` replaces the client every
+    caller builds here.
+    """
+    from lakebench import s3
+
+    client: S3Client = s3.S3Client(
+        endpoint=s3_cfg.endpoint,
+        access_key=s3_cfg.access_key,
+        secret_key=s3_cfg.secret_key,
+        region=s3_cfg.region,
+        path_style=s3_cfg.path_style,
+        ca_cert=s3_cfg.ca_cert,
+        verify_ssl=s3_cfg.verify_ssl,
+    )
+    return client
+
+
 def test_s3_connectivity(
     endpoint: str,
     access_key: str,

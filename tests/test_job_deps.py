@@ -213,8 +213,8 @@ def test_the_duckdb_executor_never_autoinstalls():
 
 @pytest.mark.parametrize("recipe", ["hive-iceberg-spark-thrift", "hive-iceberg-spark-duckdb"])
 def test_consumers_refuse_a_real_deploy_without_a_set(recipe):
-    from lakebench.deploy.duckdb import DuckDBDeployer
     from lakebench.deploy.engine import DeploymentStatus
+    from lakebench.modules.query_engines.duckdb.deployer import DuckDBDeployer
     from lakebench.modules.query_engines.spark_thrift.deployer import SparkThriftDeployer
 
     cfg = make_config(recipe=recipe)

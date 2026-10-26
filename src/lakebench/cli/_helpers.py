@@ -11,6 +11,7 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
@@ -19,6 +20,9 @@ from rich.text import Text
 
 from lakebench.exit_codes import ExitCode, LakebenchError
 from lakebench.journal import Journal
+
+if TYPE_CHECKING:
+    from lakebench.config import LakebenchConfig, LoadPurpose
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +125,43 @@ def print_error(message: object) -> None:
 
     _json.note_printed_error(message)
     _status_line("ERROR", "red", message)
+
+
+def load_config_or_exit(
+    path: Path,
+    purpose: LoadPurpose,
+    *,
+    name_override: str | None = None,
+    allow_long_names: bool = False,
+) -> LakebenchConfig:
+    """``load_config(path, purpose=purpose, ...)``, or the load error on
+    stderr (each validation error on its own line) and exit USAGE."""
+    from lakebench.config import (
+        ConfigError,
+        ConfigFileNotFoundError,
+        ConfigValidationError,
+        load_config,
+    )
+
+    try:
+        return load_config(
+            path,
+            purpose=purpose,
+            name_override=name_override,
+            allow_long_names=allow_long_names,
+        )
+    except ConfigFileNotFoundError as e:
+        print_error(f"File not found: {e}")
+        raise typer.Exit(ExitCode.USAGE) from e
+    except ConfigValidationError as e:
+        print_error("Config validation failed:")
+        for err in e.errors:
+            loc = ".".join(str(x) for x in err["loc"])
+            console.print(f"  [red]*[/red] {esc(loc)}: {esc(err['msg'])}")
+        raise typer.Exit(ExitCode.USAGE) from e
+    except ConfigError as e:
+        print_error(f"Config error: {e}")
+        raise typer.Exit(ExitCode.USAGE) from e
 
 
 #: The warnings held by the active ``defer_warnings`` block, or None.

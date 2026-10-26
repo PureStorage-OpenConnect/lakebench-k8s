@@ -4,8 +4,8 @@ Covers:
 - HiveDeployer: a missing Stackable fails the step and installs nothing
 - DuckDBDeployer: _wait_for_ready accepts only a pod on this deploy's set
 - ObservabilityDeployer: destroy deletes only this deployment's binding
-- DatagenDeployer: _parse_size_to_bytes, and the schema and bronze prefix
-  reaching the datagen context
+- parse_size_to_bytes, and the schema and bronze prefix reaching the
+  datagen context
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ class TestHiveDeployerDeploy:
     """Tests for HiveDeployer.deploy()."""
 
     def _make_deployer(self):
-        from lakebench.deploy.hive import HiveDeployer
+        from lakebench.modules.catalogs.hive.deployer import HiveDeployer
 
         cfg = make_config()
         engine = MagicMock()
@@ -93,8 +93,8 @@ class TestDuckDBDeployerWaitForReady:
         )
 
     def _deployer(self):
-        from lakebench.deploy.duckdb import DuckDBDeployer
         from lakebench.deps.manifest import placeholder_handle
+        from lakebench.modules.query_engines.duckdb.deployer import DuckDBDeployer
 
         cfg = make_config(recipe="hive-iceberg-spark-duckdb")
         engine = MagicMock()
@@ -175,8 +175,8 @@ class TestObservabilityDeployerSkip:
 # ===========================================================================
 
 
-class TestDatagenDeployerParseSizeToBytes:
-    """Tests for DatagenDeployer._parse_size_to_bytes()."""
+class TestParseSizeToBytes:
+    """Tests for parse_size_to_bytes()."""
 
     @pytest.mark.parametrize(
         ("text", "size"),
@@ -190,11 +190,9 @@ class TestDatagenDeployerParseSizeToBytes:
         ],
     )
     def test_parse(self, text, size):
-        from lakebench.deploy.datagen import DatagenDeployer
+        from lakebench.config.schema import parse_size_to_bytes
 
-        engine = MagicMock()
-        engine.config = make_config()
-        assert DatagenDeployer(engine)._parse_size_to_bytes(text) == size
+        assert parse_size_to_bytes(text) == size
 
 
 class TestDatagenDeployerSchemaWireThrough:

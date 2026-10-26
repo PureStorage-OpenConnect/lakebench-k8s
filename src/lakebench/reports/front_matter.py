@@ -29,6 +29,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from lakebench.config.schema import is_continuous_mode
 from lakebench.reports import copy as words
 
 #: compute_verdict puts this first whenever ``success`` is False; it says
@@ -326,7 +327,7 @@ def limits_interpretation(
         from lakebench.metrics.verdict import continuous_excluded_rules
 
         pb = metrics.pipeline_benchmark
-        if pb is not None and pb.pipeline_mode in ("sustained", "continuous"):
+        if pb is not None and is_continuous_mode(pb.pipeline_mode):
             executed = set(rules.get("executed") or [])
             not_run = sorted(
                 (r for r in continuous_excluded_rules(metrics) if r not in executed),

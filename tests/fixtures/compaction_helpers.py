@@ -62,7 +62,7 @@ def compact(trino: Trino, cfg, **kw) -> list[dict]:
     k8s.exec_in_pod.side_effect = trino
     outcomes: list[dict] = []
     with patch(
-        "lakebench.deploy.iceberg.find_maintenance_engine",
+        "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
         return_value=("trino", "trino-coordinator-0", "lakehouse"),
     ):
         _run_iceberg_compaction(cfg, k8s, Console(quiet=True), MagicMock(), outcomes=outcomes, **kw)

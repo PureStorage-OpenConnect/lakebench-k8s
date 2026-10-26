@@ -125,7 +125,7 @@ def generation_for(cfg: Any, total: int | None = None) -> dict[str, Any]:
     delivery mode), and the autosizer may change the pod count between
     runs."""
     from lakebench.config.datagen_seed import config_perturbation
-    from lakebench.deploy.datagen import parse_size_to_bytes
+    from lakebench.config.schema import parse_size_to_bytes
 
     workload = cfg.architecture.workload
     dg = workload.datagen

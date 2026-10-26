@@ -554,10 +554,10 @@ def test_a_continuous_maintenance_round_records_its_time_and_tables():
     rounds: list = []
     with (
         patch(
-            "lakebench.deploy.iceberg.find_maintenance_engine",
+            "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
             return_value=("trino", "trino-0", "lakehouse"),
         ),
-        patch("lakebench.deploy.iceberg.exec_sql"),
+        patch("lakebench.modules.table_formats.iceberg.maintenance.exec_sql"),
     ):
         _run_iceberg_maintenance(
             cfg,

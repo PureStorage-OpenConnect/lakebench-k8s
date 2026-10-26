@@ -10,13 +10,7 @@ from typing import Annotated
 import typer
 from rich.panel import Panel
 
-from lakebench.config import (
-    ConfigError,
-    ConfigFileNotFoundError,
-    ConfigValidationError,
-    LoadPurpose,
-    load_config,
-)
+from lakebench.config import LoadPurpose
 from lakebench.exit_codes import ExitCode, LakebenchError, UsageError
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError, get_k8s_client
@@ -29,6 +23,7 @@ from ._helpers import (
     enforce_bronze_gate,
     esc,
     journal_open,
+    load_config_or_exit,
     print_error,
     print_info,
     print_success,
@@ -126,20 +121,7 @@ def generate(
     config_file = resolve_config_path(config_file, file_option)
 
     # Load configuration
-    try:
-        cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
-    except ConfigFileNotFoundError as e:
-        print_error(f"File not found: {e}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
-    except ConfigValidationError as e:
-        print_error("Config validation failed:")
-        for err in e.errors:
-            loc = ".".join(str(x) for x in err["loc"])
-            console.print(f"  [red]*[/red] {esc(loc)}: {esc(err['msg'])}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
-    except ConfigError as e:
-        print_error(f"Config error: {e}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+    cfg = load_config_or_exit(config_file, purpose=LoadPurpose.MUTATE)
 
     # A multi-cycle config generates each cycle inside `run`, before that
     # cycle's stages; a corpus generated here in one go would be read as
@@ -210,22 +192,14 @@ def _s3_corpus_fingerprint(cfg) -> dict:
 
     from lakebench.config.datagen_seed import corpus_file, corpus_fingerprint
     from lakebench.deploy.datagen import bronze_datagen_prefix
-    from lakebench.s3 import S3Client
+    from lakebench.s3 import s3_client_from_config
     from lakebench.s3.client import list_user_objects
 
     s3 = cfg.platform.storage.s3
     bucket = s3.buckets.bronze
     prefix = bronze_datagen_prefix(cfg).strip("/") + "/"
     try:
-        client = S3Client(
-            endpoint=s3.endpoint,
-            access_key=s3.access_key,
-            secret_key=s3.secret_key,
-            region=s3.region,
-            path_style=s3.path_style,
-            ca_cert=s3.ca_cert,
-            verify_ssl=s3.verify_ssl,
-        ).raw_client
+        client = s3_client_from_config(s3).raw_client
         if client is None:
             raise RuntimeError("the S3 client could not be built")
         files, manifests = [], {}

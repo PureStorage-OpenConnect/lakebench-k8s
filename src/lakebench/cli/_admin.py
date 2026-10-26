@@ -31,19 +31,14 @@ from lakebench.cli._aliases import alias_notice
 from lakebench.cli._helpers import (
     console,
     esc,
+    load_config_or_exit,
     print_error,
     print_info,
     print_success,
     print_warning,
     resolve_config_path,
 )
-from lakebench.config import (
-    ConfigError,
-    ConfigFileNotFoundError,
-    ConfigValidationError,
-    LoadPurpose,
-    load_config,
-)
+from lakebench.config import LoadPurpose
 from lakebench.exit_codes import ExitCode
 from lakebench.modules.pipeline_engines.spark.operator_scratch import (
     DEFAULT_CONTROLLER_TMP_SIZE,
@@ -113,20 +108,7 @@ def _load_cfg(config_file: Path | None, file_option: Path | None):
     derived-name length check that deploy relies on.
     """
     path = resolve_config_path(config_file, file_option)
-    try:
-        return load_config(path, purpose=LoadPurpose.TEARDOWN)
-    except ConfigFileNotFoundError as e:
-        print_error(f"File not found: {e}")
-        raise typer.Exit(ExitCode.USAGE) from e
-    except ConfigValidationError as e:
-        print_error("Config validation failed:")
-        for err in e.errors:
-            loc = ".".join(str(x) for x in err["loc"])
-            console.print(f"  [red]*[/red] {loc}: {err['msg']}")
-        raise typer.Exit(ExitCode.USAGE) from e
-    except ConfigError as e:
-        print_error(f"Config error: {e}")
-        raise typer.Exit(ExitCode.USAGE) from e
+    return load_config_or_exit(path, purpose=LoadPurpose.TEARDOWN)
 
 
 def _read_operator_scratch(core_v1, operator_ns: str):
@@ -1383,7 +1365,7 @@ def reclaim_bucket(
         list_lakebench_deployment_names,
         write_bucket_ownership_tag,
     )
-    from lakebench.s3 import S3Client
+    from lakebench.s3 import s3_client_from_config
 
     cfg = _load_cfg(config_file, file_option)
     s3_cfg = cfg.platform.storage.s3
@@ -1392,15 +1374,7 @@ def reclaim_bucket(
     # ambient KUBECONFIG's.
     core_v1 = _get_core_v1(context=cfg.platform.kubernetes.context or None)
 
-    s3 = S3Client(
-        endpoint=s3_cfg.endpoint,
-        access_key=s3_cfg.access_key,
-        secret_key=s3_cfg.secret_key,
-        region=s3_cfg.region,
-        path_style=s3_cfg.path_style,
-        ca_cert=s3_cfg.ca_cert,
-        verify_ssl=s3_cfg.verify_ssl,
-    )
+    s3 = s3_client_from_config(s3_cfg)
     if s3._init_error:  # noqa: SLF001
         print_error(f"S3 client init failed: {s3._init_error}")
         raise typer.Exit(ExitCode.PREREQUISITE)

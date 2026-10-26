@@ -113,16 +113,23 @@ def _wait_for_sparkapp(namespace: str, name: str, timeout: int = 1800) -> str:
     from kubernetes import client
     from kubernetes.client.rest import ApiException
 
+    from lakebench.cli._cluster_ops import (
+        FINISHED_APP_STATES,
+        SPARK_GROUP,
+        SPARK_PLURAL,
+        SPARK_VERSION,
+    )
+
     api = client.CustomObjectsApi()
     start = time.time()
     last_state = ""
     while time.time() - start < timeout:
         try:
             obj = api.get_namespaced_custom_object(
-                group="sparkoperator.k8s.io",
-                version="v1beta2",
+                group=SPARK_GROUP,
+                version=SPARK_VERSION,
                 namespace=namespace,
-                plural="sparkapplications",
+                plural=SPARK_PLURAL,
                 name=name,
             )
         except ApiException as e:
@@ -134,7 +141,7 @@ def _wait_for_sparkapp(namespace: str, name: str, timeout: int = 1800) -> str:
         if state != last_state:
             console.print(f"  [dim]{name}: {state}[/dim]")
             last_state = state
-        if state in ("COMPLETED", "FAILED"):
+        if state in FINISHED_APP_STATES:
             return state
         time.sleep(10)
     return "TIMEOUT"

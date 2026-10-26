@@ -36,7 +36,7 @@ from lakebench.cli._helpers import (
     write_run_report,
 )
 from lakebench.cli._interrupt import restores_handlers
-from lakebench.config.schema import is_continuous_mode
+from lakebench.config.schema import interval_seconds, is_continuous_mode, parse_size_to_bytes
 from lakebench.exit_codes import ExitCode
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import (
@@ -193,18 +193,10 @@ def _bucket_ownership_problem(cfg, core_v1) -> str | None:
         list_lakebench_deployment_names,
         verify_bucket_ownership,
     )
-    from lakebench.s3 import S3Client
+    from lakebench.s3 import s3_client_from_config
 
     s3_cfg = cfg.platform.storage.s3
-    raw = S3Client(
-        endpoint=s3_cfg.endpoint,
-        access_key=s3_cfg.access_key,
-        secret_key=s3_cfg.secret_key,
-        region=s3_cfg.region,
-        path_style=s3_cfg.path_style,
-        ca_cert=s3_cfg.ca_cert,
-        verify_ssl=s3_cfg.verify_ssl,
-    ).raw_client
+    raw = s3_client_from_config(s3_cfg).raw_client
     others = None
     b = s3_cfg.buckets
     from lakebench.deploy.ownership import (
@@ -382,21 +374,13 @@ def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
     streamed in next to the new corpus (ingest_ratio above 1). Raises
     typer.Exit on an ownership refusal or any delete failure.
     """
-    from lakebench.s3 import S3Client
+    from lakebench.s3 import s3_client_from_config
 
     _require_reset_ownership(cfg)
 
     s3_cfg = cfg.platform.storage.s3
     base = cfg.architecture.pipeline.sustained.checkpoint_base.strip("/")
-    client = S3Client(
-        endpoint=s3_cfg.endpoint,
-        access_key=s3_cfg.access_key,
-        secret_key=s3_cfg.secret_key,
-        region=s3_cfg.region,
-        path_style=s3_cfg.path_style,
-        ca_cert=s3_cfg.ca_cert,
-        verify_ssl=s3_cfg.verify_ssl,
-    )
+    client = s3_client_from_config(s3_cfg)
     b = s3_cfg.buckets
     targets = [
         (b.bronze, f"{base}/bronze-ingest"),
@@ -432,18 +416,10 @@ def _c360_existing_state(cfg, *, clear_raw: bool) -> list[str]:
     Read-only listing, one key per prefix. A prefix that cannot be listed is
     reported too, so the caller fails closed.
     """
-    from lakebench.s3 import S3Client
+    from lakebench.s3 import s3_client_from_config
 
     s3_cfg = cfg.platform.storage.s3
-    raw_client = S3Client(
-        endpoint=s3_cfg.endpoint,
-        access_key=s3_cfg.access_key,
-        secret_key=s3_cfg.secret_key,
-        region=s3_cfg.region,
-        path_style=s3_cfg.path_style,
-        ca_cert=s3_cfg.ca_cert,
-        verify_ssl=s3_cfg.verify_ssl,
-    ).raw_client
+    raw_client = s3_client_from_config(s3_cfg).raw_client
     b = s3_cfg.buckets
     base = cfg.architecture.pipeline.sustained.checkpoint_base.strip("/")
     # Silver and gold buckets hold only the tables and stream checkpoints.
@@ -574,7 +550,7 @@ def _c360_raw_replace_problem(cfg) -> str | None:
     larger than this run regenerates (an earlier generate at a larger
     scale is hours of work the continuous run would not rebuild).
     """
-    from lakebench.s3 import S3Client
+    from lakebench.s3 import s3_client_from_config
 
     state, detail = _datagen_job_state(cfg.get_namespace())
     if state == "unfinished":
@@ -587,15 +563,9 @@ def _c360_raw_replace_problem(cfg) -> str | None:
 
     raw = bronze_datagen_prefix(cfg).strip("/")
     try:
-        info = S3Client(
-            endpoint=s3_cfg.endpoint,
-            access_key=s3_cfg.access_key,
-            secret_key=s3_cfg.secret_key,
-            region=s3_cfg.region,
-            path_style=s3_cfg.path_style,
-            ca_cert=s3_cfg.ca_cert,
-            verify_ssl=s3_cfg.verify_ssl,
-        ).get_bucket_size(s3_cfg.buckets.bronze, prefix=f"{raw}/")
+        info = s3_client_from_config(s3_cfg).get_bucket_size(
+            s3_cfg.buckets.bronze, prefix=f"{raw}/"
+        )
     except Exception as e:  # noqa: BLE001
         return f"could not size the raw corpus: {e}"
     size_gb = (info.size_bytes or 0) / 1024**3
@@ -822,26 +792,9 @@ def _find_free_port() -> int:
 
 
 def _parse_spark_interval(interval_str: str) -> int:
-    """Parse a Spark-style interval string to seconds.
-
-    Handles: ``"30 seconds"``, ``"5 minutes"``, ``"1 minute"``.
-    Falls back to 300 if unparseable.
-    """
-    parts = interval_str.strip().lower().split()
-    if len(parts) != 2:
-        return 300
-    try:
-        value = int(parts[0])
-    except ValueError:
-        return 300
-    unit = parts[1].rstrip("s")  # "minutes" -> "minute"
-    if unit == "second":
-        return value
-    elif unit == "minute":
-        return value * 60
-    elif unit == "hour":
-        return value * 3600
-    return 300
+    """Whole seconds in a validated Spark interval string (``"30 seconds"``,
+    ``"5 minutes"``); 0 for ``"0 seconds"``."""
+    return int(interval_seconds(interval_str) or 0)
 
 
 _DAYS_PER_MONTH = 30.5
@@ -1039,8 +992,7 @@ def _run_statements(
     Returns counts plus failures, timeouts and statements not attempted.
     With ``budget`` the first timeout or the deadline stops the rest.
     """
-    from lakebench.deploy.iceberg import exec_sql
-    from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout
+    from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout, exec_sql
 
     out: dict = {
         "succeeded": 0,
@@ -1156,7 +1108,7 @@ def maintained_tables(cfg) -> list[str]:
     continuous bronze_raw only exists in continuous mode. Maintenance on it
     failed 2 of 6 statements on every batch c360 run (live, 61489ab)."""
     schema = cfg.architecture.workload.schema_type.value
-    continuous = cfg.architecture.pipeline.mode.value in ("sustained", "continuous")
+    continuous = is_continuous_mode(cfg.architecture.pipeline.mode)
     layers: tuple[str, ...] = ("bronze", "silver", "gold")
     if schema != "financial" and not continuous:
         layers = ("silver", "gold")
@@ -1233,7 +1185,7 @@ def applied_retentions(table_format: str, retention_threshold: str, live_streams
     )
 
     if table_format == "delta":
-        from lakebench.deploy.delta_maintenance import parse_retention_to_hours
+        from lakebench.modules.table_formats.delta.maintenance import parse_retention_to_hours
 
         expire = retention_threshold
         if live_streams and parse_retention_to_hours(retention_threshold) < (
@@ -1422,7 +1374,7 @@ def _run_iceberg_maintenance(
     statements: ``expire_round_record``, which the time-travel reads use to
     say which round expired a tick's snapshot.
     """
-    from lakebench.deploy.iceberg import find_maintenance_engine
+    from lakebench.modules.table_formats.iceberg.maintenance import find_maintenance_engine
 
     namespace = cfg.get_namespace()
     engine_type = cfg.architecture.query_engine.type.value
@@ -1458,7 +1410,7 @@ def _run_iceberg_maintenance(
     applied = applied_retentions(table_format, retention_threshold, live_streams)
     bronze_protection_failed: str | None = None
     if table_format == "delta":
-        from lakebench.deploy.delta_maintenance import (
+        from lakebench.modules.table_formats.delta.maintenance import (
             build_delta_maintenance_sql,
             parse_retention_to_hours,
         )
@@ -1480,7 +1432,7 @@ def _run_iceberg_maintenance(
         def build_sql(tbl):
             return build_delta_maintenance_sql(engine, catalog, tbl, retention_hours)
     else:
-        from lakebench.deploy.iceberg import build_maintenance_sql
+        from lakebench.modules.table_formats.iceberg.maintenance import build_maintenance_sql
 
         retention_threshold = applied["expire"]
         orphan_retention = applied["orphan"]
@@ -1698,7 +1650,7 @@ def _run_iceberg_compaction(
     the rewrite server-side, so the pre-benchmark caller passes a long one:
     the benchmark must not start while rewrite_data_files still runs.
     """
-    from lakebench.deploy.iceberg import (
+    from lakebench.modules.table_formats.iceberg.maintenance import (
         find_maintenance_engine,
     )
 
@@ -1742,7 +1694,7 @@ def _run_iceberg_compaction(
     names = tables.workload_tables(
         schema,
         layers=layers,
-        continuous=cfg.architecture.pipeline.mode.value in ("sustained", "continuous"),
+        continuous=is_continuous_mode(cfg.architecture.pipeline.mode),
     )
     if live_streams and schema == "financial":
         merged = {
@@ -1761,11 +1713,11 @@ def _run_iceberg_compaction(
 
     started = _time.monotonic()
     notes: list[str] = []
-    from lakebench.deploy.iceberg import build_compaction_plan
+    from lakebench.modules.table_formats.iceberg.maintenance import build_compaction_plan
 
     # Build SQL based on table format
     if table_format == "delta":
-        from lakebench.deploy.delta_maintenance import build_delta_compaction_sql
+        from lakebench.modules.table_formats.delta.maintenance import build_delta_compaction_sql
 
         def build_sql(tbl):
             return build_delta_compaction_sql(engine, catalog, tbl)
@@ -1854,11 +1806,11 @@ def _compaction_partitions(
     fails; a failed read is added to *notes* for the effective maintenance
     reasons.
     """
-    from lakebench.deploy.iceberg import query_sql
     from lakebench.modules.table_formats.iceberg.maintenance import (
         build_partition_values_sql,
         compaction_partitioning,
         parse_partition_values,
+        query_sql,
     )
 
     spec = compaction_partitioning(table)
@@ -1991,7 +1943,7 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
     Returns a dict like {"silver_data_file_count": N, "silver_snapshot_count": N, ...}.
     Returns empty dict if no engine is available.
     """
-    from lakebench.deploy.iceberg import (
+    from lakebench.modules.table_formats.iceberg.maintenance import (
         find_maintenance_engine,
         query_sql,
     )
@@ -2013,7 +1965,7 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
     # Format-conditional health SQL builder
     parse_detail = None
     if table_format == "delta":
-        from lakebench.deploy.delta_maintenance import (
+        from lakebench.modules.table_formats.delta.maintenance import (
             DELTA_HEALTH_UNAVAILABLE,
             build_delta_table_health_sql,
             parse_describe_detail,
@@ -2032,7 +1984,7 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
         def _build_health(eng, tbl):
             return build_delta_table_health_sql(eng, catalog, tbl)
     else:
-        from lakebench.deploy.iceberg import build_table_health_sql
+        from lakebench.modules.table_formats.iceberg.maintenance import build_table_health_sql
 
         def _build_health(eng, tbl):
             return build_table_health_sql(eng, tbl)
@@ -2800,15 +2752,6 @@ def watch_all_streams(job_manager, watches: dict[str, StreamStartWatch], current
     return on_status
 
 
-def _size_mb(size: str) -> float:
-    """MB in a datagen size string ("64MB", "1GB"); bare numbers are bytes."""
-    text = str(size).strip().upper()
-    for suffix, mb in (("TB", 1024.0**2), ("GB", 1024.0), ("MB", 1.0), ("KB", 1 / 1024)):
-        if text.endswith(suffix):
-            return float(text[: -len(suffix)]) * mb
-    return float(text.rstrip("B")) / (1024 * 1024)
-
-
 class NamespaceGone(Exception):
     """The run's namespace was deleted (or deleted and created again) mid-run."""
 
@@ -3090,18 +3033,10 @@ def _measure_bucket_sizes(cfg, collector) -> int | None:
     """Record the bronze/silver/gold bucket sizes on the run; the total
     object count, None when it cannot be measured."""
     try:
-        from lakebench.s3 import S3Client
+        from lakebench.s3 import s3_client_from_config
 
         s3_cfg = cfg.platform.storage.s3
-        s3_client = S3Client(
-            endpoint=s3_cfg.endpoint,
-            access_key=s3_cfg.access_key,
-            secret_key=s3_cfg.secret_key,
-            region=s3_cfg.region,
-            path_style=s3_cfg.path_style,
-            ca_cert=s3_cfg.ca_cert,
-            verify_ssl=s3_cfg.verify_ssl,
-        )
+        s3_client = s3_client_from_config(s3_cfg)
         print_info("Measuring actual S3 bucket sizes...")
         return collector.record_actual_sizes(
             s3_client, s3_cfg.buckets.bronze, s3_cfg.buckets.silver, s3_cfg.buckets.gold
@@ -3228,7 +3163,9 @@ def resolve_trickle(cfg, run_duration: int, *, continuous_datagen: bool = False)
     trigger_s = _parse_spark_interval(sustained.bronze_trigger_interval) or TRICKLE_TRIGGER_S
     try:
         dims = cfg.get_scale_dimensions()
-        file_mb = _size_mb(cfg.architecture.workload.datagen.file_size)
+        file_mb = parse_size_to_bytes(str(cfg.architecture.workload.datagen.file_size)) / (
+            1024 * 1024
+        )
         files = dims.approx_bronze_gb * 1024 / file_mb
     except Exception:  # noqa: BLE001 -- unknown size: keep the ceiling, no refusal
         files = None
@@ -3372,13 +3309,11 @@ def short_window_problem(cfg, run_duration: int) -> str | None:
 
 def _stage_intervals(cfg) -> dict[str, float | None]:
     """Each stream's trigger interval in seconds (None or 0: back to back)."""
-    from lakebench.metrics.collector import _interval_seconds
-
     sus = cfg.architecture.pipeline.sustained
     return {
-        "bronze-ingest": _interval_seconds(sus.bronze_trigger_interval),
-        "silver-stream": _interval_seconds(sus.silver_trigger_interval),
-        "gold-refresh": _interval_seconds(sus.gold_refresh_interval),
+        "bronze-ingest": interval_seconds(sus.bronze_trigger_interval),
+        "silver-stream": interval_seconds(sus.silver_trigger_interval),
+        "gold-refresh": interval_seconds(sus.gold_refresh_interval),
     }
 
 
@@ -4443,18 +4378,10 @@ def _run_sustained(
         # Measure bronze bucket for datagen stats (datagen runs concurrently,
         # so we measure after the monitoring window to capture all output)
         try:
-            from lakebench.s3 import S3Client
+            from lakebench.s3 import s3_client_from_config
 
             s3_cfg = cfg.platform.storage.s3
-            _s3_dg = S3Client(
-                endpoint=s3_cfg.endpoint,
-                access_key=s3_cfg.access_key,
-                secret_key=s3_cfg.secret_key,
-                region=s3_cfg.region,
-                path_style=s3_cfg.path_style,
-                ca_cert=s3_cfg.ca_cert,
-                verify_ssl=s3_cfg.verify_ssl,
-            )
+            _s3_dg = s3_client_from_config(s3_cfg)
             dg_info = _s3_dg.get_bucket_size(s3_cfg.buckets.bronze)
             if dg_info.size_bytes:
                 _datagen_output_gb = dg_info.size_bytes / (1024**3)

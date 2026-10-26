@@ -1185,18 +1185,10 @@ def _buckets_destroy_empties(
     if not clean_buckets:
         return set(), "bucket cleanup is off"
     try:
-        from lakebench.s3 import S3Client
+        from lakebench.s3 import s3_client_from_config
 
         s3_cfg = engine.config.platform.storage.s3
-        s3 = S3Client(
-            endpoint=s3_cfg.endpoint,
-            access_key=s3_cfg.access_key,
-            secret_key=s3_cfg.secret_key,
-            region=s3_cfg.region,
-            path_style=s3_cfg.path_style,
-            ca_cert=s3_cfg.ca_cert,
-            verify_ssl=s3_cfg.verify_ssl,
-        )
+        s3 = s3_client_from_config(s3_cfg)
         if s3._init_error:
             return None, f"bucket ownership could not be checked ({s3._init_error})"
         bplan = _classify_buckets(engine, s3, namespace, namespace_present, force_legacy)
@@ -1351,18 +1343,10 @@ def _buckets_hold_data(engine) -> bool | None:
     """True if any of the deployment's buckets exists and holds an object,
     False if none do, None if that cannot be determined. Read-only."""
     try:
-        from lakebench.s3 import S3Client
+        from lakebench.s3 import s3_client_from_config
 
         s3_cfg = engine.config.platform.storage.s3
-        s3 = S3Client(
-            endpoint=s3_cfg.endpoint,
-            access_key=s3_cfg.access_key,
-            secret_key=s3_cfg.secret_key,
-            region=s3_cfg.region,
-            path_style=s3_cfg.path_style,
-            ca_cert=s3_cfg.ca_cert,
-            verify_ssl=s3_cfg.verify_ssl,
-        )
+        s3 = s3_client_from_config(s3_cfg)
         if s3._init_error:
             return None
         for bucket in (s3_cfg.buckets.bronze, s3_cfg.buckets.silver, s3_cfg.buckets.gold):
@@ -2586,7 +2570,7 @@ def destroy_all(
         table_format = engine.config.architecture.table_format.type.value
         report("table-cleanup", DeploymentStatus.IN_PROGRESS, f"Dropping {table_format} tables...")
         try:
-            from lakebench.deploy.iceberg import (
+            from lakebench.modules.table_formats.iceberg.maintenance import (
                 build_drop_table_sql,
                 exec_sql,
                 find_maintenance_engine,
@@ -2648,7 +2632,7 @@ def destroy_all(
                             continue
                         plan.append((table, _trino_unregister_sql(table)))
                 elif _drop_deletes_files(maint_engine, table_format):
-                    from lakebench.deploy.iceberg import query_sql
+                    from lakebench.modules.table_formats.iceberg.maintenance import query_sql
 
                     emptied, own_why = _buckets_destroy_empties(
                         engine, namespace, namespace_present, force_legacy, clean_buckets
@@ -2906,18 +2890,10 @@ def destroy_all(
                 forget_created_buckets,
                 read_bucket_ownership_tag,
             )
-            from lakebench.s3 import S3BucketVanished, S3Client
+            from lakebench.s3 import S3BucketVanished, s3_client_from_config
 
             s3_cfg = engine.config.platform.storage.s3
-            s3 = S3Client(
-                endpoint=s3_cfg.endpoint,
-                access_key=s3_cfg.access_key,
-                secret_key=s3_cfg.secret_key,
-                region=s3_cfg.region,
-                path_style=s3_cfg.path_style,
-                ca_cert=s3_cfg.ca_cert,
-                verify_ssl=s3_cfg.verify_ssl,
-            )
+            s3 = s3_client_from_config(s3_cfg)
             if s3._init_error:
                 bucket_transient_failure = True
                 bucket_names = (

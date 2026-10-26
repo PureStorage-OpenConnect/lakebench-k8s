@@ -10,6 +10,7 @@ from .client import (
     S3ConnectionInfo,
     S3Credentials,
     S3Error,
+    s3_client_from_config,
     test_s3_connectivity,
 )
 from .conformance import (
@@ -39,5 +40,6 @@ __all__ = [
     "S3AuthError",
     "S3BucketError",
     "S3BucketVanished",
+    "s3_client_from_config",
     "test_s3_connectivity",
 ]

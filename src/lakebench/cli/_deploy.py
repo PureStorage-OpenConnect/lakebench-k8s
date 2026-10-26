@@ -21,18 +21,13 @@ from lakebench.cli._helpers import (
     console,
     esc,
     journal_open,
+    load_config_or_exit,
     print_error,
     print_info,
     print_warning,
     resolve_config_path,
 )
-from lakebench.config import (
-    ConfigError,
-    ConfigFileNotFoundError,
-    ConfigValidationError,
-    LoadPurpose,
-    load_config,
-)
+from lakebench.config import LoadPurpose
 from lakebench.exit_codes import ExitCode, LakebenchError
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
@@ -545,20 +540,7 @@ def _deploy_impl(
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
     # Load configuration
-    try:
-        cfg = load_config(config_file, purpose=LoadPurpose.MUTATE)
-    except ConfigFileNotFoundError as e:
-        print_error(f"File not found: {e}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
-    except ConfigValidationError as e:
-        print_error("Config validation failed:")
-        for err in e.errors:
-            loc = ".".join(str(x) for x in err["loc"])
-            console.print(f"  [red]*[/red] {loc}: {err['msg']}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
-    except ConfigError as e:
-        print_error(f"Config error: {e}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+    cfg = load_config_or_exit(config_file, purpose=LoadPurpose.MUTATE)
 
     if not local:
         # A name the deploy state cannot record stops here, before the

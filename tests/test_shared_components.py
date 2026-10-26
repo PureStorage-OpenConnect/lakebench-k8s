@@ -436,8 +436,8 @@ def test_deploy_never_installs_under_fixture():
     observability deploys in the namespace with the kubelet binding skipped
     (ClusterRole absent), and makes no shared mutation."""
     from lakebench.deploy.engine import DeploymentEngine, DeploymentStatus
-    from lakebench.deploy.hive import HiveDeployer
     from lakebench.deploy.observability import ObservabilityDeployer
+    from lakebench.modules.catalogs.hive.deployer import HiveDeployer
 
     cfg = make_config(name=NS, observability={"enabled": True})
     with recording(NS) as rec:

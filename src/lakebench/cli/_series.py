@@ -85,18 +85,10 @@ def bronze_listing(cfg: Any) -> tuple[str | None, int, int, str]:
     ``listing_sha256``; None for an empty scope). Errors propagate."""
     from lakebench.corpus_digest import datagen_scope, list_scope, listing_sha256
     from lakebench.deploy.datagen import bronze_datagen_prefix
-    from lakebench.s3 import S3Client
+    from lakebench.s3 import s3_client_from_config
 
     s3 = cfg.platform.storage.s3
-    client = S3Client(
-        endpoint=s3.endpoint,
-        access_key=s3.access_key,
-        secret_key=s3.secret_key,
-        region=s3.region,
-        path_style=s3.path_style,
-        ca_cert=s3.ca_cert,
-        verify_ssl=s3.verify_ssl,
-    ).raw_client
+    client = s3_client_from_config(s3).raw_client
     if client is None:
         raise RuntimeError("the S3 client did not initialise")
     scope = datagen_scope(bronze_datagen_prefix(cfg))
@@ -139,6 +131,12 @@ def _unfinished_apps(cfg: Any) -> list[str] | None:
     from kubernetes import client as k8s_client
 
     import lakebench.k8s
+    from lakebench.cli._cluster_ops import (
+        FINISHING_APP_STATES,
+        SPARK_GROUP,
+        SPARK_PLURAL,
+        SPARK_VERSION,
+    )
 
     # Before repetition 1 nothing has loaded the kubeconfig yet: the
     # K8sClient pins this process to the deployment's context and configures
@@ -149,10 +147,10 @@ def _unfinished_apps(cfg: Any) -> list[str] | None:
     )
     try:
         resp = k8s_client.CustomObjectsApi().list_namespaced_custom_object(
-            group="sparkoperator.k8s.io",
-            version="v1beta2",
+            group=SPARK_GROUP,
+            version=SPARK_VERSION,
             namespace=cfg.get_namespace(),
-            plural="sparkapplications",
+            plural=SPARK_PLURAL,
             _request_timeout=(5, 30),
         )
     except Exception as e:  # noqa: BLE001 -- unknown is not "none running"
@@ -163,12 +161,7 @@ def _unfinished_apps(cfg: Any) -> list[str] | None:
         name = str(((item or {}).get("metadata") or {}).get("name") or "")
         state = (((item or {}).get("status") or {}).get("applicationState") or {}).get("state")
         # SUCCEEDING and FAILING are the monitor's terminal states too.
-        if name.startswith("lakebench-") and state not in (
-            "COMPLETED",
-            "FAILED",
-            "SUCCEEDING",
-            "FAILING",
-        ):
+        if name.startswith("lakebench-") and state not in FINISHING_APP_STATES:
             out.append(name)
     return out
 

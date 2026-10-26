@@ -1625,10 +1625,10 @@ def _spark_interval_to_seconds(interval: str) -> int:
     ``"1 hour"``) to an integer seconds value, for the AML scripts' trigger
     env vars. The config validates the intervals at load; anything else
     raises rather than guessing a period."""
-    parts = interval.strip().lower().split()
-    units = {"second": 1, "minute": 60, "hour": 3600}
-    if len(parts) == 2 and parts[0].isdigit() and parts[1].rstrip("s") in units:
-        return int(parts[0]) * units[parts[1].rstrip("s")]
+    from lakebench.config.schema import TRIGGER_INTERVAL_RE, interval_seconds
+
+    if TRIGGER_INTERVAL_RE.fullmatch(interval):
+        return int(interval_seconds(interval) or 0)
     raise ValueError(f"trigger interval {interval!r} is not a whole number and a unit")
 
 

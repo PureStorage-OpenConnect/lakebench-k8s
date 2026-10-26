@@ -214,10 +214,13 @@ def _run_live_iceberg_maintenance(offset_sid, committed_at_returns, live_streams
 
     with (
         patch(
-            "lakebench.deploy.iceberg.find_maintenance_engine",
+            "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
             return_value=("trino", "trino-pod", "lakehouse"),
         ),
-        patch("lakebench.deploy.iceberg.build_maintenance_sql", side_effect=fake_build_sql),
+        patch(
+            "lakebench.modules.table_formats.iceberg.maintenance.build_maintenance_sql",
+            side_effect=fake_build_sql,
+        ),
         patch.object(
             _sustained,
             "maintained_tables",

@@ -35,9 +35,6 @@ from lakebench.cli._helpers import (
     resolve_config_path,
     warn_deprecated_short_f,
 )
-from lakebench.cli._helpers import (
-    get_journal as get_journal,
-)
 from lakebench.cli._json import json_option
 from lakebench.cli._nameless import NAME_OPTION_HELP, guard_nameless
 from lakebench.config import (
@@ -49,7 +46,6 @@ from lakebench.config import (
 )
 from lakebench.config.schema import is_continuous_mode
 from lakebench.exit_codes import ExitCode
-from lakebench.journal import DEFAULT_JOURNAL_DIR as DEFAULT_JOURNAL_DIR
 from lakebench.journal import CommandName, EventType, Journal
 from lakebench.k8s import (
     K8sConnectionError,
@@ -139,25 +135,6 @@ app.command(name="plan")(_plan_fn)
 from lakebench.cli import _aliases  # noqa: E402
 
 _aliases.register(app)
-
-
-# Re-exports for backward compatibility (tests import these from lakebench.cli)
-from lakebench.cli._deploy import _preflight_check as _preflight_check  # noqa: E402
-from lakebench.cli._run import (  # noqa: E402
-    _run_preflight_infra_check as _run_preflight_infra_check,
-)
-from lakebench.cli._sustained import (  # noqa: E402
-    _collect_platform_metrics as _collect_platform_metrics,
-)
-from lakebench.cli._sustained import (  # noqa: E402
-    _parse_spark_interval as _parse_spark_interval,
-)
-from lakebench.cli._sustained import (  # noqa: E402
-    _run_iceberg_compaction as _run_iceberg_compaction,
-)
-from lakebench.cli._sustained import (  # noqa: E402
-    _run_iceberg_maintenance as _run_iceberg_maintenance,
-)
 
 
 def _print_front_matter(metrics) -> None:

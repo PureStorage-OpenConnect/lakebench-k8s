@@ -675,16 +675,17 @@ class DeploymentEngine:
         Returns:
             List of deployment results
         """
+        from lakebench.modules.catalogs.hive.deployer import HiveDeployer
+        from lakebench.modules.catalogs.polaris.deployer import PolarisDeployer
+        from lakebench.modules.catalogs.unity.deployer import UnityDeployer
+        from lakebench.modules.pipeline_engines.spark.rbac import RBACDeployer
+        from lakebench.modules.query_engines.duckdb.deployer import DuckDBDeployer
+        from lakebench.modules.query_engines.spark_thrift.deployer import SparkThriftDeployer
+        from lakebench.modules.query_engines.trino.deployer import TrinoDeployer
+
         from .deps import DependencyServerDeployer
-        from .duckdb import DuckDBDeployer
-        from .hive import HiveDeployer
         from .observability import ObservabilityDeployer
-        from .polaris import PolarisDeployer
         from .postgres import PostgresDeployer
-        from .rbac import RBACDeployer
-        from .spark_thrift import SparkThriftDeployer
-        from .trino import TrinoDeployer
-        from .unity import UnityDeployer
 
         # Initialize deployers
         postgres = PostgresDeployer(self)
@@ -1358,18 +1359,10 @@ class DeploymentEngine:
                 verify_bucket_ownership,
             )
             from lakebench.k8s import get_k8s_client as _get_k8s
-            from lakebench.s3 import S3Client
+            from lakebench.s3 import s3_client_from_config
 
             s3_cfg = self.config.platform.storage.s3
-            s3 = S3Client(
-                endpoint=s3_cfg.endpoint,
-                access_key=s3_cfg.access_key,
-                secret_key=s3_cfg.secret_key,
-                region=s3_cfg.region,
-                path_style=s3_cfg.path_style,
-                ca_cert=s3_cfg.ca_cert,
-                verify_ssl=s3_cfg.verify_ssl,
-            )
+            s3 = s3_client_from_config(s3_cfg)
             if s3._init_error:
                 return
             _get_k8s(
@@ -1505,17 +1498,9 @@ class DeploymentEngine:
                 elapsed_seconds=0,
             )
 
-        from lakebench.s3 import S3Client
+        from lakebench.s3 import s3_client_from_config
 
-        s3 = S3Client(
-            endpoint=s3_cfg.endpoint,
-            access_key=s3_cfg.access_key,
-            secret_key=s3_cfg.secret_key,
-            region=s3_cfg.region,
-            path_style=s3_cfg.path_style,
-            ca_cert=s3_cfg.ca_cert,
-            verify_ssl=s3_cfg.verify_ssl,
-        )
+        s3 = s3_client_from_config(s3_cfg)
         if s3._init_error:
             return DeploymentResult(
                 component="s3-buckets",

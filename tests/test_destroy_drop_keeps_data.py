@@ -82,7 +82,10 @@ class _Harness(_tdb.DestroyAllBucketsHarness):
         self._layers = ("b-bronze", "a-silver", "a-gold")
         self._on_sql = on_sql
         try:
-            with patch("lakebench.deploy.iceberg.query_sql", side_effect=fake_query):
+            with patch(
+                "lakebench.modules.table_formats.iceberg.maintenance.query_sql",
+                side_effect=fake_query,
+            ):
                 buckets = self._run(boto, verdicts, maint=maint, table_format=table_format, **kw)
         finally:
             self._on_sql = None

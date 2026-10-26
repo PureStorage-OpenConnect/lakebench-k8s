@@ -1449,6 +1449,29 @@ _MEDALLION_V16_DEFAULT: dict[str, Any] = {
 }
 
 
+_INTERVAL_UNITS = {"second": 1, "minute": 60, "hour": 3600}
+# What the trigger interval validator accepts: a whole number and a unit.
+TRIGGER_INTERVAL_RE = re.compile(r"\s*\d+\s+(second|minute|hour)s?\s*", re.IGNORECASE)
+
+
+def interval_seconds(interval: Any) -> float | None:
+    """Seconds in a Spark interval string ("30 seconds", "5 minutes");
+    None when it does not parse, never a guessed default."""
+    if not isinstance(interval, str):
+        return None
+    parts = interval.strip().lower().split()
+    if len(parts) != 2:
+        return None
+    try:
+        value = float(parts[0])
+    except ValueError:
+        return None
+    unit = _INTERVAL_UNITS.get(parts[1].rstrip("s"))
+    if unit is None or value <= 0:
+        return None
+    return value * unit
+
+
 class SustainedConfig(ConfigModel):
     """Sustained pipeline configuration.
 
@@ -1604,11 +1627,7 @@ class SustainedConfig(ConfigModel):
     def _validate_interval(cls, v: str) -> str:
         # A bare "0" passed straight to Spark for one workload and read as a
         # 10 s fallback for the other.
-        import re as _re
-
-        if not isinstance(v, str) or not _re.fullmatch(
-            r"\s*\d+\s+(second|minute|hour)s?\s*", v, flags=_re.IGNORECASE
-        ):
+        if not isinstance(v, str) or not TRIGGER_INTERVAL_RE.fullmatch(v):
             raise ValueError(
                 f"trigger interval {v!r} is not a whole number and a unit (seconds, minutes "
                 "or hours), for example '0 seconds' (back to back) or '5 minutes'"
@@ -1689,20 +1708,7 @@ class SustainedConfig(ConfigModel):
         Both fields are clamped up to gold_refresh_interval (default
         0s, so no clamp).  Users who want more rounds must run the pipeline longer.
         """
-        parts = self.gold_refresh_interval.strip().lower().split()
-        gold_s = 300  # fallback
-        if len(parts) == 2:
-            try:
-                val = int(parts[0])
-                unit = parts[1].rstrip("s")
-                if unit == "second":
-                    gold_s = val
-                elif unit == "minute":
-                    gold_s = val * 60
-                elif unit == "hour":
-                    gold_s = val * 3600
-            except ValueError:
-                pass
+        gold_s = int(interval_seconds(self.gold_refresh_interval) or 0)
         if self.benchmark_warmup < gold_s:
             self.benchmark_warmup = gold_s
         if self.benchmark_interval < gold_s:

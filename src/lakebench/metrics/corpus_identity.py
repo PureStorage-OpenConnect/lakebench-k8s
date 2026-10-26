@@ -208,18 +208,10 @@ def record_corpus_observation(run: Any, cfg: Any, s3: Any = None) -> None:
         if not isinstance(inputs, dict):
             return
         if s3 is None:
-            from lakebench.s3 import S3Client
+            from lakebench.s3 import s3_client_from_config
 
             s3c = cfg.platform.storage.s3
-            s3 = S3Client(
-                endpoint=s3c.endpoint,
-                access_key=s3c.access_key,
-                secret_key=s3c.secret_key,
-                region=s3c.region,
-                path_style=s3c.path_style,
-                ca_cert=s3c.ca_cert,
-                verify_ssl=s3c.verify_ssl,
-            )
+            s3 = s3_client_from_config(s3c)
         inputs["corpus_observation"] = observe_corpus(cfg, s3)
     except Exception as e:  # noqa: BLE001 -- evidence, never a save failure
         if not isinstance(inputs, dict):

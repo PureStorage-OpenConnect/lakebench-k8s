@@ -231,6 +231,38 @@ def test_cli_verbs_load_with_their_purpose(
     assert bool(seen[0].get("allow_long_names")) is long_names
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["deploy"],
+        ["generate"],
+        ["run"],
+        ["clean", "silver"],
+        ["destroy"],
+        ["admin", "reclaim-bucket"],
+    ],
+)
+def test_validation_errors_print_brackets_verbatim(argv, tmp_path, monkeypatch):
+    """A validation message holding ``[...]`` is printed as written and the
+    command exits USAGE: unescaped, Rich swallows ``[main]`` and raises on
+    ``[/tmp]``."""
+    import lakebench.config
+
+    monkeypatch.setenv("KUBECONFIG", "/nonexistent")
+    monkeypatch.chdir(tmp_path)
+
+    def invalid(path, **kwargs):
+        raise ConfigValidationError(
+            "invalid", errors=[{"loc": ("platform", "[main]"), "msg": "bad path [/tmp]"}]
+        )
+
+    monkeypatch.setattr(lakebench.config, "load_config", invalid)
+    cfg_path = _write(tmp_path, {**NAMELESS, "name": "verb"})
+    result = runner.invoke(app, [*argv, str(cfg_path)])
+    assert result.exit_code == 2, result.output
+    assert "platform.[main]: bad path [/tmp]" in result.output
+
+
 # -- v1.6 directories with several nameless configs --------------------------
 
 

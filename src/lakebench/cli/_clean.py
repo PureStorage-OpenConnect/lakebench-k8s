@@ -16,19 +16,14 @@ from lakebench.cli._helpers import (
     deprecated_short_f_force,
     esc,
     journal_open,
+    load_config_or_exit,
     print_error,
     print_info,
     print_success,
     print_warning,
     resolve_config_path,
 )
-from lakebench.config import (
-    ConfigError,
-    ConfigFileNotFoundError,
-    ConfigValidationError,
-    LoadPurpose,
-    load_config,
-)
+from lakebench.config import LoadPurpose
 from lakebench.exit_codes import ExitCode
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s.target import ContextConflictError
@@ -131,22 +126,8 @@ def clean(
     config_file = resolve_config_path(config_file, file_option)
 
     # Load configuration
-    try:
-        cfg = load_config(
-            config_file, purpose=LoadPurpose.MUTATE, allow_long_names=True
-        )  # cleanup path accepts long names
-    except ConfigFileNotFoundError as e:
-        print_error(f"File not found: {e}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
-    except ConfigValidationError as e:
-        print_error("Config validation failed:")
-        for err in e.errors:
-            loc = ".".join(str(x) for x in err["loc"])
-            console.print(f"  [red]*[/red] {esc(loc)}: {esc(err['msg'])}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
-    except ConfigError as e:
-        print_error(f"Config error: {e}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+    # The cleanup path accepts long names.
+    cfg = load_config_or_exit(config_file, purpose=LoadPurpose.MUTATE, allow_long_names=True)
 
     s3_cfg = cfg.platform.storage.s3
 
@@ -267,6 +248,13 @@ def clean(
         try:
             from kubernetes import client as k8s_client
 
+            from lakebench.cli._cluster_ops import (
+                FINISHED_APP_STATES,
+                SPARK_GROUP,
+                SPARK_PLURAL,
+                SPARK_VERSION,
+            )
+
             ns = cfg.get_namespace()
             try:
                 job = k8s_client.BatchV1Api().read_namespaced_job("lakebench-datagen", ns)
@@ -277,10 +265,10 @@ def clean(
                 pass  # no datagen job
             try:
                 apps = k8s_client.CustomObjectsApi().list_namespaced_custom_object(
-                    group="sparkoperator.k8s.io",
-                    version="v1beta2",
+                    group=SPARK_GROUP,
+                    version=SPARK_VERSION,
                     namespace=ns,
-                    plural="sparkapplications",
+                    plural=SPARK_PLURAL,
                 )
                 for app in apps.get("items", []):
                     state = ((app.get("status") or {}).get("applicationState") or {}).get(
@@ -288,7 +276,7 @@ def clean(
                     )
                     # SUBMISSION_FAILED is not final: the operator resubmits
                     # it (restartPolicy), so the app may start writing.
-                    if state not in ("COMPLETED", "FAILED"):
+                    if state not in FINISHED_APP_STATES:
                         active_writers.append(
                             f"Spark application {app['metadata']['name']} ({state or 'pending'})"
                         )
@@ -305,17 +293,9 @@ def clean(
     # Clean S3 buckets
     if bucket_targets:
         try:
-            from lakebench.s3 import S3Client
+            from lakebench.s3 import s3_client_from_config
 
-            s3 = S3Client(
-                endpoint=s3_cfg.endpoint,
-                access_key=s3_cfg.access_key,
-                secret_key=s3_cfg.secret_key,
-                region=s3_cfg.region,
-                path_style=s3_cfg.path_style,
-                ca_cert=s3_cfg.ca_cert,
-                verify_ssl=s3_cfg.verify_ssl,
-            )
+            s3 = s3_client_from_config(s3_cfg)
             # F1-A: bail on S3 init failure with a clean refusal.
             # Without this guard, `raw_client` returns None and every
             # verify_bucket_ownership call raises AttributeError.

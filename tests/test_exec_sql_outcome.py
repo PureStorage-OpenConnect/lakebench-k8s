@@ -223,7 +223,7 @@ def _journal_details(j, message):
 @pytest.fixture
 def _engine_pod():
     with patch(
-        "lakebench.deploy.iceberg.find_maintenance_engine",
+        "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
         return_value=("trino", "trino-coordinator-0", "lakehouse"),
     ):
         yield
@@ -344,7 +344,7 @@ def test_batch_delta_vacuum_still_honours_short_retention():
 
 
 def test_trino_maintenance_sets_the_session_minimum_in_the_same_submission():
-    from lakebench.deploy.iceberg import build_maintenance_sql
+    from lakebench.modules.table_formats.iceberg.maintenance import build_maintenance_sql
 
     exp, orph = build_maintenance_sql("trino", "lakehouse", "lakehouse.silver.t", "30m")
     assert exp == (
@@ -363,13 +363,13 @@ def test_trino_maintenance_sets_the_session_minimum_in_the_same_submission():
 
 
 def _iceberg_trino_statements():
-    from lakebench.deploy.iceberg import build_maintenance_sql
+    from lakebench.modules.table_formats.iceberg.maintenance import build_maintenance_sql
 
     return build_maintenance_sql("trino", "lakehouse", "lakehouse.silver.t", "30m")
 
 
 def _delta_trino_statements():
-    from lakebench.deploy.delta_maintenance import build_delta_maintenance_sql
+    from lakebench.modules.table_formats.delta.maintenance import build_delta_maintenance_sql
 
     return build_delta_maintenance_sql("trino", "lakehouse", "lakehouse.gold.t", 0.0)
 
@@ -405,7 +405,7 @@ def test_trino_maintenance_reaches_one_execute_each(statements, main_statement):
     ids=["utc", "cest"],
 )
 def test_spark_maintenance_uses_a_timestamp_literal(now):
-    from lakebench.deploy.iceberg import build_maintenance_sql
+    from lakebench.modules.table_formats.iceberg.maintenance import build_maintenance_sql
 
     exp, orph = build_maintenance_sql(
         "spark-thrift", "lakehouse", "lakehouse.silver.t", "30m", "24h", now=now
@@ -466,7 +466,7 @@ def test_batch_spark_orphans_never_below_24h10m():
     k8s.exec_in_pod.return_value = (0, "", "")
     j = MagicMock()
     with patch(
-        "lakebench.deploy.iceberg.find_maintenance_engine",
+        "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
         return_value=("spark-thrift", "thrift-0", "lakehouse"),
     ):
         _run_iceberg_maintenance(_cfg("spark-thrift"), k8s, Console(quiet=True), j, "30m")

@@ -16,12 +16,14 @@ from rich.panel import Panel
 from lakebench._clock import utc_now
 from lakebench.cli._aml_post import score_financial_via_queries as _score_financial_via_queries
 from lakebench.cli._aml_post import scoring_count_line  # noqa: F401 -- re-exported
+from lakebench.cli._cluster_ops import DATAGEN_JOB
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
     enforce_bronze_gate,
     esc,
     journal_open,
+    load_config_or_exit,
     load_deps_handle,
     print_error,
     print_info,
@@ -36,11 +38,7 @@ from lakebench.cli._helpers import (
 from lakebench.cli._interrupt import restores_handlers
 from lakebench.cli._run_args import BATCH_STAGES
 from lakebench.config import (
-    ConfigError,
-    ConfigFileNotFoundError,
-    ConfigValidationError,
     LoadPurpose,
-    load_config,
     parse_spark_memory,
 )
 from lakebench.config.schema import is_continuous_mode
@@ -1956,20 +1954,7 @@ def run(
     # Load configuration, once: a --repeat series runs every repetition from
     # this one load, and records the hash of the bytes it was loaded from.
     _config_sha256 = _file_sha256(config_file)
-    try:
-        cfg = load_config(config_file, purpose=LoadPurpose.RUN)
-    except ConfigFileNotFoundError as e:
-        print_error(f"File not found: {e}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
-    except ConfigValidationError as e:
-        print_error("Config validation failed:")
-        for err in e.errors:
-            loc = ".".join(str(x) for x in err["loc"])
-            console.print(f"  [red]*[/red] {loc}: {err['msg']}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
-    except ConfigError as e:
-        print_error(f"Config error: {e}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+    cfg = load_config_or_exit(config_file, purpose=LoadPurpose.RUN)
     if repeat is not None and _file_sha256(config_file) != _config_sha256:
         print_error(f"{config_file} changed while it was loaded; run again")
         raise typer.Exit(ExitCode.USAGE)
@@ -2506,12 +2491,12 @@ def _run_once(
                     allow_stale_bronze=_gate.stale_allowed,
                     stale_record=_gate.record(),
                 )
-                _interrupt.creating("Job", "lakebench-datagen")
+                _interrupt.creating("Job", DATAGEN_JOB)
                 _dg_deploy = datagen_deployer.deploy()
                 if _dg_deploy.status == DeploymentStatus.SUCCESS:
                     _interrupt.datagen_created()
                 else:
-                    _interrupt.not_created("Job", "lakebench-datagen")
+                    _interrupt.not_created("Job", DATAGEN_JOB)
                     # A refusal (stale bronze, live datagen pods) created no
                     # Job: stop here with 3 instead of polling for progress.
                     from lakebench.cli._exit import refused_result_code
@@ -2546,7 +2531,7 @@ def _run_once(
                                 raise typer.Exit(ExitCode.FAILED)
                             _dg_bar.update(_dg_task, completed=_total_pods)
                             _dg_timed_out = False
-                            _interrupt.finished("Job", "lakebench-datagen")
+                            _interrupt.finished("Job", DATAGEN_JOB)
                             break
                         if _dg_prog.get("oom_pods"):
                             _dg_bar.stop()
@@ -2613,18 +2598,10 @@ def _run_once(
 
                 # Measure bronze bucket after datagen
                 try:
-                    from lakebench.s3 import S3Client
+                    from lakebench.s3 import s3_client_from_config
 
                     s3_cfg = cfg.platform.storage.s3
-                    _s3_dg = S3Client(
-                        endpoint=s3_cfg.endpoint,
-                        access_key=s3_cfg.access_key,
-                        secret_key=s3_cfg.secret_key,
-                        region=s3_cfg.region,
-                        path_style=s3_cfg.path_style,
-                        ca_cert=s3_cfg.ca_cert,
-                        verify_ssl=s3_cfg.verify_ssl,
-                    )
+                    _s3_dg = s3_client_from_config(s3_cfg)
                     dg_info = _s3_dg.get_bucket_size(s3_cfg.buckets.bronze)
                     if dg_info.size_bytes:
                         _datagen_output_gb = dg_info.size_bytes / (1024**3)
@@ -2815,7 +2792,7 @@ def _run_once(
                         allow_stale_bronze=_cycle_stale_allowed,
                         stale_record=_cycle_stale_record,
                     )
-                    _interrupt.creating("Job", "lakebench-datagen")
+                    _interrupt.creating("Job", DATAGEN_JOB)
                     # Time to value leaves the cycle's datagen out (CycleMetrics).
                     _cycle_dg_start = utc_now().isoformat()
                     datagen_result = _cycle_datagen.deploy_cycle(cycle_idx, total_cycles)
@@ -2825,7 +2802,7 @@ def _run_once(
                             # The deployer wrote the marker unfinished.
                             _cycle_series_after(collector.current_run, cfg, "begun")
                     else:
-                        _interrupt.not_created("Job", "lakebench-datagen")
+                        _interrupt.not_created("Job", DATAGEN_JOB)
                     if datagen_result.status != DeploymentStatus.SUCCESS:
                         # Fatal: continuing would rebuild this cycle from the
                         # previous cycle's bronze, and incremental silver would
@@ -2858,7 +2835,7 @@ def _run_once(
                             print_error(f"Datagen did not complete: {dg_wait.message}")
                             pipeline_success = False
                             break
-                        _interrupt.finished("Job", "lakebench-datagen")
+                        _interrupt.finished("Job", DATAGEN_JOB)
                         _series_mark = _record_series_cycle(cfg, cycle_idx, total_cycles, run_id)
                         # After the marker write, which is datagen's work too.
                         _cycle_dg_end = utc_now().isoformat()
@@ -3075,18 +3052,10 @@ def _run_once(
                 }
                 if stage_name in _stage_bucket_map and job_metrics.output_size_gb == 0:
                     try:
-                        from lakebench.s3 import S3Client
+                        from lakebench.s3 import s3_client_from_config
 
                         s3_cfg = cfg.platform.storage.s3
-                        _s3 = S3Client(
-                            endpoint=s3_cfg.endpoint,
-                            access_key=s3_cfg.access_key,
-                            secret_key=s3_cfg.secret_key,
-                            region=s3_cfg.region,
-                            path_style=s3_cfg.path_style,
-                            ca_cert=s3_cfg.ca_cert,
-                            verify_ssl=s3_cfg.verify_ssl,
-                        )
+                        _s3 = s3_client_from_config(s3_cfg)
                         _bucket_info = _s3.get_bucket_size(_stage_bucket_map[stage_name])
                         if _bucket_info.size_bytes:
                             job_metrics.output_size_gb = _bucket_info.size_bytes / (1024**3)
@@ -3843,18 +3812,10 @@ def _run_once(
             print_info("S3 sizes not measured: the run was interrupted")
         else:
             try:
-                from lakebench.s3 import S3Client
+                from lakebench.s3 import s3_client_from_config
 
                 s3_cfg = cfg.platform.storage.s3
-                s3_client = S3Client(
-                    endpoint=s3_cfg.endpoint,
-                    access_key=s3_cfg.access_key,
-                    secret_key=s3_cfg.secret_key,
-                    region=s3_cfg.region,
-                    path_style=s3_cfg.path_style,
-                    ca_cert=s3_cfg.ca_cert,
-                    verify_ssl=s3_cfg.verify_ssl,
-                )
+                s3_client = s3_client_from_config(s3_cfg)
                 print_info("Measuring actual S3 bucket sizes...")
                 collector.record_actual_sizes(
                     s3_client,

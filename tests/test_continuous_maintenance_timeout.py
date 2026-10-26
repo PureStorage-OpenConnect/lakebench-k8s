@@ -34,10 +34,12 @@ def test_maintenance_journals_the_budgeted_timeout():
     per_stmt, round_s = continuous_round_bounds(1800, 10_000)
     with (
         patch(
-            "lakebench.deploy.iceberg.find_maintenance_engine",
+            "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
             return_value=("trino", "trino-0", "lakehouse"),
         ),
-        patch("lakebench.deploy.iceberg.exec_sql", side_effect=fake_exec),
+        patch(
+            "lakebench.modules.table_formats.iceberg.maintenance.exec_sql", side_effect=fake_exec
+        ),
     ):
         _run_iceberg_maintenance(
             cfg,
@@ -76,10 +78,12 @@ def test_maintenance_and_compaction_record_what_ran():
 
     with (
         patch(
-            "lakebench.deploy.iceberg.find_maintenance_engine",
+            "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
             return_value=("trino", "trino-0", "lakehouse"),
         ),
-        patch("lakebench.deploy.iceberg.exec_sql", side_effect=fake_exec),
+        patch(
+            "lakebench.modules.table_formats.iceberg.maintenance.exec_sql", side_effect=fake_exec
+        ),
     ):
         _run_iceberg_maintenance(
             cfg, MagicMock(), Console(quiet=True), MagicMock(), "30m", outcomes=outcomes

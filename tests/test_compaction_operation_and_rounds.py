@@ -283,7 +283,7 @@ def test_the_compaction_call_records_its_operation(monkeypatch):
     the operation of the statements it ran into its outcome."""
     from unittest.mock import MagicMock
 
-    import lakebench.deploy.iceberg as iceberg
+    import lakebench.modules.table_formats.iceberg.maintenance as iceberg
     from lakebench.cli import _sustained
     from lakebench.config import LakebenchConfig
 

@@ -614,18 +614,10 @@ def _clients(cfg: Any, local: bool, *, s3_too: bool = True) -> tuple[Any, Any]:
         # Without a cluster client this is not a cluster run; skip the HEAD.
         return k8s, None
     try:
-        from lakebench.s3 import S3Client
+        from lakebench.s3 import s3_client_from_config
 
         s3c = cfg.platform.storage.s3
-        s3 = S3Client(
-            endpoint=s3c.endpoint,
-            access_key=s3c.access_key,
-            secret_key=s3c.secret_key,
-            region=s3c.region,
-            path_style=s3c.path_style,
-            ca_cert=s3c.ca_cert,
-            verify_ssl=s3c.verify_ssl,
-        )
+        s3 = s3_client_from_config(s3c)
     except Exception as exc:  # noqa: BLE001
         logger.debug("system identity: no S3 client: %s", _reason(exc))
     return k8s, s3

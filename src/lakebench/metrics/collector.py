@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from lakebench._clock import utc_now
+from lakebench.config.schema import interval_seconds
 from lakebench.metrics import provenance as _prov
 from lakebench.metrics.experiment import effective_trickle, experiment_inputs
 from lakebench.metrics.io import build_io
@@ -1432,7 +1433,7 @@ class PipelineBenchmark:
                 released = released_rows(
                     run_duration,
                     bronze_stages[0].trickle_start_offset_seconds,
-                    _interval_seconds(sustained.get("bronze_trigger_interval")),
+                    interval_seconds(sustained.get("bronze_trigger_interval")),
                     sustained.get("max_files_per_trigger"),
                     datagen_rows,
                     int(self.config_snapshot.get("datagen_output_files") or 0),
@@ -1713,7 +1714,7 @@ class PipelineBenchmark:
         span proves nothing and returns False.
         """
         sustained = self.config_snapshot.get("sustained") or {}
-        trigger_s = _interval_seconds(sustained.get("bronze_trigger_interval"))
+        trigger_s = interval_seconds(sustained.get("bronze_trigger_interval"))
         batches = _window_batches(bronze)
         if not trigger_s or not bronze.latency_ms or not batches:
             return False
@@ -1759,7 +1760,7 @@ class PipelineBenchmark:
         bronze_trigger_s = _cadence_seconds(sustained.get("bronze_trigger_interval"), bronze)
         if not silver_trigger_s or not bronze_trigger_s:
             return None
-        interval = _interval_seconds(sustained.get("silver_trigger_interval"))
+        interval = interval_seconds(sustained.get("silver_trigger_interval"))
         # Against an interval, a batch that overruns it is behind; back to
         # back, the committed lag below decides.
         if interval and any(s.latency_ms / 1000.0 >= interval for s in silver if s.latency_ms):
@@ -3065,8 +3066,6 @@ _TRIGGER_REGULARITY = 0.95
 # Timestamp of common.log's "[lb] <iso> - msg" prefix.
 _LOG_TS = re.compile(r"\[lb\] (\d{4}-\d\d-\d\dT[\d:.]+) - ")
 
-_INTERVAL_UNITS = {"second": 1, "minute": 60, "hour": 3600}
-
 
 def _stage_capacity(streaming: list, snapshot: dict) -> dict[str, dict[str, float]]:
     """Per stage, busy fraction and raw MB/s per core at full busy, and
@@ -3146,31 +3145,13 @@ def _window_batches(stage: StageMetrics) -> int:
 def _cadence_seconds(interval: Any, stage: Any | None) -> float | None:
     """A streaming stage's cadence in seconds: its trigger interval, or, with
     none ("0 seconds": back to back), its median micro-batch time."""
-    trigger = _interval_seconds(interval)
+    trigger = interval_seconds(interval)
     if trigger:
         return trigger
     if stage is None:
         return trigger
     ms = getattr(stage, "median_batch_ms", None) or getattr(stage, "latency_ms", None)
     return ms / 1000.0 if ms else trigger
-
-
-def _interval_seconds(interval: Any) -> float | None:
-    """Seconds in a Spark interval string ("30 seconds", "5 minutes");
-    None when it does not parse, never a guessed default."""
-    if not isinstance(interval, str):
-        return None
-    parts = interval.strip().lower().split()
-    if len(parts) != 2:
-        return None
-    try:
-        value = float(parts[0])
-    except ValueError:
-        return None
-    unit = _INTERVAL_UNITS.get(parts[1].rstrip("s"))
-    if unit is None or value <= 0:
-        return None
-    return value * unit
 
 
 # gold_refresh_financial's per-cycle time-to-detect line (common.ttd_line).

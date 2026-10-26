@@ -492,18 +492,9 @@ def orphan_removal_ran(outcomes: list[dict[str, Any]] | None) -> bool:
 
 
 def _s3_client(cfg: Any) -> Any:
-    from lakebench.s3 import S3Client
+    from lakebench.s3 import s3_client_from_config
 
-    s3_cfg = cfg.platform.storage.s3
-    return S3Client(
-        endpoint=s3_cfg.endpoint,
-        access_key=s3_cfg.access_key,
-        secret_key=s3_cfg.secret_key,
-        region=s3_cfg.region,
-        path_style=s3_cfg.path_style,
-        ca_cert=s3_cfg.ca_cert,
-        verify_ssl=s3_cfg.verify_ssl,
-    )
+    return s3_client_from_config(cfg.platform.storage.s3)
 
 
 def measure_run(cfg: Any, k8s: Any, s3: Any, metrics: Any) -> dict:

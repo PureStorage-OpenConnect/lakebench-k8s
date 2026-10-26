@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from lakebench.config.datagen_seed import config_perturbation, config_seed
+from lakebench.config.schema import parse_size_to_bytes
 from lakebench.config.seed_secret import (
     SEED_REF_ANNOTATION,
     SEED_SECRET_COMPONENT,
@@ -93,26 +94,6 @@ def _clear_clock_best_effort(cfg: Any) -> None:
     except Exception as e:  # noqa: BLE001
         if getattr(e, "status", None) != 404:
             logger.warning("could not clear the bronze data clock: %s", e)
-
-
-def parse_size_to_bytes(size_str: str) -> int:
-    """Bytes in a size string such as "64MB" or "1TB" (bytes without a suffix)."""
-    size_str = size_str.strip().upper()
-    multipliers = {
-        "B": 1,
-        "KB": 1024,
-        "MB": 1024**2,
-        "GB": 1024**3,
-        "TB": 1024**4,
-    }
-
-    for suffix, multiplier in sorted(multipliers.items(), key=lambda x: -len(x[0])):
-        if size_str.endswith(suffix):
-            value = float(size_str[: -len(suffix)])
-            return int(value * multiplier)
-
-    # Assume bytes if no suffix
-    return int(size_str)
 
 
 class DatagenRefused(RuntimeError):
@@ -520,18 +501,9 @@ def _refusal_details(e: BaseException) -> dict[str, Any]:
 
 
 def _s3_client_for(cfg: Any) -> Any:
-    from lakebench.s3 import S3Client
+    from lakebench.s3 import s3_client_from_config
 
-    s3_cfg = cfg.platform.storage.s3
-    return S3Client(
-        endpoint=s3_cfg.endpoint,
-        access_key=s3_cfg.access_key,
-        secret_key=s3_cfg.secret_key,
-        region=s3_cfg.region,
-        path_style=s3_cfg.path_style,
-        ca_cert=s3_cfg.ca_cert,
-        verify_ssl=s3_cfg.verify_ssl,
-    )
+    return s3_client_from_config(cfg.platform.storage.s3)
 
 
 def deployment_may_empty(cfg: Any, bucket: str, s3: Any = None, *, strict: bool = False) -> bool:
@@ -804,7 +776,7 @@ class DatagenDeployer:
 
         # Derive dimensions from scale factor
         dims = cfg.get_scale_dimensions()
-        file_size_bytes = self._parse_size_to_bytes(datagen.file_size)
+        file_size_bytes = parse_size_to_bytes(datagen.file_size)
         file_size_mb = file_size_bytes // (1024 * 1024)
 
         # Target in TB for CLI args interface
@@ -908,10 +880,6 @@ class DatagenDeployer:
             context["run_id"] = os.environ.get("LB_RUN_ID", "")
 
         return context
-
-    def _parse_size_to_bytes(self, size_str: str) -> int:
-        """``parse_size_to_bytes``."""
-        return parse_size_to_bytes(size_str)
 
     @staticmethod
     def _cycle_timestamp_range(
