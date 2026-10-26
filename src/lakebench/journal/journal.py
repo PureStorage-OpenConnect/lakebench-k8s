@@ -74,7 +74,6 @@ class Journal:
         self._current_command: CommandName | None = None
         self._command_start_time: datetime | None = None
         self._event_count: int = 0
-        self._command_count: int = 0
 
     # ------------------------------------------------------------------
     # Session lifecycle
@@ -116,7 +115,6 @@ class Journal:
         self.session_id = _generate_session_id()
         self._session_file = self.journal_dir / f"session-{safe_name}.jsonl"
         self._event_count = 0
-        self._command_count = 0
 
         self.record(
             EventType.SESSION_START,
@@ -138,15 +136,23 @@ class Journal:
         After closing, the next open_session with the same name will start
         a fresh session file (the old one is renamed with a timestamp).
         """
-        if not self.session_id:
+        if not self.session_id or not self._session_file:
             return
 
+        # Count from the file: a resumed session ran commands in earlier processes.
+        try:
+            commands_run = sum(
+                e.get("event_type") == EventType.COMMAND_END.value
+                for e in self._load_events(self._session_file)
+            )
+        except (json.JSONDecodeError, OSError):
+            commands_run = 0
         self.record(
             EventType.SESSION_END,
             message="Session ended",
             details={
                 "events_recorded": self._event_count,
-                "commands_run": self._command_count,
+                "commands_run": commands_run,
             },
         )
 
@@ -204,7 +210,6 @@ class Journal:
 
         self._current_command = None
         self._command_start_time = None
-        self._command_count += 1
 
     # ------------------------------------------------------------------
     # Generic event recording
@@ -357,19 +362,3 @@ class Journal:
                 if line:
                     events.append(json.loads(line))
         return events
-
-    # ------------------------------------------------------------------
-    # Reset
-    # ------------------------------------------------------------------
-
-    def purge(self) -> int:
-        """Delete all journal files.
-
-        Returns:
-            Number of files deleted
-        """
-        count = 0
-        for path in self.journal_dir.glob("session-*.jsonl"):
-            path.unlink()
-            count += 1
-        return count

@@ -20,9 +20,6 @@ class EventType(str, Enum):
     COMMAND_START = "command.start"
     COMMAND_END = "command.end"
 
-    # Config
-    CONFIG_LOADED = "config.loaded"
-
     # Deploy
     DEPLOY_COMPONENT = "deploy.component"
     DEPLOY_COMPLETE = "deploy.complete"
@@ -61,7 +58,6 @@ class EventType(str, Enum):
 class CommandName(str, Enum):
     """CLI command names for journal tracking."""
 
-    VALIDATE = "validate"
     DEPLOY = "deploy"
     DESTROY = "destroy"
     GENERATE = "generate"
@@ -96,10 +92,3 @@ class JournalEvent:
         d = asdict(self)
         d["event_type"] = self.event_type.value
         return d
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> JournalEvent:
-        """Deserialize from dict."""
-        data = dict(data)  # shallow copy to avoid mutating input
-        data["event_type"] = EventType(data["event_type"])
-        return cls(**data)
