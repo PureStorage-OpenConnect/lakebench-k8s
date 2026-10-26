@@ -323,6 +323,34 @@ class TestObservabilityDeployer:
         assert "prometheus/kubelet-metrics-binding.yaml.j2" not in rendered
         assert "not collected" in result.message
 
+    def test_deploy_success_reports_failed_templates_and_omits_a_disabled_pushgateway(self):
+        """A template that fails to apply is named on the SUCCESS result, and
+        a disabled Pushgateway is not claimed as deployed."""
+        from lakebench.deploy.engine import DeploymentStatus
+        from lakebench.deploy.observability import ObservabilityDeployer
+
+        engine = _obs_engine()
+        engine.config = make_config(
+            name="lakebench-dep",
+            observability={"enabled": True, "pushgateway_enabled": False},
+        )
+
+        def apply(doc, namespace=None):
+            if namespace and engine.k8s.apply_manifest.call_count == 1:
+                raise RuntimeError("quota exceeded")
+
+        engine.k8s.apply_manifest.side_effect = apply
+        with (
+            patch("lakebench.deploy.observability.kubelet_cluster_role_exists", return_value=True),
+            patch("lakebench.deploy.observability._wait_for_deployment_ready", return_value=""),
+            patch("lakebench.deploy.observability.read_grafana_password", return_value=None),
+        ):
+            result = ObservabilityDeployer(engine).deploy()
+        assert result.status == DeploymentStatus.SUCCESS, result.message
+        assert "Pushgateway" not in result.message
+        assert "apply prometheus/prometheus.yaml.j2/ConfigMap: quota exceeded" in result.message
+        assert "quota exceeded" in result.detail
+
     def test_deploy_fails_when_prometheus_not_ready(self):
         from lakebench.deploy.engine import DeploymentStatus
         from lakebench.deploy.observability import ObservabilityDeployer

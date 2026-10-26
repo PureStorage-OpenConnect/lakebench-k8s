@@ -230,13 +230,13 @@ class ObservabilityDeployer:
             )
 
         if self.engine.dry_run:
+            stack = "Prometheus, Grafana and the Pushgateway"
+            if not self.config.observability.pushgateway_enabled:
+                stack = "Prometheus and Grafana"
             return DeploymentResult(
                 component="observability",
                 status=DeploymentStatus.SUCCESS,
-                message=(
-                    "Would deploy Prometheus, Grafana and the Pushgateway in "
-                    f"namespace '{namespace}'"
-                ),
+                message=f"Would deploy {stack} in namespace '{namespace}'",
                 elapsed_seconds=0,
             )
 
@@ -349,13 +349,20 @@ class ObservabilityDeployer:
             detail_parts.append(binding_note)
         if grafana_wait:
             detail_parts.append(f"grafana: {grafana_wait}")
+        detail_parts += apply_notes
 
+        stack = (
+            "Prometheus, Grafana and Pushgateway"
+            if obs.pushgateway_enabled
+            else "Prometheus and Grafana"
+        )
         return DeploymentResult(
             component="observability",
             status=DeploymentStatus.SUCCESS,
             message=(
-                f"Deployed Prometheus, Grafana and Pushgateway in '{namespace}'"
+                f"Deployed {stack} in '{namespace}'"
                 + (f" ({binding_note})" if binding_note else "")
+                + (f"; {'; '.join(apply_notes)}" if apply_notes else "")
             ),
             elapsed_seconds=time.time() - start,
             details=details,
