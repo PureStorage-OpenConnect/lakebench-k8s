@@ -53,7 +53,6 @@ def job(load_script, monkeypatch):
 
     monkeypatch.setattr(mod, "live_snapshots", lambda spark, fq: set(live))
     monkeypatch.setattr(mod, "fingerprint_at", fingerprint_at)
-    monkeypatch.setattr(mod, "table_provider", lambda spark, fq: "iceberg")
     monkeypatch.setattr(mod, "current_snapshot", lambda spark, fq: T3)
     monkeypatch.setattr(mod, "_write_text", lambda spark, uri, text: store.__setitem__(uri, text))
     monkeypatch.setattr(mod, "_read_text", lambda spark, uri: store[uri])
@@ -213,15 +212,6 @@ def test_a_scan_starts_only_when_the_time_left_can_hold_it(job):
 def test_a_record_without_a_snapshot_id_is_a_mismatch(job):
     out = _run(job, [_rec(2, "unknown")])
     assert _states(out) == ["mismatch"]
-
-
-def test_delta_table_is_not_supported(job, monkeypatch):
-    monkeypatch.setattr(job.mod, "table_provider", lambda spark, fq: "delta")
-    out = _run(job, [_rec(2, T2)])
-    assert out["status"] == "not_supported" and _states(out) == ["not_supported"]
-    assert job.scans == [] and job.store == {}
-    rec = {"time_travel": {"ticks": [_rec(2, T2)]}}
-    assert tt.merge(rec, out, {"configured": "30m"})["verdict"] == "fail"
 
 
 # --- expiry attribution and the verdict ---------------------------------------

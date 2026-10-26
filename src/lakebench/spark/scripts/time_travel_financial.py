@@ -38,8 +38,7 @@ stops starting a scan that would not finish before it (the time left must
 exceed 1.5 times the longest scan so far, so the first scan of a pass
 always starts); the hash pass gets half of the
 time: the records left read ``not_read`` and the result says
-``incomplete``. A Delta table is refused: every record reads
-``not_supported`` (AML on Delta is refused by the config today). Writes no
+``incomplete``. Iceberg only: the config refuses AML on Delta. Writes no
 table and creates no tag, branch or other snapshot reference.
 """
 
@@ -62,7 +61,6 @@ EXPIRED = "expired"
 MISMATCH = "mismatch"
 ERROR = "error"
 NOT_READ = "not_read"
-NOT_SUPPORTED = "not_supported"
 
 
 def _read_text(spark, uri: str) -> str:
@@ -86,15 +84,6 @@ def _write_text(spark, uri: str, text: str) -> None:
 
 def is_snapshot(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
-
-
-def table_provider(spark, fq: str) -> str | None:
-    """The table's provider (``iceberg``, ``delta``) from ``DESCRIBE TABLE
-    EXTENDED``, lower case; None when it does not say."""
-    for row in spark.sql(f"DESCRIBE TABLE EXTENDED {fq}").collect():
-        if str(row["col_name"]).strip().lower() == "provider":
-            return str(row["data_type"]).strip().lower() or None
-    return None
 
 
 def live_snapshots(spark, fq: str) -> set[int]:
@@ -225,15 +214,12 @@ def newest_first(records: list[dict]) -> list[tuple[str, int]]:
 
 
 def table_state(spark, tables: list[str]) -> dict[str, dict]:
-    """Per table: ``{provider, live}`` (live snapshot ids), or ``{error}``
-    when the table cannot be described or its snapshots listed."""
+    """Per table: ``{live}`` (live snapshot ids), or ``{error}`` when its
+    snapshots cannot be listed."""
     out: dict[str, dict] = {}
     for table in tables:
-        fq = f"{CATALOG}.{table}"
         try:
-            provider = table_provider(spark, fq)
-            live = live_snapshots(spark, fq) if provider != "delta" else set()
-            out[table] = {"provider": provider, "live": live}
+            out[table] = {"live": live_snapshots(spark, f"{CATALOG}.{table}")}
         except Exception as e:  # noqa: BLE001 -- every record of it reads error
             out[table] = {"error": f"{type(e).__name__}: {one_line(e)}"}
     return out
@@ -400,24 +386,6 @@ def time_travel(spark, inputs: dict, hashes_uri: str, budget: Budget) -> dict:
     records = [r for r in inputs.get("records") or [] if isinstance(r, dict)]
     names = sorted({str(r.get("table")) for r in records if r.get("table")})
     tables = table_state(spark, names)
-    delta = [t for t, st in tables.items() if st.get("provider") == "delta"]
-    if delta:
-        return {
-            "status": NOT_SUPPORTED,
-            "reason": f"{', '.join(delta)} is a Delta table; time-travel reads support Iceberg only",
-            "ticks": [
-                {
-                    "start": r.get("start"),
-                    "cycle": r.get("cycle"),
-                    "table": r.get("table"),
-                    "snapshot": r.get("snapshot"),
-                    "state": NOT_SUPPORTED,
-                }
-                for r in records
-            ],
-            "current": None,
-            "incomplete": False,
-        }
     nonce = str(inputs.get("nonce") or "")
     live_keys = [
         k
