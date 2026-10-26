@@ -14,6 +14,7 @@ from typing import Any
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
+from lakebench.k8s.lease_state import LeaseHoldExceeded
 from lakebench.k8s.target import ClusterTarget, ContextConflictError
 
 logger = logging.getLogger(__name__)
@@ -27,8 +28,9 @@ _BASE_DELAY = 1.0  # seconds
 def retry_k8s_api(func):
     """Retry decorator for K8s API calls with exponential backoff and jitter.
 
-    Retries on transient ApiException (429/5xx), ConnectionError, and
-    TimeoutError. 3 retries with 1s/2s/4s base delay + random jitter.
+    Retries on transient ApiException (429/5xx), a K8sResourceError raised
+    from one, ConnectionError, and TimeoutError. 3 retries with 1s/2s/4s base
+    delay + random jitter. The last exception is re-raised unchanged.
     """
 
     @functools.wraps(func)
@@ -39,6 +41,13 @@ def retry_k8s_api(func):
                 return func(*args, **kwargs)
             except ApiException as e:
                 if e.status not in _RETRYABLE_STATUS_CODES:
+                    raise
+                last_exc = e
+            except K8sResourceError as e:
+                cause = e.__cause__
+                if not (
+                    isinstance(cause, ApiException) and cause.status in _RETRYABLE_STATUS_CODES
+                ):
                     raise
                 last_exc = e
             except (ConnectionError, TimeoutError) as e:
@@ -471,14 +480,11 @@ class K8sClient:
         except ApiException as e:
             if e.status == 409:  # Already exists
                 return False
-            raise K8sResourceError(f"Failed to create namespace: {e}")  # noqa: B904
+            raise K8sResourceError(f"Failed to create namespace: {e}") from e
 
     @retry_k8s_api
     def delete_namespace(self, name: str, uid: str | None = None) -> bool:
         """Delete a namespace.
-
-        Args:
-            name: Namespace name
 
         Args:
             name: Namespace name
@@ -519,7 +525,7 @@ class K8sClient:
                 raise NamespaceTerminatingError(  # noqa: B904
                     f"Namespace '{name}' is already being deleted"
                 )
-            raise K8sResourceError(f"Failed to delete namespace: {e}")  # noqa: B904
+            raise K8sResourceError(f"Failed to delete namespace: {e}") from e
 
     def secret_exists(self, name: str, namespace: str | None = None) -> bool:
         """Check if a secret exists.
@@ -619,7 +625,7 @@ class K8sClient:
                     return self._apply_custom_resource(manifest, ns)
                 raise K8sResourceError(f"Unsupported resource kind: {kind}")
         except ApiException as e:
-            raise K8sResourceError(f"Failed to apply {kind}/{name}: {e}")  # noqa: B904
+            raise K8sResourceError(f"Failed to apply {kind}/{name}: {e}") from e
 
     def _apply_namespace(self, manifest: dict[str, Any]) -> bool:
         """Apply a Namespace manifest."""
@@ -1262,6 +1268,10 @@ class K8sClient:
 
         Returns:
             Tuple of (exit_code, stdout, stderr)
+
+        Raises:
+            ContextConflictError, LeaseHoldExceeded: refusals from the pinned
+                kubectl helper; they are not command failures.
         """
         ns = namespace or self.namespace
 
@@ -1287,6 +1297,8 @@ class K8sClient:
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
             return 1, "", "Command timed out"
+        except (ContextConflictError, LeaseHoldExceeded):
+            raise
         except Exception as e:
             return 1, "", str(e)
 
