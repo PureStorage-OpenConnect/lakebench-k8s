@@ -53,6 +53,10 @@ depends on the seed.
 |---|---|---|---|---|
 | `architecture.tables.bronze` (default `default.bronze_raw`) | one payment, schema inferred from the Parquet | unpartitioned (zero-copy `add_files`, or a CTAS fallback) | 26,671,867 | 266,718,594 |
 | `bronze.manifest` | one planted instance, CTAS of the manifest Parquet | unpartitioned | 7,285 | 73,083 |
+| `bronze.accounts` | one account of the generator's account master, CTAS of `account.parquet` | unpartitioned | scales with the entity count ([3.2](generation.md#32-scale-factor)) | |
+
+The scoring statements read `bronze.accounts` to map a planted participant's
+generator id to its silver entity key through the account IBAN.
 
 In continuous mode the bronze table gains `ingest_ts` and the bronze-ingest
 stream fills it.

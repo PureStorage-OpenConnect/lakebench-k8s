@@ -211,7 +211,6 @@ def _coverage_recall(
     catalog: str,
     pins: dict[str, str],
     run_id: str,
-    account_parquet: str,
     pairs_sql: str,
     covered_pass: bool,
     timeout: int,
@@ -224,7 +223,6 @@ def _coverage_recall(
     sql = _template("coverage_recall.sql.tmpl").format(
         catalog=catalog,
         run_id=run_id,
-        account_parquet=account_parquet,
         pairs_values=pairs_sql,
         hit_scope=hit_scope,
         **pins,
@@ -305,7 +303,6 @@ def _chance(
     catalog: str,
     pins: dict[str, str],
     run_id: str,
-    account_parquet: str,
     covered_pass: bool,
     timeout: int,
 ) -> tuple[int, dict[str, int]]:
@@ -320,7 +317,6 @@ def _chance(
     sql = _template("chance.sql.tmpl").format(
         catalog=catalog,
         run_id=run_id,
-        account_parquet=account_parquet,
         random_scope=random_scope,
         **pins,
     )
@@ -444,7 +440,6 @@ def _subject_check(
     run_tsv: RunTsv,
     catalog: str,
     pins: dict[str, str],
-    account_parquet: str,
     manifest_rows: list[tuple[str, list[int] | None, int | None]],
     scoped_typologies: set[str],
     timeout: int,
@@ -469,7 +464,6 @@ def _subject_check(
         dg_list = ", ".join(f"({d})" for d in chunk)
         sql = _template("subject_check.sql.tmpl").format(
             catalog=catalog,
-            account_parquet=account_parquet,
             accounts_pin=pins["accounts_pin"],
             entities_pin=pins["entities_pin"],
             dg_ids=dg_list,
@@ -602,7 +596,6 @@ def score(
     catalog: str,
     snapshot_ids: dict[str, int] | None,
     run_id: str,
-    account_parquet: str,
     meta: RulesMeta,
     alert_set: dict | None = None,
     timeout: int = 900,
@@ -645,7 +638,6 @@ def score(
         catalog,
         pins,
         status_run_id,
-        account_parquet,
         pairs_sql,
         covered_pass=snapshot_ids is not None,
         timeout=timeout,
@@ -657,7 +649,6 @@ def score(
         catalog,
         pins,
         status_run_id,
-        account_parquet,
         covered_pass=snapshot_ids is not None,
         timeout=timeout,
     )
@@ -693,7 +684,6 @@ def score(
             run_tsv,
             catalog,
             pins,
-            account_parquet,
             status_run_id,
             cov,
             covered_ids,
@@ -706,7 +696,6 @@ def score(
         run_tsv,
         catalog,
         pins,
-        account_parquet,
         snapshot_ids,
         status_run_id,
         cov,
@@ -780,7 +769,6 @@ def _batch_record(
     run_tsv: RunTsv,
     catalog: str,
     pins: dict[str, str],
-    account_parquet: str,
     run_id: str,
     cov: dict[str, dict[str, int]],
     covered_ids: set[str],
@@ -802,7 +790,7 @@ def _batch_record(
 
     # Batch scores the whole manifest: every instance's subject is checked.
     subj_rows = _manifest_subject_rows(run_tsv, catalog, pins, timeout, None)
-    check = _subject_check(run_tsv, catalog, pins, account_parquet, subj_rows, scoped, timeout)
+    check = _subject_check(run_tsv, catalog, pins, subj_rows, scoped, timeout)
     typologies = []
     for typ in sorted(cov):
         c = cov[typ]
@@ -839,7 +827,6 @@ def _covered_record(
     run_tsv: RunTsv,
     catalog: str,
     pins: dict[str, str],
-    account_parquet: str,
     snapshot_ids: dict[str, int],
     run_id: str,
     cov: dict[str, dict[str, int]],
@@ -869,7 +856,7 @@ def _covered_record(
     rescreen = _rescreen_only(run_tsv, catalog, pins, timeout, covered_ids)
     # Covered subject check: subjects of covered instances only.
     subj_rows = _manifest_subject_rows(run_tsv, catalog, pins, timeout, covered_ids)
-    check = _subject_check(run_tsv, catalog, pins, account_parquet, subj_rows, scoped, timeout)
+    check = _subject_check(run_tsv, catalog, pins, subj_rows, scoped, timeout)
 
     typologies = []
     for typ in sorted(cov):

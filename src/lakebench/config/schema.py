@@ -2594,7 +2594,7 @@ class TableNamesConfig(ConfigModel):
             by_layer = {"bronze": [self.bronze], "silver": [self.silver], "gold": [self.gold]}
         else:
             by_layer = {
-                "bronze": [self.bronze, "bronze.manifest"],
+                "bronze": [self.bronze, "bronze.manifest", "bronze.accounts"],
                 "silver": [
                     self.silver,
                     self.silver_entities,

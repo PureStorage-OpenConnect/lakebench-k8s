@@ -3,8 +3,7 @@
 -- the covered pass). Integer counts only; the assembler divides by n_random.
 -- Only random-typology instances are considered, so this is cheap even though
 -- it repeats the covered test; it reads silver for the random instances only.
--- Placeholders: {catalog}, {run_id}, pins as in coverage_recall, plus
--- {account_parquet}.
+-- Placeholders: {catalog}, {run_id}, pins as in coverage_recall.
 WITH manifest AS (
   SELECT typology_id, typology_type, participant_uetrs, participant_entity_ids
   FROM {catalog}.bronze.manifest {manifest_pin}
@@ -21,7 +20,7 @@ id_map AS (
   SELECT dg_id, MIN(key) AS key
   FROM (
     SELECT CAST(a.holder_entity_id AS BIGINT) AS dg_id, a.iban
-    FROM parquet."{account_parquet}" a
+    FROM {catalog}.bronze.accounts a
     WHERE a.iban IS NOT NULL
   ) acct
   JOIN (

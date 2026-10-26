@@ -130,7 +130,6 @@ def test_covered_scored_run_mixes_states():
         catalog="lh",
         snapshot_ids=ids,
         run_id="run-x",
-        account_parquet="s3a://b/account.parquet",
         meta=META,
         alert_set={"rows": 25, "digest": "abc"},
     )
@@ -189,7 +188,6 @@ def test_batch_run():
         catalog="lh",
         snapshot_ids=None,
         run_id="run-x",
-        account_parquet="s3a://b/account.parquet",
         meta=META,
     )
     assert "mode" not in rec  # batch has no mode key
@@ -243,7 +241,6 @@ def test_batch_ignores_coverage():
         catalog="lh",
         snapshot_ids=None,
         run_id="run-x",
-        account_parquet="s3a://b/account.parquet",
         meta=META,
     )
     t = {x["typology_type"]: x for x in rec["typologies"]}["micro_structuring"]
@@ -264,7 +261,6 @@ def test_not_scored_on_protected_seed(monkeypatch):
             catalog="lh",
             snapshot_ids=None,
             run_id="run-x",
-            account_parquet="s3a://b/account.parquet",
             meta=META,
         )
     assert "refusing to score" in str(e.value)
@@ -286,7 +282,6 @@ def test_not_scored_on_duplicate_typology_id(monkeypatch):
             catalog="lh",
             snapshot_ids=None,
             run_id="run-x",
-            account_parquet="s3a://b/account.parquet",
             meta=META,
         )
     assert "repeat typology_id" in str(e.value)
@@ -312,7 +307,6 @@ def test_subject_chunking_boundary(monkeypatch):
         run_tsv,
         "lh",
         sq._pins(None),
-        "s3a://b/account.parquet",
         rows,
         {"micro_structuring"},
         900,
@@ -352,7 +346,6 @@ def test_zero_alerts_fp_rate_none():
         catalog="lh",
         snapshot_ids=None,
         run_id="run-x",
-        account_parquet="s3a://b/account.parquet",
         meta=META,
     )
     assert rec["fp_rate"] is None

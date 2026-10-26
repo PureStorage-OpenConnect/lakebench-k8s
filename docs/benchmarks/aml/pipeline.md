@@ -9,7 +9,7 @@ See also: rules in [4.2](rules.md#42-detection-rules).
 | # | Stage | Input | Transformation | Output |
 |---|---|---|---|---|
 | 1 | datagen, only with `--generate` | seed, scale | [3](generation.md) | raw corpus |
-| 2 | bronze-verify | `pacs008/` Parquet, manifest | schema and null checks; zero-copy Iceberg registration (`add_files`) of the files; CTAS of the manifest as `bronze.manifest` (missing manifest: a warning); writes the bronze data clock (max settlement date) | bronze table, `bronze.manifest` |
+| 2 | bronze-verify | `pacs008/` Parquet, manifest, account master | schema and null checks; zero-copy Iceberg registration (`add_files`) of the files; CTAS of the manifest as `bronze.manifest` and of the account master as `bronze.accounts` (a missing file: a warning); writes the bronze data clock (max settlement date) | bronze table, `bronze.manifest`, `bronze.accounts` |
 | 3 | silver-build | bronze, party, account | full rebuild each cycle, listed below; then a sealed marker | six silver tables plus `silver_batch_versions` |
 | 4 | gold-finalize | sealed silver | baseline dashboard; nine detection rules; the W1 and W4 projections (`gold.entity_clusters`, `gold.risk_scores`, best effort); TM operations | gold tables ([2.4](data-model.md#24-gold-tables)) |
 | 5 | score-financial | `gold.alerts`, `gold.detection_status`, manifest | recall and false-positive scoring ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)) | `recall.parquet`, `recall.json` |
@@ -124,7 +124,7 @@ in bronze.
      recreates it empty from `pacs008_schema.json` plus `ingest_ts`;
    - drops all eight silver tables (the seven batch ones and
      `silver.counterparty_pairs`);
-   - drops and re-registers `bronze.manifest`;
+   - drops and re-registers `bronze.manifest` and `bronze.accounts`;
    - drops the TM operations tables and the gold tables `alerts`,
      `risk_scores`, `entity_clusters`, `daily_dashboards` and
      `detection_status`.

@@ -63,6 +63,15 @@ MANIFEST_PATH = env(
     BRONZE_ROOT_PREFIX.rstrip("/") + "/manifest/manifest*.parquet",
 )
 MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
+# The account master (one file, written once by cycle 0; same env override
+# as silver_build's ACCOUNT_PATH). The Trino scoring statements map a planted
+# participant's datagen id to its silver entity key through this table's
+# IBANs, so it is registered as an Iceberg table beside the manifest.
+ACCOUNT_URI = env(
+    "LB_FINANCIAL_ACCOUNT_PATH",
+    f"{BRONZE_URI}{BRONZE_ROOT_PREFIX.rstrip('/')}/bronze/account.parquet",
+)
+ACCOUNTS_TABLE = env("LB_FINANCIAL_ACCOUNTS_TABLE", "bronze.accounts")
 # Default REGISTER=1: silver_build reads a real Iceberg table
 # (spark.table(CATALOG.pacs008_raw)), not the raw parquet, so without
 # registration the entire pipeline stalls at silver-build with
@@ -262,6 +271,33 @@ def register_manifest(spark) -> bool:
         return False
 
 
+def register_accounts(spark) -> bool:
+    """(Re)register the account master as an Iceberg table from its file.
+
+    Returns False, with a warning, when the file is not there or the CTAS
+    fails. Not fatal here: the recall and precision scoring statements then
+    fail loudly on the missing table and the run records not-scored.
+    """
+    ns = ACCOUNTS_TABLE.split(".", 1)[0] if "." in ACCOUNTS_TABLE else "bronze"
+    try:
+        spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{ns}")
+        spark.sql(f"""
+            CREATE OR REPLACE TABLE {CATALOG}.{ACCOUNTS_TABLE}
+            USING iceberg
+            TBLPROPERTIES ('format-version' = '2', {ICEBERG_METADATA_PROPS_SQL})
+            AS SELECT * FROM parquet.`{ACCOUNT_URI}`
+        """)
+        log(f"Registered account master Iceberg table: {CATALOG}.{ACCOUNTS_TABLE}")
+        return True
+    except Exception as e:  # noqa: BLE001
+        log(
+            f"WARNING: account master registration failed ({one_line(e)}). "
+            "AML recall and precision scoring reads this table and will record "
+            "the run not-scored without it."
+        )
+        return False
+
+
 def pacs008_schema():
     """The pacs.008 bronze schema the generator writes, as Spark reads it
     (spark/data/aml/pacs008_schema.json, shipped with the AML data)."""
@@ -322,6 +358,9 @@ def _continuous_reset(spark, df):
     # gold-refresh registers it once it appears otherwise.
     spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{MANIFEST_TABLE}")
     register_manifest(spark)
+    # Same for the account master: this run's datagen writes a new one.
+    spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{ACCOUNTS_TABLE}")
+    register_accounts(spark)
     # The P10 operations tables are projections of the previous run's alerts
     # (cases, dispositions, the reconciliation ledger). gold-refresh rebuilds
     # them from its first tick, but until then a reader would see the old
@@ -695,6 +734,8 @@ def main() -> None:
         # can still emit alerts; the benchmark scoring queries will
         # then fail loudly at their own `bronze.manifest` reads.
         register_manifest(spark)
+        # The account master, which the scoring statements join to silver.
+        register_accounts(spark)
 
     elapsed = time.time() - start_time
     log("=" * 60)

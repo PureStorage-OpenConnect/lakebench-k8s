@@ -104,7 +104,14 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from bronze_verify_financial import BRONZE_URI, MANIFEST_PATH, MANIFEST_TABLE, register_manifest
+from bronze_verify_financial import (
+    ACCOUNTS_TABLE,
+    BRONZE_URI,
+    MANIFEST_PATH,
+    MANIFEST_TABLE,
+    register_accounts,
+    register_manifest,
+)
 from common import (
     TTD_SNAPSHOT_UNKNOWN,
     SealedFilterError,
@@ -899,8 +906,18 @@ class TickState:
     """What a tick carries to the next: manifest registration, the last
     freshness sample, the time-to-detect baseline and the TM clock."""
 
-    def __init__(self, run_start, window_end_s=0.0, manifest_ready=False, incremental=None):
+    def __init__(
+        self,
+        run_start,
+        window_end_s=0.0,
+        manifest_ready=False,
+        incremental=None,
+        accounts_ready=False,
+    ):
         self.manifest_ready = manifest_ready
+        # bronze.accounts (the account master the scorer joins to silver) is
+        # registered once, as soon as datagen has written a manifest.
+        self.accounts_ready = accounts_ready
         # Per-rule detection state between ticks (incremental_detection);
         # None runs every rule as a full recompute.
         self.incremental = incremental
@@ -938,6 +955,7 @@ class TickState:
             window_end_s,
             manifest_ready=table_exists(spark, f"{CATALOG}.{MANIFEST_TABLE}"),
             incremental=_incremental_detection(spark),
+            accounts_ready=table_exists(spark, f"{CATALOG}.{ACCOUNTS_TABLE}"),
         )
 
 
@@ -1090,6 +1108,11 @@ def run_tick(spark, state, cycle) -> dict:
         if register_manifest(spark):
             state.manifest_ready = True
             state.manifest_files = files
+    # The account master is written once, before the first manifest, so it
+    # is registered as soon as a manifest file exists (the scoring statements
+    # map datagen ids to silver keys through it).
+    if not state.accounts_ready and files:
+        state.accounts_ready = register_accounts(spark)
     # Pinned before anything reads silver, so every reader sees this corpus.
     pinned_at = time.time()
     txns, sid, versions_used, silver_rows, newest_ingest_s, tt = _pin_silver(spark)

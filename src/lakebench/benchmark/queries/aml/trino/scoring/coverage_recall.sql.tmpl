@@ -2,8 +2,8 @@
 -- One statement so silver.transactions is scanned once (design finding 10).
 -- Placeholders: {catalog}; the table pins {txns_pin} {versions_pin}
 -- {accounts_pin} {entities_pin} {alerts_pin} {manifest_pin} each render as
--- "FOR VERSION AS OF <id>" (covered mode) or "" (batch mode). {account_parquet}
--- is the bronze account-master URI. {pairs_values} is a VALUES list of the
+-- "FOR VERSION AS OF <id>" (covered mode) or "" (batch mode). bronze.accounts
+-- is the registered account master. {pairs_values} is a VALUES list of the
 -- (typology_type, rule_id) pairs for designated rules that ran, bound by the
 -- assembler; "" means no such pair (then designated hits are empty).
 --
@@ -51,7 +51,7 @@ id_map AS (
   SELECT dg_id, MIN(key) AS key
   FROM (
     SELECT CAST(a.holder_entity_id AS BIGINT) AS dg_id, a.iban
-    FROM parquet."{account_parquet}" a
+    FROM {catalog}.bronze.accounts a
     WHERE a.iban IS NOT NULL
   ) acct
   JOIN (

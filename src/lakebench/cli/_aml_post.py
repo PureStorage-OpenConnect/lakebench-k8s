@@ -182,16 +182,6 @@ def not_scored(reason: str) -> dict[str, Any]:
     return {"mode": "covered", "status": "not_scored", "reason": reason}
 
 
-def _account_parquet_uri(cfg) -> str:
-    """The bronze account-master parquet URI, as the Spark scorer's
-    ACCOUNT_PATH resolves it: ``{bronze}/{prefix}/bronze/account.parquet``."""
-    from lakebench.deploy.datagen import bronze_datagen_prefix
-
-    s3 = cfg.platform.storage.s3
-    prefix = bronze_datagen_prefix(cfg).rstrip("/")
-    return f"s3a://{s3.buckets.bronze}/{prefix}/bronze/account.parquet"
-
-
 def _rules_meta():
     """RulesMeta from the pure rule metadata and the reason-code vocabulary.
 
@@ -252,7 +242,6 @@ def score_financial_via_queries(
 
         executor = get_executor(cfg)
         meta = _rules_meta()
-        account_parquet = _account_parquet_uri(cfg)
         snapshot_ids = None
         alert_set = None
         if covered is not None:
@@ -275,7 +264,6 @@ def score_financial_via_queries(
                 catalog=executor.catalog_name,
                 snapshot_ids=snapshot_ids,
                 run_id=run_id,
-                account_parquet=account_parquet,
                 meta=meta,
                 alert_set=alert_set,
                 timeout=timeout,

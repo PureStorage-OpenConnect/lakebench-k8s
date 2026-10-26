@@ -6,8 +6,7 @@
 --                 (0 when unmapped).
 -- The assembler supplies {dg_ids}, a comma list of the chunk's distinct
 -- dg_ids, and pairs the result back to (typology_type, dg_id) it holds.
--- Placeholders: {catalog}, {account_parquet}, {accounts_pin}, {entities_pin},
--- {dg_ids}.
+-- Placeholders: {catalog}, {accounts_pin}, {entities_pin}, {dg_ids}.
 WITH ids AS (
   SELECT CAST(x AS BIGINT) AS dg_id FROM (VALUES {dg_ids}) AS t(x)
 ),
@@ -15,7 +14,7 @@ id_map AS (
   SELECT dg_id, MIN(key) AS key
   FROM (
     SELECT CAST(a.holder_entity_id AS BIGINT) AS dg_id, a.iban
-    FROM parquet."{account_parquet}" a
+    FROM {catalog}.bronze.accounts a
     WHERE a.iban IS NOT NULL
   ) acct
   JOIN (
