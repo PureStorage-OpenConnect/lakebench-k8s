@@ -428,3 +428,16 @@ def test_record_and_config_values_are_escaped():
     html = _render_dict(record)
     assert _SCRIPT not in html
     assert html.count("&lt;script&gt;alert(1)&lt;/script&gt;") >= 6
+
+
+def test_duckdb_pods_have_their_own_platform_row():
+    record = load_record("5105a0")
+    record["platform_metrics"] = {
+        "pods": [
+            {"pod_name": "lakebench-duckdb-0", "component": "duckdb", "cpu_avg_cores": 1.0},
+            {"pod_name": "lakebench-trino-worker-0", "component": "trino", "cpu_avg_cores": 2.0},
+        ]
+    }
+    html = _render_dict(record)
+    assert "<td><strong>duckdb</strong></td>" in html
+    assert "<td><strong>trino</strong></td>" in html

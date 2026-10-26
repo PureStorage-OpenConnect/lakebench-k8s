@@ -3971,7 +3971,7 @@ class ReportGenerator:
         if "trino" in component or "trino" in name:
             return "trino"
         if "duckdb" in component or "duckdb" in name:
-            return "trino"
+            return "duckdb"
         if any(c in component for c in ("hive", "polaris", "postgres")):
             return "catalog"
         if "datagen" in component or "datagen" in name:
@@ -4061,6 +4061,7 @@ class ReportGenerator:
             "silver",
             "gold",
             "trino",
+            "duckdb",
             "catalog",
             "datagen",
             "spark-other",
