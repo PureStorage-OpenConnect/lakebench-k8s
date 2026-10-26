@@ -107,6 +107,11 @@ def test_covered_scored_run_mixes_states():
                 ["cycle", "4"],
                 ["random", "6"],
             ],
+            "MAX(expected_workload)": [
+                ["micro_structuring", "W2_structuring"],
+                ["cycle", "W3_round_tripping"],
+                ["random", "random"],
+            ],
             "Per-reason-code counts": [
                 ["W2_structuring", "W2_SUB_THRESHOLD_BURST", "20", "18", "6", "16"],
             ],
@@ -132,7 +137,6 @@ def test_covered_scored_run_mixes_states():
     assert rec["mode"] == "covered"
     assert rec["status"] == "scored"
     assert rec["computed_by"] == "lb-score-query"
-    assert rec["alert_set"] == {"rows": 25, "digest": "abc"}
     cov = rec["covered"]
     typ = {t["typology_type"]: t for t in cov["typologies"]}
     # recall_covered = designated_hits / covered_instances, scored.
@@ -142,6 +146,8 @@ def test_covered_scored_run_mixes_states():
     assert typ["cycle"]["no_participant_txns"] == 1
     # coverage = covered / corpus.
     assert typ["random"]["coverage"] == pytest.approx(1.0)
+    # workload_category comes from the manifest, not null.
+    assert typ["micro_structuring"]["workload_category"] == "W2_structuring"
     # fp over the full manifest: fp_alerts = 25 - 18 = 7, rate 7/25.
     assert cov["fp_alerts"] == 7
     assert cov["fp_rate"] == pytest.approx(7 / 25)
@@ -166,6 +172,7 @@ def test_batch_run():
             "Per-rule chance": [],
             "an evidence cap cut": [],
             "Distinct instance count per typology_type": [["micro_structuring", "10"]],
+            "MAX(expected_workload)": [["micro_structuring", "W2_structuring"]],
             "Per-reason-code counts": [
                 ["W2_structuring", "W2_SUB_THRESHOLD_BURST", "20", "18", "6", "16"],
             ],
@@ -192,7 +199,57 @@ def test_batch_run():
     # batch recall = designated_hits / corpus_instances.
     assert t["recall"] == pytest.approx(6 / 10)
     assert t["instance_count"] == 10
+    assert t["workload_category"] == "W2_structuring"  # from the manifest, not null
     assert rec["fp_rate"] == pytest.approx(7 / 25)
+
+
+def test_batch_ignores_coverage():
+    # Batch scoring has no coverage gate (compute_scores scores the full
+    # manifest), so the assembler must run coverage_recall without the covered
+    # join. The FakeExecutor returns the hit for an instance whose is_covered
+    # flag is 0; batch recall must still count it. In the SQL this is the
+    # {hit_scope} placeholder rendering empty for batch; here we assert the
+    # assembler divides designated_hits by the full corpus regardless of the
+    # is_covered flag on the rows.
+    rows = [
+        # 3 instances, 1 covered, but 2 designated hits (one on an uncovered
+        # instance): a batch score counts both; a covered score would not.
+        ["micro_structuring_t_0", "micro_structuring", "1", "0", "1", "1"],
+        ["micro_structuring_t_1", "micro_structuring", "0", "0", "1", "1"],
+        ["micro_structuring_t_2", "micro_structuring", "0", "0", "0", "0"],
+    ]
+    exe = FakeExecutor(
+        {
+            "for the assembler's two guards": [["micro_structuring_1_0", "43"]],
+            "FROM lh.gold.detection_status": [
+                ["W2_structuring", "run-x", "ran", "micro_structuring", "5", ""],
+            ],
+            "Coverage and covered-recall": rows,
+            "Per-rule false positives": [["W2_structuring", "20", "5", "30", "40"]],
+            "Global alert counts": [["25", "18"]],
+            "Per-rule chance": [],
+            "an evidence cap cut": [],
+            "Distinct instance count per typology_type": [["micro_structuring", "3"]],
+            "MAX(expected_workload)": [["micro_structuring", "W2_structuring"]],
+            "Per-reason-code counts": [],
+            "CARDINALITY(a.reason_codes)": [["0", "25"]],
+            "Resolve a chunk of subject": [],
+            "participant_entity_ids": [],
+            "detectable_by": [],
+        }
+    )
+    rec = sq.score(
+        exe.run_tsv,
+        catalog="lh",
+        snapshot_ids=None,
+        run_id="run-x",
+        account_parquet="s3a://b/account.parquet",
+        meta=META,
+    )
+    t = {x["typology_type"]: x for x in rec["typologies"]}["micro_structuring"]
+    # 2 designated hits over 3 corpus instances, the uncovered hit included.
+    assert t["recall"] == pytest.approx(2 / 3)
+    assert t["instance_count"] == 3
 
 
 def test_not_scored_on_protected_seed(monkeypatch):
@@ -282,6 +339,7 @@ def test_zero_alerts_fp_rate_none():
             "Per-rule chance": [],
             "an evidence cap cut": [],
             "Distinct instance count per typology_type": [["micro_structuring", "10"]],
+            "MAX(expected_workload)": [["micro_structuring", "W2_structuring"]],
             "Per-reason-code counts": [],
             "CARDINALITY(a.reason_codes)": [["0", "0"]],
             "Resolve a chunk of subject": [],

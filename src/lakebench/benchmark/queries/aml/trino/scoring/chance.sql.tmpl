@@ -56,14 +56,16 @@ by_entity AS (
   LEFT JOIN entity_keys ek ON ek.key = im.key
   GROUP BY ie.typology_id
 ),
+-- The random instances the chance floor counts over: covered random
+-- instances in covered mode, every random instance in batch (compute_scores
+-- counts n_random over the full manifest). {random_scope} is the coverage
+-- predicate in covered mode and "TRUE" in batch.
 covered_random AS (
   SELECT i.typology_id
   FROM (SELECT DISTINCT typology_id FROM manifest) i
   LEFT JOIN by_uetr bu ON bu.typology_id = i.typology_id
   LEFT JOIN by_entity be ON be.typology_id = i.typology_id
-  WHERE COALESCE(bu.n_uetr, 0) > 0
-    AND COALESCE(bu.missing_uetr, 0) = 0
-    AND COALESCE(be.missing_entity, 0) = 0
+  WHERE {random_scope}
 ),
 random_uetr AS (
   SELECT DISTINCT cr.typology_id, u.uetr

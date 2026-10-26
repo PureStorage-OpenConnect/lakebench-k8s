@@ -213,13 +213,20 @@ def _coverage_recall(
     run_id: str,
     account_parquet: str,
     pairs_sql: str,
+    covered_pass: bool,
     timeout: int,
 ) -> tuple[dict[str, dict[str, int]], set[str]]:
+    # Covered mode counts hits over covered instances only; batch mode counts
+    # over the whole manifest (compute_scores has no coverage gate).
+    hit_scope = (
+        "JOIN covered c ON c.typology_id = mu.typology_id AND c.is_covered" if covered_pass else ""
+    )
     sql = _template("coverage_recall.sql.tmpl").format(
         catalog=catalog,
         run_id=run_id,
         account_parquet=account_parquet,
         pairs_values=pairs_sql,
+        hit_scope=hit_scope,
         **pins,
     )
     rows = run_tsv(sql, timeout)
@@ -299,10 +306,23 @@ def _chance(
     pins: dict[str, str],
     run_id: str,
     account_parquet: str,
+    covered_pass: bool,
     timeout: int,
 ) -> tuple[int, dict[str, int]]:
+    # Covered mode counts the chance floor over covered random instances;
+    # batch over every random instance (compute_scores n_random).
+    random_scope = (
+        "COALESCE(bu.n_uetr, 0) > 0 AND COALESCE(bu.missing_uetr, 0) = 0 "
+        "AND COALESCE(be.missing_entity, 0) = 0"
+        if covered_pass
+        else "TRUE"
+    )
     sql = _template("chance.sql.tmpl").format(
-        catalog=catalog, run_id=run_id, account_parquet=account_parquet, **pins
+        catalog=catalog,
+        run_id=run_id,
+        account_parquet=account_parquet,
+        random_scope=random_scope,
+        **pins,
     )
     rows = run_tsv(sql, timeout)
     n_random = 0
@@ -326,6 +346,20 @@ def _evidence_cap(
 def _n_inst(run_tsv: RunTsv, catalog: str, pins: dict[str, str], timeout: int) -> dict[str, int]:
     sql = _template("n_inst.sql.tmpl").format(catalog=catalog, manifest_pin=pins["manifest_pin"])
     return {_s(r[0]): _i(r[1]) for r in run_tsv(sql, timeout)}
+
+
+def _workload_categories(
+    run_tsv: RunTsv, catalog: str, pins: dict[str, str], timeout: int
+) -> dict[str, str | None]:
+    """typology_type -> expected_workload (the generator's AML category), for
+    the workload_category field compute_scores carries (score_financial.py
+    agg groups by typology_type and expected_workload together, so one
+    workload per type)."""
+    sql = (
+        f"SELECT typology_type, MAX(expected_workload) "
+        f"FROM {catalog}.bronze.manifest {pins['manifest_pin']} GROUP BY typology_type"
+    )
+    return {_s(r[0]): (None if r[1] in (None, "") else _s(r[1])) for r in run_tsv(sql, timeout)}
 
 
 def _by_code(
@@ -607,13 +641,29 @@ def score(
     targets_sql = _values(targets, ["rule_id", "target"])
 
     cov, covered_ids = _coverage_recall(
-        run_tsv, catalog, pins, status_run_id, account_parquet, pairs_sql, timeout
+        run_tsv,
+        catalog,
+        pins,
+        status_run_id,
+        account_parquet,
+        pairs_sql,
+        covered_pass=snapshot_ids is not None,
+        timeout=timeout,
     )
     prec = _precision(run_tsv, catalog, pins, status_run_id, targets_sql, timeout)
     total_alerts, tp_global = _global_fp(run_tsv, catalog, pins, status_run_id, timeout)
-    n_random, chance_hits = _chance(run_tsv, catalog, pins, status_run_id, account_parquet, timeout)
+    n_random, chance_hits = _chance(
+        run_tsv,
+        catalog,
+        pins,
+        status_run_id,
+        account_parquet,
+        covered_pass=snapshot_ids is not None,
+        timeout=timeout,
+    )
     capped = _evidence_cap(run_tsv, catalog, pins, status_run_id, timeout)
     n_inst = _n_inst(run_tsv, catalog, pins, timeout)
+    workload = _workload_categories(run_tsv, catalog, pins, timeout)
     by_code = _by_code(
         run_tsv, catalog, pins, status_run_id, targets_sql, ran_targets, n_inst, meta, timeout
     )
@@ -649,6 +699,7 @@ def score(
             covered_ids,
             summary,
             scoped,
+            workload,
             timeout,
         )
     return _covered_record(
@@ -666,6 +717,7 @@ def score(
         status_rows,
         scoped,
         alert_set,
+        workload,
         timeout,
     )
 
@@ -694,8 +746,11 @@ def _manifest_subject_rows(
     covered_manifest does); None reads every instance (batch). Filtering is in
     Python against typology_id, so a large covered set is not pushed through an
     IN-list argv."""
+    # ARRAY_JOIN renders the id array as a comma string; a raw ARRAY column
+    # prints as a bracketed literal in Trino TSV, which would not parse.
     sql = (
-        f"SELECT typology_id, typology_type, participant_entity_ids, CAST(seed AS BIGINT) "
+        f"SELECT typology_id, typology_type, "
+        f"ARRAY_JOIN(participant_entity_ids, ','), CAST(seed AS BIGINT) "
         f"FROM {catalog}.bronze.manifest {pins['manifest_pin']}"
     )
     rows = run_tsv(sql, timeout)
@@ -731,6 +786,7 @@ def _batch_record(
     covered_ids: set[str],
     summary: dict[str, Any],
     scoped: set[str],
+    workload: dict[str, str | None],
     timeout: int,
 ) -> dict[str, Any]:
     """The batch financial_scoring record: the compute_scores summary plus the
@@ -759,7 +815,7 @@ def _batch_record(
         typologies.append(
             {
                 "typology_type": typ,
-                "workload_category": None,
+                "workload_category": workload.get(typ),
                 "designated_rules": des_rules,
                 "recall": recall,
                 "incidental_recall": incidental,
@@ -794,6 +850,7 @@ def _covered_record(
     status_rows: list[dict],
     scoped: set[str],
     alert_set: dict | None,
+    workload: dict[str, str | None],
     timeout: int,
 ) -> dict[str, Any]:
     """The covered financial_scoring record (mode: covered)."""
@@ -836,7 +893,7 @@ def _covered_record(
                 "rescreen_only_excluded": rescreen.get(typ, 0),
                 "detection_status": state,
                 "designated_rules": des_rules,
-                "workload_category": None,
+                "workload_category": workload.get(typ),
             }
         )
     covered_block = {

@@ -108,21 +108,24 @@ alert_uetr AS (
 pairs AS (
   {pairs_values}
 ),
--- Covered manifest uetrs only (recall_covered is over covered instances).
-covered_uetrs AS (
+-- The manifest uetrs the recall numerator counts over. Covered mode scores
+-- covered instances only (recall_covered); batch mode scores the whole
+-- manifest (score_financial.compute_scores has no coverage gate), so
+-- {hit_scope} is the covered join in covered mode and empty in batch.
+scored_uetrs AS (
   SELECT mu.typology_id, mu.typology_type, mu.uetr
   FROM manifest_uetrs mu
-  JOIN covered c ON c.typology_id = mu.typology_id AND c.is_covered
+  {hit_scope}
 ),
 designated_hit AS (
   SELECT DISTINCT cu.typology_id
-  FROM covered_uetrs cu
+  FROM scored_uetrs cu
   JOIN pairs p ON p.typology_type = cu.typology_type
   JOIN alert_uetr au ON au.rule_id = p.rule_id AND au.uetr = cu.uetr
 ),
 incidental_hit AS (
   SELECT DISTINCT cu.typology_id
-  FROM covered_uetrs cu
+  FROM scored_uetrs cu
   JOIN alert_uetr au ON au.uetr = cu.uetr
 )
 -- One row per instance, with integer flags. The assembler groups these in

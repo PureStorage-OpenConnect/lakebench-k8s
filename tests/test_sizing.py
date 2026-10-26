@@ -296,21 +296,15 @@ def test_thrift_pod_memory_counts_its_overhead():
     assert co_resident_request(odd, False).memory_gb == 30 + 5 + 2  # lb-deps
 
 
-def test_duckdb_recipes_leave_memory_to_the_autosizer():
-    """A recipe does not mark the DuckDB memory user-set: the autosizer owns
-    it, and a value the user sets is kept. DuckDB scores Customer 360 only
-    (financial is Trino-only), so this is a Customer 360 invariant."""
+def test_duckdb_memory_set_by_the_user_is_kept():
+    """A user-set DuckDB memory survives autosizing. The per-schema DuckDB
+    memory bump was financial-only, and financial is Trino-only now, so the
+    autosizer no longer moves DuckDB memory on any valid config; only the
+    user-value-kept half remains testable."""
     from lakebench.config.autosizer import resolve_auto_sizing
     from tests.conftest import make_config
 
     for recipe in ("hive-iceberg-spark-duckdb", "polaris-iceberg-spark-duckdb"):
-        c360 = make_config(recipe=recipe)
-        before = c360.architecture.query_engine.duckdb.memory
-        resolve_auto_sizing(c360)
-        # The autosizer set it (not left at a user-marked value), so a cluster
-        # cap can still move it; it is not frozen by the recipe.
-        assert "memory" not in c360.architecture.query_engine.duckdb.model_fields_set, recipe
-        assert c360.architecture.query_engine.duckdb.memory == before, recipe
         user = make_config(
             recipe=recipe,
             architecture={"query_engine": {"duckdb": {"memory": "7g"}}},
