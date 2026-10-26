@@ -288,9 +288,9 @@ def _passed_of(passed: int, total: int, list_key: str) -> str:
     )
 
 
-# Owner decision D-6 (AML-GOALS #46): continuous Delta ships with no effective
-# table maintenance in v1.6 (VACUUM keeps the 7 d default while streams are
-# live and OPTIMIZE is skipped), and the report says so.
+# Continuous Delta runs no effective table maintenance (VACUUM keeps the
+# 7 d default while streams are live and OPTIMIZE is skipped); the report
+# says so.
 DELTA_CONTINUOUS_NO_MAINTENANCE = "no effective table maintenance in continuous mode (v1.6)"
 
 
@@ -312,6 +312,24 @@ def _post_qph_caveat(pb) -> str:
             + "); the benchmark ran with writers active"
         )
     return "; ".join(parts)
+
+
+def _ingest_ratio_state(pb: Any) -> str:
+    """How a continuous run's ingest ratio reads: unmeasured, trickle_held
+    (below 0.95 because the trickle held intake and silver kept pace),
+    trickle_unmeasured (the same with silver's pace unmeasured), saturated
+    (below 0.95 otherwise), above (over 1.05: past the released-rows
+    estimate) or healthy."""
+    ratio = pb.ingest_ratio
+    if ratio is None:
+        return "unmeasured"
+    if ratio < 0.95:
+        if pb.intake_limit == "trickle_rate" and pb.pipeline_saturated is False:
+            return "trickle_held"
+        if pb.intake_limit == "trickle_rate" and pb.pipeline_saturated is None:
+            return "trickle_unmeasured"
+        return "saturated"
+    return "above" if ratio > 1.05 else "healthy"
 
 
 _STAGE_TO_JOB_TYPES = {
@@ -363,12 +381,10 @@ def _qph_stop_warning(metrics) -> str:
     caveat = _post_qph_caveat(getattr(metrics, "pipeline_benchmark", None))
     if not caveat:
         return ""
-    from html import escape
-
     return (
         ' <span class="qph-stop-warning" style="color: var(--danger); font-size: 0.5em;" '
-        f'title="{escape(caveat)}">'
-        f"WARNING: {escape(caveat)}, so this is not a clean measurement</span>"
+        f'title="{_html_escape(caveat)}">'
+        f"WARNING: {_html_escape(caveat)}, so this is not a clean measurement</span>"
     )
 
 
@@ -508,8 +524,7 @@ class ReportGenerator:
             deployment_name: When ``run_id`` is not supplied, scope the
                 "latest run" lookup to this deployment so a parallel
                 deployment's newer run is not rendered by mistake. ``None``
-                keeps the unscoped behaviour for callers that do not know
-                the deployment (SP-2 owns the deployment_id follow-up).
+                takes the latest run of any deployment.
 
         Returns:
             Path to the written HTML file.
@@ -673,48 +688,31 @@ class ReportGenerator:
         Shows Ingest Ratio below the stage table.  Compute Efficiency and
         Total CPU-hours are now in the Layer 1 summary cards.
         """
-        # Ingest ratio badge -- None means the denominator (datagen row count)
-        # was not measured. Report as N/A rather than fabricating a status.
-        if pb.ingest_ratio is None:
-            ratio_badge = '<span style="color: var(--text-muted);">N/A</span>'
-            ratio_value = "N/A"
-        elif (
-            pb.ingest_ratio < 0.95
-            and pb.intake_limit == "trickle_rate"
-            and pb.pipeline_saturated is False
-        ):
-            note = _html_escape(pb.trickle_note() or "", quote=True)
-            ratio_badge = (
-                f'<span style="color: var(--warning);" title="{note}">'
+        # An unmeasured ratio (no datagen row count) reads N/A, never a status.
+        state = _ingest_ratio_state(pb)
+        ratio_value = "N/A" if state == "unmeasured" else f"{pb.ingest_ratio:.2f}"
+        ratio_badge = {
+            "unmeasured": '<span style="color: var(--text-muted);">N/A</span>',
+            "trickle_held": (
+                '<span style="color: var(--warning);" '
+                f'title="{_html_escape(pb.trickle_note() or "", quote=True)}">'
                 "Held to trickle rate (not saturated)</span>"
-            )
-            ratio_value = f"{pb.ingest_ratio:.2f}"
-        elif (
-            pb.ingest_ratio < 0.95
-            and pb.intake_limit == "trickle_rate"
-            and pb.pipeline_saturated is None
-        ):
-            ratio_badge = (
+            ),
+            "trickle_unmeasured": (
                 '<span style="color: var(--warning);">Held to trickle rate '
                 "(silver pace unmeasured)</span>"
-            )
-            ratio_value = f"{pb.ingest_ratio:.2f}"
-        elif pb.ingest_ratio < 0.95:
-            ratio_badge = '<span style="color: var(--danger);">SATURATED</span>'
-            ratio_value = f"{pb.ingest_ratio:.2f}"
-        elif pb.ingest_ratio > 1.05:
-            ratio_badge = (
-                f'<span style="color: var(--warning);"'
-                f' title="Bronze took more rows than the estimate of rows released by'
-                f" the window's end. The denominator is a mean-rate estimate (trickle"
-                f" files x mean rows per file, or continuous datagen's mean rate one"
-                f' bronze trigger before the window end), not a count.">'
-                f"{pb.ingest_ratio:.2f} (bronze above released-rows estimate)</span>"
-            )
-            ratio_value = f"{pb.ingest_ratio:.2f}"
-        else:
-            ratio_badge = '<span style="color: var(--success);">Healthy</span>'
-            ratio_value = f"{pb.ingest_ratio:.2f}"
+            ),
+            "saturated": '<span style="color: var(--danger);">SATURATED</span>',
+            "above": (
+                '<span style="color: var(--warning);"'
+                ' title="Bronze took more rows than the estimate of rows released by'
+                " the window's end. The denominator is a mean-rate estimate (trickle"
+                " files x mean rows per file, or continuous datagen's mean rate one"
+                ' bronze trigger before the window end), not a count.">'
+                f"{ratio_value} (bronze above released-rows estimate)</span>"
+            ),
+            "healthy": '<span style="color: var(--success);">Healthy</span>',
+        }[state]
 
         from lakebench.reports import derived as dv
 
@@ -860,7 +858,7 @@ class ReportGenerator:
 
         stage_data = []
         for i, s in enumerate(pb.stages):
-            if s.stage_name in ("datagen",) and is_sustained:
+            if s.stage_name == "datagen" and is_sustained:
                 continue
             cpu_sec: float | None
             if s.stage_name == "query":
@@ -1077,34 +1075,27 @@ class ReportGenerator:
         Always states the maintenance policy the run was measured under, and
         for a continuous Delta run that it had no effective maintenance.
         """
-        from html import escape as _pol_esc
-
         pb = metrics.pipeline_benchmark
         policy_rows = [
             "<tr><td>Maintenance policy</td>"
-            f'<td><code class="mono">{_pol_esc(metrics.maintenance_policy_id)}</code></td></tr>'
+            f'<td><code class="mono">{_html_escape(metrics.maintenance_policy_id)}</code></td></tr>'
         ]
         cs = metrics.config_snapshot or {}
-        # The statement describes this policy; earlier continuous Delta runs
-        # vacuumed at the requested retention (m1-legacy).
-        if (
-            self._is_sustained(metrics)
-            and cs.get("table_format") == "delta"
+        # Continuous Delta has no effective maintenance under every policy but
+        # the legacy one, which vacuumed at the requested retention.
+        delta_limitation = (
+            cs.get("table_format") == "delta"
             and metrics.maintenance_policy_id != LEGACY_MAINTENANCE_POLICY_ID
-        ):
-            policy_rows.append(
-                f"<tr><td>Continuous maintenance</td><td>{DELTA_CONTINUOUS_NO_MAINTENANCE}</td></tr>"
-            )
+        )
         if self._is_sustained(metrics):
             from lakebench.reports.scorecard import continuous_trend_rows
 
-            policy_rows.extend(
-                continuous_trend_rows(
-                    pb,
-                    delta_limitation=cs.get("table_format") == "delta"
-                    and metrics.maintenance_policy_id != LEGACY_MAINTENANCE_POLICY_ID,
+            if delta_limitation:
+                policy_rows.append(
+                    "<tr><td>Continuous maintenance</td>"
+                    f"<td>{DELTA_CONTINUOUS_NO_MAINTENANCE}</td></tr>"
                 )
-            )
+            policy_rows.extend(continuous_trend_rows(pb, delta_limitation=delta_limitation))
         if not pb:
             return self._maintenance_table(policy_rows)
 
@@ -1137,22 +1128,18 @@ class ReportGenerator:
         if maint_elapsed > 0:
             rows.append(f"<tr><td>Maintenance time</td><td>{maint_elapsed:.0f}s</td></tr>")
         if pb.maintenance_stopped:
-            from html import escape as _ms_esc
-
             # Holds for the headline QpH too: it was measured after this.
             rows.append(
                 "<tr><td>Maintenance outcome</td>"
                 '<td style="color: var(--danger); font-weight: 600">stopped before '
-                f"completion ({_ms_esc(pb.maintenance_stop_reason)}); QpH measured after "
+                f"completion ({_html_escape(pb.maintenance_stop_reason)}); QpH measured after "
                 "maintenance may include a statement still running</td></tr>"
             )
         if pb.maintenance_live_streams:
-            from html import escape as _ls_esc
-
             rows.append(
                 "<tr><td>Streams during maintenance</td>"
                 '<td style="color: var(--danger); font-weight: 600">live '
-                f"({_ls_esc(pb.maintenance_live_streams_reason)}); QpH measured after "
+                f"({_html_escape(pb.maintenance_live_streams_reason)}); QpH measured after "
                 "maintenance ran with writers active</td></tr>"
             )
         # Pre and post QpH are each over the queries that round ran, which can
@@ -1196,12 +1183,10 @@ class ReportGenerator:
             )
             caveat = _post_qph_caveat(pb)
             if caveat:
-                from html import escape as _stop_esc
-
                 rows.append(
                     f"<tr><td>{label}</td><td>{post_qph:.1f} "
                     '<span style="color: var(--danger); font-weight: 600">'
-                    f"(warning: {_stop_esc(caveat)}, so this is not a clean "
+                    f"(warning: {_html_escape(caveat)}, so this is not a clean "
                     "measurement)</span></td></tr>"
                 )
             else:
@@ -1235,16 +1220,12 @@ class ReportGenerator:
                 f'<td style="color: {color}; font-weight: 600">{value_html}</td></tr>'
             )
         elif pre_qph > 0 and pb.maintenance_value_reason:
-            from html import escape
-
             rows.append(
                 f"<tr><td>{paired_label}</td>"
-                f"<td>not reported ({escape(pb.maintenance_value_reason)})</td></tr>"
+                f"<td>not reported ({_html_escape(pb.maintenance_value_reason)})</td></tr>"
             )
         settle_s = pb.maintenance_settle_seconds
         if settle_s is not None:
-            from html import escape as _esc
-
             detail = pb.maintenance_settle or {}
             probes = detail.get("probes") or []
             times = ", ".join(
@@ -1263,12 +1244,12 @@ class ReportGenerator:
                 state = f"did not settle ({detail.get('reason') or 'unknown'})"
             rows.append(
                 "<tr><td>Storage settle wait</td>"
-                f"<td>{_esc(state)}; not counted in time to value</td></tr>"
+                f"<td>{_html_escape(state)}; not counted in time to value</td></tr>"
             )
             if probes:
                 rows.append(
-                    f"<tr><td>Settle probes ({_esc(str(detail.get('probe_query', '')))})</td>"
-                    f"<td>{_esc(times)}</td></tr>"
+                    f"<tr><td>Settle probes ({_html_escape(str(detail.get('probe_query', '')))})</td>"
+                    f"<td>{_html_escape(times)}</td></tr>"
                 )
 
         return self._maintenance_table(rows)
@@ -1305,37 +1286,28 @@ class ReportGenerator:
 
         # Scale Ratio / Ingest Ratio
         if is_sustained and pb:
-            ratio = pb.ingest_ratio
-            if ratio is None:
-                indicators.append(("Ingest Ratio", "status-warning", "N/A unmeasured"))
-            elif (
-                ratio < 0.95
-                and pb.intake_limit == "trickle_rate"
-                and pb.pipeline_saturated is False
-            ):
-                indicators.append(
-                    ("Ingest Ratio", "status-warning", f"{ratio:.2f} held to trickle rate")
-                )
-            elif (
-                ratio < 0.95 and pb.intake_limit == "trickle_rate" and pb.pipeline_saturated is None
-            ):
-                indicators.append(
-                    ("Ingest Ratio", "status-warning", f"{ratio:.2f} trickle, silver unmeasured")
-                )
-            elif ratio < 0.95:
-                indicators.append(("Ingest Ratio", "status-failed", f"{ratio:.2f} SATURATED"))
-            elif ratio > 1.05:
-                indicators.append(
-                    (
+            state = _ingest_ratio_state(pb)
+            r = "" if state == "unmeasured" else f"{pb.ingest_ratio:.2f}"
+            indicators.append(
+                {
+                    "unmeasured": ("Ingest Ratio", "status-warning", "N/A unmeasured"),
+                    "trickle_held": ("Ingest Ratio", "status-warning", f"{r} held to trickle rate"),
+                    "trickle_unmeasured": (
                         "Ingest Ratio",
                         "status-warning",
-                        f'{ratio:.2f} <span title="Bronze took more rows than the'
-                        f" estimate of rows released by the window's end (a mean-rate"
-                        f' estimate, not a count)">(above released-rows estimate)</span>',
-                    )
-                )
-            else:
-                indicators.append(("Ingest Ratio", "status-success", f"{ratio:.2f} Healthy"))
+                        f"{r} trickle, silver unmeasured",
+                    ),
+                    "saturated": ("Ingest Ratio", "status-failed", f"{r} SATURATED"),
+                    "above": (
+                        "Ingest Ratio",
+                        "status-warning",
+                        f'{r} <span title="Bronze took more rows than the'
+                        " estimate of rows released by the window's end (a mean-rate"
+                        ' estimate, not a count)">(above released-rows estimate)</span>',
+                    ),
+                    "healthy": ("Ingest Ratio", "status-success", f"{r} Healthy"),
+                }[state]
+            )
         elif pb:
             ratio = pb.scale_ratio
             if not ratio:
@@ -1547,8 +1519,6 @@ class ReportGenerator:
         trend_html = (
             f'<p style="color: var(--text-muted); font-style: italic; margin-top: 0.75rem;">'
             f"{trend}</p>"
-            if trend
-            else ""
         )
 
         return f"""
@@ -2571,16 +2541,15 @@ class ReportGenerator:
         if not metrics.streaming:
             return ""
 
-        # Build stage lookup from pipeline_benchmark for compute columns
-        _JOB_TYPE_TO_STAGE = {
-            "bronze-ingest": "bronze",
-            "silver-stream": "silver",
-            "gold-refresh": "gold",
+        from lakebench.reports.replay import STREAM_STAGE
+
+        # Each stage's index and metrics, for the compute columns.
+        stage_at = {
+            st.stage_name: (i, st)
+            for i, st in enumerate(
+                metrics.pipeline_benchmark.stages if metrics.pipeline_benchmark else []
+            )
         }
-        stage_map: dict[str, object] = {}
-        if metrics.pipeline_benchmark and metrics.pipeline_benchmark.stages:
-            for st in metrics.pipeline_benchmark.stages:
-                stage_map[st.stage_name] = st
 
         caps_bound = caps_bound_from(metrics)
         from lakebench.reports.formatter import trickle_caps_from
@@ -2597,18 +2566,12 @@ class ReportGenerator:
         exec_paths: list[str] = []
         cpu_terms: list[str] = []
         mem_terms: list[str] = []
-        stage_index = {
-            st.stage_name: i
-            for i, st in enumerate(
-                metrics.pipeline_benchmark.stages if metrics.pipeline_benchmark else []
-            )
-        }
         for si, s in enumerate(metrics.streaming):
             status_class = "status-success" if s.success else "status-failed"
             status_text = "Pass" if s.success else "Fail"
+            stage_name = STREAM_STAGE.get(s.job_type, "")
 
             if s.throughput_rps > 0:
-                stage_name = _JOB_TYPE_TO_STAGE.get(s.job_type, "")
                 stage_bound = caps_bound if _stage_matches_cap(stage_name, caps_bound) else []
                 if s.job_type == "bronze-ingest":
                     stage_bound = [*stage_bound, *trickle_caps]
@@ -2625,8 +2588,7 @@ class ReportGenerator:
             freshness = f"{s.freshness_seconds:.0f}s" if s.freshness_seconds else "-"
 
             # Compute columns from stage metrics
-            stage_name = _JOB_TYPE_TO_STAGE.get(s.job_type, "")
-            stage = stage_map.get(stage_name)
+            stage_i, stage = stage_at.get(stage_name, (0, None))
             if stage:
                 execs = str(stage.executor_count) if stage.executor_count > 0 else "-"
                 cores_mem = (
@@ -2635,7 +2597,7 @@ class ReportGenerator:
                     else "-"
                 )
                 cpu_sec = stage.executor_count * stage.executor_cores * s.elapsed_seconds
-                sp = dv.path("pipeline_benchmark", "stages", stage_index[stage_name])
+                sp = dv.path("pipeline_benchmark", "stages", stage_i)
                 cpu_sec_str = dv.total(
                     cpu_sec,
                     paths=dv.product(
@@ -3634,9 +3596,7 @@ class ReportGenerator:
                 )
             notes.append(note)
         # One entry per bucket, the name a value (never a key: the fixture
-        # scrubber refuses a record keyed by bucket name). Development builds
-        # of 1.7.0 keyed these by bucket name; that shape was never released
-        # and is not read.
+        # scrubber refuses a record keyed by bucket name).
         bucket_rows = sm.get("buckets")
         listing_notes = []
         for b in bucket_rows if isinstance(bucket_rows, list) else []:
@@ -3721,17 +3681,14 @@ class ReportGenerator:
                     f"<td>{e(_scratch(j.job_type))}</td></tr>"
                 )
         else:
-            stage_of = {
-                "bronze-ingest": "bronze",
-                "silver-stream": "silver",
-                "gold-refresh": "gold",
-            }
+            from lakebench.reports.replay import STREAM_STAGE
+
             stages = {
                 st.stage_name: st
                 for st in (metrics.pipeline_benchmark.stages if metrics.pipeline_benchmark else [])
             }
             for sm in metrics.streaming:
-                st = stages.get(stage_of.get(sm.job_type, ""))
+                st = stages.get(STREAM_STAGE.get(sm.job_type, ""))
                 if st is None:
                     continue
                 rows.append(

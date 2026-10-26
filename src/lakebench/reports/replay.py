@@ -120,6 +120,8 @@ _PROFILES: dict[tuple[str, str], dict[str, Any]] = {
 # The sustained streams, upstream first: the record's stream name, and the
 # handoff (as the balance block names it) that feeds the stage after it.
 _STREAMS = ("bronze-ingest", "silver-stream", "gold-refresh")
+#: The pipeline stage each continuous stream's job type drives.
+STREAM_STAGE = {"bronze-ingest": "bronze", "silver-stream": "silver", "gold-refresh": "gold"}
 _HANDOFFS = ("datagen->bronze", "bronze->silver", "silver->gold")
 
 _MAX_BUCKETS = 240
@@ -309,12 +311,7 @@ def _sustained(
         for i, name in enumerate(_HANDOFFS)
         if (balance_h.get(name) or {}).get("keeps_up") is False
     }
-    stage_key_for_stream = {
-        "bronze-ingest": "bronze",
-        "silver-stream": "silver",
-        "gold-refresh": "gold",
-    }
-    bottleneck_keys = {stage_key_for_stream[s] for s in behind}
+    bottleneck_keys = {STREAM_STAGE[s] for s in behind}
     stages = []
     for idx, (start, value, path, rows) in enumerate(spec):
         placed = start is not None and w1 is not None
