@@ -1,9 +1,12 @@
-"""The scorer's recall.json sidecar lands at the key the held-out audit reads."""
+"""The scorer's recall.json sidecar lands at the key the held-out audit reads,
+and a score the engine fails records the engine's error as its reason."""
 
 from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+
+import pytest
 
 from lakebench.cli import _aml_post
 from lakebench.s3.client import S3Client
@@ -27,3 +30,29 @@ def test_recall_json_is_put_under_the_gold_scoring_prefix(monkeypatch):
     assert calls[0]["Bucket"] == "lb-gold"
     assert calls[0]["Key"] == "scoring/run-1/recall.json"
     assert json.loads(calls[0]["Body"]) == {"mode": "covered", "status": "scored"}
+
+
+@pytest.mark.parametrize("covered", [None, {"cycle": 3}])
+def test_an_engine_failure_is_the_not_scored_reason(monkeypatch, covered):
+    from lakebench.aml import scoring_queries as sq
+
+    def _fail(*a, **k):
+        raise RuntimeError("alerts.sql: Query exceeded distributed total memory limit")
+
+    executor = SimpleNamespace(query_rows=None, catalog_name="lakehouse")
+    monkeypatch.setattr("lakebench.benchmark.executor.get_executor", lambda cfg: executor)
+    monkeypatch.setattr(_aml_post, "_rules_meta", lambda: None)
+    monkeypatch.setattr(_aml_post, "COVERED_OPTIONS", ())
+    monkeypatch.setattr(sq, "score", _fail)
+
+    if covered is None:
+        out = _aml_post.score_financial_via_queries(None, "run-1", covered=None, timeout=60)
+        mode, head = "batch", "the scoring queries did not complete"
+    else:
+        out = _aml_post.continuous_scoring(None, "run-1", covered, "", None, None, 60)
+        mode, head = "covered", "the score query did not complete"
+    assert out == {
+        "mode": mode,
+        "status": "not_scored",
+        "reason": f"{head}: alerts.sql: Query exceeded distributed total memory limit",
+    }

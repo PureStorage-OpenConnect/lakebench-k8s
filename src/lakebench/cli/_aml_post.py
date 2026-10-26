@@ -121,9 +121,10 @@ def score_financial_via_queries(
     Covered mode: *covered* is the scored tick record; every table is read at
     the snapshot that tick pinned and alert_set comes from the tick. Batch:
     *covered* is None, tables read at their current snapshot. Returns the
-    financial_scoring record, or None only on an unexpected failure.
-    Best effort: a scoring failure never fails a pipeline that already
-    succeeded.
+    financial_scoring record; a query that fails on the engine returns
+    ``not_scored`` with the engine's error as its reason. None only on an
+    unexpected failure. Best effort: a scoring failure never fails a
+    pipeline that already succeeded.
     """
     try:
         from lakebench.aml import scoring_queries as sq
@@ -159,6 +160,14 @@ def score_financial_via_queries(
             )
         except sq.NotScored as e:
             record = _not_scored_record(str(e), covered)
+        except RuntimeError as e:
+            # An engine failure: said here, and its text is the record's
+            # reason, in the record the callers write when no score came back.
+            print_warning(f"Financial scoring did not complete: {esc(str(e))}")
+            if covered is None:
+                reason = f"the scoring queries did not complete: {e}"
+                return {"mode": "batch", "status": "not_scored", "reason": reason}
+            return not_scored(f"the score query did not complete: {e}")
 
         _write_recall_json(cfg, run_id, record)
         print_success(scoring_count_line(record))
