@@ -1838,10 +1838,7 @@ def pinned_read(spark, table, table_format):
     silver state. A table with no commit yet reads as it is (None)."""
     refresh_table(spark, table)
     if table_format == "delta":
-        rows = spark.sql(f"DESCRIBE HISTORY {table} LIMIT 1").collect()
-        if not rows:
-            return spark.table(table), None
-        version = int(rows[0]["version"])
+        version = delta_table_version(spark, table)
         return spark.sql(f"SELECT * FROM {table} VERSION AS OF {version}"), version
     rows = spark.sql(
         f"SELECT snapshot_id FROM {table}.history WHERE is_current_ancestor "
@@ -3022,6 +3019,42 @@ def _jobs_evicted_since(jobs, mark_ms):
     )
 
 
+def _listener_drained(jsc, wait_s):
+    """Wait up to ``wait_s`` for the listener bus to drain; False if it did not."""
+    try:
+        jsc.listenerBus().waitUntilEmpty(int(wait_s * 1000))
+        return True
+    except Exception:  # noqa: BLE001 -- TimeoutException, or no such call
+        return False
+
+
+def _stage_attempts(store, tracker, job_ids):
+    """``(attempts, missing)``: ``(stage id, last attempt, status)`` for every
+    stage of ``job_ids`` that ran (skipped and pending stages left out), in
+    stage-id order, and whether the store had dropped any of the jobs or
+    stages."""
+    stage_ids, missing = set(), False
+    for job_id in job_ids:
+        info = tracker.getJobInfo(job_id)
+        if info is None:
+            missing = True
+            continue
+        stage_ids.update(int(s) for s in info.stageIds)
+    attempts = []
+    for sid in sorted(stage_ids):
+        try:
+            sd = store.lastStageAttempt(sid)
+        except Exception as e:  # noqa: BLE001
+            if "NoSuchElementException" not in str(e):
+                raise
+            missing = True  # dropped from the store
+            continue
+        status = sd.status().toString()
+        if status not in ("SKIPPED", "PENDING"):
+            attempts.append((sid, sd, status))
+    return attempts, missing
+
+
 def driver_output_bytes(spark=None, *, wait_s=1.0):
     """``(bytes, complete)``: the bytes the application's tasks wrote, summed
     from the driver's status store, or None when it cannot be read.
@@ -3047,11 +3080,7 @@ def driver_output_bytes(spark=None, *, wait_s=1.0):
             return None
         sc = spark.sparkContext
         jsc = sc._jsc.sc()
-        complete = True
-        try:
-            jsc.listenerBus().waitUntilEmpty(int(wait_s * 1000))
-        except Exception:  # noqa: BLE001 -- TimeoutException, or no such call
-            complete = False
+        complete = _listener_drained(jsc, wait_s)
         if _status_events_dropped(jsc) > 0:
             complete = False
         store = jsc.statusStore()
@@ -3059,26 +3088,9 @@ def driver_output_bytes(spark=None, *, wait_s=1.0):
         jobs = list(_store_jobs(store))
         if len(jobs) < int(jsc.dagScheduler().numTotalJobs()):
             complete = False  # the store dropped completed jobs
-        stage_ids = set()
-        for job_id, _status, _comp, _group in jobs:
-            info = tracker.getJobInfo(job_id)
-            if info is None:
-                complete = False
-                continue
-            stage_ids.update(int(x) for x in info.stageIds)
-        total = 0
-        for sid in sorted(stage_ids):
-            try:
-                sd = store.lastStageAttempt(sid)
-            except Exception as e:  # noqa: BLE001
-                if "NoSuchElementException" not in str(e):
-                    raise
-                complete = False  # dropped from the store
-                continue
-            if sd.status().toString() in ("SKIPPED", "PENDING"):
-                continue
-            total += int(sd.outputBytes())
-        return total, complete
+        attempts, missing = _stage_attempts(store, tracker, [j[0] for j in jobs])
+        total = sum(int(sd.outputBytes()) for _sid, sd, _status in attempts)
+        return total, complete and not missing
     except Exception as e:  # noqa: BLE001 -- a measurement, never the job's result
         log(f"[output-bytes] unavailable reason={one_line(f'{type(e).__name__}: {e}')}")
         return None
@@ -3153,17 +3165,11 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
     raises, so detection cannot fail because of it. Returns the logged
     stage rows.
     """
-    import time
-
     started = time.time()
     try:
         sc = spark.sparkContext
         jsc = sc._jsc.sc()
-        complete = True
-        try:
-            jsc.listenerBus().waitUntilEmpty(int(wait_s * 1000))
-        except Exception:  # noqa: BLE001 -- TimeoutException, or no such call
-            complete = False
+        complete = _listener_drained(jsc, wait_s)
         tracker = sc.statusTracker()
         store = jsc.statusStore()
         job_ids = list(tracker.getJobIdsForGroup(group))
@@ -3186,25 +3192,10 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
                     f"groups={sorted({str(g) for _, g in foreign})[:5]}"
                 )
             lossy = _status_events_dropped(jsc) > mark["dropped"]
-        stage_ids = set()
-        for job_id in job_ids:
-            info = tracker.getJobInfo(job_id)
-            if info is None:
-                truncated = True
-                continue
-            stage_ids.update(int(s) for s in info.stageIds)
+        attempts, missing = _stage_attempts(store, tracker, job_ids)
+        truncated = truncated or missing
         stages = []
-        for sid in sorted(stage_ids):
-            try:
-                sd = store.lastStageAttempt(sid)
-            except Exception as e:  # noqa: BLE001
-                if "NoSuchElementException" not in str(e):
-                    raise
-                truncated = True  # dropped from the store
-                continue
-            status = sd.status().toString()
-            if status in ("SKIPPED", "PENDING"):
-                continue
+        for sid, sd, status in attempts:
             sub, comp = sd.submissionTime(), sd.completionTime()
             wall = (
                 round((comp.get().getTime() - sub.get().getTime()) / 1000.0, 1)
