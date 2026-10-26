@@ -16,8 +16,6 @@ from typing import Any
 
 from lakebench.cli._helpers import console, esc, print_info, print_success, print_warning
 
-GOLD_REFRESH_APP = "lakebench-gold-refresh"
-
 #: The covered-mode table names, in tick-record terms.
 COVERED_OPTIONS = (
     ("txns", "pinned_txns"),
@@ -115,8 +113,7 @@ def score_financial_via_queries(
     covered: dict | None,
     timeout: int,
 ) -> dict[str, Any] | None:
-    """Score recall and precision with SQL on the query engine (the scorer
-    that replaces the score_financial Spark job).
+    """Score recall and precision with SQL on the query engine.
 
     Covered mode: *covered* is the scored tick record; every table is read at
     the snapshot that tick pinned and alert_set comes from the tick. Batch:
@@ -178,8 +175,8 @@ def score_financial_via_queries(
 
 
 def _not_scored_record(reason: str, covered: dict | None) -> dict[str, Any]:
-    """The not_scored record, in the shape the Spark scorer wrote: batch has
-    no covered block; covered carries the tick's snapshot ids."""
+    """The record of a score the queries refused: batch has no covered
+    block; covered carries the tick's snapshot ids."""
     if covered is None:
         return {"mode": "batch", "status": "not_scored", "reason": reason}
     body: dict[str, Any] = {
@@ -338,11 +335,11 @@ def run_time_travel(
         )
         if interrupt is not None:
             interrupt.submitted(status)
-        submitted = status.state != JobState.FAILED
         if status.state == JobState.FAILED:
             return tt_mod.not_run(
                 continuous, f"the job was not submitted: {status.message}", policy
             )
+        submitted = True
         result = monitor.wait_for_completion(app_name, timeout_seconds=timeout, poll_interval=15)
         if interrupt is not None and result.success:
             interrupt.finished("SparkApplication", app_name)
