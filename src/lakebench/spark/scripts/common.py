@@ -2669,9 +2669,25 @@ def ensure_namespaces_for_ddl(spark, catalog, ddls):
     ensure_namespaces(spark, catalog, tables)
 
 
+def _semi_join_sealed(txns_df, versions):
+    """``txns_df`` rows whose ``(_stream_id, _batch_id)`` has a versions row."""
+    from pyspark.sql.functions import col as _col
+
+    versions = versions.select(
+        _col("stream_id").alias("_sv_stream_id"),
+        _col("batch_id").alias("_sv_batch_id"),
+    )
+    return txns_df.join(
+        versions,
+        (txns_df["_stream_id"] == versions["_sv_stream_id"])
+        & (txns_df["_batch_id"] == versions["_sv_batch_id"]),
+        "left_semi",
+    )
+
+
 def sealed_txns_filter(spark, txns_df, catalog, versions_table):
     """Semi-join ``txns_df`` against ``silver_batch_versions`` on
-    ``(_stream_id, _batch_id)`` (I10).
+    ``(_stream_id, _batch_id)``.
 
     A driver crash between the AML stream's transactions/edges commits and
     the sealed-marker commit leaves rows visible in silver.transactions
@@ -2691,31 +2707,20 @@ def sealed_txns_filter(spark, txns_df, catalog, versions_table):
     this call correctly becomes visible on a later reader; a batch not yet
     sealed anywhere in the versions table stays hidden.
 
-    Fail-open on a missing versions table: the helper logs and returns
-    ``txns_df`` unchanged so a legacy catalog that predates I10 still
-    reads (the next silver run bootstraps the sidecar). Callers do not
-    have to catch this: the filter degrades to the pre-I10 behaviour.
+    Fails open only when the versions table does not exist: the helper
+    logs and returns ``txns_df`` unchanged so a catalog created before the
+    versions table still reads (the next silver run creates it). Any other
+    error reading it raises, so a transient catalog failure fails the
+    caller instead of letting it read partial batches.
     """
-    from pyspark.sql.functions import col as _col
-
     versions_fq = f"{catalog}.{versions_table}"
-    try:
-        versions = spark.table(versions_fq).select(
-            _col("stream_id").alias("_sv_stream_id"),
-            _col("batch_id").alias("_sv_batch_id"),
-        )
-    except Exception as e:  # noqa: BLE001
+    if not table_exists(spark, versions_fq):
         log(
-            f"[i10] {versions_fq} not readable ({e}); "
+            f"[i10] {versions_fq} does not exist; "
             "falling back to unfiltered read. A silver run bootstraps the sidecar."
         )
         return txns_df
-    return txns_df.join(
-        versions,
-        (txns_df["_stream_id"] == versions["_sv_stream_id"])
-        & (txns_df["_batch_id"] == versions["_sv_batch_id"]),
-        "left_semi",
-    )
+    return _semi_join_sealed(txns_df, spark.table(versions_fq))
 
 
 class materialised_source:  # noqa: N801 -- used like a function: with materialised_source(...)
@@ -2809,15 +2814,10 @@ def sealed_txns_filter_at(spark, txns_df, catalog, versions_table, versions_snap
             "sealed_txns_filter_at needs an int versions snapshot id, got "
             f"{type(versions_snapshot).__name__} {versions_snapshot!r}"
         )
-    from pyspark.sql.functions import col as _col
-
     versions_fq = f"{catalog}.{versions_table}"
     try:
         versions = spark.sql(
             f"SELECT stream_id, batch_id FROM {versions_fq} VERSION AS OF {versions_snapshot}"
-        ).select(
-            _col("stream_id").alias("_sv_stream_id"),
-            _col("batch_id").alias("_sv_batch_id"),
         )
         # Classic pyspark analyses spark.sql eagerly; reading the schema
         # forces analysis on a lazy client too, so the snapshot and the
@@ -2827,12 +2827,7 @@ def sealed_txns_filter_at(spark, txns_df, catalog, versions_table, versions_snap
         raise SealedFilterError(
             f"{versions_fq} not readable at snapshot {versions_snapshot}: {e}"
         ) from e
-    return txns_df.join(
-        versions,
-        (txns_df["_stream_id"] == versions["_sv_stream_id"])
-        & (txns_df["_batch_id"] == versions["_sv_batch_id"]),
-        "left_semi",
-    )
+    return _semi_join_sealed(txns_df, versions)
 
 
 # Bumped when the fingerprint definition changes, so fingerprints made by two
