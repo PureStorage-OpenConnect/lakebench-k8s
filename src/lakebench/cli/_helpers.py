@@ -129,13 +129,15 @@ def print_error(message: object) -> None:
 
 def load_config_or_exit(
     path: Path,
-    purpose: LoadPurpose,
     *,
+    purpose: LoadPurpose,
     name_override: str | None = None,
     allow_long_names: bool = False,
 ) -> LakebenchConfig:
-    """``load_config(path, purpose=purpose, ...)``, or the load error on
-    stderr (each validation error on its own line) and exit USAGE."""
+    """``load_config(path, purpose=purpose, ...)``, or report the load error
+    and exit USAGE. The error line goes to stderr; a validation failure then
+    lists each error on its own line on stdout. *purpose* is keyword-only
+    because tests/test_look_guard.py finds each load by its ``purpose=``."""
     from lakebench.config import (
         ConfigError,
         ConfigFileNotFoundError,
