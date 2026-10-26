@@ -1,11 +1,9 @@
--- Two scalars by_code needs that are cheaper on their own:
---  uncoded  = alerts of this run with an empty or null reason_codes array
---             (coalesce(size(reason_codes), -1) <= 0 in Spark); when > 0 the
---             by-code block is not scored.
+-- The scalar by_code checks first, cheaper on its own: alerts of this run
+-- with an empty or null reason_codes array (coalesce(size(reason_codes), -1)
+-- <= 0 in Spark). When it is above 0 the by-code block is not scored.
 -- Placeholders: {catalog}, {run_id}, {alerts_pin}.
 SELECT
   SUM(CASE WHEN a.reason_codes IS NULL OR CARDINALITY(a.reason_codes) = 0
-           THEN 1 ELSE 0 END) AS uncoded,
-  COUNT(*) AS total
+           THEN 1 ELSE 0 END) AS uncoded
 FROM {catalog}.gold.alerts {alerts_pin} a
 WHERE a.run_id = '{run_id}';

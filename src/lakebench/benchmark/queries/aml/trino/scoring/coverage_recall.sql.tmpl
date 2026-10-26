@@ -1,6 +1,6 @@
 -- Coverage and covered-recall per typology, as integer counts only.
 -- One statement, and silver.transactions appears in one CTE (sealed) that
--- is referenced once, so it is scanned once (design finding 10).
+-- is referenced once, so it is scanned once.
 -- Placeholders: {catalog}; the table pins {txns_pin} {versions_pin}
 -- {accounts_pin} {entities_pin} {alerts_pin} {manifest_pin} each render as
 -- "FOR VERSION AS OF <id>" (covered mode) or "" (batch mode). bronze.accounts
@@ -21,21 +21,13 @@
 --  * incidental hit = ... in an alert of any rule;
 --  * recall/incidental ratios are computed by the assembler from these counts.
 WITH manifest AS (
-  SELECT typology_id, typology_type, expected_workload,
-         participant_uetrs, participant_entity_ids
+  SELECT typology_id, typology_type, participant_uetrs, participant_entity_ids
   FROM {catalog}.bronze.manifest {manifest_pin}
 ),
--- explode_outer of participant uetrs: an instance with an empty/null array
--- keeps one row with uetr = NULL.
-inst_uetr AS (
-  SELECT m.typology_id, m.typology_type, u.uetr
-  FROM manifest m
-  LEFT JOIN UNNEST(m.participant_uetrs) AS u(uetr) ON TRUE
-),
--- Distinct over (typology_id, typology_type, expected_workload, uetr), as the
--- Spark manifest_uetrs frame.
+-- explode_outer of participant uetrs, distinct per instance: an instance
+-- with an empty/null array keeps one row with uetr = NULL.
 manifest_uetrs AS (
-  SELECT DISTINCT m.typology_id, m.typology_type, m.expected_workload, u.uetr
+  SELECT DISTINCT m.typology_id, m.typology_type, u.uetr
   FROM manifest m
   LEFT JOIN UNNEST(m.participant_uetrs) AS u(uetr) ON TRUE
 ),
@@ -70,13 +62,14 @@ id_map AS (
 entity_keys AS (
   SELECT DISTINCT entity_id AS key FROM {catalog}.silver.entities {entities_pin}
 ),
--- Per-instance uetr coverage: how many participant uetrs, how many missing
--- from the sealed set.
+-- Per-instance uetr coverage: how many distinct participant uetrs, how many
+-- missing from the sealed set. Only n_uetr > 0 and missing_uetr = 0 are
+-- tested, which counting distinct uetrs does not change.
 by_uetr AS (
   SELECT iu.typology_id,
          COUNT(iu.uetr) AS n_uetr,
          SUM(CASE WHEN iu.uetr IS NOT NULL AND s.uetr IS NULL THEN 1 ELSE 0 END) AS missing_uetr
-  FROM inst_uetr iu
+  FROM manifest_uetrs iu
   LEFT JOIN sealed s ON s.uetr = iu.uetr
   GROUP BY iu.typology_id
 ),
