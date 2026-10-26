@@ -365,6 +365,31 @@ def _registered_corpus_record(
     return _CorpusRecord(entry)
 
 
+def datagen_pod_failure(prog: dict, namespace: str, bar) -> str | None:
+    """The failure one datagen progress read (``DatagenDeployer.get_progress``)
+    shows, said on the console. OOMKilled or crash-looping pods stop *bar*
+    (a Rich ``Progress``), print why, and return the journal message; the
+    caller then exits FAILED. A crash-looping generator never finishes, so
+    waiting out the timeout (hours at large scale) only hides the failure.
+    Pending pods are printed under the bar and return None: the wait goes on.
+    """
+    if prog.get("oom_pods"):
+        bar.stop()
+        print_error(f"OOMKilled: {', '.join(prog['oom_pods'])}")
+        print_info("Increase datagen memory or reduce parallelism")
+        return "OOMKilled pods detected"
+    if prog.get("crash_pods"):
+        bar.stop()
+        details = prog.get("crash_details", {})
+        for pod in prog["crash_pods"]:
+            print_error(f"Datagen pod crash-looping: {pod} {details.get(pod, '')}")
+        print_info(f"See why with: kubectl logs -n {namespace} {prog['crash_pods'][0]} --previous")
+        return "Datagen pods crash-looping"
+    if prog.get("pending_pods"):
+        bar.console.print(f"  [yellow]{len(prog['pending_pods'])} pod(s) pending[/yellow]")
+    return None
+
+
 def _generate_loaded(
     cfg,
     config_file: Path,
@@ -575,30 +600,9 @@ def _generate_loaded(
                     progress_bar.update(task, completed=total_completions)
                     break
 
-                # Surface pod failures early
-                if prog.get("oom_pods"):
-                    progress_bar.stop()
-                    print_error(f"OOMKilled: {', '.join(prog['oom_pods'])}")
-                    print_info("Increase datagen memory or reduce parallelism")
-                    failure = "OOMKilled pods detected"
+                failure = datagen_pod_failure(prog, cfg.get_namespace(), progress_bar) or ""
+                if failure:
                     raise typer.Exit(ExitCode.FAILED)
-                if prog.get("crash_pods"):
-                    # A crash-looping generator never finishes; waiting out the
-                    # timeout (hours at large scale) only hides the failure.
-                    progress_bar.stop()
-                    details = prog.get("crash_details", {})
-                    for pod in prog["crash_pods"]:
-                        print_error(f"Datagen pod crash-looping: {pod} {details.get(pod, '')}")
-                    ns = cfg.get_namespace()
-                    print_info(
-                        f"See why with: kubectl logs -n {ns} {prog['crash_pods'][0]} --previous"
-                    )
-                    failure = "Datagen pods crash-looping"
-                    raise typer.Exit(ExitCode.FAILED)
-                if prog.get("pending_pods"):
-                    progress_bar.console.print(
-                        f"  [yellow]{len(prog['pending_pods'])} pod(s) pending[/yellow]"
-                    )
 
                 succeeded = prog.get("succeeded", 0)
                 progress_bar.update(task, completed=succeeded)

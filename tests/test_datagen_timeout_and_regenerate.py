@@ -382,3 +382,28 @@ def test_a_refused_generate_ends_its_journal_command(
         gen._generate_loaded(_cfg(), "cfg.yaml", 60, True, False, False)
     assert exc.value.exit_code == ExitCode.REFUSED
     assert journal.calls[-1] == ("end", {"success": False, "message": ""})
+
+
+@pytest.mark.parametrize(
+    ("prog", "failure", "stopped"),
+    [
+        ({"oom_pods": ["p0"]}, "OOMKilled pods detected", True),
+        (
+            {"crash_pods": ["p1"], "crash_details": {"p1": "exit 101"}},
+            "Datagen pods crash-looping",
+            True,
+        ),
+        ({"pending_pods": ["p2", "p3"]}, None, False),
+        ({"succeeded": 4}, None, False),
+    ],
+)
+def test_datagen_pod_failure(prog: dict, failure: str | None, stopped: bool) -> None:
+    """Failed pods stop the bar and name the failure; pending pods are only
+    shown, and the wait goes on."""
+    from lakebench.cli._generate import datagen_pod_failure
+
+    bar = MagicMock()
+    assert datagen_pod_failure(prog, "ns", bar) == failure
+    assert bar.stop.called is stopped
+    if "pending_pods" in prog:
+        bar.console.print.assert_called_once_with("  [yellow]2 pod(s) pending[/yellow]")
