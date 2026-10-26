@@ -2873,8 +2873,8 @@ def _run_once(
             # Cycle env vars for incremental mode (cycles 2+)
             # LB_RUN_ID ties gold.alerts / gold.detection_status rows to this
             # run's metrics.json; without it every pod drew its own uuid. The
-            # "<run>-c<n>" form is parsed back: score_financial accepts it as
-            # this run, and tm_operations reads the cycle from it.
+            # "<run>-c<n>" form is parsed back: the scorer accepts it as this
+            # run, and tm_operations reads the cycle from it.
             cycle_env: dict[str, str] = {"LB_RUN_ID": f"{run_id}-c{cycle_idx + 1}"}
             if total_cycles > 1:
                 # c360 silver appends read only this cycle's bronze files

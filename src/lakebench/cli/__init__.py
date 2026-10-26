@@ -1988,7 +1988,7 @@ def report(
 
 _LOGS_HELP_COMPONENTS = (
     "datagen, a stage (bronze-verify, silver-build, gold-finalize, bronze-ingest, "
-    "silver-stream, gold-refresh, score-financial, ...), spark-driver, trino, "
+    "silver-stream, gold-refresh, ...), spark-driver, trino, "
     "trino-worker, thrift, duckdb, hive, polaris, postgres"
 )
 

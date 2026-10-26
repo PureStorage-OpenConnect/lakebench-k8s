@@ -1072,7 +1072,7 @@ lakebench logs [CONFIG] [COMPONENT] [OPTIONS]
 | Argument | Required | Description |
 |---|---|---|
 | `CONFIG` | no | Path to configuration YAML file (default: ./lakebench.yaml) |
-| `COMPONENT` | no | Component to read: datagen, a stage (bronze-verify, silver-build, gold-finalize, bronze-ingest, silver-stream, gold-refresh, score-financial, ...), spark-driver, trino, trino-worker, thrift, duckdb, hive, polaris, postgres |
+| `COMPONENT` | no | Component to read: datagen, a stage (bronze-verify, silver-build, gold-finalize, bronze-ingest, silver-stream, gold-refresh, ...), spark-driver, trino, trino-worker, thrift, duckdb, hive, polaris, postgres |
 
 | Flag | Short | Type | Default | Description |
 |---|---|---|---|---|

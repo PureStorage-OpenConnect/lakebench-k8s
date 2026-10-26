@@ -121,7 +121,7 @@ def _module_const_dict(tree, name):
 def test_rule_target_typology_matches_aml_queries():
     """The driver-side RULE_TARGET_TYPOLOGY must stay in lock-step with the
     orchestrator-side RULE_TARGETS -- they live on opposite sides of the
-    package boundary and score_financial relies on them agreeing."""
+    package boundary and the scorer relies on them agreeing."""
     from lakebench.benchmark.aml_queries import RULE_TARGETS
 
     tree = ast.parse(RULE_META_PATH.read_text())
@@ -133,14 +133,15 @@ def test_rule_target_typology_matches_aml_queries():
     )
 
 
-def test_score_financial_scopes_alerts_by_run_id():
-    """score_financial must scope its gold.alerts read to the
-    current run (via detection_status.run_id) so stale prior-run alerts from
-    a skipped rule on a reused catalog don't inflate total_alerts/fp_rate."""
-    p = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts/score_financial.py"
-    body = p.read_text()
-    assert "current_run_id" in body
-    assert 'col("run_id") == lit(current_run_id)' in body
+def test_scoring_statements_scope_alerts_by_run_id():
+    """Every scoring statement that reads gold.alerts filters on the run id,
+    so stale prior-run alerts from a skipped rule on a reused catalog do not
+    inflate total_alerts or fp_rate."""
+    d = Path(__file__).resolve().parents[1] / "src/lakebench/benchmark/queries/aml/trino/scoring"
+    read_alerts = [p for p in sorted(d.glob("*.sql.tmpl")) if "gold.alerts" in p.read_text()]
+    assert read_alerts, "no scoring statement reads gold.alerts"
+    for p in read_alerts:
+        assert "run_id = '{run_id}'" in p.read_text(), p.name
 
 
 def test_detected_ts_follows_evidence_in_alert_columns():

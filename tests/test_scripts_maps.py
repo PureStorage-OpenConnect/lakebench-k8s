@@ -341,7 +341,9 @@ def test_financial_command_exits_when_not_submitted():
     from lakebench.cli import _financial
     from lakebench.modules.pipeline_engines.spark.job import JobState, JobStatus
 
-    status = JobStatus(name="lakebench-score-financial", state=JobState.FAILED, message="why")
+    status = JobStatus(
+        name="lakebench-score-financial-reference", state=JobState.FAILED, message="why"
+    )
     with pytest.raises(typer.Exit) as ei:
         _financial._require_submitted(status)
     assert ei.value.exit_code == 1

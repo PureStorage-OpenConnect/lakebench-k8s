@@ -257,8 +257,8 @@ class FinancialScorecardBlock:
         # per-rule DELETE-then-INSERT, so each cycle's [detection] counts are
         # CUMULATIVE and the final gold.alerts holds the last cycle's totals --
         # NOT the sum across cycles (an earlier "sum" fix was backwards: it
-        # would ~triple a 3-cycle run and contradict the score-financial
-        # footer, which reads the final gold.alerts once). Use the LAST
+        # would ~triple a 3-cycle run and contradict the scoring footer,
+        # which reads the final gold.alerts once). Use the LAST
         # gold-finalize job's dicts as the authoritative final state
         # (last-cycle-wins), which is also correct for a single-cycle run.
         # Taking one job's pair keeps alerts and skips mutually consistent
@@ -939,7 +939,7 @@ def registered_look_role(run_id: str | None) -> str | None:
 
 
 def _subject_check_html(scoring) -> str:
-    """The planted-subject customer check (score_financial
+    """The planted-subject customer check (the scorer's
     ``subject_customer_check``): whether every planted subject is a customer
     in silver, which customer-scoped recall depends on."""
     from html import escape

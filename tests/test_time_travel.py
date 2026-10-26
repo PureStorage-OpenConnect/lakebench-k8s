@@ -581,15 +581,15 @@ def test_a_continuous_maintenance_round_records_its_time_and_tables():
 # --- profile ---------------------------------------
 
 
-def test_profile_equals_the_scorer_and_one_attempt():
+def test_profile_is_small_and_one_attempt():
     schema = "financial"
     from lakebench.modules.pipeline_engines.spark import job as job_mod
     from lakebench.spark.job import JobType, SparkJobManager
     from tests.test_spark import _mock_k8s
 
-    assert job_mod._resolve_job_profile("time-travel-financial", schema) == (
-        job_mod._resolve_job_profile("score-financial", schema)
-    )
+    profile = job_mod._resolve_job_profile("time-travel-financial", schema)
+    assert profile is not None
+    assert (profile["base_executors"], profile["scratch_size"]) == (2, "50Gi")
     mgr = SparkJobManager(_cfg(), _mock_k8s())
     manifest = mgr._build_manifest(JobType.TIME_TRAVEL_FINANCIAL, arguments=["--input", "x"])
     spec = manifest["spec"]

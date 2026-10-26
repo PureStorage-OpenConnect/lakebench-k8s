@@ -19,8 +19,7 @@ scripts/aml_gate.py). Two independent things this script does:
    band and K-of-N summary, D2 timing mixture and D11 density. Every constant
    comes from ``aml_preregistration.json`` (packaged flat next to this script).
    Emits ``aml_gate_report.json`` (the full report) and
-   ``reference_metrics.parquet`` (one aggregate row plus one row per typology,
-   the table ``aggregate_reference_vs_rule.sql`` joins against rule recall).
+   ``reference_metrics.parquet`` (one aggregate row plus one row per typology).
 
 scikit-learn is not on the Spark image; job.py installs it per job
 (REFERENCE_PY_DEPS). Without it the report carries verdict ``no_sklearn`` and
@@ -82,8 +81,7 @@ _STRUCTURING_BANDS = {
     "KRW": (9_900_000.0, 9_999_999.0),
 }
 
-#: reference_metrics.parquet columns (aggregate_reference_vs_rule.sql reads
-#: row_kind, typology_type, verdict, precision, recall, f1).
+#: reference_metrics.parquet columns.
 _METRIC_SCHEMA = (
     "row_kind string, typology_type string, verdict string, precision double, "
     "recall double, f1 double, support long, r_precision double, ap double, ap_ci_lo double, "

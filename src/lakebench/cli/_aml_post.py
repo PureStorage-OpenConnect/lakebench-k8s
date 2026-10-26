@@ -3,9 +3,9 @@ continuous runs, and the time-travel reads of the snapshots the continuous
 ticks read.
 
 The continuous AML scorer runs over the snapshots the last completed tick
-inside the window recorded (``score_financial.py`` covered mode). Each
-table is read at the snapshot that tick pinned (VERSION AS OF), so
-gold.alerts being rewritten by a later tick does not reach the score.
+inside the window recorded (covered mode). Each table is read at the
+snapshot that tick pinned (FOR VERSION AS OF), so gold.alerts being
+rewritten by a later tick does not reach the score.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from lakebench.cli._helpers import console, esc, print_info, print_success, prin
 
 GOLD_REFRESH_APP = "lakebench-gold-refresh"
 
-#: The covered-mode options of score_financial.py, in tick-record terms.
+#: The covered-mode table names, in tick-record terms.
 COVERED_OPTIONS = (
     ("txns", "pinned_txns"),
     ("entities", "pinned_entities"),
@@ -73,108 +73,6 @@ def scoring_count_line(summary: dict) -> str:
     rest = [f"{counts[k]} {lab}" for k, lab in labels if counts.get(k)]
     line = f"{counts.get('scored', 0)} of {len(typs)} typologies scored"
     return line + (f"; {', '.join(rest)}" if rest else "")
-
-
-def run_financial_scoring(
-    cfg,
-    run_id,
-    job_manager,
-    monitor,
-    timeout,
-    interrupt=None,
-    covered: dict | None = None,
-):
-    """Score recall against the datagen manifest and return the
-    recall.json summary, or None when scoring did not complete.
-
-    Batch: after gold-finalize, over the whole run. Continuous:
-    *covered* is the last completed tick inside the window, and the scorer
-    runs in covered mode over exactly the snapshots that tick read.
-    Best-effort: a scoring failure never fails the pipeline (the pipeline
-    result is still valid), it just leaves the record without recall.
-    """
-    # Whole body is best-effort: NOTHING here (imports, config access, submit,
-    # wait, S3 read) may propagate and fail a pipeline that already reported
-    # success. One outer try guarantees that.
-    try:
-        import json as _json
-
-        from lakebench.spark.job import JobState, JobType
-
-        s3 = cfg.platform.storage.s3
-        # Manifest URI mirrors bronze_verify_financial:
-        # {bronze}/{prefix}/manifest/manifest.parquet.
-        from lakebench.deploy.datagen import bronze_datagen_prefix
-
-        prefix = bronze_datagen_prefix(cfg).rstrip("/")
-        # Glob over every cycle's manifest (manifest.parquet, manifest-cNNN.parquet).
-        manifest_uri = f"s3a://{s3.buckets.bronze}/{prefix}/manifest/manifest*.parquet"
-        json_key = f"scoring/{run_id}/recall.json"
-        output_uri = f"s3a://{s3.buckets.gold}/scoring/{run_id}/recall.parquet"
-        # Derive the SparkApplication name from the enum rather than a literal
-        # so it can never drift from submit_job's f"lakebench-{value}".
-        app_name = f"lakebench-{JobType.SCORE_FINANCIAL.value}"
-        arguments = ["--manifest", manifest_uri, "--output", output_uri]
-        if covered is not None:
-            for option, key in COVERED_OPTIONS:
-                arguments += [f"--covered-{option}-snapshot", str(covered[key])]
-
-        console.print()
-        console.print("[bold]Stage: financial score[/bold]")
-        if covered is not None:
-            print_info(
-                "Scoring recall over what the last completed tick saw "
-                f"(cycle {covered.get('cycle')})..."
-            )
-        else:
-            print_info("Scoring recall/precision against the datagen manifest...")
-
-        if interrupt is not None:
-            interrupt.creating("SparkApplication", app_name)
-        status = job_manager.submit_job(
-            JobType.SCORE_FINANCIAL,
-            arguments=arguments,
-            # The score refuses a gold.detection_status another run wrote; it
-            # needs this run's id for that (job.py exports one only with
-            # observability on).
-            cycle_env={"LB_RUN_ID": run_id},
-        )
-        if interrupt is not None:
-            interrupt.submitted(status)
-        if status.state == JobState.FAILED:
-            print_warning(f"Could not submit score job: {status.message}")
-            return None
-        result = monitor.wait_for_completion(
-            app_name,
-            timeout_seconds=timeout,
-            poll_interval=15,
-        )
-        if interrupt is not None and result.success:
-            interrupt.finished("SparkApplication", app_name)
-        if not result.success:
-            print_warning(f"Financial scoring did not complete: {result.message}")
-            # Surface the score driver's own error -- scoring is best-effort so
-            # its failure is easy to miss, and without the driver tail the only
-            # signal is a generic "driver container failed".
-            if getattr(result, "driver_logs", None):
-                console.print("[dim]Score driver logs (last 25 lines):[/dim]")
-                for line in result.driver_logs.split("\n")[-25:]:
-                    console.print(f"  {esc(line)}")
-            return None
-
-        # Read the recall.json sidecar (boto3 only -- the CLI has no
-        # pandas/pyarrow to read recall.parquet).
-        client = _s3_client(cfg)
-        body = client.raw_client.get_object(Bucket=s3.buckets.gold, Key=json_key)["Body"].read()
-        summary = _json.loads(body)
-        if summary.get("status") == "not_scored":
-            print_warning(f"Financial scoring: {scoring_count_line(summary)}")
-        else:
-            print_success(f"Financial scoring complete ({scoring_count_line(summary)})")
-        return summary
-    except Exception as e:  # noqa: BLE001 -- scoring is best-effort enrichment
-        print_warning(f"Financial scoring failed ({e}); scorecard will omit recall.")
-        return None
 
 
 def not_scored(reason: str) -> dict[str, Any]:

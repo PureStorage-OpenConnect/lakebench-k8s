@@ -141,7 +141,6 @@ SCRIPT_MAPS: dict[str, tuple[ScriptSource, ...]] = {
         "bronze_ingest_financial.py",
         "silver_stream_financial.py",
         "gold_refresh_financial.py",
-        "score_financial.py",
         "time_travel_financial.py",
     ),
     # The reference detector and the pre-registered gate. reference_score,
@@ -186,7 +185,6 @@ MOUNTS_BY_JOB_TYPE: dict[JobType, tuple[str, ...]] = {
     JobType.BRONZE_INGEST: ROLES,
     JobType.SILVER_STREAM: ROLES,
     JobType.GOLD_REFRESH: ROLES,
-    JobType.SCORE_FINANCIAL: ROLES,
     JobType.TIME_TRAVEL_FINANCIAL: ROLES,
     JobType.SCORE_FINANCIAL_REFERENCE: ROLES,
 }

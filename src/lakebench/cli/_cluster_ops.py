@@ -45,7 +45,6 @@ STAGES: tuple[str, ...] = (
     "bronze-ingest",
     "silver-stream",
     "gold-refresh",
-    "score-financial",
     "score-financial-reference",
     "time-travel-financial",
 )

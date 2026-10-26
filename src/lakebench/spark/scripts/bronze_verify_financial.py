@@ -50,12 +50,9 @@ PACS_PREFIX = env(
     "LB_FINANCIAL_PACS_PATH",
     BRONZE_ROOT_PREFIX.rstrip("/") + "/bronze/pacs008/",
 )
-# Manifest sidecar (typology ground truth). The AML benchmark queries
-# rule_precision, rule_recall, rule_pattern_span, and aggregate_typology_coverage
-# all read `{catalog}.bronze.manifest`; without a registration here the
-# whole scoring stack fails at Trino with 'Table does not exist'.
-# The first fix covered only the pacs.008 read; this one adds the
-# manifest registration so an AML benchmark actually produces recall.
+# Manifest sidecar (typology ground truth). The recall and precision scoring
+# statements read `{catalog}.bronze.manifest`; without a registration here
+# the whole scoring stack fails at Trino with 'Table does not exist'.
 MANIFEST_PATH = env(
     "LB_FINANCIAL_MANIFEST_PATH",
     # A glob: multi-cycle datagen writes manifest-c001.parquet etc. next to
@@ -138,7 +135,7 @@ CONTINUOUS_SILVER_TABLES = (
 )
 # The gold tables gold-refresh writes, besides the TM tables (TM_TABLES):
 # until its first tick a reader would take the previous run's rows as this
-# run's (score_financial reads the run id from detection_status).
+# run's (the scorer reads the run id from detection_status).
 CONTINUOUS_GOLD_TABLES = (
     env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts"),
     env("LB_FINANCIAL_GOLD_RISK_SCORES", "gold.risk_scores"),
@@ -247,8 +244,8 @@ def register_manifest(spark) -> bool:
     """(Re)register the typology manifest as an Iceberg table from its file.
 
     Returns False, with a warning, when the file is not there or the CTAS
-    fails. Not fatal: score_financial reads the manifest file directly; the
-    Trino recall/precision queries then fail loudly on the missing table.
+    fails. Not fatal here: the Trino recall and precision statements then
+    fail loudly on the missing table and the run records not-scored.
     """
     manifest_ns = MANIFEST_TABLE.split(".", 1)[0] if "." in MANIFEST_TABLE else "bronze"
     try:
@@ -264,9 +261,8 @@ def register_manifest(spark) -> bool:
     except Exception as e:  # noqa: BLE001
         log(
             f"WARNING: manifest registration failed ({one_line(e)}). "
-            "AML precision/recall/pattern_span/coverage queries will fail "
-            "at benchmark time; alert-volume queries and score_financial "
-            "(reads manifest via --manifest arg) are unaffected."
+            "AML recall and precision scoring reads this table and will "
+            "record the run not-scored without it."
         )
         return False
 

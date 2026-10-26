@@ -175,10 +175,7 @@ def _job_types(workload: str) -> list:
         return [JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH]
     jobs = [JobType.BRONZE_VERIFY, JobType.SILVER_BUILD, JobType.GOLD_FINALIZE]
     if workload.startswith("aml"):
-        jobs += [
-            JobType.SCORE_FINANCIAL,
-            JobType.SCORE_FINANCIAL_REFERENCE,
-        ]
+        jobs += [JobType.SCORE_FINANCIAL_REFERENCE]
     return jobs
 
 

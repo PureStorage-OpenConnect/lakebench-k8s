@@ -1,6 +1,5 @@
-"""AML-5 reason codes, executed: each code's condition at its boundary, the
-per-code scores against values computed by hand, the per-code union
-identity, and the reused-catalog upgrade of an alerts table."""
+"""AML-5 reason codes, executed: each code's condition at its boundary, and
+the reused-catalog upgrade of an alerts table."""
 
 from __future__ import annotations
 
@@ -64,98 +63,6 @@ CASES = [
 @pytest.mark.parametrize(("key", "rows", "schema", "want"), CASES, ids=[c[0] for c in CASES])
 def test_conditional_codes_at_their_cuts(spark, key, rows, schema, want):
     assert _codes(spark, key, rows, schema) == want
-
-
-def _manifest(spark):
-    # Four W4 instances (stack) and one random-control instance.
-    return spark.createDataFrame(
-        [
-            ("s1", "stack", "x", ["a"]),
-            ("s2", "stack", "x", ["b"]),
-            ("s3", "stack", "x", ["c"]),
-            ("s4", "stack", "x", ["d"]),
-            # An instance with no planted payment: typology recall counts it.
-            ("s5", "stack", "x", []),
-            ("r1", "random", "x", ["z"]),
-        ],
-        "typology_id STRING, typology_type STRING, expected_workload STRING, "
-        "participant_uetrs ARRAY<STRING>",
-    )
-
-
-W4 = "W4_risk_propagation"
-STATUS = [{"rule_id": W4, "status": "ran", "target_typology": "stack"}]
-
-
-def _alerts(spark, rows):
-    return spark.createDataFrame(
-        rows,
-        "alert_id STRING, rule_id STRING, related_txn_ids ARRAY<STRING>, "
-        "reason_codes ARRAY<STRING>",
-    )
-
-
-# Seven alerts, three codes, one alert with two conditional codes (one of
-# them twice), one alert with no related payment. Five stack instances,
-# one without payments. By hand:
-# - W4_FAST_PASS_THROUGH (every alert, 7): instances s1, s2, s3 hit -> 3/5;
-#   of the 6 alerts with a payment, a1, a2, a3, a5 on target -> FP 2/6.
-# - W4_MULTI_CHAIN (a2, a3, a6): s2, s3 -> 2/5; on target a2, a3 -> FP 1/3.
-# - X_EXTRA (a3 only, an unlisted code): s3 -> 1/5; FP 0.
-ROWS = [
-    ("a1", W4, ["a", "q"], ["W4_FAST_PASS_THROUGH"]),
-    ("a2", W4, ["b"], ["W4_FAST_PASS_THROUGH", "W4_MULTI_CHAIN"]),
-    ("a3", W4, ["c"], ["W4_FAST_PASS_THROUGH", "W4_MULTI_CHAIN", "X_EXTRA", "W4_MULTI_CHAIN"]),
-    ("a4", W4, ["q2"], ["W4_FAST_PASS_THROUGH"]),
-    ("a5", W4, ["a"], ["W4_FAST_PASS_THROUGH"]),
-    ("a6", W4, ["z"], ["W4_FAST_PASS_THROUGH", "W4_MULTI_CHAIN"]),
-    ("a8", W4, [], ["W4_FAST_PASS_THROUGH"]),
-]
-
-
-def test_per_code_scores_by_hand(spark):
-    from score_financial import compute_scores
-
-    per, s = compute_scores(spark, _manifest(spark), _alerts(spark, ROWS), STATUS)
-    assert s["by_code_status"] == "scored"
-    rec = s["recall_by_code"][W4]
-    assert rec == pytest.approx(
-        {"W4_FAST_PASS_THROUGH": 0.6, "W4_MULTI_CHAIN": 0.4, "X_EXTRA": 0.2}
-    )
-    assert s["fp_by_code"][W4] == pytest.approx(
-        {"W4_FAST_PASS_THROUGH": 2 / 6, "W4_MULTI_CHAIN": 1 / 3, "X_EXTRA": 0.0}
-    )
-    assert s["alerts_by_code"][W4] == {"W4_FAST_PASS_THROUGH": 7, "W4_MULTI_CHAIN": 3, "X_EXTRA": 1}
-    # The base code's recall is the rule's recall (the union identity).
-    stack = [r for r in per.collect() if r["typology_type"] == "stack"][0]
-    assert rec["W4_FAST_PASS_THROUGH"] == pytest.approx(stack["recall"])
-    assert s["fp_rate_by_rule"][W4] == pytest.approx(s["fp_by_code"][W4]["W4_FAST_PASS_THROUGH"])
-    assert len(s["reason_code_vocabulary"]) == 16
-
-
-def test_an_alert_without_a_code_stops_per_code_scores(spark):
-    from score_financial import compute_scores
-
-    rows = ROWS[:-1] + [("a8", W4, ["d"], [])]
-    _, s = compute_scores(spark, _manifest(spark), _alerts(spark, rows), STATUS)
-    assert s["by_code_status"].startswith("not_scored: 1 alerts carry no reason code")
-    assert s["recall_by_code"] == {} and s["fp_by_code"] == {}
-
-
-def test_a_rule_that_did_not_run_gets_no_per_code_scores(spark):
-    from score_financial import compute_scores
-
-    status = [{"rule_id": W4, "status": "skipped", "target_typology": "stack"}]
-    _, s = compute_scores(spark, _manifest(spark), _alerts(spark, ROWS), status)
-    assert W4 not in s["recall_by_code"] and W4 not in s["fp_by_code"]
-
-
-def test_alerts_without_the_column_are_not_recorded(spark):
-    from score_financial import compute_scores
-
-    alerts = _alerts(spark, ROWS).drop("reason_codes")
-    _, s = compute_scores(spark, _manifest(spark), alerts, STATUS)
-    assert s["by_code_status"].startswith("not_recorded")
 
 
 def test_ensure_alert_columns_appends_trailing_and_refuses_reordered(spark):

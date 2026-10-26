@@ -175,30 +175,10 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "max_executors": 10,
         "base_partitions": 32,
     },
-    # Recall/precision scoring. A manifest read + a linear
-    # explode-and-join against gold.alerts (score_financial.py rewrote the
-    # old N*M crossjoin to a single explode per side, so it stays linear in
-    # the UETR footprint). Deliberately small: without this entry the job
-    # falls back to the silver-build profile (~36 cores / 525 GB at scale 1)
-    # just to score a handful of typologies, which under the 4-parallel UAT
-    # limit fails to schedule and blocks on the per-job timeout after the
-    # pipeline already reported success (adversarial-review finding).
-    "score-financial": {
-        "driver_cores": 2,
-        "driver_memory": "8g",
-        "executor_cores": 4,
-        "executor_memory": "16g",
-        "executor_memory_overhead": "4g",
-        "scratch_size": "50Gi",
-        "base_executors": 2,
-        "executors_per_100_scale": 4,
-        "max_executors": 10,
-        "base_partitions": 32,
-    },
     # Time-travel reads after a continuous AML window: two full scans
     # of each recorded transactions snapshot that is still live and one of
-    # the current one, each a single fingerprint aggregate. Sized as the
-    # scorer, which runs just before it on the same stopped deployment.
+    # the current one, each a single fingerprint aggregate. Deliberately
+    # small: it runs on the stopped deployment after the window.
     "time-travel-financial": {
         "driver_cores": 2,
         "driver_memory": "8g",
@@ -1925,8 +1905,6 @@ class JobType(Enum):
     SILVER_STREAM = "silver-stream"
     GOLD_REFRESH = "gold-refresh"
 
-    # Financial-only: recall scoring (submitted by `run`)
-    SCORE_FINANCIAL = "score-financial"
     # Post-window re-read of the snapshots continuous AML ticks read.
     TIME_TRAVEL_FINANCIAL = "time-travel-financial"
     # Reference detector + leakage gate: the "distribution checks do not
@@ -2548,12 +2526,11 @@ class SparkJobManager:
                     JobType.GOLD_REFRESH: "gold_refresh_delta.py",
                 }
             )
-        # Financial-only jobs (scoring, time travel, the reference detector)
-        # are schema-agnostic in the deploy path but only meaningful for
+        # Financial-only jobs (time travel, the reference detector) are
+        # schema-agnostic in the deploy path but only meaningful for
         # Financial workloads. Registered unconditionally so `run` and
         # `lakebench financial reference-score` work regardless of the elif
         # branch above.
-        script_map.setdefault(JobType.SCORE_FINANCIAL, "score_financial.py")
         script_map.setdefault(JobType.TIME_TRAVEL_FINANCIAL, "time_travel_financial.py")
         script_map.setdefault(JobType.SCORE_FINANCIAL_REFERENCE, "score_financial_reference.py")
         # Use local:// to reference scripts already in the container filesystem

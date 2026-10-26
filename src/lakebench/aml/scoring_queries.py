@@ -1,7 +1,8 @@
 """AML recall and precision scoring as queries, assembled on the CLI side.
 
-This is the covered and batch scorer that replaces the ``score_financial``
-Spark job: the counts come from SQL run through the benchmark query engine,
+This is the covered and batch scorer that replaced the ``score_financial``
+Spark job (deleted in 1.7.14; its definitions are cited below by function
+name): the counts come from SQL run through the benchmark query engine,
 and every ratio, null rule and the per-code vocabulary are assembled here,
 from integer counts, so the figures do not depend on a Spark double's last
 bit. The assembled ``financial_scoring`` record matches the Spark job field

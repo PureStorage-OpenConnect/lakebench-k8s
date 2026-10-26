@@ -4,7 +4,7 @@ Every alert carries ``reason_codes`` (array<string>, the last gold.alerts
 column): first its rule's base code (``BASE_CODE``), then each conditional
 code whose condition holds on the alert. The base code makes the codes of a
 rule cover all of its alerts, so the per-code hit sets of a rule union to the
-rule's hit set (score_financial's per-code recall relies on it).
+rule's hit set (the scorer's per-code recall relies on it).
 
 Conditional codes read only columns the rule's own projection already holds,
 and use only cut points the rule already has: its HIGH priority threshold

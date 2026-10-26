@@ -1662,7 +1662,7 @@ def w4_risk_propagation(
     entities_truncated ('true' when the cap cut the list). Scoring matches
     planted transactions against related_txn_ids, so a truncated hub alert
     can miss planted payments past the cut: recall is reported as bounded by
-    this cap when any W4 alert was truncated (score_financial).
+    this cap when any W4 alert was truncated.
 
     ``alert_window_hours`` (continuous gold): one alert per B per window of
     payments instead, so a tick recomputes only the windows of its new rows.

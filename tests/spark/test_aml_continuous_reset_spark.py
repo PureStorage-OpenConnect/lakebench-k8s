@@ -31,7 +31,7 @@ STREAM_SILVER = (
     "silver.silver_batch_versions",
 )
 # The gold tables gold-refresh writes besides the TM ones the reset already
-# dropped; a reader (score_financial) would take their rows as this run's.
+# dropped; a reader (the scorer) would take their rows as this run's.
 STREAM_GOLD = (
     "gold.alerts",
     "gold.risk_scores",

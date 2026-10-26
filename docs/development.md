@@ -56,7 +56,7 @@ Supporting directories:
 | Valid architectures | `_SUPPORTED_COMBINATIONS` and `_COMBINATION_NOTES` in `src/lakebench/config/schema.py` |
 | Recipes | `src/lakebench/config/recipes.py` |
 | Support record | `src/lakebench/config/validated_combinations.yaml` and `config/support.py` |
-| Queries | `src/lakebench/benchmark/queries.py` (the QpH sets), `benchmark/aml_queries.py` and the SQL under `benchmark/queries/aml/` (the AML score queries) |
+| Queries | `src/lakebench/benchmark/queries.py` (the QpH sets); `benchmark/aml_queries.py` (the rule-to-typology map) and the SQL under `benchmark/queries/aml/trino/scoring/` (the AML scoring statements, assembled by `aml/scoring_queries.py`) |
 | Metric definitions | `src/lakebench/metrics/metric_registry.py`, which the collector's score descriptions read |
 | Kubernetes manifests | the Jinja2 templates in `src/lakebench/templates/`; Spark jobs are built in code in `job.py` |
 | Datagen metrics | `datagen_rs/src/metrics.rs` (struct and JSON line), `src/lakebench/metrics/datagen_aggregator.py` (aggregator), `src/lakebench/templates/datagen/job.yaml.j2` (`LB_POD_CPU_REQUEST_MILLI`) |
@@ -513,8 +513,8 @@ hashes; no refusal message prints a held-out seed:
 3. generator start (`datagen_rs/src/heldout.rs`), which refuses a financial
    corpus without the hash file Lakebench mounts on the datagen pod;
 4. bronze-verify (`spark/scripts/bronze_verify_financial.py`) and the recall
-   scorer (`spark/scripts/score_financial.py`), which recover the corpus seed
-   from every manifest row;
+   scorer (`aml/scoring_queries.py`), which recover the corpus seed from
+   every manifest row;
 5. the reference scorer (`spark/scripts/score_financial_reference.py`), which
    also refuses a held-out corpus outside its registered run.
 

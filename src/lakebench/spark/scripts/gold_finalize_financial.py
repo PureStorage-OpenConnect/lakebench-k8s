@@ -165,8 +165,8 @@ TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 # Durable, data-plane record of what each detection rule did this
 # run -- 'ran' (with alert_count), 'skipped' (with reason, e.g. vertex-cap),
 # or 'error' (with the exception class). This is the bridge that lets
-# score_financial mark a skipped rule's target typology "not run" in
-# recall.parquet instead of 0%, which the log-only rules_skipped in
+# the scorer mark a skipped rule's target typology "not run" in
+# recall.json instead of 0%, which the log-only rules_skipped in
 # metrics.json could not reach (the recall scorer runs in Spark and reads
 # the data plane, not the driver log). Overwritten every gold_finalize run
 # so it reflects the run that produced the current gold.alerts.
@@ -264,7 +264,7 @@ def main() -> None:
     # UTC pin (same rationale as silver_build): to_date(txn_timestamp) uses
     # session tz for the day boundary, so a non-UTC executor tz shifts
     # dashboard_date by up to one day for late-night UTC txns and breaks the
-    # score_financial join to the manifest's UTC-based UETRs.
+    # scorer's join to the manifest's UTC-based UETRs.
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     start = time.time()
 
@@ -471,7 +471,7 @@ def run_detection_rules(
     # silver_stream appended silver.entities; see gold_refresh_financial), and
     # W8 (needs a 90-day dormancy gap a narrow continuous corpus cannot hold).
     # Marking them 'skipped' (not simply omitting them) is what lets
-    # score_financial render their typologies "not run" instead of a false 0%.
+    # the scorer render their typologies "not run" instead of a false 0%.
     rules = tuple(rules) if rules is not None else DEFAULT_DETECTION_RULES
     skipped_rules = tuple(skipped_rules or ())
     pass_start = time.time()

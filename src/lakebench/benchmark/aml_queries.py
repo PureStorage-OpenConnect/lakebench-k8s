@@ -1,25 +1,13 @@
-"""AML benchmark query set.
+"""The AML rule-to-typology map.
 
-Ships four SQL templates (detect / precision / recall / pattern_span)
-that are
-instantiated once per W-rule, plus four aggregate queries that run
-as-is. This lands 40 executable queries with 8 source files. What the
-scores mean, and their caveats, is in `docs/aml-scoring.md`.
-
-Precision, recall, and pattern-span all need to know which planted
-typology TYPE a rule targets. That mapping lives here as the single
-source of truth; changing it changes what the score attributes to
-what typology.
-
-Callers pass a catalog name and get back a list of
-(query_id, sql_text) tuples ready to run against Trino or Spark SQL.
+Recall and precision need to know which planted typology TYPE a rule
+targets. That mapping lives here as the single source of truth (the driver
+side mirrors it in ``aml.rule_meta.RULE_TARGET_TYPOLOGY``, kept in lock-step
+by a test); changing it changes what the score attributes to what typology.
+What the scores mean, and their caveats, is in `docs/aml-scoring.md`.
 """
 
 from __future__ import annotations
-
-import os
-from dataclasses import dataclass
-from pathlib import Path
 
 # Map each W-rule to the typology_type in `bronze.manifest` that the
 # rule is supposed to detect. Several rules may target the same type;
@@ -116,137 +104,3 @@ UNMAPPED_TYPOLOGIES: dict[str, str] = {
         "recall/precision for TBML remains untestable until then."
     ),
 }
-
-
-_TEMPLATE_DIR = Path(__file__).resolve().parent / "queries" / "aml" / "trino"
-
-
-@dataclass(frozen=True)
-class AmlQuery:
-    """One expanded AML query, ready to execute."""
-
-    query_id: str  # e.g. "W2_structuring_precision"
-    sql: str
-    rule_id: str | None  # rule the query attributes to, None for aggregates
-    kind: str  # "detect" | "precision" | "recall" | "pattern_span" | "aggregate"
-
-
-def _read_template(name: str) -> str:
-    path = _TEMPLATE_DIR / name
-    return path.read_text()
-
-
-def load_aml_queries(catalog: str) -> list[AmlQuery]:
-    """Return the full AML query set instantiated for `catalog`.
-
-    36 rule queries (9 detect + 9 targeted rules x 3 kinds) + 4 aggregate
-    queries = 40 total.
-    Query text uses `{catalog}` as a placeholder; the caller has
-    already picked the catalog name (varies per config: iceberg,
-    spark_catalog, polaris, etc.).
-    """
-    # Allowlist rather than blocklist: a blocklist misses newline, tab,
-    # non-ASCII whitespace, comment sequences, and unicode "smart quotes",
-    # any of which could smuggle SQL through a config-driven catalog name.
-    # Real Trino / Spark catalog names are plain SQL identifiers.
-    import re
-
-    if not catalog or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", catalog):
-        raise ValueError(f"catalog name {catalog!r} is not a plain identifier")
-
-    detect_tmpl = _read_template("rule_detect.sql.tmpl")
-    precision_tmpl = _read_template("rule_precision.sql.tmpl")
-    recall_tmpl = _read_template("rule_recall.sql.tmpl")
-    pattern_span_tmpl = _read_template("rule_pattern_span.sql.tmpl")
-
-    queries: list[AmlQuery] = []
-    for rule_id, typology_type in RULE_TARGETS.items():
-        # Detect always emits; volume rule is inspectable regardless of
-        # whether there's a planted typology.
-        queries.append(
-            AmlQuery(
-                query_id=f"{rule_id}_detect",
-                sql=detect_tmpl.format(catalog=catalog, rule_id=rule_id),
-                rule_id=rule_id,
-                kind="detect",
-            )
-        )
-        # Precision / recall / pattern_span need a typology target. Rules that
-        # have none produce no query in these kinds; downstream
-        # scoring reports them as N/A.
-        if typology_type is None:
-            continue
-        for kind, tmpl in (
-            ("precision", precision_tmpl),
-            ("recall", recall_tmpl),
-            ("pattern_span", pattern_span_tmpl),
-        ):
-            queries.append(
-                AmlQuery(
-                    query_id=f"{rule_id}_{kind}",
-                    sql=tmpl.format(
-                        catalog=catalog,
-                        rule_id=rule_id,
-                        typology_type=typology_type,
-                    ),
-                    rule_id=rule_id,
-                    kind=kind,
-                )
-            )
-
-    # Aggregate queries. Same directory, no template expansion beyond
-    # the catalog name.
-    for filename, qid in (
-        ("aggregate_alert_volume.sql", "aggregate_alert_volume"),
-        ("aggregate_top_entities.sql", "aggregate_top_entities"),
-        ("aggregate_typology_coverage.sql", "aggregate_typology_coverage"),
-        ("aggregate_reference_vs_rule.sql", "aggregate_reference_vs_rule"),
-    ):
-        sql = _read_template(filename).format(catalog=catalog)
-        queries.append(
-            AmlQuery(
-                query_id=qid,
-                sql=sql,
-                rule_id=None,
-                kind="aggregate",
-            )
-        )
-
-    return queries
-
-
-def query_count() -> int:
-    """Static count of queries produced. Useful for tests to detect
-    accidental removal of a template."""
-    n = 0
-    for typ in RULE_TARGETS.values():
-        n += 1  # detect
-        if typ is not None:
-            n += 3  # precision + recall + pattern_span
-    n += 4  # aggregates: volume, top entities, typology coverage, reference-vs-rule
-    return n
-
-
-# Sanity: at import time, the file layout should be intact. The
-# benchmark's CLI plumbing loads this module during config load, so
-# a missing template file fails fast rather than at query run time.
-def _self_check() -> None:
-    for name in (
-        "rule_detect.sql.tmpl",
-        "rule_precision.sql.tmpl",
-        "rule_recall.sql.tmpl",
-        "rule_pattern_span.sql.tmpl",
-        "aggregate_alert_volume.sql",
-        "aggregate_top_entities.sql",
-        "aggregate_typology_coverage.sql",
-        "aggregate_reference_vs_rule.sql",
-    ):
-        if not (_TEMPLATE_DIR / name).exists():
-            raise ImportError(
-                f"AML query template missing: {_TEMPLATE_DIR / name}. "
-                "Reinstall the package or check the wheel build."
-            )
-
-
-if os.environ.get("LB_AML_SKIP_SELF_CHECK") != "1":
-    _self_check()
