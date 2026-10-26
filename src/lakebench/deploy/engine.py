@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -109,7 +110,7 @@ def jvm_heap_for_limit(limit: str, fraction: float = JVM_HEAP_FRACTION) -> str:
 # loads Hive, Delta or Iceberg and the S3A client (metaspace plus code cache
 # alone run to several hundred MiB) and runs HiveServer2's handler threads,
 # so the floor here is 1 GiB. At the 4g default that gives a 5Gi pod; with
-# heap == limit (the earlier shape) the pod sat at 4014Mi of 4Gi mid-query.
+# heap == limit the pod sat at 4014Mi of 4Gi mid-query.
 THRIFT_OVERHEAD_FACTOR = 0.10
 THRIFT_MIN_OVERHEAD_BYTES = 2**30
 
@@ -200,7 +201,7 @@ def trino_memory_properties(
 
     ``query.max-total-memory`` (user + revocable) is left at Trino's default,
     twice ``query.max-memory``, which here is about the workers' physical
-    pool. Pinning it to exactly that pool added a failure mode in review:
+    pool. Pinning it to exactly that pool would add a failure mode:
     Trino sums every node, the coordinator included, so a coordinator
     reservation plus full revocable use on the workers could trip it.
     """
@@ -218,9 +219,8 @@ def trino_memory_properties(
 def _try_cleanup_orphan_bucket(boto_client, bucket: str) -> None:
     """Delete a freshly-created bucket when ownership was refused.
 
-    Round-3 F5: the naive ``delete_bucket`` call raced a concurrent
-    writer who could have written objects between our CreateBucket
-    and our refusal. If the bucket is non-empty at cleanup time we
+    A concurrent writer could have written objects between our
+    CreateBucket and our refusal. If the bucket is non-empty at cleanup time we
     do NOT delete -- silently emptying-then-deleting could destroy
     data written by a racer. Instead we log a warning naming the
     orphan and leave it for the operator to investigate.
@@ -287,16 +287,6 @@ class DeploymentResult:
     detail: str = ""  # Version or context (e.g. "17")
 
 
-@dataclass
-class DeploymentStep:
-    """A single deployment step."""
-
-    name: str
-    component: str
-    deploy_fn: Callable[[], DeploymentResult]
-    depends_on: list[str] = field(default_factory=list)
-
-
 class TemplateRenderer:
     """Renders Jinja2 templates for Kubernetes manifests."""
 
@@ -333,32 +323,19 @@ class TemplateRenderer:
         template = self.env.get_template(template_name)
         return template.render(**context)
 
-    def render_all(self, template_names: list[str], context: dict[str, Any]) -> list[str]:
-        """Render multiple templates with the same context.
-
-        Args:
-            template_names: List of template file names
-            context: Template variables
-
-        Returns:
-            List of rendered YAML strings
-        """
-        return [self.render(name, context) for name in template_names]
-
 
 class DeploymentEngine:
     """Orchestrates deployment of Lakebench components.
 
-    Deployment order (from spec Section 2.1):
-    1. Namespace + Secrets + ConfigMaps
-    2. S3 bucket validation/creation
+    Deployment order (``deploy_all``'s ``steps``):
+    1. Namespace, Secrets, silver-state ConfigMap
+    2. S3 bucket validation/creation, scratch StorageClass check
     3. PostgreSQL (StatefulSet + Service)
-    4. Catalog Service (Hive Metastore / Polaris / Unity)
-    5. Spark RBAC (ServiceAccount, Role, RoleBinding)
-    6. Spark Operator check and watch-list entry
-    7. Dependency server (lb-deps: resolves and serves the jars and wheels)
-    8. Query Engine (Trino / Spark Thrift Server / DuckDB)
-    9. Monitoring Stack (if enabled)
+    4. Catalog Service (Hive Metastore / Polaris / Unity) and Spark RBAC
+    5. Spark Operator check and watch-list entry
+    6. Dependency server (lb-deps: resolves and serves the jars and wheels)
+    7. Query Engine (Trino / Spark Thrift Server / DuckDB)
+    8. Monitoring Stack (if enabled)
     """
 
     #: Class default, so an engine built without __init__ (tests) reads False.
@@ -392,7 +369,7 @@ class DeploymentEngine:
         self.config = config
         self.dry_run = dry_run
         self.results: list[DeploymentResult] = []
-        # PR-1-F1: if we create the namespace in this run, remember it so
+        # If we create the namespace in this run, remember it so
         # a transient stamp failure + retry does not turn the namespace
         # from "we created it" into "unowned legacy" that then requires
         # the dangerous --force-legacy flag.
@@ -522,8 +499,6 @@ class DeploymentEngine:
         """
         if not path:
             return ""
-        from pathlib import Path
-
         cert_path = Path(path)
         if not cert_path.is_file():
             raise FileNotFoundError(f"CA certificate not found: {path}")
@@ -744,8 +719,6 @@ class DeploymentEngine:
         steps: list[tuple[str, str, Callable[[], DeploymentResult]]],
         progress_callback: Callable[[str, DeploymentStatus, str], None] | None,
     ) -> list[DeploymentResult]:
-        import time
-
         for component, description, deploy_fn in steps:
             # Between steps: a deadline that passed during the last step's
             # non-wait work stops here.
@@ -826,8 +799,6 @@ class DeploymentEngine:
 
     def _existing_refusal(self, component: str, what: str, start: float) -> DeploymentResult:
         """The refusal for an existing namespace or bucket under ``require_new``."""
-        import time
-
         return DeploymentResult(
             component=component,
             status=DeploymentStatus.FAILED,
@@ -886,11 +857,8 @@ class DeploymentEngine:
 
         The stamp is the anchor for the "delete A does not affect B"
         invariant: destroy compares it before touching any resource, and
-        a foreign stamp is a hard refuse. See
-        docs/internal/namespace-isolation.md.
+        a foreign stamp is a hard refuse.
         """
-        import time
-
         start = time.time()
 
         namespace = self.config.get_namespace()
@@ -993,7 +961,7 @@ class DeploymentEngine:
             import yaml
 
             manifest = yaml.safe_load(yaml_content)
-            # F-2: seed the tracking BEFORE apply. If K8s accepts the
+            # Seed the tracking BEFORE apply. If K8s accepts the
             # create but the response is lost to a network reset, our
             # retry sees `namespace_exists=True` with the tracking bit
             # already set, so we correctly stamp with force_legacy.
@@ -1029,7 +997,7 @@ class DeploymentEngine:
                 else:
                     self.k8s.apply_manifest(manifest)
             except Exception as e:
-                # F2-A: on a non-transient failure (K8s definitively
+                # On a non-transient failure (K8s definitively
                 # rejected the create), un-seed the tracking so a
                 # caller reusing this engine cannot silently claim a
                 # legacy annotation-less namespace that appeared later
@@ -1042,8 +1010,7 @@ class DeploymentEngine:
         # Stamp deployment identity onto the namespace. A pre-existing
         # legacy (annotation-less) namespace requires force_legacy=True to
         # claim; otherwise deploy refuses and points at admin migration.
-        # New namespaces we created ourselves are
-        # stamped unconditionally.
+        # New namespaces we created ourselves are stamped unconditionally.
         from kubernetes import client as _kclient
 
         from lakebench.deploy.ownership import (
@@ -1057,7 +1024,7 @@ class DeploymentEngine:
             context=self.config.platform.kubernetes.context or "",
         )
         core_v1 = _kclient.CoreV1Api()
-        # PR-1-F1: force_legacy on the FIRST create OR on any retry after a
+        # force_legacy on the FIRST create OR on any retry after a
         # transient failure that saw us create the namespace earlier.
         we_own_it = created or namespace in self._namespace_created_this_run
         stamp = stamp_namespace(
@@ -1070,10 +1037,10 @@ class DeploymentEngine:
         )
 
         if stamp.verdict is IdentityVerdict.MISMATCH:
-            # R5: distinguish "raced a competing create" from "existing
+            # Distinguish "raced a competing create" from "existing
             # foreign deployment" so the operator knows whether to
-            # abandon this config name or reconcile. F1 covers the same
-            # case on retry after a transient stamp failure.
+            # abandon this config name or reconcile; we_own_it covers the
+            # same case on a retry after a transient stamp failure.
             extra = ""
             if we_own_it:
                 extra = (
@@ -1142,8 +1109,6 @@ class DeploymentEngine:
 
     def _deploy_secrets(self) -> DeploymentResult:
         """Deploy secrets (S3 credentials, PostgreSQL credentials)."""
-        import time
-
         import yaml
 
         start = time.time()
@@ -1214,7 +1179,7 @@ class DeploymentEngine:
             detail="S3 + PostgreSQL",
         )
 
-    # B1 + C2: names of the silver-state ConfigMap and its keys. The
+    # Names of the silver-state ConfigMap and its keys. The
     # ConfigMap is per-deployment. Rebuild-epoch keys: job.py._build_env_vars
     # reads the workload+format key into LB_REBUILD_EPOCH and the CLI
     # --force-rebuild atomically bumps it before submitting silver.
@@ -1233,13 +1198,13 @@ class DeploymentEngine:
         """Create the per-deployment silver-state ConfigMap on a greenfield deploy.
 
         Holds two independent state families keyed off the same ConfigMap so a
-        single early deploy step covers both silver-plan blocks:
-        - B1 rebuild-epoch counters (one per workload x format) initialised to
+        single early deploy step covers both:
+        - rebuild-epoch counters (one per workload x format) initialised to
           "0" so the first --force-rebuild bumps to "1". Delta's batch
           cycle-append idempotency and Iceberg's cycle-0 rebuild guard both
           key off these; a redeploy never resets a counter so an old
           ``(txnAppId, txnVersion)`` cannot silently look fresh to Delta.
-        - C2 ``bronze_data_clock`` initialised empty; bronze-verify PATCHes it
+        - ``bronze_data_clock`` initialised empty; bronze-verify PATCHes it
           on a successful run and silver's LB_DATA_CLOCK resolution ladder
           falls through to ``datagen.timestamp_start`` or today until then.
 
@@ -1247,8 +1212,6 @@ class DeploymentEngine:
         empty defaults ("0" for rebuild counters, "" for the clock); existing
         values are left alone.
         """
-        import time
-
         start = time.time()
         if self.dry_run:
             return DeploymentResult(
@@ -1453,8 +1416,6 @@ class DeploymentEngine:
         Uses S3Client.ensure_buckets() which is idempotent -- existing
         buckets are left untouched.
         """
-        import time
-
         start = time.time()
 
         s3_cfg = self.config.platform.storage.s3
@@ -1567,9 +1528,8 @@ class DeploymentEngine:
         # the UNSUPPORTED-fallback prefix check can enforce
         # longest-prefix-wins. ``None`` means "cannot enumerate": the
         # UNSUPPORTED branch below MUST refuse rather than fall back
-        # to naive prefix (F2 finding, round-3 review). Uses the
-        # convention already in this module -- get_k8s_client loads
-        # the right kubeconfig context (F8) and CoreV1Api uses it.
+        # to naive prefix. get_k8s_client loads the config's kubeconfig
+        # context, and CoreV1Api uses it.
         from kubernetes import client as _kclient
 
         from lakebench.k8s import get_k8s_client as _get_k8s
@@ -1664,7 +1624,7 @@ class DeploymentEngine:
                     elapsed_seconds=time.time() - start,
                     details={REFUSAL_DETAIL: "deploy.identity_foreign"},
                 )
-            # R2: an ABSENT (legacy, untagged) bucket must NOT be claimed
+            # An ABSENT (legacy, untagged) bucket must NOT be claimed
             # silently. Freshly-created buckets ARE our own untagged
             # buckets (ensure_buckets returned True for was_created);
             # those we tag. Pre-existing untagged buckets require
@@ -1911,8 +1871,6 @@ class DeploymentEngine:
         ``lakebench admin install --component scratch-storage-class`` when the class
         is missing.
         """
-        import time
-
         start = time.time()
 
         scratch_cfg = self.config.platform.storage.scratch
@@ -1995,8 +1953,6 @@ class DeploymentEngine:
         A missing or broken operator fails the step rather than letting
         ``run`` fail later.
         """
-        import time
-
         start = time.time()
 
         spark_op_cfg = self.config.platform.compute.spark.operator
