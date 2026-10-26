@@ -1,13 +1,15 @@
 """The AML rule-to-typology map.
 
 Recall and precision need to know which planted typology TYPE a rule
-targets. That mapping lives here as the single source of truth (the driver
-side mirrors it in ``aml.rule_meta.RULE_TARGET_TYPOLOGY``, kept in lock-step
-by a test); changing it changes what the score attributes to what typology.
-What the scores mean, and their caveats, is in `docs/aml-scoring.md`.
+targets. The map is ``aml.rule_meta.RULE_TARGET_TYPOLOGY``, which the Spark
+driver reads too; changing it changes what the score attributes to what
+typology. What the scores mean, and their caveats, is in
+`docs/aml-scoring.md`.
 """
 
 from __future__ import annotations
+
+from lakebench.aml.rule_meta import RULE_TARGET_TYPOLOGY
 
 # Map each W-rule to the typology_type in `bronze.manifest` that the
 # rule is supposed to detect. Several rules may target the same type;
@@ -26,27 +28,7 @@ from __future__ import annotations
 # because that's the rule that can actually detect its graph shape.
 # Consumers computing precision/recall MUST use RULE_TARGETS as the
 # authoritative mapping; `manifest.workload` is category-level context.
-RULE_TARGETS: dict[str, str | None] = {
-    "W1_connected_components": "gather_scatter",  # multi-entity graph clusters
-    "W2_structuring": "micro_structuring",
-    "W3_round_tripping": "cycle",  # funds return to origin via 2-5 hops
-    "W4_risk_propagation": "rapid_layering",  # pass-through within hours
-    # Screening track (datagen_rs/src/screening.rs, AML-GOALS #50): one
-    # instance per (customer, listed party) relationship, its UETRs the
-    # customer's payments to that party. Sanctions instances include the
-    # payments before a list-version-2 entry was listed (only a rescreen
-    # finds those). Namesake decoys are paid too and are not instances, so
-    # a loose screen shows up as false positives.
-    "W5_sanctions_match": "sanctions_match",
-    "W6_pep_counterparty": "pep_match",
-    # W7 targets `corridor_high_risk` (typology.rs enum name, not
-    # `high_risk_corridor` -- the latter is the transposed variant an
-    # earlier draft used and it silently matched zero manifest rows).
-    "W7_cross_border_high_risk": "corridor_high_risk",
-    "W8_dormant_reactivation": "dormant_reactivation",
-    # Open multi-day chain forwarding 80-100% per hop (not a return).
-    "W17_layering_chain": "stack",
-}
+RULE_TARGETS: dict[str, str | None] = dict(RULE_TARGET_TYPOLOGY)
 
 
 # Planted typologies that no current W-rule targets. Explicitly listed
@@ -95,8 +77,8 @@ UNMAPPED_TYPOLOGIES: dict[str, str] = {
     ),
     "synthetic_identity": (
         "No dedicated synthetic-identity detector shipped yet; the "
-        "`W5_splink_resolution` rule is spec-level future work per "
-        "`detection_rules.py:26-28`."
+        "`W5_splink_resolution` rule is future work (see the "
+        "`detection_rules` module docstring)."
     ),
     "tbml_repeated_invoice": (
         "Trade-Based ML repeated-invoice pattern is planted but no "
