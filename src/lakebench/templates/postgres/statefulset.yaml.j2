@@ -1,6 +1,5 @@
 ---
 # PostgreSQL StatefulSet for Hive Metastore backend
-# Based on Addendum B.1
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -75,7 +74,7 @@ spec:
             limits:
               cpu: "2"
               memory: "4Gi"
-          # CRITICAL: Use pg_isready for liveness/readiness (Addendum E.1)
+          # pg_isready checks that the server accepts connections.
           livenessProbe:
             exec:
               command:

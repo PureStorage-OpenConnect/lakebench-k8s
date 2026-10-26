@@ -1,7 +1,7 @@
 {# Grafana dashboard provisioned via file provider.                          #}
 {# One ConfigMap per deployment, in the deployment namespace. The dashboard   #}
-{# uid is fixed; namespaces no longer collide because each deployment runs    #}
-{# its own Grafana. `run_id` picks between runs in this namespace. Resource   #}
+{# uid is fixed; it cannot collide because each deployment runs its own     #}
+{# Grafana. `run_id` picks between runs in this namespace. Resource           #}
 {# panels come from cAdvisor and Trino from the JMX exporter, so they work    #}
 {# for batch and continuous runs; datagen and stage panels read Pushgateway   #}
 {# series, which only some stages push (docs/component-observability.md).     #}

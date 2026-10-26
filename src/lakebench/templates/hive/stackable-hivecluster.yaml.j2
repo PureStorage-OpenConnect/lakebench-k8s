@@ -1,6 +1,5 @@
 ---
-# Stackable HiveCluster - Managed Hive Metastore with S3 support
-# Proven deployment pattern for S3-backed Hive Metastore
+# Stackable HiveCluster: managed Hive Metastore with S3 support
 apiVersion: hive.stackable.tech/v1alpha1
 kind: HiveCluster
 metadata:
@@ -46,7 +45,7 @@ spec:
               limit: "{{ hive_memory }}"
         configOverrides:
           hive-site.xml:
-            # Connection pool settings (proven defaults)
+            # Connection pool settings
             javax.jdo.option.ConnectionPool.maxPoolSize: "20"
             javax.jdo.option.ConnectionPool.maxActive: "15"
             javax.jdo.option.ConnectionPool.maxIdle: "5"

@@ -1,6 +1,5 @@
 ---
 # Trino Configuration
-# Based on Addendum B.3
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -19,9 +18,9 @@ data:
     discovery.uri=http://lakebench-trino:8080
     {% if trino_memory %}
     {# Sized in engine.py (trino_memory_properties) from the heaps and the
-       worker count. Unset, query.max-memory is a flat 20GB for any cluster
-       size, which failed AML FQ3 at scale 100 on 4 x 48Gi workers. The
-       cluster-wide caps are enforced here, on the coordinator. #}
+       worker count. Unset, query.max-memory is a flat 20GB whatever the
+       cluster size, too little for the large AML queries at high scales.
+       The cluster-wide caps are enforced here, on the coordinator. #}
     query.max-memory={{ trino_memory.max_memory }}
     query.max-memory-per-node={{ trino_memory.coordinator_max_memory_per_node }}
     memory.heap-headroom-per-node={{ trino_memory.coordinator_heap_headroom }}
@@ -30,8 +29,8 @@ data:
     {# The coordinator PLANS with spill-enabled; the workers execute with
        theirs. With spill on the workers only, the coordinator never set a
        join's spillable flag and the workers failed the query with
-       "spillable not yet set" (3 of 8 AML queries, live 2026-09-24). It never
-       spills itself (include-coordinator=false); the path must just exist. #}
+       "spillable not yet set". It never spills itself
+       (include-coordinator=false); the path must just exist. #}
     spill-enabled=true
     spiller-spill-path=/data/trino/spill
     max-spill-per-node={{ trino_worker_spill_max | replace('Gi', 'GB') }}
