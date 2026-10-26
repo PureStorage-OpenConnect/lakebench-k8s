@@ -36,6 +36,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from statistics import median
 from typing import Any
 
 # A probe that fails this many times in a row ends the wait: the query is
@@ -45,16 +46,10 @@ MAX_CONSECUTIVE_PROBE_FAILURES = 3
 # two, because a slow plateau also agrees with itself; still no proof, so the
 # result is recorded as unverified.
 UNVERIFIED_STABLE_PROBES = 3
-# Ceiling on the noise-derived tolerance. The unsettled FlashBlade rounds in
-# in a live incident were 27-34% slower than before maintenance; 20% keeps them out
+# Ceiling on the noise-derived tolerance. Unsettled FlashBlade rounds have
+# been measured 27-34% slower than before maintenance; 20% keeps them out
 # whatever the probe query's own spread.
 MAX_NOISE_TOLERANCE_PCT = 20.0
-
-
-def _median(xs: list[float]) -> float:
-    s = sorted(xs)
-    n = len(s)
-    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
 
 # Samples needed before the bound widens: with two, one outlier is half the
@@ -74,8 +69,8 @@ def reference_spread_pct(samples: list[float] | None) -> float | None:
     xs = [float(x) for x in samples or [] if x is not None and x > 0]
     if len(xs) < MIN_SPREAD_SAMPLES:
         return None
-    med = _median(xs)
-    mad = _median([abs(x - med) for x in xs])
+    med = median(xs)
+    mad = median([abs(x - med) for x in xs])
     return 2.0 * mad / med * 100.0
 
 
@@ -207,8 +202,9 @@ def wait_for_settle(
         reference_seconds: The same query's pre-maintenance time, or None
             when there was no pre round.
         reference_samples: The pre-maintenance samples behind
-            ``reference_seconds``. With two or more, ``tolerance_pct`` widens
-            to their spread, capped at ``MAX_NOISE_TOLERANCE_PCT``.
+            ``reference_seconds``. With ``MIN_SPREAD_SAMPLES`` or more,
+            ``tolerance_pct`` widens to their spread, capped at
+            ``MAX_NOISE_TOLERANCE_PCT``.
     """
     probes: list[SettleProbe] = []
     failures = 0
