@@ -9,16 +9,19 @@ Fifteen typologies are planted: `bipartite`,
 `tbml_repeated_invoice`. The screening track
 adds `sanctions_match` and `pep_match`: 17 manifest types.
 
-- Each typology gets an equal share of a row budget of 0.1% of base payments,
-  so instance counts vary with instance size.
+- Each of the fifteen gets an equal share of a row budget of 0.1% of base
+  payments, so instance counts vary with instance size.
 - Every instance's subject is a customer.
-- Nine typologies have a designated rule ([4.2](rules.md#42-detection-rules)).
-  Eight have none: `bipartite`, `cross_border_cycle`, `fan_in`, `fan_out`,
-  `random`, `scatter_gather`, `synthetic_identity`, `tbml_repeated_invoice`.
+- Seven typologies and both screening types have a designated rule
+  ([4.2](rules.md#42-detection-rules)). Eight typologies have none:
+  `bipartite`, `cross_border_cycle`, `fan_in`, `fan_out`, `random`,
+  `scatter_gather`, `synthetic_identity`, `tbml_repeated_invoice`.
   Recall for an unmapped typology is untestable, not zero.
 - `random` is a control: its hit rate is the chance floor
   ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)).
-- The pre-registered behavioural subset: `gather_scatter`, `rapid_layering`,
+- The fidelity gate
+  ([8.8](scoring.md#88-band-leakage-report-and-reference-detector)) scores
+  the pre-registered behavioural subset: `gather_scatter`, `rapid_layering`,
   `stack`, `dormant_reactivation`, `micro_structuring`, `corridor_high_risk`.
 
 ## 3.8 Sanctions and PEP screening track
@@ -50,9 +53,9 @@ Planted payments:
   name or line of business, a one-letter-different name in the same country,
   or the same name in another country. A loose screen loses precision.
 - Twenty ordinary external payees per list entry, with the same name shapes,
-  one to three payments each and no party or account master record, keep
-  planted payments from standing out as rare external payees. On a seed-43
-  calibration corpus that heuristic reaches 3% precision.
+  one to three payments each and no party or account master record, keep a
+  rare-external-payee heuristic from working: on a seed-43 calibration corpus
+  it reaches 3% precision.
 
 **Ground truth** is the manifest: one `sanctions_match` or `pep_match`
 instance per (customer, listed party), its UETRs the customer's payments to
@@ -61,17 +64,10 @@ that party. `injection_parameters` holds `list_id`, `list_version`,
 `account_country` (`listed` or `other`).
 
 Recall and precision are computed as for the behavioural rules.
-Transaction-level precision is weighted by payments: one heavily paid world
-entity whose name sits near a list entry (world persons carry a middle initial,
-list entries a full middle name) can dominate it, so read it beside the alert
+Transaction-level precision is weighted by payments, so one heavily paid world
+entity whose name sits near a list entry can dominate it (world persons carry
+a middle initial, list entries a full middle name). Read it beside the alert
 count.
-
-**W7 corridors.** The high-risk corridor list W7 uses beside the FATF list is
-synthetic: it is the country pool the generator draws
-`corridor_high_risk` participants from, since no generator home country is on
-the June 2026 FATF lists. W7's recall on that typology is partly by
-construction: the rule uses the generator's corridor list, as a bank uses its
-own.
 
 ## 3.9 Planting shapes and baseline timing
 
@@ -83,10 +79,16 @@ from a detection rule's threshold; rule recall is reported, not targeted.
 | `micro_structuring` | A crew of 3 to 8 depositors (some deposit more than once) pays the collector 8 times over 3 to 21 days. 3 to 8 payments are structured; the rest are the depositors' ordinary amounts | Structurers reuse a few people ("smurfing") and run campaigns over weeks so no single day shows the pattern. The FFIEC BSA/AML manual describes both "just under" amounts and varied amounts meant to avoid an obvious pattern |
 | `micro_structuring`, amounts | Structured amounts sit `threshold x 0.4 x (1 - sqrt(u))` below the threshold: a triangular density highest at the threshold and finite there, always under it, no step at W2's 90% band floor, about 44% inside W2's band | as above |
 | `dormant_reactivation` | Dormancy log-uniform 45 to 365 days. Two thirds of reactivations are sudden (2 days); one third return to use over 4 to 10 days (short, so few straddle a month boundary, where the monthly unit would see the burst without its gap). Amounts stay the account's own draws | An account sending about monthly goes 45 days without a send about one time in five, so the short end overlaps normal gaps. Not every reactivation is one burst |
-| `corridor_high_risk` | 2 to 4 payments from the subject to one counterparty in the higher-risk pool over 2 to 5 weeks, amounts from the sender's own distribution | W7's "corridors to high-risk jurisdictions" is about where an account's money goes; one payment cannot show that. About 38% of runs span two months; the monthly unit labels the last month and excludes the earlier, so a split run shows fewer corridor payments in its labelled month |
+| `corridor_high_risk` | 2 to 4 payments from the subject to one counterparty in the higher-risk pool over 2 to 5 weeks, amounts from the sender's own distribution. About 38% of runs span two months; the monthly unit labels the last month and excludes the earlier, so a split run shows fewer corridor payments in its labelled month | W7's "corridors to high-risk jurisdictions" is about where an account's money goes; one payment cannot show that |
 
-These three draw amounts from an instance-keyed stream, so other typologies keep their amounts, times
-and participants.
+These three draw amounts from their own instance-keyed stream, so they leave
+every other typology's amounts unchanged.
+
+**W7 corridors.** The high-risk corridor list W7 uses beside the FATF list is
+synthetic: it is the country pool the generator draws `corridor_high_risk`
+participants from, since no generator home country is on the June 2026 FATF
+lists. W7's recall on that typology is partly by construction: the rule uses
+the generator's corridor list, as a bank uses its own.
 
 **Scheduled and bursty senders.** Real accounts mix steady cadences
 (standing orders, bills, payroll, supplier runs) with bursts. The

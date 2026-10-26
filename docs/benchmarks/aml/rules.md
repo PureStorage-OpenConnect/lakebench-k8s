@@ -21,9 +21,9 @@ continuous W4 raises one alert per entity per week, batch W4 one per entity.
 | `W4_risk_propagation` | pass-through of 80% or more within 6 h | `rapid_layering` | `W4_FAST_PASS_THROUGH` | `W4_MULTI_CHAIN` | 3 chains | batch, continuous |
 | `W5_sanctions_match` | fuzzy screen of payment beneficiaries against the corpus's dated sanctions list, at payment time and as a rescreen when a list version is published | `sanctions_match` | `W5_SANCTIONS_HIT` | `W5_EXACT`, `W5_FUZZY`, `W5_RESCREEN` | -- | batch, continuous (transaction screen only) |
 | `W6_pep_counterparty` | the same screen against the PEP list; MED priority at $10,000 or more, LOW below | `pep_match` | `W6_PEP_HIT` | `W6_EXACT`, `W6_FUZZY` | -- | batch, continuous |
-| `W7_cross_border_high_risk` | cross-border payments into a FATF black or grey list country or a synthetic high-risk corridor country ([3.8](typologies.md#38-sanctions-and-pep-screening-track)) | `corridor_high_risk` | `W7_HIGH_RISK_CORRIDOR` | `W7_FATF_BLACK`, `W7_FATF_GREY`, `W7_SYNTHETIC_CORRIDOR` | -- | batch |
-| `W8_dormant_reactivation` | an inactive account with a sudden large flow | `dormant_reactivation` | `W8_DORMANCY_GAP` | none | -- | batch |
-| `W17_layering_chain` | open chains of 3 or more transfers, each forwarding 80 to 100% of the previous within 7 days | `stack` | `W17_CHAIN` | `W17_LONG_CHAIN` | 5 hops | batch, continuous |
+| `W7_cross_border_high_risk` | cross-border payments into a FATF black or grey list country or a synthetic high-risk corridor country ([3.9](typologies.md#39-planting-shapes-and-baseline-timing)) | `corridor_high_risk` | `W7_HIGH_RISK_CORRIDOR` | `W7_FATF_BLACK`, `W7_FATF_GREY`, `W7_SYNTHETIC_CORRIDOR` | -- | batch |
+| `W8_dormant_reactivation` | a payment of $5,000 or more from a customer account idle for 90 days or more | `dormant_reactivation` | `W8_DORMANCY_GAP` | none | -- | batch |
+| `W17_layering_chain` | open chains of 3 to 6 transfers, each forwarding 80 to 100% of the previous within 7 days | `stack` | `W17_CHAIN` | `W17_LONG_CHAIN` | 5 hops | batch, continuous |
 
 - Scoring and the verdict read the target typology column, never the
   manifest's coarser `workload` category.
@@ -35,10 +35,10 @@ continuous W4 raises one alert per entity per week, batch W4 one per entity.
   token-sorted names.
 - The entry's country is the only secondary identifier. There is no phonetic
   scoring, date of birth or identifier matching.
-- W6 screens every payment and uses $10,000 only to order the queue, so its
-  recall measures the screen, not the amount distribution.
+- W6 screens every payment; its amount cut sets only priority, so its recall
+  measures the screen, not the amount distribution.
 
-**Path caps.** W3 and W17 skip with "not run" (`path-cap`) when their path
+**Path caps.** W3 and W17 are recorded `skipped` (`path-cap`) when their path
 search would not fit the job's scratch (budget in
 [7.4](execution-rules.md#74-lakebench-imposed-caps)). A `path-cap` skip, like
 W1's `vertex-cap`, is a Lakebench cap: the run can still pass and the skip is
@@ -59,8 +59,8 @@ condition holds, so a rule's codes cover all its alerts.
 - `W2_BENEFICIARY_FAN_IN` marks the beneficiary kind; `*_EXACT` and
   `*_FUZZY` the name match; `W5_RESCREEN` an alert raised when a list version
   listed a prior counterparty.
-- A code reading the HIGH cut (`*_LARGE_COMPONENT`, `*_HIGH_COUNT`,
-  `*_LONG_CYCLE`, `*_MULTI_CHAIN`, `*_LONG_CHAIN`) always marks a
+- A code reading the HIGH cut (`W1_LARGE_COMPONENT`, `W2_HIGH_COUNT`,
+  `W3_LONG_CYCLE`, `W4_MULTI_CHAIN`, `W17_LONG_CHAIN`) always marks a
   HIGH-priority alert.
 - The generator's home countries include no FATF-listed jurisdiction, so on
   generated corpora W7 alerts carry `W7_SYNTHETIC_CORRIDOR` and the two FATF

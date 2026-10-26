@@ -28,9 +28,9 @@ executor run time (`exec_s`), with status, task count, wall time, longest task
 - An empty list means the rule ran no stage. With no usable list (store
   unreadable, or no stage of the rule while a flag is set), the rule is in
   `stage_profile_unavailable` with the reason.
-- Detection is unaffected. The wait adds at most 5 s per rule.
-  `stage_profile_cost_s` records each rule's read time: Lakebench overhead
-  inside the job's time, never in `rule_elapsed_s`. The continuous gold [tick](../../glossary.md#tick) does not profile.
+- The wait adds at most 5 s per rule. `stage_profile_cost_s` records each
+  rule's read time: Lakebench overhead inside the job's time. The continuous
+  gold [tick](../../glossary.md#tick) does not profile.
 
 **`tm_ops.phases`**: wall seconds per TM pass stage, in pass order `pin`,
 `reconcile`, `prior_state`, `plan` (alert-input, replay and disposition
@@ -42,8 +42,6 @@ per-customer replay), `write_dispositions`, `write_cases`, `coverage`,
 - The JSON keys are sorted, not in pass order.
 - Spark evaluates lazily, so a phase holds the work its own reads and writes
   trigger.
-- The alert inputs and the replay are materialised in their own phases,
-  after the cycle is recorded as started, so a failure there fails the pass.
 
 **`alert_set_seconds`**: seconds the alert-set fingerprint took
 ([8.7](scoring.md#87-alert-set)). It runs last in the gold-finalize pod, after
@@ -54,9 +52,9 @@ the TM pass.
   check.
 - The report prints it beside the stage time ("excludes 1.2s of Lakebench's
   alert-set fingerprint").
-- Time to value loses it in a single-cycle run. With `cycles` above 1 the
-  earlier cycles' fingerprints stay inside time to value, as the Customer 360
-  check's do.
+- A single-cycle run also takes it off time to value. With `cycles` above 1
+  the earlier cycles' fingerprints stay inside time to value, as the Customer
+  360 check's do.
 
 Two diagnostic blocks derive from these; neither enters identity, a verdict
 or a comparison:
@@ -70,15 +68,13 @@ or a comparison:
   - the TM pass's time and share (`tm_elapsed_s`, `tm_share`);
   - `profile`: `read`, or why the stage is missing (`unavailable:
     <reason>`, `no_stage`, `missing`).
-- `limits.headroom_pct` (batch): per stage, `100 x (1 - elapsed / per-job
-  timeout)` against the per-job timeout the run gave every stage (recorded as
-  `job_timeout_seconds`).
+- `limits.headroom_pct` (batch): per stage, `100 x (1 - elapsed /
+  job_timeout_seconds)`, the one per-job timeout (`--timeout`, else scaled
+  from data scale) every batch stage runs under.
+  - Absent when the run recorded no `job_timeout_seconds`.
   - A stage that ran more than once reports its slowest run; a failed stage
     reads null.
-  - The benchmark phase has no per-job timeout, since its queries are
-    bounded one by one. So `benchmark_query` is `100 x (1 - slowest timed
-    query sample / per-query timeout)` (recorded as
-    `benchmark_query_timeout_seconds`, 900 s for AML).
+  - `benchmark_query` is `100 x (1 - slowest timed query sample /
+    benchmark_query_timeout_seconds)` (900 s for AML).
   - `benchmark_query` is null when a query failed or `lakebench benchmark`
     later replaced the benchmark.
-  - 25 or more means at most 75% of the budget used.

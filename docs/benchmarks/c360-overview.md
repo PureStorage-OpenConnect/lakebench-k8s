@@ -1,19 +1,16 @@
 # Customer 360 workload: overview
 
-For the person choosing which Lakebench workload to run against an
-architecture. It explains what the Customer 360 workload is, what each stage
-is designed to stress, and what a comparison across architectures therefore
-learns. For the exact columns, metrics and compatibility, follow the links
-into [the specification](C360.md).
+For choosing which Lakebench workload to run against an architecture: what
+the Customer 360 workload is, what each stage stresses, and what a comparison
+across architectures learns. Exact columns, metrics and compatibility are in
+[the specification](C360.md).
 
 ## What it models
 
 A retail analytics pipeline. Customer interaction events (web, app, store,
 support and more) are generated, validated, enriched into a wide per-event
 record, aggregated into daily key performance indicators, and queried by
-analysts and dashboards. The pipeline lands the events, filters and enriches
-them into a silver table, rolls them up into one row per day, and answers a
-set of analytical queries.
+analysts and dashboards.
 
 The workload exercises how an architecture executes this pipeline, not the
 business value of any particular metric.
@@ -21,54 +18,46 @@ business value of any particular metric.
 ## Why run it
 
 Customer 360 is the light, scan-and-aggregate workload. Its silver stage is
-a single pass with no joins or shuffles, and its gold is a small daily
-rollup. Pick it when the architectural question you want measured is
-any of these:
+a single pass with no joins, and its gold is a small daily rollup. Pick it
+when the architectural question you want measured is any of these:
 
-- Single-pass transform and scan-and-write throughput, free of join and
-  shuffle cost.
+- Single-pass transform and scan-and-write throughput, free of join cost.
 - Grouped aggregation and single-file write behaviour.
 - How an engine behaves across a ladder of query shapes, from raw scan to
   windowed analytics, over a clean wide table.
 
-[AML](aml-overview.md) is the heavy, stateful workload. Choosing between the two workloads is choosing which architectural
-stress you want to measure.
+[AML](aml-overview.md) is the heavy, stateful workload. Choosing between the
+two workloads is choosing which architectural stress you want to measure.
 
 Customer 360 runs on both Iceberg and Delta recipes, so it also serves as the
 cross-table-format comparison.
 
 ## What each stage is designed to stress
 
-Each stage targets one architectural capability.
-
 ### Bronze: schema validation and scan throughput
 
 In batch mode no bronze table is written. Bronze-verify is a validation pass
 over the landing Parquet: required columns and their types, row counts, and
-key columns that must not be entirely NULL. So bronze measures schema
-validation and file-scan throughput, and nothing else. AML's bronze, by
-contrast, registers files in place.
+key columns that must not be entirely NULL. Bronze measures schema
+validation and file-scan throughput. AML's bronze registers files in place.
 
-### Silver: single-pass transform, no joins or shuffles
+### Silver: single-pass transform, no joins
 
 Silver drops duplicate-flagged rows and derives a wide per-event record in a
-single pass, with no joins and no shuffles. It measures
-embarrassingly-parallel transform throughput: how fast the architecture can
-scan, compute per-row columns, and write. Below 100 GB of bronze it uses a
-simple strategy; at or above it switches to a streaming, hash-distributed
-pass. Because there is no accumulated cross-row state, silver cost tracks the
-data volume of the run, not the length of a history. AML's silver maintains
-state that grows.
+single pass with no joins. In batch mode one shuffle clusters the rows by day
+before the write. It measures transform throughput: how fast the architecture
+can scan, compute per-row columns, and write. With no cross-row state, silver
+cost tracks the data volume of the run, not the length of a history. AML's
+silver maintains state that grows.
 
 ### Gold: grouped aggregation and single-file write
 
 Gold groups the whole silver table by day into a set of KPIs and writes the
 result as a single coalesced file. The output is around a year of daily rows,
-so the stage measures the aggregation path and the dashboard read, not output
-volume. In continuous mode gold recomputes only
-the dates that new rows touch, which is the date-slice recompute stress. A
-non-degeneracy gate reads gold and silver to confirm the rollup covers every
-day, so the stage also exercises a full-table verification read.
+so the stage measures the aggregation path, not output volume. In batch mode a
+non-degeneracy gate then reads gold and silver to confirm one gold row per
+silver day, a full-table verification read. In continuous mode gold
+recomputes only the dates that new rows touch.
 
 ## What the queries probe
 
@@ -87,11 +76,8 @@ The two modes do not measure the same thing at different speeds.
   into answers.
 - **Continuous** runs the pipeline as a live stream and measures sustained
   freshness and throughput under constant writes, with gold recomputing only
-  the dates that change. It answers a different question: how well does the
-  architecture keep an always-on rollup current as events arrive.
-
-Run continuous when you care about steady-state behaviour under load; run
-batch when you want a clean, repeatable pass over a fixed corpus.
+  the dates that change. It answers: how well does the architecture keep an
+  always-on rollup current as events arrive.
 
 ## How to read the results, and where the detail is
 

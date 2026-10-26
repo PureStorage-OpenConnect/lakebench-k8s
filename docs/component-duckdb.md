@@ -8,6 +8,7 @@ DuckDB runs the benchmark query suite against Iceberg tables in one pod, without
 
 - Set `architecture.query_engine.type: duckdb`.
 - DuckDB reads Iceberg only. DuckDB with Delta is rejected at config load: its delta extension ignores DuckDB's S3 settings and cannot reach non-AWS S3.
+- The financial (AML) workload is rejected at config load: its recall and precision scoring runs as SQL on Trino.
 - Recipes: `hive-iceberg-spark-duckdb`, `polaris-iceberg-spark-duckdb` ([Recipes](recipes.md)).
 
 ## Version and image
@@ -19,14 +20,12 @@ DuckDB runs the benchmark query suite against Iceberg tables in one pod, without
 | Key | Default | Effect |
 |---|---|---|
 | `query_engine.type` | `trino` | `duckdb` deploys DuckDB instead of Trino. |
-| `duckdb.cores` | `2` | CPU request and limit. DuckDB parallelizes across all cores in one process. |
-| `duckdb.memory` | `"4g"` | Memory request and limit; a query over it fails with OOM. On the financial schema, an unset memory becomes `16g`; on a node under 24 GiB allocatable, node minus 8 GiB (floor 4g). |
+| `duckdb.cores` | `2` | CPU request and limit. |
+| `duckdb.memory` | `"4g"` | Memory request and limit; a query over it fails with OOM. |
 | `duckdb.catalog_name` | `"lakehouse"` | Catalog prefix in SQL (`lakehouse.silver.table`). Must match the catalog registered in Hive or Polaris. |
 | `duckdb.version` | [matrix](compatibility-matrix.md#component-version-matrix) | `duckdb` Python package version. Pinned so runs weeks apart use the same engine. |
 
 ## Sizing
-
-At large scale Trino is much faster through distributed execution.
 
 | Scale factor | Cores | Memory | Notes |
 |---|---|---|---|
@@ -44,11 +43,10 @@ At large scale Trino is much faster through distributed execution.
                              allow_moved_paths := true)
   ```
 
-- `adapt_query()` in `DuckDBExecutor` rewrites catalog-qualified names (e.g. `lakehouse.silver.customer_interactions_enriched`) to `iceberg_scan()` calls on the table's S3 path. Hive uses the `namespace.db/` warehouse layout. The auxiliary AML tables (`silver_entities`, `gold_alerts` and the others) resolve to the bucket of the layer that writes them.
+- `adapt_query()` in `DuckDBExecutor` rewrites catalog-qualified names (e.g. `lakehouse.silver.customer_interactions_enriched`) to `iceberg_scan()` calls on the table's S3 path. Hive uses the `namespace.db/` warehouse layout.
 - Queries are written in Trino SQL. `adapt_query()` rewrites Trino functions:
   - `date_add('month', N, expr)` -> `(expr + INTERVAL N MONTH)`
   - `date_diff(...)` -> `datediff(...)`
-  - `cardinality(array)` -> `len(array)` (outside string literals, quoted identifiers and comments)
 - COUNT, SUM, AVG, LAG and window frames work unchanged.
 - No metadata cache: every query reads Iceberg metadata from S3. `flush_cache()` is a no-op.
 

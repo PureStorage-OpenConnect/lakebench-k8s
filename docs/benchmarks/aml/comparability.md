@@ -27,8 +27,10 @@ published AML result must show:
 Continuous runs also disclose the window, `continuous.trickle`,
 `limits.trickle_bound`, `intake_limit` and `corpus_ingest_ratio`: a window
 that did not drain the corpus measures a subset of it, and Lakebench sets the
-arrival rate. Disclose every skipped rule and any skipped-rule warning the
-batch gate printed (not enforced).
+arrival rate.
+
+Batch runs also disclose any skipped-rule warning the gate printed (not
+enforced).
 
 ## 10. Comparability
 
@@ -45,18 +47,16 @@ comparable only when:
   rule (a different alert set is a different result;
   [8.7](scoring.md#87-alert-set)).
 
-- Lakebench does not compare query answers: a reader compares the per-query
-  row counts and numbers of the two reports by eye.
-- An AML continuous run has no comparable alert set, and a `*-none` recipe no
-  query set, so such runs cannot show matching results.
-- Differing execution conditions
-  ([7.2](execution-rules.md#72-permitted-tuning-still-publishable)), or only
-  the dependency pinset, leave the pair comparable but not like-for-like.
-  When architecture and system both differ, no difference can be attributed
-  to either.
+Also:
+
+- An AML continuous run has no comparable alert set, and a run with no
+  benchmark (`--skip-benchmark`) no query set, so such runs cannot show
+  matching results.
+- Differing execution conditions or dependency pinsets
+  ([7.2](execution-rules.md#72-permitted-tuning-still-publishable)) leave the
+  pair comparable but not like-for-like.
 - Batch and continuous runs are never comparable (mode is a Workload key).
 - A batch run whose TM layer did not run (8 queries) is not comparable with
   one where it ran (12), because the query sets differ.
-- Records written by Lakebench 1.6 (exp1, workload `aml-1`), including the
-  three cited runs, are not comparable with this release's records. They are
-  reference figures, not baselines.
+- Older records: see
+  [7.3](execution-rules.md#73-prohibited-changes-invalidate-a-result-or-are-refused).

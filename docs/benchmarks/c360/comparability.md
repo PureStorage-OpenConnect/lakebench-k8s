@@ -9,9 +9,9 @@ published result shows:
 
 | Area | Must show |
 |---|---|
-| Workload | name `customer360`, version `c360-2.dev1`; parameters id and the resolved `unique_customers` and event window |
+| Workload | name `customer360`, version `c360-2.dev1`; `parameters_id` and the resolved `unique_customers` and event window |
 | Corpus | id, generator image as configured and as run, digest, seed, scale, timestamps, `dirty_data_ratio`, whether each was observed from the datagen pods or only declared; on exp2, corpus id v2 and its lineage; problems when the pods disagree |
-| Architecture | recipe; catalog, table format and query engine types and versions (Hive as the derived Stackable image); Spark image; query access path (`catalog`, `direct_storage`, or null without a query engine) |
+| Architecture | recipe; catalog, table format and query engine types and versions (Hive as the derived Stackable image); Spark image; query access path (`catalog`, `direct_storage`, or null without a query engine); dependency pinset; user-set executor and driver overrides and Spark conf when set |
 | System and support | `cluster` or `local`; support state frozen at run start (`supported`, `unverified`, `unsupported`) and its basis |
 | Mode and maintenance | mode; maintenance policy id, configured settings and effective maintenance per operation (compaction operation included), with known limitations |
 | Stages | executed and skipped (a skipped benchmark or maintenance is listed) |
@@ -35,20 +35,24 @@ comparable only when (`metrics/comparability.py`):
   is equal and neither run has a corpus problem;
 - they ran the same query set.
 
+When reading a pair:
+
 - Lakebench does not compare query answers; compare the per-query row counts
   and numbers of the two reports.
 - A run with no benchmark (`--skip-benchmark`, a `*-none` recipe) has no
   query set to compare.
 - Execution conditions: effective maintenance, compaction operation,
   maintenance settings, benchmark iterations and mode, the Lakebench caps
-  that bound, and (continuous) the in-stream round count. When they or the
-  dependency pinset differ, a difference in the numbers may come from them. A
-  Trino-vs-Thrift Iceberg pair that both compacted differs in conditions ([7.2](execution-rules.md#72-maintenance-policy-handling)).
-- Query access path and system are Architecture and System keys, not
-  conditions; when architecture and system both differ, no difference can be
-  put down to either.
+  that bound, and (continuous) the in-stream round count. When they differ,
+  a difference in the numbers may come from them. A Trino-vs-Thrift Iceberg
+  pair that both compacted differs in conditions
+  ([7.2](execution-rules.md#72-maintenance-policy-handling)).
+- Query access path, dependency pinset and system are Architecture and System
+  keys, not conditions; when architecture and system both differ, no
+  difference can be put down to either.
 - Compare QpH only between runs with the same non-unknown `query_set_id`; a
   continuous median over rounds of different sets reads `blended`
   ([8.2](metrics.md#82-continuous)).
-- Continuous rows per second from a run whose corpus drained with less than
-  90% arrival is over a short arrival; do not compare it.
+- Continuous rows per second from a drained run (`corpus_drained`) is taken
+  over `arrival_seconds` only, and the verdict marks it a lower bound set by
+  corpus size; do not compare it.

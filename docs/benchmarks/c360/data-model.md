@@ -10,7 +10,7 @@ prefixed at runtime with the pipeline catalog.
 
 | Object | Layer | Mode | Grain | Key | Partitioning | Rows, scale 1 | Rows, scale 10 |
 |---|---|---|---|---|---|---|---|
-| Landing Parquet `s3://<bronze>/customer/interactions/part-NNNNNN.parquet` | bronze (raw) | both | one interaction event | `id` = `row_id` (unique per file block) | none; one object per file id | 2,478,560 (sizing code: 160 files x 15,491 rows) | 24,770,109 (1,599 files x 15,491; also recorded on the `c360-1` scale-10 record) |
+| Landing Parquet `s3://<bronze>/customer/interactions/part-NNNNNN.parquet` (batch cycle n > 0: `part-cNNN-NNNNNN`; continuous: `part-eNNNN-NNNNNN`) | bronze (raw) | both | one interaction event | `id` = `row_id` = file id x rows per file + row index (batch file id: fid + cycle x 2^32; continuous: epoch x files + fid) | none; one object per file id | 2,478,560 (sizing code: 160 files x 15,491 rows) | 24,770,109 (1,599 files x 15,491; also recorded on the `c360-1` scale-10 record) |
 | `default.bronze_raw` | bronze (table) | continuous only | one landed event | none enforced | unpartitioned | equals landing rows once drained (not separately recorded) | not recorded |
 | `silver.customer_interactions_enriched` | silver | both | one bronze row whose `data_quality_flag` is not `duplicate_suspected` | none enforced (`event_id` is unique in the generator) | identity on `interaction_date` | about 98% of bronze (not in a published record) | 24,274,519 (recorded) |
 | `gold.customer_executive_dashboard` | gold | both | one `interaction_date` present in silver (enforced in batch, [5.1](correctness.md#51-checks-that-gate-a-run-fail-it)) | `interaction_date` | unpartitioned, one file per write | 366 (one per day of the default 2024 window) | 366 (recorded) |
@@ -40,12 +40,12 @@ the Arrow schema is in `datagen_rs/src/schema.rs`.
 
 | # | Column | Type | Description | Example values |
 |---|---|---|---|---|
-| 1 | `id` | int64 | Monotonically increasing row identifier | `0`, `122000`, `244000` |
-| 2 | `row_id` | int64 | Global row identifier (same value as `id`) | `0`, `122000`, `244000` |
+| 1 | `id` | int64 | Monotonically increasing row identifier | `0`, `15491`, `30982` |
+| 2 | `row_id` | int64 | Global row identifier (same value as `id`) | `0`, `15491`, `30982` |
 | 3 | `event_timestamp` | timestamp(us, UTC) | Event time within a configurable date range | `2024-06-15 14:32:07.123456` |
 | 4 | `event_id` | string | UUID v4 per event | `a3f1b2c4-d5e6-4f78-9a0b-1c2d3e4f5678` |
 | 5 | `session_id` | string | UUID v4 per session | `b7c8d9e0-f1a2-4b3c-8d4e-5f6a7b8c9d0e` |
-| 6 | `customer_id` | int64 | Zipf-distributed customer identifier; the top id gets about 10% of events | `42`, `1337`, `499999` |
+| 6 | `customer_id` | int64 | Zipf-distributed customer identifier; the top id gets about 10% of events | `42`, `1337`, `99999` |
 | 7 | `email_raw` | string | Raw email, intentionally dirty (duplicates, corruption) | `user123456@gmail.com`, `user789.DUPLICATE@yahoo.com` |
 | 8 | `phone_raw` | string | Raw phone number in mixed formats | `+12025551234`, `(415) 555-6789` |
 | 9 | `interaction_type` | string | Interaction type (weighted) | `purchase`, `browse`, `support`, `login`, `abandoned_cart` |
@@ -82,8 +82,9 @@ the Arrow schema is in `datagen_rs/src/schema.rs`.
 | 40 | `session_fingerprint` | string | SHA-256-style hex fingerprint | `a1b2c3d4e5f6...` (64 hex characters) |
 | 41 | `interaction_payload` | string | Random hex payload, a compression anchor: 2 KiB of random bytes as 4,096 hex characters | `4f2a8b...` |
 
-`data_source` and `data_quality_flag` are drawn independently of dirty-data
-corruption. Silver uses the flags for filtering and quality reporting.
+`data_quality_flag` is drawn independently of dirty-data corruption; the
+corruption rate scales with `data_source` (`legacy_import` 70x
+`primary_system`). Silver uses the flags for filtering and quality reporting.
 
 | `data_source` | Weight | Meaning |
 |---|---|---|
@@ -109,8 +110,8 @@ All 41 bronze columns plus 32 derived per row with no joins or shuffles:
   `interaction_hour`, `interaction_day_of_week`, `interaction_week_of_year`,
   `interaction_month`, `interaction_year`, `is_weekend`,
   `is_business_hours`, `is_peak_hours`;
-- `customer_value_tier` (high > 500, medium > 100, low > 0, else
-  `browser_only`), `transaction_size_category`;
+- `customer_value_tier` (`high_value` > 500, `medium_value` > 100,
+  `low_value` > 0, else `browser_only`), `transaction_size_category`;
 - `engagement_score` (0 to 4 from `page_views`), `session_depth_category`,
   `time_spent_category`;
 - `channel_preference` (mobile_first, web_first, physical_first, else
@@ -119,8 +120,8 @@ All 41 bronze columns plus 32 derived per row with no joins or shuffles:
 - `customer_recency_score` (30 minus days from the data clock,
   [4.1](pipeline.md#41-batch-mode-pipelinemode-batch)),
   `engagement_velocity`;
-- `churn_risk_indicator` (satisfaction <= 2 high, <= 3 medium, NULL unknown,
-  else low);
+- `churn_risk_indicator` (satisfaction <= 2 `high_risk`, <= 3
+  `medium_risk`, NULL `unknown_risk`, else `low_risk`);
 - `attribution_channel`, `attribution_quality`;
 - `customer_journey_stage` (browse awareness, abandoned_cart consideration,
   purchase conversion, support retention, login other);
@@ -129,9 +130,10 @@ All 41 bronze columns plus 32 derived per row with no joins or shuffles:
 - `silver_processing_timestamp` (wall clock at transform,
   non-deterministic), `data_quality_score`.
 
-Batch silver adds `_batch_id` (the cycle index); continuous silver adds
-`_stream_id` and `_batch_id` (stream query id and micro-batch id), used for
-replay idempotency.
+Iceberg batch silver adds `_batch_id` (the cycle index; Delta batch uses the
+transaction app id instead); continuous silver adds `_stream_id` and
+`_batch_id` (stream query id and micro-batch id), used for Iceberg replay
+idempotency (debug columns on Delta).
 
 ### 2.3 Gold columns
 

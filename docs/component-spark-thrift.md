@@ -10,6 +10,7 @@ Spark Thrift Server (HiveThriftServer2) is a Spark-native query engine. It expos
 - Queries run through `kubectl exec` into the pod with `beeline` and `jdbc:hive2://localhost:10000`.
 - Spark refreshes Iceberg metadata on each query; `flush_cache()` is a no-op.
 - Recipes: `hive-iceberg-spark-thrift`, `polaris-iceberg-spark-thrift`, `hive-delta-spark-thrift` ([Recipes](recipes.md)).
+- The financial (AML) workload needs Trino; config load refuses it on spark-thrift.
 
 ## Version and image
 
@@ -17,30 +18,30 @@ The server uses `images.spark`, shared with the pipeline jobs: changing it chang
 
 ## Configuration keys
 
-The Delta and financial values are set by the autosizer on fields left unset.
+The Delta + Hive values are set by the autosizer on fields left unset.
 
 | Key | Default | Effect |
 |---|---|---|
 | `query_engine.type` | `trino` | `spark-thrift` deploys Spark Thrift Server instead of Trino. |
 | `spark_thrift.cores` | `2` (`8` on Delta + Hive) | CPU request and limit. The server runs Spark in local mode, so this is the query parallelism. Delta + Hive fits down to min(8, largest node cores - 2), floor 2. |
-| `spark_thrift.memory` | `"4g"` (`"16g"` on Delta + Hive, `"24g"` on the financial schema) | Driver heap; all query data (shuffle, aggregation, sort) must fit here plus spill. See below. |
+| `spark_thrift.memory` | `"4g"` (`"16g"` on Delta + Hive) | Driver heap; all query data (shuffle, aggregation, sort) must fit here plus spill. See below. |
 | `spark_thrift.catalog_name` | `"lakehouse"` | Catalog prefix in SQL. Must match the catalog registered in Hive or Polaris. |
 
 `spark_thrift.memory`:
 
-- Fit-down on the largest node: Delta + Hive min(16, node - 8) GiB; financial below 36 GiB allocatable min(20g, node - 8g); floor 4g.
+- Fit-down on the largest node: Delta + Hive min(16, node - 8) GiB; floor 4g.
 - Delta + Hive gets more because Delta OPTIMIZE is skipped for Thrift, so queries scan uncompacted silver.
 - Pod request and limit are the heap plus max(10% of heap, 1 GiB), so `4g` gives a 5 GiB pod.
 
 ## Sizing
 
-At large scale Trino's distributed workers are faster.
+Iceberg starting points. Delta + Hive uses the autosized values above.
 
 | Scale factor | Cores | Memory | Notes |
 |---|---|---|---|
 | 1-10 | 2 | 4g | Defaults work |
 | 10-50 | 4 | 8g | More memory for analytics queries |
-| 50+ | -- | -- | Consider Trino; if staying, 4 cores and 8g or 16g |
+| 50+ | 4 | 8g or 16g | -- |
 
 ## Limitations
 
@@ -56,10 +57,11 @@ The server runs as a plain Kubernetes Deployment, not a SparkApplication: HiveTh
 - **Service** `lakebench-spark-thrift` (ClusterIP): `lakebench-spark-thrift.<namespace>.svc.cluster.local:10000`.
 - **Probes:** TCP socket on port 10000 for readiness and liveness.
 
-Init containers, plus a CA-import container when `platform.storage.s3.ca_cert` is set:
+Init containers, in order:
 
 1. **Catalog wait:** TCP check on `lakebench-hive-metastore:9083` (Hive) or `lakebench-polaris:8181` (Polaris).
-2. **`lb-deps-fetch`:** copies the table-format runtime (Iceberg or Delta), AWS SDK and Hadoop S3 jars that the Spark jobs load from the `lb-deps` server, checking each sha256 against the `lb-deps-manifest` ConfigMap. The server puts them on its driver classpath after the image's own jars, in the jobs' order. Nothing downloads from Maven at start.
+2. **`import-ca-cert`:** only when `platform.storage.s3.ca_cert` is set; imports the CA into `/truststore/truststore.jks`, which the driver uses as its truststore.
+3. **`lb-deps-fetch`:** copies the table-format runtime (Iceberg or Delta), AWS SDK and Hadoop S3 jars that the Spark jobs load from the `lb-deps` server, checking each sha256 against the `lb-deps-manifest` ConfigMap. The server puts them on its driver classpath after the image's own jars, in the jobs' order. Nothing downloads from Maven at start.
 
 `lakebench destroy` removes the Deployment and Service.
 

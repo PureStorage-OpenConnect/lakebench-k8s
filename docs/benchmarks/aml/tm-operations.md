@@ -5,9 +5,7 @@ See also: config keys in [configuration.md](../../configuration.md#workload----c
 ## 8.5 TM operations
 
 `tm_operations.status` is `pass`, `fail`, `not_run`, `disabled` or `unknown`;
-only `fail` (a violated workflow invariant) fails the run. In continuous mode
-the operations pass runs every `continuous_interval_seconds` (default
-1,800 s), so a shorter window may record `not_run`.
+only `fail` (a violated workflow invariant) fails the run.
 
 `tm_operations.ops` reports the alert funnel (payments, monitored, alerts,
 escalated, cases, SARs), dispositions, priorities, alert aging and SLA
@@ -26,7 +24,7 @@ not the architecture:
 | simulation seed | 20260924 |
 | SLA | 60 days |
 | lookback | 12 months |
-| counterparty scenarios | the scenario list |
+| counterparty scenarios | W1, W3, W4, W17 (full IDs in configuration.md) |
 | `max_alerts_per_customer` (a Lakebench cap) | 50,000; alerts past it are dispositioned `over_capacity` and the cap is listed in `experiment.limits.bound` |
 
 **The model.** One reporting institution monitors its own customers
@@ -109,16 +107,18 @@ cycles can lose its identity and be counted twice: once withdrawn, once new.
 
 | Status | Meaning |
 |---|---|
+| `pass` | the layer ran on every cycle and no invariant failed or went unchecked |
 | `fail` | the layer ran and an invariant is violated; fails the run |
 | `not_run` | no manifest, a layer error, or a continuous window that ended before the manifest was ready; says why and leaves detection scoring alone |
-| `unknown` | no driver log captured for some cycle, or an invariant could not be checked (the raw source files failed to list) |
+| `unknown` | no driver log captured for some cycle, or an invariant could not be checked (the raw source files failed to list), or a pass was interrupted after writing the TM tables |
 | `disabled` | skips the gate |
 
 **Continuous passes.** Gold-refresh runs the layer every
-`continuous_interval_seconds` (at least 60), counted from the end of the last
-pass so detection [ticks](../../glossary.md#tick) always run between passes. A final pass is timed to
-finish before the window closes. The close is the first gold-refresh
-driver's start, persisted in its checkpoint, plus the window length.
+`continuous_interval_seconds` (default 1,800 s, at least 60), counted from
+the end of the last pass so detection [ticks](../../glossary.md#tick) always
+run between passes. A final pass is timed to finish before the window closes.
+The close is the first gold-refresh driver's start, persisted in its
+checkpoint, plus the window length.
 
 - One pass over the full corpus takes minutes at scale 10, and gold is not
   refreshed meanwhile. A freshness sample is logged after each pass and the
@@ -142,8 +142,8 @@ driver's start, persisted in its checkpoint, plus the window length.
 
 **Investigator queries** (class `investigator`; [6](queries.md#6-query-set)):
 customer 360 for the top open case, the 12-month activity review of the
-newest case, the counterparty and two-hop view, and open cases older than 60
-days.
+newest escalation case, the counterparties and two-hop network of the oldest
+open case, and open cases older than 60 days.
 
 - They read only this run's rows, and are left out unless this run's TM
   verdict is `pass` or `fail`, so a disabled or not-run layer never times
@@ -160,9 +160,8 @@ days.
 
 **Investigators under load** (`architecture.benchmark.investigator_sessions`).
 
-- Set to N (1 to 32) on an AML config with TM operations on Trino or Spark
-  Thrift; refused at load otherwise. `run` refuses it in batch, so it needs a
-  continuous run.
+- Set to N (1 to 32) on an AML config with TM operations enabled; refused at
+  load otherwise. `run` refuses it in batch, so it needs a continuous run.
 - It adds one round right after the first in-stream round that included the
   investigator queries (that round is the baseline). N sessions run
   concurrently, each working one case of this run. Cases are picked in IQ1's

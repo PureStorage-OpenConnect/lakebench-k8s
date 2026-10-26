@@ -10,21 +10,19 @@ A Rust generator writes the corpus, with `--schema financial` (the default).
 
 - Stamped as a `model_version` column in the party, account, manifest and
   watchlist files; never in pacs.008 rows.
-- A generator built from this release's source also writes it into each
-  node's completion marker (`_corpus/c<cycle>-node-<node>.json`) and prints
-  it with `--version`.
 - Lakebench stamps `experiment.workload.generator_model_version` from its own
   copy of the model version, not from the corpus.
 
 **Image.** `images.datagen` defaults to
 `docker.io/sillidata/lb-datagen:latest`, which floats: a push can change the
-corpus. Set a versioned tag such as `1.7.1` or a `@sha256:` digest to fix the
-generator.
+corpus. A `@sha256:` digest fixes the generator; a versioned tag such as
+`1.7.1` fixes it until the tag is re-pushed.
 
 - The generator lineage in the corpus identity is the observed image digest,
   mapped through `src/lakebench/config/datagen_lineage.yaml`
   ([7.3](execution-rules.md#73-prohibited-changes-invalidate-a-result-or-are-refused)).
-  `latest` has no row there, so its corpora get a corpus id of their own.
+  A digest with no row there is its own lineage, so a new `latest` push
+  starts a new corpus id.
 - A registered [look](../../glossary.md#look) never uses a tag:
   `scripts/aml_gate.py --registered` refuses to start without a
   digest-pinned `--generator-image`, and refuses one that differs from the
@@ -32,24 +30,24 @@ generator.
 
 **Markers and arguments.** A generator built from this release's source:
 
-- writes one completion marker per node and cycle under `_corpus/`, holding
-  the resolved generator arguments and their sha256; `--print-resolved-args`
+- prints the model version with `--version`;
+- writes one completion marker per node and cycle
+  (`_corpus/c<cycle>-node-<node>.json`), holding the model version, the
+  resolved generator arguments and their sha256; `--print-resolved-args`
   prints the same object without writing;
+- runs the generator-start held-out check and reads `LB_DATAGEN_SEED`;
 - refuses, with exit 2, an unknown flag, an abbreviated flag and any stray
   argument, so a typo never runs as a silent default.
 
-Lakebench folds the markers into corpus id v2.
+Lakebench folds the markers into corpus id v2, so a run on such an image
+records it.
 
-The default image writes the markers, runs the generator-start held-out check
-and reads `LB_DATAGEN_SEED`.
-
-- A run on it records corpus id v2.
 - Its experiment block is identity v2 (exp2) when the run-start identity
   version and a system identity with at least one observed part also exist.
-  Otherwise it is exp1 and names what was missing in `v2_unavailable`
-
-- An image that writes no markers keeps its runs at exp1, whose corpus id hashes config fields the AML generator
-  never reads ([12](limitations.md#12-known-limitations)).
+  Otherwise it is exp1 and names what was missing in `v2_unavailable`.
+- An image that writes no markers keeps its runs at exp1, whose corpus id
+  hashes config fields the AML generator never reads
+  ([12](limitations.md#12-known-limitations)).
 - Such an image cannot generate a registered corpus, whose seed reaches the
   pod only as `LB_DATAGEN_SEED`.
 
@@ -72,9 +70,11 @@ customers of the reporting institution.
 
 **Datagen pods:**
 
-- Unset parallelism follows the scale: 2 pods up to scale 5, 4 above 5 up to
-  10; above scale 50 it is raised to what the cluster's CPU allows; above
-  scale 100 financial gets at least 8 pods.
+- Unset parallelism in batch, or with `cpu` set: 2 pods up to scale 5, 4 up
+  to 10, then max(4, scale // 5) to 50, max(8, scale // 10) to 500 and
+  max(16, scale // 30) above, cut to what the cluster's CPU fits; a batch
+  run above scale 50 is raised to it. Above scale 100 financial gets at
+  least 8 pods.
 - Continuous mode with `cpu` and `parallelism` both unset: the cores that
   offer 4 MB/s per scale unit at 28 MB/s per core (100m steps, at least
   200m). Pods hold up to 8 cores, still with the 8-pod floor above scale 100.
@@ -91,10 +91,9 @@ customers of the reporting institution.
 
 **Size and limits.**
 
-- Size is measured to scale 10 (8.47 GB at scale 1, 93.6 GB at scale 10);
-  bytes per row grow between the two. [data-generation.md](../../data-generation.md)
-  has the runs. Two scale-100 runs on other setups read within 2% of the
-  scale-10 size per unit.
+- Size is measured to scale 10; bytes per row grow between scale 1 and 10.
+  [data-generation.md](../../data-generation.md) has the runs. Two scale-100
+  runs on other setups read within 2% of the scale-10 size per unit.
 - At 9.36 GB per unit, scale 10000 is about 94 TB.
 - The schema accepts up to scale 10000. AML datagen is banded: supported to
   300, unverified to 800, refused above 800, where a datagen pod would exceed
@@ -113,7 +112,8 @@ customers of the reporting institution.
 | `auto` | `continuous` at every scale |
 
 - Party and account are always multipart; manifest and watchlist always a
-  single PUT.
+  single PUT. The pipeline registers the manifest as `bronze.manifest` and
+  the account master as `bronze.accounts` ([2.2](data-model.md#22-bronze-tables)).
 - Row content is independent of delivery mode, thread count and node count.
   Generator tests check row-multiset identity across delivery modes and
   across thread, file-size and node layouts.
@@ -132,8 +132,8 @@ customers of the reporting institution.
   seed salt, new planted patterns, `part-eNNNN-*` files and a
   `manifest-eNNNN.parquet` answer key. Parties, accounts and the watchlist
   stay the same.
-- Timestamps are zone-less (read as UTC by the Spark stages and query
-  engines) and whole-second.
+- Timestamps are zone-less (read as UTC by the Spark stages and Trino) and
+  whole-second.
 - Volume follows a weekday, salary-day, quarter-end and intraday calendar
   with per-country holiday roll-forward.
 

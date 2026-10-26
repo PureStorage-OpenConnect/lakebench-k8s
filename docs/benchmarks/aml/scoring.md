@@ -15,9 +15,9 @@ or scoring produced no result.
 - `bronze.manifest` is the registered Iceberg copy of the generator's manifest
   (bronze-verify registers it, gold-refresh re-registers it as the corpus
   grows). Scoring reads it at its current snapshot and fails closed when it is
-  missing. `bronze.accounts` is the registered copy of the generator's account
-  master, through which a planted participant's id resolves to its silver
-  entity key.
+  missing. `bronze.accounts` holds the generator's account-to-holder map
+  (`holder_entity_id`, `iban`), through which a planted participant's id
+  resolves to its silver entity key.
 - The scorecard shows `fp_rate_by_rule` as **Off-target** (by alert id, not
   payment), `txn_precision_by_rule` as **Txn precision**, and `fp_rate` in its
   footer as **Overall off-target rate** beside the total alert count. None is

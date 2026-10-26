@@ -13,7 +13,9 @@ exit codes are in the [CLI reference](cli-reference.md).
 - The shared pieces a cluster admin installs once:
   [Operations](operations.md#before-the-first-deploy).
 - S3 credentials that can create and delete buckets and objects.
-- A config with `name` and the S3 settings filled in.
+- A config with `name` and the S3 settings filled in. The financial (AML)
+  workload needs `architecture.query_engine.type: trino`; it scores recall
+  and precision with SQL on Trino, so any other engine is refused at load.
 
 ## Installing the CLI
 
@@ -32,9 +34,8 @@ need no Python. On Linux arm64, install from PyPI.
 The install script:
 
 - Verifies the download against the release's `SHA256SUMS` and runs the
-  binary's `version` before installing. This catches a corrupted download;
-  the checksum file comes from the same release, so it does not prove who
-  built the binary.
+  binary's `version` before installing. The checksum catches a corrupted
+  download, not a forged one.
 - Installs into `INSTALL_DIR` (default `/usr/local/bin`). Run it with
   `sudo bash`, or set `INSTALL_DIR` to a writable directory.
 - Installs nothing, and keeps any existing lakebench, if the download fails,
@@ -69,11 +70,13 @@ lakebench validate my-config.yaml          # checks the operator and StorageClas
 lakebench deploy my-config.yaml            # prompts for confirmation
 lakebench deploy my-config.yaml --yes      # no prompt
 lakebench deploy my-config.yaml --dry-run  # show the plan, change nothing
+lakebench deploy my-config.yaml --local    # podman or docker on this machine
 ```
 
 Deploy runs its steps in a fixed order and stops at the first failure.
-Warnings are printed together after the summary. With `--local`, the same
-pipeline runs in podman or docker containers on this machine.
+Warnings are printed together after the summary. The capacity check and the
+steps below are the cluster path; `--local` starts a podman or docker stack
+instead.
 
 ### Capacity check
 
@@ -97,35 +100,35 @@ step, including the wait for the cluster lease.
 
 ### Deployment Order
 
-1. **Namespace** -- Creates the namespace, or reuses one this deployment
+1. **Namespace**: Creates the namespace, or reuses one this deployment
    stamped. Any other is refused unless `--force-legacy`. A namespace still
    `Terminating` from an earlier destroy is waited out, then re-created.
-2. **Secrets** -- Creates the S3 and PostgreSQL credential secrets from the
+2. **Secrets**: Creates the S3 and PostgreSQL credential secrets from the
    config's `access_key` and `secret_key` (`secret_ref` is not supported).
    With `s3.ca_cert` set, it also creates a CA certificate secret that every
    component uses to verify TLS to an HTTPS endpoint.
-3. **Silver state** -- Creates the `lakebench-silver-state` ConfigMap: the
+3. **Silver state**: Creates the `lakebench-silver-state` ConfigMap: the
    silver rebuild counters and bronze's data clock. A redeploy keeps the
    existing values.
-4. **S3 buckets** -- Creates the bronze, silver and gold buckets, or adopts
+4. **S3 buckets**: Creates the bronze, silver and gold buckets, or adopts
    existing ones. It records which buckets this deployment created.
-5. **Scratch StorageClass** -- Checks that the StorageClass for Spark
+5. **Scratch StorageClass**: Checks that the StorageClass for Spark
    shuffle volumes exists. Deploy never creates it: it is shared,
    cluster-scoped infrastructure. If it is missing, deploy stops and names
    `lakebench admin install --component scratch-storage-class`, which a
    cluster admin runs once. Skipped when scratch is off (see
    [Scratch StorageClass](operations.md#installing-the-shared-pieces)).
-6. **PostgreSQL** -- A StatefulSet, the catalog's metadata backend.
-7. **Hive Metastore or Polaris** -- The catalog `architecture.catalog.type`
+6. **PostgreSQL**: A StatefulSet, the catalog's metadata backend.
+7. **Hive Metastore or Polaris**: The catalog `architecture.catalog.type`
    selects: a Stackable HiveCluster CRD for `hive`, an Apache Polaris REST
    catalog Deployment for `polaris`. The other is skipped.
-8. **Spark RBAC** -- The ServiceAccount, Role and RoleBinding for Spark job
+8. **Spark RBAC**: The ServiceAccount, Role and RoleBinding for Spark job
    submission. On OpenShift it also grants the `anyuid` SCC to the service
    account; the PostgreSQL step does the same for `lakebench-postgres`. A
    refused grant fails the step.
-9. **Unity Catalog** -- Skipped unless `architecture.catalog.type` is
+9. **Unity Catalog**: Skipped unless `architecture.catalog.type` is
    `unity`. No shipped recipe uses Unity.
-10. **Spark Operator** -- Checks that the shared Spark Operator runs and
+10. **Spark Operator**: Checks that the shared Spark Operator runs and
     watches the namespace.
     - If it does not, deploy adds the namespace to `spark.jobNamespaces`
       with `helm upgrade`, under the `lakebench-cluster-lock` lease, so
@@ -137,7 +140,7 @@ step, including the wait for the cluster lease.
       `platform.compute.spark.operator.install: true`.
     - With `observability.enabled`, a missing `lakebench-kubelet-metrics`
       ClusterRole prints a warning and the deploy continues.
-11. **Dependency server** -- Starts `lb-deps` (a Deployment, a Service and
+11. **Dependency server**: Starts `lb-deps` (a Deployment, a Service and
     the 5Gi PVC `lb-deps-data`) on the stock Spark image.
     - Its init containers resolve the jars onto the PVC, with a sha256 for
       every file. They also resolve the AML reference wheels, and the DuckDB
@@ -154,20 +157,17 @@ step, including the wait for the cluster lease.
       format version, workload, query engine, mirror key or Lakebench
       resolver resolves again.
     - See [Dependency server failures](#dependency-server-failures).
-12. **Trino** -- The coordinator (Deployment) and workers (StatefulSet), with
+12. **Trino**: The coordinator (Deployment) and workers (StatefulSet), with
     the connector pointed at the catalog. Skipped unless
     `architecture.query_engine.type` is `trino`.
-13. **Spark Thrift Server** -- When the query engine is `spark-thrift`. Its
+13. **Spark Thrift Server**: When the query engine is `spark-thrift`. Its
     init container copies the dependency set from `lb-deps` and checks each
     file's sha256. Deploy waits until the rollout is complete and the pod
     runs this deploy's set (Recreate: one pod at a time). A fetch that cannot
     recover by retrying fails at once.
-14. **DuckDB** -- When the query engine is `duckdb`. Its wheel and
+14. **DuckDB**: When the query engine is `duckdb`. Its wheel and
     extensions come from the dependency set the same way.
-    - The financial (AML) workload requires `query_engine.type: trino`:
-      it scores recall and precision with SQL on Trino, so a financial
-      config on `spark-thrift`, `duckdb` or `none` is refused at load.
-15. **Observability** -- Only with `observability.enabled: true`.
+15. **Observability**: Only with `observability.enabled: true`.
     - Deploys Prometheus, Grafana and the Pushgateway in this deployment's
       namespace, so two deployments on one cluster never collide.
     - The one cluster-scoped piece is the `lakebench-kubelet-metrics`
@@ -253,13 +253,13 @@ Destroy is irreversible. Flags and exit codes: [destroy](cli-reference.md#destro
 
 ### Destroy Order
 
-1. **Ownership check** -- Refuses to continue if the namespace carries
+1. **Ownership check**: Refuses to continue if the namespace carries
    another deployment's identity annotations, targets a different cluster,
    or has no lakebench annotations at all (unless `--force-legacy`).
-2. **SparkApplications** -- Deletes all running and completed Spark jobs.
-3. **Spark pods** -- Force-deletes orphaned driver and executor pods.
-4. **Datagen jobs** -- Deletes the datagen batch Jobs and their pods.
-5. **Table removal** -- Removes the workload's tables from the catalog and
+2. **SparkApplications**: Deletes all running and completed Spark jobs.
+3. **Spark pods**: Force-deletes orphaned driver and executor pods.
+4. **Datagen jobs**: Deletes the datagen batch Jobs and their pods.
+5. **Table removal**: Removes the workload's tables from the catalog and
    never deletes files. Skipped when the engine is DuckDB or `none`.
    - Trino: `CALL <catalog>.system.unregister_table(...)`, not
      `DROP TABLE`. Trino's `DROP TABLE` deletes every file an Iceberg table
@@ -280,22 +280,22 @@ Destroy is irreversible. Flags and exit codes: [destroy](cli-reference.md#destro
      that is not in the catalog (for example after `--keep-buckets` with
      the namespace deleted): delete that table directory, or use other
      buckets.
-6. **S3 buckets** -- Empties the buckets, aborting incomplete multipart
+6. **S3 buckets**: Empties the buckets, aborting incomplete multipart
    uploads, then deletes only the buckets this deployment created (see
    [Bucket ownership](#bucket-ownership)).
-7. **Observability** -- Deletes this deployment's kubelet-metrics
-   ClusterRoleBinding. The stack itself goes with the namespace (step 12).
-8. **Query engine** -- Removes Trino, Spark Thrift Server or DuckDB.
-9. **Catalog** -- Removes the HiveCluster or Polaris deployment (or a Unity
+7. **Observability**: Deletes this deployment's kubelet-metrics
+   ClusterRoleBinding. Step 12 deletes the stack itself.
+8. **Query engine**: Removes Trino, Spark Thrift Server or DuckDB.
+9. **Catalog**: Removes the HiveCluster or Polaris deployment (or a Unity
    Catalog deployment if the config selected `unity`; no recipe does).
-10. **PostgreSQL** -- Removes the StatefulSet, the Service and the data PVC
+10. **PostgreSQL**: Removes the StatefulSet, the Service and the data PVC
     (`data-lakebench-postgres-<n>`, found by name), also when
     `create_namespace: false` keeps the namespace.
-11. **RBAC and Secrets** -- Removes the Spark ServiceAccount, Role,
+11. **RBAC and Secrets**: Removes the Spark ServiceAccount, Role,
     RoleBinding, and the Secrets `lakebench-s3-credentials`,
     `lakebench-postgres-secret`, and `lakebench-ca-certificate` when
     `s3.ca_cert` is set.
-12. **Remaining namespaced objects** -- Deletes by name what no step above
+12. **Remaining namespaced objects**: Deletes by name what no step above
     removes:
     - the PostgreSQL ServiceAccount;
     - with observability enabled, the Prometheus and Pushgateway objects
@@ -307,9 +307,6 @@ Destroy is irreversible. Flags and exit codes: [destroy](cli-reference.md#destro
     - when the namespace survives, the `lakebench.deployment/state-schema`
       and `lakebench.deployment/deps-set` namespace annotations.
 
-    The list is the registry in `src/lakebench/deploy/category1.py`; a unit
-    test checks every template against it.
-
     With `create_namespace: false`, two things stay on purpose:
     - The `lakebench-silver-state` ConfigMap. Its silver rebuild-epoch
       counters must not go back while table data written under them may
@@ -320,7 +317,7 @@ Destroy is irreversible. Flags and exit codes: [destroy](cli-reference.md#destro
       so a re-run of a destroy that stopped half way still finds its record.
       A deployment with another name cannot deploy into that namespace until
       they are removed.
-13. **Namespace** -- Removes the namespace from the Spark Operator watch
+13. **Namespace**: Removes the namespace from the Spark Operator watch
     list.
     - Still inside the cluster lease, it waits up to 120 s until no running
       operator pod and no operator Deployment template lists it. A stale pod
@@ -387,8 +384,8 @@ Refused targets (exit 2, and the refusal echoes no argument):
 
 - `clean bronze` and `clean data` name the `run --generate --regenerate`
   command above (`data` also names `clean silver` and `clean gold`). A run
-  regenerates its own corpus, so the corpus a record names is the one it
-  read.
+  regenerates its own corpus, so the corpus a record names is the one its
+  run read.
 - On a bucket the deployment did not create, `--regenerate` refuses too; an
   owner runs `lakebench admin reclaim-bucket` first.
 - `clean metrics`, `clean journal` and the old `--metrics-dir`/`-m`: run

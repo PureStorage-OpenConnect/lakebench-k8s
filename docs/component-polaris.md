@@ -11,7 +11,7 @@ Reference: Apache Polaris REST catalog: config keys, version limits, sizing and 
 - `lakebench deploy` deploys Polaris and `lakebench destroy` removes it. No Hive Metastore is deployed.
 - Commands, stages, table names and benchmark queries match Hive. Spark and Trino use the Polaris REST API instead of the Hive Thrift protocol.
 - Polaris serves only catalog metadata and processes no query data.
-- Recipes: `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none` ([Recipes](recipes.md)).
+- Recipes: `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none` ([Recipes](recipes.md)). The financial workload needs Trino, so it runs only on `polaris-iceberg-spark-trino`.
 
 ## Version and image
 
@@ -22,12 +22,12 @@ Reference: Apache Polaris REST catalog: config keys, version limits, sizing and 
 | Apache Polaris | 1.3.0-incubating | 1.8.0 | 1.1.0 and 1.2.0 attempt STS even when told not to. |
 | Trino | 454 | 483 | 454 added `iceberg.rest-catalog.oauth2.scope`. |
 
-1.6.0, 1.7.0 and 1.8.0 each passed the full AML continuous pipeline on a cluster (Spark, Trino 483, Polaris REST catalog). 1.8.0 is the default. 1.3.0 to 1.5.x are accepted but not tested; 1.1.0 and 1.2.0 are not supported.
+1.6.0, 1.7.0 and 1.8.0 each passed the full AML continuous pipeline on a cluster with Spark and Trino 483. 1.3.0 to 1.5.x are accepted but not tested.
 
 - **Polaris 1.8 and the schema.** 1.8.0 stopped creating its JDBC schema during `bootstrap`. `deploy` creates `polaris_schema` (`CREATE SCHEMA IF NOT EXISTS`, owned by the `polaris` role) before it bootstraps, which is also safe on 1.6.0 and 1.7.0. A JDBC URL that sets `currentSchema` would point Polaris at a different schema from 1.8 on; Lakebench's URL does not.
-- **Polaris 1.3.0.** In 1.1.0 and 1.2.0, `TaskFileIOSupplier` tries STS credential subscoping even when told not to ([apache/polaris#379](https://github.com/apache/polaris/issues/379)). Server-side S3 operations then fail on non-AWS storage. 1.3.0 and later contain the fix ([PR #400](https://github.com/apache/polaris/pull/400)).
+- **Polaris 1.3.0.** The STS attempt is in `TaskFileIOSupplier` ([apache/polaris#379](https://github.com/apache/polaris/issues/379), fixed by [PR #400](https://github.com/apache/polaris/pull/400) in 1.3.0). It fails server-side S3 operations on non-AWS storage.
 - **Tag suffix:** only 1.3.0 carries `-incubating` (`apache/polaris:1.3.0` does not exist). 1.4.0 and later have no suffix.
-- **Trino 454** added `oauth2.scope` ([PR #22961](https://github.com/trinodb/trino/pull/22961)). Without it, Trino sends `scope=catalog`, which Polaris rejects as `invalid_scope`. The default, 483, also has the native S3 file system that current Trino releases need.
+- **Trino 454** ([PR #22961](https://github.com/trinodb/trino/pull/22961)). Without `oauth2.scope`, Trino sends `scope=catalog`, which Polaris rejects as `invalid_scope`. The default, 483, also has the native S3 file system that current Trino releases need.
 - **STS skip:** the bootstrap creates the catalog with `stsUnavailable: true` and `pathStyleAccess: true`, because FlashBlade and most on-premises stores have no STS. This is the only supported way to skip STS on non-AWS S3.
 - Do not add a server-wide credential-subscoping override. It drops the endpoint and path-style settings, and server-side S3FileIO falls back to `s3.amazonaws.com`.
 
@@ -52,26 +52,21 @@ architecture:
 |---|---|---|
 | `architecture.catalog.type` | `hive` | `polaris` deploys Polaris instead of Hive Metastore. |
 | `polaris.client_secret` | `""` | OAuth2 client secret for the `lakebench` root principal. See [Client secret](#client-secret). |
-| `polaris.port` | `8181` | REST API port. Rarely needs changing. |
-| `polaris.resources.cpu` | `"1"` | CPU request and limit. Raise to `"2"` at scale 100+ if table commits or metadata reads slow down. |
-| `polaris.resources.memory` | `"2Gi"` | Memory request and limit (JVM heap). Raise to `"4Gi"` if Polaris OOMs during concurrent table commits. |
+| `polaris.port` | `8181` | REST API port. |
+| `polaris.resources.cpu` | `"1"` | CPU request and limit. See [Sizing](#sizing). |
+| `polaris.resources.memory` | `"2Gi"` | Memory request and limit. See [Sizing](#sizing). |
 | `images.polaris`, `images.polaris_admin_tool` | [matrix](compatibility-matrix.md#component-version-matrix) | Server and bootstrap init-container images. |
 
 ### Client secret
 
 - Empty: `deploy` generates one per deployment, once, and stores it in the Secret `lakebench-polaris-client` in the namespace. `run`, `benchmark`, Trino and Spark Thrift read it from there.
 - Set before the first deploy (for example `"${LAKEBENCH_POLARIS_CLIENT_SECRET}"`): it is used as is and stored in that Secret.
-- A bootstrapped Polaris keeps its secret. `deploy` refuses a config value that differs from the stored one. It stops when neither the config nor the Secret holds it.
+- A bootstrapped Polaris keeps its secret. `deploy` refuses a config value that differs from the stored one; run `lakebench destroy` first to change it. It stops when neither the config nor the Secret holds it.
 - The Polaris DB password is per deployment too (Secret `lakebench-polaris-db`). Each deploy sets the `polaris` role to it.
 
 ## Sizing
 
-The defaults (1 CPU, 2Gi) handle pipelines up to ~1 TB. Load follows concurrent catalog operations (table commits from many Spark executors), not data volume.
-
-| Scale factor | CPU | Memory |
-|---|---|---|
-| 1-50 | 1 | 2Gi |
-| 51 and above | 2 | 4Gi |
+The autosizer does not size Polaris. Defaults are 1 CPU and 2Gi; if table commits slow down or Polaris OOMs, set 2 CPU and 4Gi. Load follows concurrent catalog operations (table commits from many Spark executors), not data volume.
 
 ## Deploy and destroy
 
@@ -79,9 +74,9 @@ The defaults (1 CPU, 2Gi) handle pipelines up to ~1 TB. Load follows concurrent 
 
 - **Deployment** `lakebench-polaris` (1 replica): REST server on port 8181 (API) and 8182 (health and metrics). Readiness probe `/q/health/ready`, liveness `/q/health/live`, both on 8182.
 - **Service** `lakebench-polaris` (ClusterIP): `lakebench-polaris.<namespace>.svc.cluster.local:8181`.
-- **Bootstrap Job** `lakebench-polaris-bootstrap`: runs once after the server is healthy and the REST API answers on 8181.
+- **Bootstrap Job** `lakebench-polaris-bootstrap`: runs after the server is healthy and the REST API answers on 8181. Each deploy deletes the old Job and runs it again; an existing realm, catalog or namespace counts as success.
   1. Init container: `polaris-admin-tool bootstrap` creates the realm and root principal.
-  2. Main container: gets an OAuth2 token. It creates the catalog and namespaces `default`, `bronze`, `silver`, `gold` via the REST API, then grants `TABLE_READ_DATA` and `TABLE_WRITE_DATA` to the catalog's `catalog_admin` role. Polaris authorizes the Iceberg client's scan-metrics report with `TABLE_READ_DATA`; without the grant every Spark and Trino scan logs a 403 for it. The grant is idempotent, so a redeploy applies it to an existing catalog.
+  2. Main container: gets an OAuth2 token. It creates the catalog and namespaces `default`, `bronze`, `silver`, `gold` via the REST API, then grants `TABLE_READ_DATA` and `TABLE_WRITE_DATA` to the catalog's `catalog_admin` role. Polaris authorizes the Iceberg client's scan-metrics report with `TABLE_READ_DATA`; without the grant every Spark and Trino scan logs a 403 for it.
 - Metadata goes into a `polaris` database the deployer creates on the deployment's PostgreSQL.
 
 The engines are set up to match:
@@ -91,13 +86,11 @@ The engines are set up to match:
 | Spark | Iceberg REST catalog (`catalog-impl=org.apache.iceberg.rest.RESTCatalog`), OAuth2 client credentials, static S3 access keys. |
 | Trino | `iceberg.catalog.type=rest`, `oauth2.scope=PRINCIPAL_ROLE:ALL`, native S3 file system (`fs.native-s3.enabled=true`). Init containers wait for Polaris instead of the Hive Metastore. |
 
-The bootstrap is not idempotent: re-running it on an existing realm fails. Lakebench deletes stale bootstrap jobs before creating new ones and treats "already bootstrapped" errors as success. To redeploy Polaris, run `lakebench destroy` first.
-
 `lakebench destroy`:
 
 - Deletes the bootstrap Job and the Polaris Deployment, Service and ConfigMap.
 - Does not drop the `polaris` database on its own. It lives on the PostgreSQL PVC, which destroy deletes.
-- With `platform.kubernetes.create_namespace: false`, leaves the namespace. It still unregisters the tables from the catalog first.
+- With `platform.kubernetes.create_namespace: false`, keeps the namespace and first unregisters the tables through Trino or Spark Thrift. DuckDB and `none` recipes cannot, so their tables stay registered.
 
 ## Troubleshooting
 
@@ -105,6 +98,7 @@ The bootstrap is not idempotent: re-running it on an existing realm fails. Lakeb
 - [Polaris credential vending fails](troubleshooting.md#polaris-credential-vending-fails)
 - [Polaris 1.3.0 image fails with ImagePullBackOff](troubleshooting.md#polaris-130-image-fails-with-imagepullbackoff)
 - [Trino queries fail with Polaris: "scope not valid"](troubleshooting.md#trino-queries-fail-with-polaris-scope-not-valid)
+- [Hive or Polaris cannot log in to PostgreSQL](troubleshooting.md#hive-or-polaris-cannot-log-in-to-postgresql)
 
 ## See also
 

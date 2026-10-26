@@ -9,13 +9,13 @@ See also: rules in [4.2](rules.md#42-detection-rules).
 | # | Stage | Input | Transformation | Output |
 |---|---|---|---|---|
 | 1 | datagen, only with `--generate` | seed, scale | [3](generation.md) | raw corpus |
-| 2 | bronze-verify | `pacs008/` Parquet, manifest, account master | schema and null checks; zero-copy Iceberg registration (`add_files`) of the files; CTAS of the manifest as `bronze.manifest` and of the account master as `bronze.accounts` (a missing file: a warning); writes the bronze data clock (max settlement date) | bronze table, `bronze.manifest`, `bronze.accounts` |
+| 2 | bronze-verify | `pacs008/` Parquet, manifest, account master | schema and null checks; zero-copy Iceberg registration (`add_files`) of the files; CTAS of the manifest as `bronze.manifest` and of the account master's holder and IBAN columns as `bronze.accounts` (a missing file: a warning); writes the bronze data clock (max settlement date) | bronze table, `bronze.manifest`, `bronze.accounts` |
 | 3 | silver-build | bronze, party, account | full rebuild each cycle, listed below; then a sealed marker | six silver tables plus `silver_batch_versions` |
 | 4 | gold-finalize | sealed silver | baseline dashboard; nine detection rules; the W1 and W4 projections (`gold.entity_clusters`, `gold.risk_scores`, best effort); TM operations | gold tables ([2.4](data-model.md#24-gold-tables)) |
 | 5 | scoring | `gold.alerts`, `gold.detection_status`, silver, `bronze.manifest`, `bronze.accounts` | recall and false-positive scoring as SQL on Trino ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)) | `recall.json` |
 | 6 | AML batch gate, TM verdict | driver logs, `recall.json` | [5](correctness.md#5-correctness-contract) | pass or fail |
-| 7 | pre-compaction benchmark (scale below 50, maintenance on) | silver, gold | warm-up pass, then FQ1 to FQ8 | `pre_compaction_qph` |
-| 8 | table maintenance | maintained tables | expire snapshots and orphan removal, compaction on silver and gold only (never bronze), under policy `m2-2026-09-26` and one shared 1,800 s budget; DuckDB recipes run none | `maintenance_outcomes` |
+| 7 | pre-compaction benchmark (scale below 50, maintenance on) | silver, gold | warm-up pass, then the same set as step 9 | `pre_compaction_qph` |
+| 8 | table maintenance | maintained tables | expire snapshots and orphan removal, compaction on silver and gold only (never bronze), under policy `m2-2026-09-26` and one shared 1,800 s budget | `maintenance_outcomes` |
 | 9 | settle wait (skipped when no maintenance statement ran), then the scored benchmark | silver, gold | 12 queries when TM operations gave a `pass` or `fail` verdict, else FQ1 to FQ8; power mode, hot, `benchmark.iterations` samples per query | QpH, per-query row counts |
 
 - Bronze-verify falls back from `add_files` to CTAS (doubles bronze storage)

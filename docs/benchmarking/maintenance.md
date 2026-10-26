@@ -17,14 +17,16 @@ Each round starts with one unmeasured warm-up pass (first touch of a snapshot). 
 |---|---|
 | `pre_compaction_qph` | QpH before maintenance. |
 | `post_compaction_qph` | QpH after, over every query that succeeded in that round. The reported `composite_qph`. |
-| `maintenance_value_pct` | QpH change over only the queries that succeeded in both rounds. Null when maintenance did not run, compaction changed no files, no query succeeded twice, one sample per query, or within noise. |
+| `maintenance_value_pct` | QpH change over only the queries that succeeded in both rounds. Null when maintenance did not run or stopped early, stream apps were live, file counts were unavailable, compaction changed no files, no query succeeded twice, storage did not settle, one sample per query, or within noise. |
 | `maintenance_value_reason` | Why it is null. |
 | `maintenance_paired_queries` | Queries in that comparison. |
 | `maintenance_elapsed_seconds` | Wall clock spent on maintenance. |
 | `maintenance_pct_of_pipeline` | Maintenance seconds as a share of `time_to_value_seconds` plus maintenance. |
 | `pre_compaction_file_count`, `post_compaction_file_count`, `compaction_ratio` | Data files before and after; their ratio (higher = more benefit). |
 | `maintenance_settle_seconds` | Maintenance end to a stable settle probe. In no stage time or time to value. |
-| `maintenance_settled`, `maintenance_settle_capped`, `maintenance_settle_verified` | False: post round on unsettled storage. True: wait reached `max_seconds`. False: no pre-maintenance probe time to check against. |
+| `maintenance_settled` | False: the post round ran on unsettled storage. |
+| `maintenance_settle_capped` | True: the wait reached `max_seconds`. |
+| `maintenance_settle_verified` | False: no pre-maintenance time (no pre round at scale 50 and up, or the probe failed in it); the probes agreed only with each other. |
 
 **Within noise.** The value is reported only when the rounds are distinguishable:
 
@@ -39,7 +41,7 @@ Each round starts with one unmeasured warm-up pass (first touch of a snapshot). 
 
 The object store keeps working off deletes and rewrites after maintenance SQL returns. Measured on an enterprise object store at Customer 360 scale 10, queries read 27-34% slow straight after compaction and recovered over about 35 minutes.
 
-`maintenance_settle` controls the wait, which adds to wall clock only. Lakebench probes with a scan-class query every `interval_seconds` until consecutive probes agree within `tolerance_pct`, or `max_seconds` is reached.
+`maintenance_settle` controls the wait, which adds to wall clock only. Lakebench probes with a scan-class query every `interval_seconds` until two consecutive probes agree within `tolerance_pct` and neither is slower than the pre-maintenance time beyond that tolerance widened to the probe's pre-round spread (at most 20%). With no pre-maintenance time (no pre round at scale 50 and up, or the probe failed in it), three probes must agree. The wait also ends at `max_seconds` or when the probe fails 3 times in a row.
 
 ```yaml
 architecture:

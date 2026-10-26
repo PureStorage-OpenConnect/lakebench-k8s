@@ -35,7 +35,7 @@ Primary: `data_freshness_seconds`, lower is better.
 | `qph_degradation_withheld` | text | none | why `qph_degradation_pct` is absent with 4 or more rounds: the rounds ran different query sets |
 | `query_time_event_age_seconds` | s | none | not in the scorecard (`pipeline_benchmark.diagnostics`): median age of gold's newest event date at query time; tracks the corpus's position in time, not freshness |
 | `total_elapsed_seconds` | s | none | the run's wall-clock seconds |
-| `pipeline_throughput_gb_per_second`, `compute_efficiency_gb_per_core_hour` | GB/s, GB/core-h | higher | data processed over the window; the streams' input over their core-hours |
+| `pipeline_throughput_gb_per_second`, `compute_efficiency_gb_per_core_hour` | GiB/s, GiB/core-h | higher | data processed over the window; the streams' input over their core-hours |
 | `total_core_hours` | core-h | none | core-hours of the three streams, which run the whole window, so it follows the window length |
 
 `qph_degradation_pct` needs four rounds to read as a trend; a typical run

@@ -32,18 +32,16 @@
 After gold-finalize the CLI evaluates 26 pipeline checks from the
 `[c360-bronze]` and `[c360-check]` facts, and after the benchmark 8 query
 row-count checks, into `metrics.json` `c360_correctness`. Its status is
-`fail` when any check failed, else `pass` when the five core checks ran and
-passed, else `unknown`. Continuous, `--local` and `--stage` runs evaluate
-none, so their verdict carries no `c360` gate.
+`fail` when any check failed, else `pass` when the five checks marked core
+ran and passed, else `unknown`. Continuous, `--local` and `--stage` runs
+evaluate none, so their verdict carries no `c360` gate.
 
 Sixteen checks gate the run (`GATING_CHECKS` in
 `metrics/c360_correctness.py`): every invariant and reconcile check and
 `avg_transaction_value_overall`.
 
-- A gated check that fails, does not run or is absent fails the run. So does
-  a record with no expected-result facts.
-- A failed run has a non-zero exit, `metrics.success` false and the
-  verdict's `c360` gate failed.
+- A gated check failure (the Correctness gate row in
+  [5.1](#51-checks-that-gate-a-run-fail-it)) gives a non-zero exit, `metrics.success` false and a failed `c360` verdict gate.
 - A failure among the other 18 (remaining statistical checks and the
   benchmark row counts) is listed under the verdict's
   `c360_failed_not_gating` qualifier and changes neither exit code nor
@@ -53,7 +51,6 @@ Kinds and tolerances:
 
 - invariant: exact, gated;
 - reconcile: exact, gated;
-- "core" marks the five checks that must run and pass for status `pass`;
 - statistical: 6 standard errors (8 or 10 on the right tail of amounts);
   only `avg_transaction_value_overall` is gated;
 - shape: the benchmark row counts.
@@ -86,7 +83,7 @@ Kinds and tolerances:
 | `medium_churn_share` | statistical | medium churn share 0.2 of support rows |
 | `distinct_customers` | statistical | distinct customers against the Zipf model (plus 3%) |
 | `gold_days_cover_window` | statistical | every window day present when there are at least 30 sessions a day |
-| `benchmark_rows_Q1` to `_Q7`, `benchmark_rows_Q9` | shape | Q1 1; Q7 5; Q3 12 (when >= 5,000 transactions); Q4 6 (when >= 5,000 support rows); Q5 min(90, gold days); Q9 min(30, gold days); Q2 5 x days in the first three months (when every type appears daily); Q6 1 to 6 |
+| `benchmark_rows_Q1` to `_Q7`, `benchmark_rows_Q9` | shape | Q1 1; Q7 5; Q3 12 (when >= 5,000 transactions); Q4 6 (when >= 5,000 support rows); Q5 min(90, gold days); Q9 min(30, gold days); Q2 5 x days in the first three months (when silver averages 250+ rows a day); Q6 1 to 6 |
 
 `gold_daily_identities` asserts, per day:
 
@@ -116,19 +113,12 @@ The balance check is advisory and does not fail the run. A handoff whose lag
 rose by more than one cadence across the window's second half prints
 `balance (advisory): ...` with a bottleneck line, is recorded in
 `continuous.balance`, and shows as "not balanced" in the report
-([Benchmarking](../../benchmarking.md)).
+([Verdict](../../benchmarking/verdict.md#continuous-gate)).
 
 ### 5.4 Run equivalence
 
 Lakebench records no per-query answer hash; the answer checks are the
-benchmark gate and the expected-result checks above. Two runs are not
-comparable when (`metrics/comparability.py`):
-
-- they were recorded under different identity versions;
-- their corpus id differs (v2 on exp2 records; corpus id and generator image
-  on exp1);
-- seed, scale or corpus role differ;
-- their generator image digests differ where both observed one.
-
-Make a fresh reference run on the same generator image and seed before
-comparing.
+benchmark gate and the expected-result checks above.
+[10](comparability.md#10-comparability) sets when two runs are comparable;
+make a fresh reference run on the same generator image (digest) and seed
+before comparing.
