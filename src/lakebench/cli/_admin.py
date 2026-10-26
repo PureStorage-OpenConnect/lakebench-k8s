@@ -1379,7 +1379,7 @@ def reclaim_bucket(
         print_error(f"S3 client init failed: {s3._init_error}")
         raise typer.Exit(ExitCode.PREREQUISITE)
 
-    workload_schema = getattr(cfg, "workload_schema", None)
+    workload_schema = cfg.architecture.workload.schema_type.value
     # The claim names this cluster too, so the same deployment name on
     # another cluster sharing the object store reads it as foreign.
     from lakebench.deploy.ownership import api_server_fingerprint, cluster_stamp

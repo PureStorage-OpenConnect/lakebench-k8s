@@ -20,6 +20,7 @@ from lakebench.cli._admin import (
 from lakebench.deploy.cluster_lock import ClusterLockHeld
 from lakebench.exit_codes import ExitCode
 from lakebench.modules.pipeline_engines.spark.operator_scratch import TmpVolume
+from tests.conftest import make_config
 
 runner = CliRunner()
 
@@ -163,7 +164,10 @@ class TestReclaimBucket:
         assert "--force-nonempty" in r.output
 
     def test_rewrites_tag_on_empty_bucket(self, tmp_path):
-        s3, cfg = self._mock_s3_and_cfg(key_count=0)
+        s3, _ = self._mock_s3_and_cfg(key_count=0)
+        # A real config: a MagicMock one answers any attribute, so it would
+        # hide a workload read from the wrong place.
+        cfg = make_config(name="new-owner")
         yaml_path = tmp_path / "cfg.yaml"
         yaml_path.write_text("name: x\n")
 
@@ -184,6 +188,9 @@ class TestReclaimBucket:
         mock_tag.assert_called_once()
         # SAF-10: the claim carries this cluster's stamp.
         assert mock_tag.call_args.kwargs["cluster"] == "fp1"
+        # The tag names the workload, as deploy's tag does.
+        assert mock_tag.call_args.kwargs["workload_schema"] == "customer360"
+        assert "workload=customer360" in r.output
         cm_ctx.__enter__.assert_called_once()
 
     def test_refuses_without_a_cluster_fingerprint(self, tmp_path):
