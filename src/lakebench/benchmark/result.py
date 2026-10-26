@@ -87,9 +87,8 @@ def summarise_engine_error(text: str, limit: int = 300) -> str:
     """Return the line of an engine's stderr that says what went wrong.
 
     A Python traceback puts the frames first and the exception last, so the
-    first 200 characters of stderr (what the executors used to keep) show
-    only ``Traceback (most recent call last): File "<string>", line 1`` and
-    lose the error entirely. For a traceback this returns the final exception
+    first 200 characters of stderr show only ``Traceback (most recent call
+    last): File "<string>", line 1`` and lose the error entirely. For a traceback this returns the final exception
     block: the first unindented line after the last traceback header, plus
     its continuation lines, skipping DuckDB's caret pointer. The last header
     is used so a chained exception reports the one that was actually raised.
