@@ -46,7 +46,7 @@ spec:
 {% elif catalog_type == "polaris" %}
         - name: wait-for-polaris
           image: busybox:1.36
-          command: ['sh', '-c', 'until nc -z lakebench-polaris {{ polaris_port | default(8181) }}; do echo waiting for polaris; sleep 2; done']
+          command: ['sh', '-c', 'until nc -z lakebench-polaris {{ polaris_port }}; do echo waiting for polaris; sleep 2; done']
 {% elif catalog_type == "unity" %}
         - name: wait-for-unity
           image: busybox:1.36
@@ -176,7 +176,7 @@ spec:
                 --conf spark.local.dir=/tmp/spark-local \
                 --conf spark.sql.warehouse.dir=/tmp/spark-warehouse \
                 --conf spark.sql.session.timeZone=UTC \
-{% if observability_enabled | default(false) %}
+{% if observability_enabled %}
                 --conf spark.ui.prometheus.enabled=true \
                 --conf spark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet \
                 --conf spark.metrics.conf.*.sink.prometheusServlet.path=/metrics/prometheus \

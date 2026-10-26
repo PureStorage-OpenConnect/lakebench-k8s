@@ -34,13 +34,13 @@ spec:
         {% elif catalog_type == "polaris" %}
         - name: wait-for-polaris
           image: busybox:1.36
-          command: ['sh', '-c', 'until nc -z lakebench-polaris {{ polaris_port | default(8181) }}; do echo waiting for polaris; sleep 2; done']
+          command: ['sh', '-c', 'until nc -z lakebench-polaris {{ polaris_port }}; do echo waiting for polaris; sleep 2; done']
         {% else %}
         - name: wait-for-hive
           image: busybox:1.36
           command: ['sh', '-c', 'until nc -z lakebench-hive-metastore 9083; do echo waiting for hive; sleep 2; done']
         {% endif %}
-        {% if observability_enabled | default(false) %}
+        {% if observability_enabled %}
         - name: jmx-exporter-init
           image: {{ jmx_exporter_image }}
           command: ['sh', '-c', 'cp /opt/bitnami/jmx-exporter/jmx_prometheus_javaagent.jar /opt/jmx-exporter/ 2>/dev/null || cp /opt/jmx_exporter/jmx_prometheus_javaagent*.jar /opt/jmx-exporter/jmx_prometheus_javaagent.jar']
@@ -50,7 +50,7 @@ spec:
         {% endif %}
         {% if s3_ca_cert_pem %}
         - name: import-ca-cert
-          image: {{ trino_image | default('trinodb/trino:483') }}
+          image: {{ trino_image }}
           command: ['bash', '-c', 'rm -f /truststore/truststore.jks && keytool -import -trustcacerts -alias custom-ca -file /etc/ssl/certs/custom-ca/ca.crt -keystore /truststore/truststore.jks -storepass changeit -noprompt']
           volumeMounts:
             - name: ca-cert
@@ -61,12 +61,12 @@ spec:
         {% endif %}
       containers:
         - name: trino
-          image: {{ trino_image | default('trinodb/trino:483') }}
-          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          image: {{ trino_image }}
+          imagePullPolicy: {{ image_pull_policy }}
           ports:
             - containerPort: 8080
               name: http
-            {% if observability_enabled | default(false) %}
+            {% if observability_enabled %}
             - containerPort: 9090
               name: jmx-metrics
             {% endif %}
@@ -106,7 +106,7 @@ spec:
               subPath: lakehouse.properties
             - name: data
               mountPath: /data/trino
-            {% if observability_enabled | default(false) %}
+            {% if observability_enabled %}
             - name: jmx-exporter
               mountPath: /opt/jmx-exporter
             - name: config
@@ -119,11 +119,11 @@ spec:
             {% endif %}
           resources:
             requests:
-              cpu: "{{ trino_coordinator_cpu | default('2') }}"
-              memory: "{{ trino_coordinator_memory | default('8Gi') }}"
+              cpu: "{{ trino_coordinator_cpu }}"
+              memory: "{{ trino_coordinator_memory }}"
             limits:
-              cpu: "{{ trino_coordinator_cpu | default('2') }}"
-              memory: "{{ trino_coordinator_memory | default('8Gi') }}"
+              cpu: "{{ trino_coordinator_cpu }}"
+              memory: "{{ trino_coordinator_memory }}"
           # Readiness: HTTP endpoint responding
           readinessProbe:
             httpGet:
@@ -146,7 +146,7 @@ spec:
             name: lakebench-trino-config
         - name: data
           emptyDir: {}
-        {% if observability_enabled | default(false) %}
+        {% if observability_enabled %}
         - name: jmx-exporter
           emptyDir: {}
         {% endif %}

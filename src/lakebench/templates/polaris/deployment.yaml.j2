@@ -39,7 +39,7 @@ spec:
       containers:
         - name: polaris
           image: {{ polaris_image }}
-          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          imagePullPolicy: {{ image_pull_policy }}
           ports:
             - containerPort: 8181
               name: rest

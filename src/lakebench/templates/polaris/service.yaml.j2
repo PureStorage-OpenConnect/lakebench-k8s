@@ -14,7 +14,7 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    - port: {{ polaris_port | default(8181) }}
+    - port: {{ polaris_port }}
       targetPort: 8181
       name: rest
     - port: 8182

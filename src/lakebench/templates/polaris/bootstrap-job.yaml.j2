@@ -29,7 +29,7 @@ spec:
         # Step 1: Bootstrap realm + root principal (direct DB access)
         - name: bootstrap-realm
           image: {{ polaris_admin_tool_image }}
-          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          imagePullPolicy: {{ image_pull_policy }}
           env:
             - name: POLARIS_PERSISTENCE_TYPE
               value: "relational-jdbc"
@@ -70,7 +70,7 @@ spec:
           image: curlimages/curl:8.11.1
           env:
             - name: POLARIS_URI
-              value: "http://lakebench-polaris.{{ namespace }}.svc.cluster.local:{{ polaris_port | default(8181) }}"
+              value: "http://lakebench-polaris.{{ namespace }}.svc.cluster.local:{{ polaris_port }}"
             # Health is served on the management port, not the REST port.
             - name: POLARIS_HEALTH_URI
               value: "http://lakebench-polaris.{{ namespace }}.svc.cluster.local:8182"
@@ -92,7 +92,7 @@ spec:
             - name: BUCKET_GOLD
               value: "{{ bucket_gold }}"
             - name: CATALOG_NAME
-              value: "{{ trino_catalog_name | default('lakehouse') }}"
+              value: "{{ trino_catalog_name }}"
           command: ["/bin/sh", "-c"]
           args:
             - |

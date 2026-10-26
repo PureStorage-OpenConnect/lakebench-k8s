@@ -40,10 +40,10 @@ spec:
         config:
           resources:
             cpu:
-              min: "{{ hive_cpu_min | default('500m') }}"
-              max: "{{ hive_cpu_max | default('2') }}"
+              min: "{{ hive_cpu_min }}"
+              max: "{{ hive_cpu_max }}"
             memory:
-              limit: "{{ hive_memory | default('4Gi') }}"
+              limit: "{{ hive_memory }}"
         configOverrides:
           hive-site.xml:
             # Connection pool settings (proven defaults)

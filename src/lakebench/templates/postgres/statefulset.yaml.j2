@@ -34,8 +34,8 @@ spec:
       {% endif %}
       containers:
         - name: postgres
-          image: {{ postgres_image | default('postgres:18') }}
-          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          image: {{ postgres_image }}
+          imagePullPolicy: {{ image_pull_policy }}
           env:
             - name: POSTGRES_USER
               valueFrom:
@@ -114,4 +114,4 @@ spec:
         {% endif %}
         resources:
           requests:
-            storage: {{ postgres_storage | default('10Gi') }}
+            storage: {{ postgres_storage }}
