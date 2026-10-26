@@ -21,6 +21,7 @@ from lakebench.benchmark.result import summarise_engine_error
 from lakebench.config.schema import TableNamesConfig
 from lakebench.modules.query_engines.duckdb.executor import DuckDBExecutor
 from lakebench.modules.query_engines.duckdb.local_executor import LocalDuckDBExecutor
+from tests.conftest import SPARK_SCRIPTS_DIR
 
 # ---------------------------------------------------------------------------
 # Table resolution and dialect
@@ -116,16 +117,24 @@ class TestAdaptQuery:
 duckdb = pytest.importorskip("duckdb")
 
 
+_DDL_SOURCES = {
+    "silver_entities": ("silver_build_financial", "DDL_ENTITIES"),
+    "silver_accounts": ("silver_build_financial", "DDL_ACCOUNTS"),
+    "gold_alert_dispositions": ("tm_operations", "DDL_DISPOSITIONS"),
+    "gold_cases": ("tm_operations", "DDL_CASES"),
+}
+
+
 def _duckdb_ddl(table_key: str, name: str) -> str:
-    """The real Spark DDL for ``table_key``, translated to a DuckDB table.
+    """The Spark script's DDL for ``table_key``, translated to a DuckDB table.
 
     TIMESTAMP becomes TIMESTAMPTZ because that is what Spark writes to Iceberg
     for a TIMESTAMP column. NOT NULL is dropped so fixtures can insert only the
     columns a query reads.
     """
-    from lakebench.deploy.financial_ddl import FINANCIAL_TABLE_DDLS
-
-    ddl = FINANCIAL_TABLE_DDLS[table_key].split("USING iceberg")[0]
+    script, constant = _DDL_SOURCES[table_key]
+    source = (SPARK_SCRIPTS_DIR / f"{script}.py").read_text()
+    ddl = source.split(f'{constant} = f"""', 1)[1].split("USING iceberg")[0]
     body = ddl[ddl.index("(") + 1 : ddl.rindex(")")]
     body = re.sub(r"--[^\n]*", "", body)
     body = re.sub(r"\bNOT NULL\b", "", body)
