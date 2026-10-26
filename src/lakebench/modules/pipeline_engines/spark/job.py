@@ -2003,6 +2003,8 @@ SUCCESS_STATES = frozenset({JobState.SUCCEEDING, JobState.COMPLETED})
 STATUS_REQUEST_TIMEOUT = (10, 30)
 #: Status reads tried per get_job_status call before a transient error is raised.
 STATUS_READ_ATTEMPTS = 3
+#: Seconds _delete_job waits for a deleted SparkApplication to disappear.
+_DELETE_WAIT_S = 60
 
 
 def is_transient_status_error(exc: BaseException) -> bool:
@@ -2236,11 +2238,21 @@ class SparkJobManager:
             if request_timeout is not None:
                 kwargs["_request_timeout"] = request_timeout
             custom_api.delete_namespaced_custom_object(**kwargs)
-            # Wait for deletion
-            time.sleep(2)
         except ApiException as e:
             if e.status != 404:
                 logger.warning(f"Error deleting job {job_name}: {e}")
+            return
+        # A create while the old object is still being removed returns 409,
+        # so wait until it is gone.
+        deadline = time.time() + (request_timeout or _DELETE_WAIT_S)
+        while time.time() < deadline:
+            try:
+                custom_api.get_namespaced_custom_object(**kwargs)
+            except ApiException as e:
+                if e.status == 404:
+                    return
+            time.sleep(1)
+        logger.warning("%s still present after its delete; the next submit may conflict", job_name)
 
     def get_job_status(self, job_name: str) -> JobStatus:
         """Get status of a Spark job.

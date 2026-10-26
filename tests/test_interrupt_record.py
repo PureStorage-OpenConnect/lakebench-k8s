@@ -318,7 +318,10 @@ def test_submit_job_returns_the_created_uid():
     k8s = FakeK8s()
     mgr = SparkJobManager(_cfg(), k8s)
     assert mgr.deploy_scripts_configmap() is True
+    from kubernetes.client.rest import ApiException
+
     api = MagicMock()
+    api.get_namespaced_custom_object.side_effect = ApiException(status=404)
     api.create_namespaced_custom_object.return_value = {"metadata": {"uid": "abc-123"}}
     with patch("kubernetes.client.CustomObjectsApi", return_value=api):
         status = mgr.submit_job(JobType.SILVER_BUILD)
