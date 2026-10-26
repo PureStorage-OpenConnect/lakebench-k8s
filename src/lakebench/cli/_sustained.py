@@ -753,8 +753,8 @@ def resolve_maintenance_retention(cfg) -> str:
     Returns ``"0s"`` (expire every snapshot older than now) for standard
     workloads. When ``workload.retention_workload`` is True, returns a
     day-string long enough to cover ``retention_months + 6`` months of
-    headroom, so that snapshot history survives maintenance. Expressed in days because the maintenance parser accepts only
-    s/m/h/d suffixes (V-23 in the FinServ-Crime spec).
+    headroom, so that snapshot history survives maintenance. Expressed in
+    days because the maintenance parser accepts only s/m/h/d suffixes.
     """
     workload = cfg.architecture.workload
     if not workload.retention_workload:
@@ -807,10 +807,10 @@ def continuous_round_bounds(
 ) -> tuple[int, float] | None:
     """(per-statement timeout, round budget) for a continuous round, or None.
 
-    The default 30 s exec timeout reported most expire_snapshots and
-    rewrite_data_files statements on real tables as timed out while the
-    engine kept running them, and the next statement then overlapped it.
-    Each statement now gets min(600 s, interval / 2). The round is capped at
+    Each statement gets min(600 s, interval / 2): the 30 s exec default
+    reports most expire_snapshots and rewrite_data_files statements on real
+    tables as timed out while the engine keeps running them, and the next
+    statement then overlaps it. The round is capped at
     interval / 2, so it finishes before the next one is due, and at the time
     left in the run minus the budget grace, so it cannot hold the loop past
     run_duration. None when too little of the run is left for a round.
@@ -903,8 +903,7 @@ def _error_line(text: str, limit: int = 300) -> str:
 
     The message is "exec_sql failed (rc=N): <stdout> | <stderr>", and on a
     live Trino pod stderr starts with kubectl's "Defaulted container ..."
-    notice (journal of run-20260929-204941-1d17f4), so the first line is
-    noise. The prefix and the notice are dropped, then
+    notice, so the first line is noise. The prefix and the notice are dropped, then
     ``summarise_engine_error`` picks the line that states the failure
     (Trino's "Query <id> failed:", beeline's "Error:" or "FAILED:", a
     Python traceback's exception) over log lines printed before it.
@@ -1049,8 +1048,7 @@ def maintained_tables(cfg) -> list[str]:
     """Tables table maintenance (expire, orphan removal) runs on: those the
     pipeline writes for this workload and mode. Batch Customer 360 has no
     bronze table (bronze-verify reads the datagen Parquet in place); the
-    continuous bronze_raw only exists in continuous mode. Maintenance on it
-    failed 2 of 6 statements on every batch c360 run."""
+    continuous bronze_raw only exists in continuous mode."""
     schema = cfg.architecture.workload.schema_type.value
     continuous = is_continuous_mode(cfg.architecture.pipeline.mode)
     layers: tuple[str, ...] = ("bronze", "silver", "gold")
@@ -1190,8 +1188,7 @@ def expire_round_record(
     whose ``expire_snapshots`` statement finished or timed out (a timed-out
     statement may still have run). A table whose statement failed or was
     not attempted is not listed: that round expired nothing in it.
-    ``engine`` says whose clock took the cutoff (Trino its own; Spark
-    Thrift a literal from this host)."""
+    ``engine`` says whose clock took the cutoff."""
     status = out.get("status") or []
     expired = [
         table
@@ -1808,8 +1805,8 @@ def _table_outcome(plan: list[tuple[str, str]], out: dict) -> dict:
 def _wait_for_query_engine_ready(cfg, k8s, console, timeout: int = 180) -> None:
     """Poll the Trino cluster until all expected worker nodes are active.
 
-    Compaction (e.g. Delta OPTIMIZE via Trino) can exhaust per-node memory
-    and cause Trino worker pods to restart.  A SELECT 1 health check passes
+    Compaction can exhaust per-node memory and cause Trino worker pods to
+    restart.  A SELECT 1 health check passes
     as soon as the coordinator responds, even while workers are still
     reconnecting.  Instead, query system.runtime.nodes and wait until the
     expected worker count is present -- this guarantees distributed queries
@@ -2012,9 +2009,9 @@ def gold_event_age_sql(engine: str, fq_gold: str, ts_column: str = "interaction_
     NULL and the probe returns NULL, which the caller leaves as UNRECORDED.
 
     Trino and DuckDB take ``date_diff('second', start, end)``. Spark SQL has
-    no string-unit form: Spark Thrift rejected it on every round with
-    INVALID_PARAMETER_VALUE.DATETIME_UNIT (lb16-cs), and adapt_query only
-    rewrites the 'day' form. Spark gets the difference of unix_timestamp
+    no string-unit form (Spark Thrift rejects it with
+    INVALID_PARAMETER_VALUE.DATETIME_UNIT), and adapt_query only rewrites the
+    'day' form. Spark gets the difference of unix_timestamp
     values, which is whole seconds like date_diff.
     """
     newest = f"CAST(MAX({ts_column}) AS TIMESTAMP)"
@@ -2049,7 +2046,7 @@ def _run_benchmark_round(
         timestamp=utc_now(),
     )
 
-    # Table health probe (v1.1.0)
+    # Table health probe
     if k8s is not None:
         try:
             health = _probe_table_health(cfg, k8s)
@@ -2113,10 +2110,8 @@ def _run_benchmark_round(
     if tm_run and investigator_queries != "included":
         bench_runner.tm_run_id = None  # this round runs without IQ1 to IQ4
     # The same per-query limit as the batch benchmark (900 s financial / 300 s
-    # c360): without it the in-stream rounds fell through to run_power's 300 s
-    # default, so financial continuous queries timed out at 300 s while
-    # financial batch allowed 900 s. This value is also the limit a crossing is
-    # measured against.
+    # c360) rather than run_power's 300 s default. This value is also the
+    # limit a crossing is measured against.
     from lakebench.cli._run import bench_query_timeout
 
     query_timeout = bench_query_timeout(cfg)
@@ -2238,7 +2233,6 @@ def _run_benchmark_round(
 def investigator_sessions_after_round(
     bench_runner,
     collector,
-    console,
     j,
     requested: int,
     *,
@@ -2369,8 +2363,8 @@ def pipeline_score_freshness(pb) -> str:
     """The freshness the Pipeline Score line prints: the scored one.
 
     data_freshness_seconds is the continuous primary score. The query-time
-    probe measured event-date age (about 635 days on a 2025 corpus, lb16) and
-    headlined the score line until v1.6; it stays a labelled diagnostic.
+    probe measures event-date age, not freshness, so it stays a labelled
+    diagnostic.
     """
     value = pb.data_freshness_seconds
     return f"{value:.1f}s" if value is not None else "n/a"
@@ -2506,8 +2500,7 @@ def _streaming_job_env(run_id: str, run_duration: int) -> dict[str, str]:
 class StreamStartWatch:
     """``wait_until_running`` callback for one stream: reports every
     submission failure while the operator retries it, and a heartbeat while
-    the wait goes on, instead of waiting silently (the 2026-09-27 discovery
-    run printed nothing for 9 minutes while two streams failed five times).
+    the wait goes on, instead of waiting silently while streams fail.
     ``failures`` is what the metrics record: ``{"at", "attempt", "reason",
     "lost_seconds"}``, lost_seconds from the first poll that saw the failure
     to the first that saw another state (good to one poll interval), as for
@@ -2598,8 +2591,7 @@ def maintenance_schedule_lines(
     compaction_source: str,
 ) -> list[tuple[str, str]]:
     """The run header's maintenance lines, as ``(level, text)``: what the
-    table format and query engine will actually run, not the Iceberg
-    schedule for every run (lb16-cf Delta runs printed "Iceberg retention").
+    table format and query engine will actually run.
     """
     fmt = (table_format or "").lower()
     engine = (query_engine or "").lower()
@@ -2627,8 +2619,6 @@ def maintenance_schedule_lines(
 
     if skip_maintenance:
         vacuum = "Delta VACUUM: disabled (--skip-maintenance)"
-    elif engine == "duckdb":
-        vacuum = "Delta VACUUM: not run (DuckDB cannot run table maintenance)"
     elif engine == "spark-thrift":
         vacuum = "Delta VACUUM: not run (it OOMs Spark Thrift at 4Gi)"
     else:
@@ -2651,9 +2641,8 @@ def watch_all_streams(job_manager, watches: dict[str, StreamStartWatch], current
 
     The streams are submitted together but waited on one at a time, so a
     stream whose submission failed while an earlier one was waited on was
-    RUNNING again by its own turn and its failures were never seen: lb16-cf
-    recorded only bronze-ingest's, while silver-stream's and gold-refresh's
-    showed only in the operator watch. Streams already seen running stay
+    RUNNING again by its own turn and its failures would go unseen. Streams
+    already seen running stay
     polled: one that dies and fails its resubmission before its own turn
     would otherwise go unrecorded the same way.
     """
@@ -2968,7 +2957,7 @@ def _measure_bucket_sizes(cfg, collector) -> int | None:
 
 
 #: Auto trickle: aim for this many window lengths of arrival, and never more
-#: than this many files per trigger (the pre-v1.6 fixed default).
+#: than this many files per trigger.
 AUTO_ARRIVAL_MARGIN = 1.2
 AUTO_TRICKLE_CEILING = 50
 #: The trickle's cadence when bronze runs back to back (no interval): a
@@ -2991,10 +2980,8 @@ def resolve_maintenance_schedule(sustained, run_duration: int, *, skip_maintenan
     """The maintenance and compaction intervals this continuous run uses.
 
     Unset intervals are derived from the window (retention: run_duration / 3,
-    within 300..7200; compaction: 2 x retention). The old fixed default,
-    retention_interval 1800 with the default run_duration 1800, never fired,
-    so a default run measured a pipeline with no table maintenance (lb16-cs).
-    An explicit interval that cannot fire inside the window is refused
+    within 300..7200; compaction: 2 x retention), so a default run's
+    maintenance fires inside its window. An explicit interval that cannot fire inside the window is refused
     (``problem``) unless maintenance is disabled: --skip-maintenance for both,
     compaction_enabled false for compaction. A derived one that cannot fire
     (a window under about six minutes) is a warning; the effective
@@ -3146,8 +3133,8 @@ def cluster_clock_offset_seconds(timeout_s: float = 5.0) -> float | None:
 
 
 def stream_identities(job_manager, job_names: list[str]) -> dict[str, tuple]:
-    """(driver pod, submission attempts) per stream, to tell at the window's
-    end whether a stream restarted inside it."""
+    """(driver pod, submission attempts, last submission time) per stream,
+    to tell at the window's end whether a stream restarted inside it."""
     out: dict[str, tuple] = {}
     for name in job_names:
         try:
@@ -3180,7 +3167,7 @@ def end_of_window_problems(
                 f"closed, not RUNNING ({st.message})"
             )
             continue
-        pod0, attempts0, submitted0 = ((opened or {}).get(name) or (None, None, None))[:3]
+        pod0, attempts0, submitted0 = (opened or {}).get(name) or (None, None, None)
         # The operator reuses the driver pod name and may reset the attempt
         # count on a rerun; lastSubmissionAttemptTime moves on every one.
         if submitted0 and st.start_time and st.start_time != submitted0:
@@ -3563,9 +3550,8 @@ def _run_sustained(
             skip_benchmark = True
 
         # The benchmark runner serves the in-stream rounds. A run that
-        # cannot create it cannot produce the query
-        # evidence continuous mode claims, so it fails here, before any
-        # stream starts (it used to warn and pass with no rounds).
+        # cannot create it cannot produce the query evidence continuous
+        # mode claims, so it fails here, before any stream starts.
         bench_runner = None
         if not skip_benchmark:
             try:
@@ -3595,11 +3581,9 @@ def _run_sustained(
             _journal_safe(j.end_command, success=False, message=f"Scripts ConfigMaps: {e}")
             raise typer.Exit(ExitCode.FAILED) from None
 
-        # Start datagen before the stages below: the AML preflight needs parquet
-        # data to infer a schema from, and datagen then runs concurrently with
-        # the continuous jobs, which consume the same prefix as it lands.
-        # Skipping is only sensible when bronze is already being populated by
-        # another process; otherwise the continuous stages have no input.
+        # Datagen starts once the streams run (below) and writes the prefix
+        # they consume. --skip-generate is only sensible when another process
+        # populates bronze; otherwise the continuous stages have no input.
         engine = DeploymentEngine(cfg)
         # Every continuous run starts clean; see _reset_continuous_state, and
         # the table reset in bronze_verify_financial CONTINUOUS_RESET (AML) or
@@ -3643,7 +3627,6 @@ def _run_sustained(
             except typer.Exit:
                 pipeline_success = False
                 raise
-        if not skip_generate:
             # The namespace's fleet sidecar describes the corpus this run
             # clears and regenerates.
             from lakebench.metrics.datagen_aggregator import drop_sidecar
@@ -3707,17 +3690,12 @@ def _run_sustained(
                 pipeline_success = False
                 raise typer.Exit(ExitCode.FAILED)
             # Preflight budget must scale with data. This bronze-verify reads
-            # whatever raw pacs.008 already sits under the bronze prefix -- and
-            # when a `generate` step precedes `run --sustained` (the standard
-            # cycle) that is close to the full corpus (~100 GB observed at
-            # scale 10 before preflight), not a trickle. bronze_verify_financial
-            # trips the CTAS fallback on it, so the old fixed 1200s cap could
-            # never pass at scale >= 10 -- it timed out with the job still
-            # legitimately RUNNING. The budget is shared with the batch path via
-            # aml_bronze_verify_timeout_budget so the two cannot diverge for
-            # the same job. Using the CLI's sustained ``timeout`` here would be
-            # wrong -- that's the streaming window, not a preflight step, and
-            # the streaming clock only starts after preflight returns.
+            # whatever raw pacs.008 already sits under the bronze prefix, which
+            # after a `generate` step is close to the full corpus, and
+            # bronze_verify_financial trips the CTAS fallback on it. The budget
+            # is shared with the batch path via aml_bronze_verify_timeout_budget
+            # so the two cannot diverge for the same job. The CLI's sustained
+            # ``timeout`` is the streaming window, not a preflight step.
             _preflight_scale = cfg.architecture.workload.datagen.get_effective_scale()
             _preflight_timeout = aml_bronze_verify_timeout_budget(_preflight_scale)
             preflight_result = monitor.wait_for_completion(
@@ -3805,10 +3783,9 @@ def _run_sustained(
                 pipeline_success = False
                 raise typer.Exit(ExitCode.FAILED)
             print_success(f"Submitted: lakebench-{job_name}")
-            for warning in getattr(job_manager, "budget_warnings", None) or []:
+            for warning in job_manager.budget_warnings:
                 print_warning(warning)
-            if isinstance(getattr(job_manager, "budget_warnings", None), list):
-                job_manager.budget_warnings.clear()
+            job_manager.budget_warnings.clear()
             if isinstance(job_status.executor_count, int) and job_status.executor_count > 0:
                 requested_executors[job_name] = job_status.executor_count
             submitted.append((job_type, job_name))
@@ -3832,9 +3809,8 @@ def _run_sustained(
             logger.warning("driver log capture: initial setup failed, continuing: %s", e)
             _driver_log_capturer = None
 
-        # A streaming submission that failed used to go unnoticed until the
-        # end-of-run gates reported zero rows. Confirm each driver is running
-        # first; dependency-download races on the shared operator are retried.
+        # Confirm each driver is running before the window opens, so a failed
+        # submission shows now rather than as zero rows at the gates; dependency-download races on the shared operator are retried.
         # One shared deadline: the streams start concurrently, so waiting
         # for each in turn with its own budget could take N times as long.
         # Each stream's submission failures are printed, journaled and
@@ -4003,7 +3979,7 @@ def _run_sustained(
                 # run with --continuous did not.
                 print_warning(floor_msg)
 
-        # Compaction scheduling (v1.1.0); Delta OPTIMIZE never runs.
+        # Compaction scheduling; Delta OPTIMIZE never runs.
         next_compaction_at = float(compaction_interval) if compaction_enabled else float("inf")
 
         start = time.time()
@@ -4062,12 +4038,7 @@ def _run_sustained(
             )
 
             # Check if it's time for a benchmark round
-            if (
-                can_run_rounds
-                and elapsed >= next_round_at
-                and remaining >= min_remaining
-                and bench_runner_instream is not None
-            ):
+            if can_run_rounds and elapsed >= next_round_at and remaining >= min_remaining:
                 _ns_watch.check(elapsed)
                 round_index += 1
                 console.print(
@@ -4092,7 +4063,6 @@ def _run_sustained(
                     sessions_pending = investigator_sessions_after_round(
                         bench_runner_instream,
                         collector,
-                        console,
                         j,
                         sessions_requested,
                         remaining_s=run_duration - (time.time() - start),
@@ -4162,7 +4132,7 @@ def _run_sustained(
                     )
                 next_maintenance_at = (time.time() - start) + retention_interval
 
-            # Iceberg compaction (v1.1.0). Bounds use the time now, after any
+            # Iceberg compaction. Bounds use the time now, after any
             # maintenance round above, so the two cannot overrun the window.
             if compaction_enabled and elapsed >= next_compaction_at:
                 now = time.time() - start
@@ -4199,7 +4169,7 @@ def _run_sustained(
             sleep_time = loop_sleep_seconds(
                 time.time() - start,
                 elapsed + check_interval,
-                next_round_at if can_run_rounds else float("inf"),
+                next_round_at,
                 next_maintenance_at,
                 next_compaction_at,
                 run_duration,
@@ -4256,11 +4226,8 @@ def _run_sustained(
             dg_info = _s3_dg.get_bucket_size(s3_cfg.buckets.bronze)
             if dg_info.size_bytes:
                 _datagen_output_gb = dg_info.size_bytes / (1024**3)
-            # datagen row count is not measurable from S3 metadata (would need
-            # to parse Parquet footers). Leaving _datagen_output_rows at 0
-            # correctly signals "unmeasurable" downstream -- ingest_ratio and
-            # pipeline_saturated become None rather than being computed against
-            # a fictional `scale * 1_500_000` denominator.
+            # S3 metadata gives no row count; _datagen_output_rows stays 0 so
+            # ingest_ratio and pipeline_saturated read as unmeasured (None).
         except Exception as e:
             logger.warning("Could not measure streaming bronze bucket size: %s", e)
 
@@ -4323,9 +4290,8 @@ def _run_sustained(
                         f"  {job_name}: captured {len(logs):,} bytes ({len(lines)} lines)"
                     )
                     # Show first line to verify format
-                    if lines:
-                        first = lines[0][:80] + "..." if len(lines[0]) > 80 else lines[0]
-                        console.print(f"    first: {first}")
+                    first = lines[0][:80] + "..." if len(lines[0]) > 80 else lines[0]
+                    console.print(f"    first: {first}")
             except Exception as e:
                 driver_logs[job_name] = None
                 print_warning(f"{job_name}: log capture failed: {e}")
@@ -4428,11 +4394,8 @@ def _run_sustained(
             print_warning(f"balance (advisory): {balance_record['bottleneck']}")
         # The verdict names what failed instead of "crashed or was
         # interrupted".
-        if collector.current_run is not None:
-            for _problem in window_problems:
-                if _problem not in collector.current_run.failure_reasons:
-                    collector.current_run.failure_reasons.append(_problem)
         for _problem in window_problems:
+            _record_failure(collector, _problem)
             print_error(_problem)
         if window_problems:
             pipeline_success = False
@@ -4603,7 +4566,7 @@ def _run_sustained(
                     _record_failure(collector, _problem)
                 pipeline_success = False
 
-        # c360 honest continuous gate (AML has its own above).
+        # c360 continuous gate (AML has its own above).
         # A continuous run whose bronze or silver stream processed zero rows
         # moved no data, whatever the exit codes say.
         if not is_financial:
@@ -4830,7 +4793,7 @@ def _run_sustained(
 
         # Summary. Only the green "completed" panel is success-gated: printing
         # it after the gate flagged FAILURE would contradict the red error and
-        # read as a pass to an operator scanning stdout (adversarial-review P1).
+        # read as a pass to an operator scanning stdout.
         if pipeline_success:
             console.print(
                 Panel(
@@ -4849,8 +4812,7 @@ def _run_sustained(
         # only set the flag (so the record loop + benchmark aggregation
         # could still persist). Raise now, inside the try, so the finally
         # block still runs (metrics + journal persist with success=False)
-        # and the process exits 1 -- the exact signal an exit-code-only UAT
-        # runner reads.
+        # and the process exits 1.
         if not pipeline_success:
             raise typer.Exit(ExitCode.FAILED)
 
