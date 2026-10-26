@@ -78,6 +78,7 @@ class FrontMatter:
     warnings: list[str] = field(default_factory=list)
     qualifiers: list[str] = field(default_factory=list)
     limits: list[str] = field(default_factory=list)
+    look: tuple = (None, None, None)  # look_for_run for this run
 
     def lines(self) -> list[tuple[str, str]]:
         """``(label, text)`` in the order every renderer shows them."""
@@ -117,12 +118,14 @@ def _metrics_of(record: Any):
     return record
 
 
-def page_verdict(metrics) -> tuple[str, list[str], str]:
+def page_verdict(metrics, recomputed=None) -> tuple[str, list[str], str]:
     """``(status, reasons, note)``: the strictest of the stored and the
-    recomputed verdict, and a note naming both when they differ."""
+    recomputed verdict, and a note naming both when they differ.
+    *recomputed* is ``compute_verdict(metrics)`` when the caller has it."""
     from lakebench.metrics.verdict import Verdict, compute_verdict
 
-    recomputed = compute_verdict(metrics)
+    if recomputed is None:
+        recomputed = compute_verdict(metrics)
     status: str = str(recomputed.status)
     reasons = list(recomputed.reasons)
     stored = getattr(metrics, "stored_verdict", None)
@@ -194,7 +197,9 @@ def _d(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _experiment(metrics) -> dict[str, Any]:
+def safe_experiment(metrics) -> dict[str, Any]:
+    """``metrics.experiment_block()``, or {} when it is missing, malformed
+    or raises: a bad block must not break a render."""
     try:
         exp = metrics.experiment_block() or {}
     except Exception:  # noqa: BLE001 -- a bad block must not break the render
@@ -202,12 +207,13 @@ def _experiment(metrics) -> dict[str, Any]:
     return exp if isinstance(exp, dict) else {}
 
 
-def evidence_class(metrics) -> tuple[str, str]:
-    """``(class, basis)`` from the look record and the stored corpus."""
-    role, sha, error = look_for_run(getattr(metrics, "run_id", None))
+def evidence_class(metrics, look: tuple | None = None) -> tuple[str, str]:
+    """``(class, basis)`` from the look record and the stored corpus. *look*
+    is ``look_for_run`` for this run when the caller has read it."""
+    role, sha, error = look or look_for_run(getattr(metrics, "run_id", None))
     if role:
         return f"registered look: {role}", f"report sha256 {(sha or 'not recorded')[:12]}"
-    corpus = _d(_experiment(metrics).get("corpus"))
+    corpus = _d(safe_experiment(metrics).get("corpus"))
     workload = (getattr(metrics, "config_snapshot", None) or {}).get("workload_schema")
     if workload == "financial" and (
         corpus.get("corpus_role") == "calibration" or corpus.get("seed") == _calibration_seed()
@@ -290,14 +296,16 @@ def limits_interpretation(
     *,
     count: Callable[[int, str], str] | None = None,
     esc: Callable[[str], str] | None = None,
+    look: tuple | None = None,
 ) -> list[str]:
     """What limits interpretation: n=1, rules skipped or errored, continuous
     AML rules not run, in-sample AML recall, a dirty tree. Plain text by
     default; the HTML page passes *count* (a derived span for a count at a
-    record path) and *esc* (HTML escaping)."""
+    record path) and *esc* (HTML escaping). *look* is ``look_for_run`` for
+    this run when the caller has read it."""
     count = count or (lambda n, _path: str(n))
     esc = esc or (lambda t: t)
-    exp = _experiment(metrics) if exp is None else exp
+    exp = safe_experiment(metrics) if exp is None else exp
     items: list[str] = []
     runs = _d(exp.get("repetitions")).get("runs") or 1
     if runs == 1:
@@ -340,7 +348,7 @@ def limits_interpretation(
                     f"{n_not_run} detection rules not run in continuous mode ({esc(ids)}): "
                     "their typologies have no result in this run"
                 )
-        if not registered_look_role(metrics.run_id):
+        if not (look or look_for_run(metrics.run_id))[0]:
             items.append(
                 "AML recall is uncalibrated and in-sample: no registered look names this run"
             )
@@ -376,17 +384,20 @@ def _passed_headline(metrics, exp: dict[str, Any], n_runs: int) -> str:
     return ", ".join(parts)
 
 
-def front_matter(record: Any) -> FrontMatter:
+def front_matter(record: Any, recomputed=None) -> FrontMatter:
     """The front matter of a run: *record* is a metrics.json dict or a loaded
-    ``PipelineMetrics``."""
+    ``PipelineMetrics``; *recomputed* is its ``compute_verdict`` when the
+    caller has it."""
     from lakebench.metrics.bounds import binding_caps
     from lakebench.metrics.verdict import compute_badge_status, compute_verdict
 
     metrics = _metrics_of(record)
     if isinstance(record, Mapping) and getattr(metrics, "stored_verdict", None) is None:
         metrics.stored_verdict = record.get("verdict")
-    exp = _experiment(metrics)
-    status, reasons, note = page_verdict(metrics)
+    exp = safe_experiment(metrics)
+    if recomputed is None:
+        recomputed = compute_verdict(metrics)
+    status, reasons, note = page_verdict(metrics, recomputed)
     _ok, _fail, warnings = compute_badge_status(metrics)
     rep = _d(exp.get("repetitions"))
     runs = rep.get("runs")
@@ -399,7 +410,8 @@ def front_matter(record: Any) -> FrontMatter:
         headline = warnings[0]
     else:
         headline = _passed_headline(metrics, exp, n_runs)
-    ev_class, ev_basis = evidence_class(metrics)
+    look = look_for_run(getattr(metrics, "run_id", None))
+    ev_class, ev_basis = evidence_class(metrics, look)
     sup = _d(exp.get("support"))
     state = str(sup.get("state") or "unknown")
     basis = str(sup.get("basis") or "") or _SUPPORT_MEANING.get(state, "not recorded")
@@ -411,7 +423,7 @@ def front_matter(record: Any) -> FrontMatter:
     for m in mismatches if isinstance(mismatches, list) else []:
         caps.append(f"requested and effective differ: {m}")
     try:
-        qualifiers = _qualifier_lines(compute_verdict(metrics).qualifiers)
+        qualifiers = _qualifier_lines(recomputed.qualifiers)
     except Exception:  # noqa: BLE001 -- the verdict above already decided
         qualifiers = []
     return FrontMatter(
@@ -431,7 +443,8 @@ def front_matter(record: Any) -> FrontMatter:
         reasons=reasons,
         warnings=list(warnings),
         qualifiers=qualifiers,
-        limits=limits_interpretation(metrics, exp),
+        limits=limits_interpretation(metrics, exp, look=look),
+        look=look,
     )
 
 
@@ -455,22 +468,25 @@ def rich_renderable(fm: FrontMatter):
     fields.add_column(overflow="fold")
     for label, text in fm.lines():
         fields.add_row(label, Text(text, style=colour if label == "Verdict" else ""))
+
+    def bullets(items: list[str], style: str) -> Table:
+        grid = Table.grid(padding=(0, 1))
+        grid.add_column(no_wrap=True)
+        grid.add_column(overflow="fold")
+        for item in items:
+            grid.add_row(Text("-", style=style), Text(item, style=style))
+        return grid
+
     notes = [*fm.qualifiers, *(fm.warnings[1:] if fm.verdict == "PASSED" else fm.warnings)]
     parts: list = [fields]
     if notes:
-        bullets = Table.grid(padding=(0, 1))
-        bullets.add_column(no_wrap=True)
-        bullets.add_column(overflow="fold")
-        for note in notes:
-            bullets.add_row(Text("-", style="yellow"), Text(note, style="yellow"))
-        parts += [Text(""), bullets]
+        parts += [Text(""), bullets(notes, "yellow")]
     if fm.limits:
-        bullets = Table.grid(padding=(0, 1))
-        bullets.add_column(no_wrap=True)
-        bullets.add_column(overflow="fold")
-        for item in fm.limits:
-            bullets.add_row("-", Text(item))
-        parts += [Text(""), Text("What limits interpretation", style="bold"), bullets]
+        parts += [
+            Text(""),
+            Text("What limits interpretation", style="bold"),
+            bullets(fm.limits, ""),
+        ]
     return Group(*parts)
 
 

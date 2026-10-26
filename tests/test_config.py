@@ -303,7 +303,7 @@ def test_benchmark_error_round_trips_and_reaches_the_report(tmp_path):
 
     from lakebench.metrics.collector import PipelineMetrics
     from lakebench.metrics.storage import MetricsStorage
-    from lakebench.reports.generator import ReportGenerator
+    from lakebench.metrics.verdict import compute_badge_status
 
     run = PipelineMetrics(
         run_id="r1",
@@ -317,8 +317,7 @@ def test_benchmark_error_round_trips_and_reaches_the_report(tmp_path):
     storage.save_run(run)
     loaded = storage.load_run("r1")
     assert loaded.benchmark_error == "RuntimeError: trino down"
-    gen = ReportGenerator.__new__(ReportGenerator)
-    ok, reasons, _ = gen._compute_overall_status(loaded)
+    ok, reasons, _ = compute_badge_status(loaded)
     assert not ok
     assert any("Benchmark did not complete" in r for r in reasons)
 

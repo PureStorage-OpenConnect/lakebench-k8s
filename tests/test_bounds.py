@@ -319,7 +319,7 @@ def test_report_labels_intake_cards_only():
         re.S,
     )
     assert avg and "BOUNDED BY" in (avg.group(0))
-    pipeline = gen._generate_pipeline_benchmark_section(m)
+    pipeline = gen._generate_pipeline_benchmark_section(m, "PASSED")
     summary = re.search(r"Throughput: <strong>(.*?)</strong>", pipeline, re.S).group(1)
     assert "BOUNDED BY" in summary
 

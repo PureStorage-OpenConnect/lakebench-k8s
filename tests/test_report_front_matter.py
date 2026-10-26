@@ -343,7 +343,7 @@ def test_interrupted_run_keeps_its_verdict_word(monkeypatch):
     from lakebench.reports import front_matter
 
     reason = "Run interrupted (SIGINT during gold-finalize)"
-    monkeypatch.setattr(front_matter, "page_verdict", lambda m: ("INTERRUPTED", [reason], ""))
+    monkeypatch.setattr(front_matter, "page_verdict", lambda m, _v: ("INTERRUPTED", [reason], ""))
     record = load_record("5105a0")
     record["success"] = False
     text = _plain(_render_dict(record))

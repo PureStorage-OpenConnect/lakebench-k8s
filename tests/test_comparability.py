@@ -132,9 +132,7 @@ def _caller_read_first(m):
     from lakebench.reports.generator import ReportGenerator
 
     with tempfile.TemporaryDirectory() as tmp:
-        html = ReportGenerator(metrics_dir=tmp)._generate_read_first_panel(
-            m, passed=True, warnings=[], fail_reasons=[], n_runs=1
-        )
+        html = ReportGenerator(metrics_dir=tmp)._generate_read_first_panel(m)
     return ("plantedcorpu" in html, ex.identity_hash(m.experiment) in html), (True, True)
 
 
