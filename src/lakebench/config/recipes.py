@@ -19,7 +19,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # Recipe defaults
 # ---------------------------------------------------------------------------
-# Each recipe maps 1:1 to a validated entry in _SUPPORTED_COMBINATIONS.
+# schema._SUPPORTED_COMBINATIONS is derived from these recipes.
 # User-specified values always take precedence over recipe defaults.
 
 RECIPES: dict[str, dict[str, Any]] = {

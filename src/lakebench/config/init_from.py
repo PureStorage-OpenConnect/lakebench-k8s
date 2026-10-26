@@ -13,10 +13,10 @@ default is written out and no ``${VAR}`` is expanded:
    ``pipeline.sustained`` to ``pipeline.continuous``, ``mode: sustained`` to
    ``continuous``. A recipe that contradicts the components written becomes
    the recipe 1.6 deployed (the written components won in 1.6).
-3. Every ``_removed_keys`` and ``_dead_fields`` entry present is dropped,
-   with its fix text; so is each refused-key row whose ``init_from`` is
-   ``drop`` (``config/refused_keys.py``), and each ``spark.conf`` key
-   Lakebench owns that carries its 1.6 default (1.6 overwrote it too).
+3. Every ``_removed_keys`` entry present is dropped, with its fix text;
+   so is each refused-key row whose ``init_from`` is ``drop``
+   (``config/refused_keys.py``), and each ``spark.conf`` key Lakebench owns
+   that carries its 1.6 default (1.6 overwrote it too).
 4. The name is OLD's, else the name 1.6 recorded in the directory's
    ``.lakebench/state.json``, else a new one. The bucket names are written
    out, so a later rename cannot move them.
@@ -317,7 +317,7 @@ def _medallion_changed_paths(data: dict[str, Any]) -> bool:
 
 
 def _drop_removed(data: dict[str, Any], changes: list[Change]) -> None:
-    """Drop every removed key and dead field present, with its fix text.
+    """Drop every removed key present, with its fix text.
 
     One is kept: a medallion block that moved the bronze layout, which 1.6
     read. The commands that change data refuse it with its fix text, and
@@ -330,17 +330,12 @@ def _drop_removed(data: dict[str, Any], changes: list[Change]) -> None:
 
     def walk(node: dict[str, Any], model: type, path: tuple[str, ...]) -> None:
         removed: dict[str, str] = getattr(model, "_removed_keys", {}) or {}
-        dead: dict[str, str] = getattr(model, "_dead_fields", {}) or {}
         for key in list(node):
             if (*path, key) in keep:
                 continue
             if key in removed:
                 node.pop(key)
                 changes.append(Change("dropped", _dotted((*path, key)), removed[key]))
-            elif key in dead:
-                node.pop(key)
-                text = dead[key] or "nothing in lakebench read it."
-                changes.append(Change("dropped", _dotted((*path, key)), text))
         for key, sub in blocks[model].items():
             child = node.get(key)
             if isinstance(child, dict) and child:
