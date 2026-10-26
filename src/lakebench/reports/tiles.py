@@ -37,6 +37,7 @@ class Tile:
     alt_sub: str = ""
     unit_label: str = ""  # what the count view counts ("Interactions"), for the switch
     guard: str = ""  # HTML under the figure: qualifiers (n=1, bounded by) and direction
+    rate: str = ""  # what a Pace figure counts per second ("payments screened")
 
 
 def _num(record: Mapping[str, Any], *keys: str) -> float | None:
@@ -223,6 +224,7 @@ def _pace_batch(record: Mapping[str, Any]) -> Tile:
         alt,
         alt_sub,
         noun.capitalize(),
+        rate=did,
     )
 
 
@@ -255,6 +257,7 @@ def _pace_offered(record: Mapping[str, Any]) -> Tile:
         _kept(record, offered=True),
         EVIDENCE_RECORDED,
         path,
+        rate=f"{noun} offered",
     )
 
 
@@ -280,6 +283,7 @@ def _pace_cleaned(record: Mapping[str, Any], secs: Any) -> Tile:
         EVIDENCE_DERIVED,
         f"{a_path} / {b_path}",
         unit_label="Interactions",
+        rate="interactions cleaned",
     )
 
 
@@ -315,6 +319,7 @@ def _pace_continuous(record: Mapping[str, Any]) -> Tile:
         EVIDENCE_DERIVED,
         path,
         unit_label=noun.capitalize(),
+        rate=f"{noun} screened",
     )
 
 

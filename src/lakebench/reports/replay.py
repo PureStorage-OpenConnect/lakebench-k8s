@@ -861,7 +861,7 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         count_hidden = ' data-unit="count"' if pace.alt_value else ""
         pace_html = (
             f'<div class="mini"><strong{count_hidden}>{pace.value}</strong>{alt}'
-            f"<span>{e(pace.sub.split(' in ')[0].split(' ', 1)[-1])} per second</span></div>"
+            f"<span>{e(pace.rate)} per second</span></div>"
         )
     return (
         f"<style>{_CSS}{UNIT_CSS}</style>"
