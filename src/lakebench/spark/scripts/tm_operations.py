@@ -1021,15 +1021,17 @@ def split_run_id(run_id: str, cycle: int | None = None) -> tuple[str, int]:
 # ---------------------------------------------------------------------------
 
 
-def current_snapshot_id(spark, fq_table):
-    """The table's newest snapshot id, or None (empty, or not Iceberg)."""
+def current_snapshot_id(spark, fq_table, *, unknown=None, tag="tm"):
+    """The table's current snapshot id: the head of its ``main`` branch, read
+    from the refs metadata. Commit and made-current times come from each
+    writer's clock, and writers' clocks disagree, so ordering by them can
+    name an older snapshot. None when the table has no snapshot yet;
+    ``unknown`` when the lookup failed (logged under ``tag``)."""
     try:
-        rows = spark.sql(
-            f"SELECT snapshot_id FROM {fq_table}.snapshots ORDER BY committed_at DESC LIMIT 1"
-        ).collect()
+        rows = spark.sql(f"SELECT snapshot_id FROM {fq_table}.refs WHERE name = 'main'").collect()
     except Exception as e:  # noqa: BLE001
-        log(f"[tm] snapshot of {fq_table} unavailable: {one_line(e)}")
-        return None
+        log(f"[{tag}] snapshot of {fq_table} unavailable: {one_line(e)}")
+        return unknown
     return int(rows[0][0]) if rows else None
 
 

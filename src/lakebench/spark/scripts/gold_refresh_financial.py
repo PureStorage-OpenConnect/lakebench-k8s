@@ -164,6 +164,7 @@ from pyspark.storagelevel import StorageLevel
 from tm_operations import (
     TM_RETRY_NOT_READY_S,
     bootstrap_tm_tables,
+    current_snapshot_id,
     params_from_env,
     read_at_snapshot,
     run_tm_operations,
@@ -555,21 +556,7 @@ def _empty_ttd_stats():
 def _current_snapshot(spark, fq_table):
     """``fq_table``'s current snapshot id; None when it has none yet;
     TTD_SNAPSHOT_UNKNOWN when the lookup failed."""
-    try:
-        rows = spark.sql(
-            f"SELECT snapshot_id FROM {fq_table}.history "
-            "WHERE is_current_ancestor ORDER BY made_current_at DESC LIMIT 1"
-        ).collect()
-    except Exception as e:  # noqa: BLE001
-        log(f"[metrics] snapshot of {fq_table} unavailable: {one_line(e)}")
-        return TTD_SNAPSHOT_UNKNOWN
-    return int(rows[0][0]) if rows else None
-
-
-def _prior_alerts_snapshot(spark):
-    """gold.alerts' current snapshot id; None when it has none yet (every
-    alert is new); TTD_SNAPSHOT_UNKNOWN when the lookup failed."""
-    return _current_snapshot(spark, f"{CATALOG}.{GOLD_ALERTS}")
+    return current_snapshot_id(spark, fq_table, unknown=TTD_SNAPSHOT_UNKNOWN, tag="metrics")
 
 
 def _token(snapshot):
@@ -1165,7 +1152,9 @@ def run_tick(spark, state, cycle) -> dict:
     # is what this tick's alerts are compared against to find the newly
     # raised ones.
     t = time.time()
-    ttd_base = state.ttd_baseline.begin(_prior_alerts_snapshot(spark), state.prev_tick_seen)
+    ttd_base = state.ttd_baseline.begin(
+        _current_snapshot(spark, f"{CATALOG}.{GOLD_ALERTS}"), state.prev_tick_seen
+    )
     # The silver position this tick read, from its own rows: the next tick's
     # new rows, late alerts and incremental cut are all judged against it.
     cut, seen_now = tick_position(txns, state.prev_tick_seen)
@@ -1313,7 +1302,7 @@ def run_tick(spark, state, cycle) -> dict:
         detected_by_rule=committed,
         scope=state.ttd_scope,
     ):
-        state.ttd_baseline.measured(_prior_alerts_snapshot(spark))
+        state.ttd_baseline.measured(_current_snapshot(spark, f"{CATALOG}.{GOLD_ALERTS}"))
         state.ttd_scope = {}
     phases["ttd"] = time.time() - t
 
