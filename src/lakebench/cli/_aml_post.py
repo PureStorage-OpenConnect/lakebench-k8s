@@ -108,7 +108,7 @@ def _write_recall_json(cfg, run_id: str, record: dict) -> None:
     import json as _json
 
     try:
-        _s3_client(cfg).raw_client().put_object(
+        _s3_client(cfg).raw_client.put_object(
             Bucket=cfg.platform.storage.s3.buckets.gold,
             Key=f"scoring/{run_id}/recall.json",
             Body=_json.dumps(record).encode(),
