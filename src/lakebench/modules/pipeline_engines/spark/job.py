@@ -17,9 +17,8 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from lakebench._constants import POLARIS_CLIENT_ID, SPARK_SERVICE_ACCOUNT
-from lakebench.modules.pipeline_engines.spark.conf_keys import (  # noqa: F401 -- job.py's names
+from lakebench.modules.pipeline_engines.spark.conf_keys import (
     DEPENDENCY_SET_SPARK_KEYS,
-    LAKEBENCH_OWNED_SPARK_KEYS,
     SPARK_CONF_DEFAULTS,
 )
 
@@ -464,8 +463,6 @@ def scratch_executor_size(profile: dict[str, Any], scale: float, executors: int)
     ``scratch_gib_per_scale`` x *scale*, between ``_SCRATCH_MIN_GIB`` and the
     profile's ``scratch_size``. A profile without a per-scale need keeps
     ``scratch_size``."""
-    import math
-
     per_scale = profile.get("scratch_gib_per_scale")
     if not per_scale:
         return str(profile["scratch_size"])
@@ -505,8 +502,6 @@ def balance_executor_need(
     cores. The load follows scale and schema only, so
     *scale* and *schema* stand in for a config. 0 for a stage with no rate
     (gold-refresh)."""
-    import math
-
     stage = _BALANCE_STAGES.get(job_type)
     if stage is None or (config is None and scale is None):
         return 0
@@ -571,8 +566,6 @@ def _executor_memory_override(job_type: str, config: Any | None) -> str | None:
 def _with_executor_memory(profile: dict[str, Any], memory: str) -> dict[str, Any]:
     """*profile* with a *memory* heap per executor: the overhead keeps the
     profile's ratio to the heap, so the pod grows in proportion."""
-    import math
-
     from lakebench.config.schema import parse_spark_memory
 
     gib = 1024**3
@@ -592,8 +585,6 @@ def _reshape_executors(
     """*profile* with *cores* per executor: memory keeps the per-core share,
     and the scale counts shrink so the total cores stay the same, unless
     *keep_count* (cores set in the config change the size only)."""
-    import math
-
     from lakebench.config.schema import parse_spark_memory
 
     old = int(profile["executor_cores"])
@@ -617,8 +608,6 @@ def kubernetes_client_conf(executors: int) -> dict[str, str]:
     """Spark's Kubernetes client settings for a job of *executors*: pod lists
     from the API server cache, polling that slows as the job grows, and pod
     requests in bounded waves."""
-    import math
-
     batch = max(5, min(20, math.ceil(executors / 3)))
     return {
         "spark.kubernetes.executor.enablePollingWithResourceVersion": "true",
@@ -1787,21 +1776,13 @@ def _spark_compat(image: str) -> tuple[str, str, str]:
 
     Returns:
         Tuple of (scala_suffix, hadoop_aws_version, aws_sdk_version), keyed on
-        the Spark image's own major.minor. Every supported Spark minor is
-        required to have an explicit ``_HADOOP_AWS_COMPAT`` entry -- the
-        import-time gate above enforces this. Unknown Spark minors (which
-        should have failed earlier at ``_validate_spark_image``) raise a
-        loud KeyError rather than falling back to a wrong pair.
+        the Spark image's own major.minor. ``_parse_spark_major`` refuses an
+        unsupported minor, and the import-time gate above gives every
+        supported minor an entry.
     """
     major = _parse_spark_major(image)
     key = _parse_spark_major_minor(image)
     scala_suffix = "_2.13" if major >= 4 else "_2.12"
-    if key not in _HADOOP_AWS_COMPAT:
-        raise KeyError(
-            f"No hadoop-aws / AWS SDK pin for Spark {key[0]}.{key[1]} in "
-            "_HADOOP_AWS_COMPAT. This must be resolved before submitting the "
-            "job -- a fallback would silently produce a wrong S3 signing pair."
-        )
     hadoop_aws_version, aws_sdk_version = _HADOOP_AWS_COMPAT[key]
     return scala_suffix, hadoop_aws_version, aws_sdk_version
 
@@ -2028,15 +2009,6 @@ def is_transient_status_error(exc: BaseException) -> bool:
 FAILURE_STATES = frozenset({JobState.FAILING, JobState.FAILED, JobState.SUBMISSION_FAILED})
 
 
-def is_terminal(state: JobState) -> bool:
-    """Whether a state means the job has stopped producing work.
-
-    ``UNKNOWN`` is deliberately excluded: an unrecognised state should keep
-    the caller waiting rather than be reported as a result either way.
-    """
-    return state in SUCCESS_STATES or state in FAILURE_STATES
-
-
 @dataclass
 class JobStatus:
     """Status of a Spark job."""
@@ -2163,8 +2135,6 @@ class SparkJobManager:
         custom_api = k8s_client.CustomObjectsApi()
 
         retryable_codes = {429, 500, 502, 503, 504}
-        last_exc: ApiException | None = None
-
         for attempt in range(4):  # 1 initial + 3 retries
             try:
                 created = custom_api.create_namespaced_custom_object(
@@ -2197,9 +2167,7 @@ class SparkJobManager:
                         state=JobState.FAILED,
                         message=f"Failed to submit: {e.reason}",
                     )
-                last_exc = e
                 import random
-                import time
 
                 delay = (2**attempt) + random.uniform(0, 0.5)
                 logger.warning(
@@ -2210,14 +2178,7 @@ class SparkJobManager:
                     e.reason,
                 )
                 time.sleep(delay)
-
-        # Should not reach here, but satisfy type checker
-        logger.error(f"Failed to submit job after retries: {last_exc}")
-        return JobStatus(
-            name=job_name,
-            state=JobState.FAILED,
-            message=f"Failed to submit after retries: {last_exc}",
-        )
+        raise AssertionError("the last attempt returns")
 
     def _delete_job(self, job_name: str, *, request_timeout: int | None = None) -> None:
         """Delete existing Spark job if present.
@@ -3827,8 +3788,3 @@ class SparkJobManager:
                     "(another run or tree wrote it); not submitting"
                 )
         return None
-
-    # Alias for backward compatibility
-    def deploy_scripts(self) -> bool:
-        """Deploy scripts. Alias for deploy_scripts_configmap()."""
-        return self.deploy_scripts_configmap()
