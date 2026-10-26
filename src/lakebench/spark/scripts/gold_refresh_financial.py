@@ -1342,24 +1342,23 @@ def run_tick(spark, state, cycle) -> dict:
                 # did no work, so it neither starts the interval nor counts
                 # as the last pass. Retry shortly.
                 tm_clock["not_ready_at"] = time.time()
-                phases["tm"] = time.time() - t
-                phases["total"] = time.time() - tick
-                log(tick_timing_line(cycle, silver_rows, phases))
-                return phases
-            tm_clock["end"] = time.time()
-            tm_clock["elapsed"] = tm_clock["end"] - now
-            # Gold was not refreshed while the pass ran: its staleness now
-            # includes the pass, so it is sampled again while data is moving
-            # -- the tick sampled, or bronze took rows during the pass that
-            # gold has not seen. A drained corpus's idle time never counts.
-            after_bronze_s = _newest_ingest_epoch_s(spark, f"{CATALOG}.{BRONZE_TABLE}")
-            arrived = (
-                after_bronze_s is not None
-                and newest_ingest_s is not None
-                and after_bronze_s > newest_ingest_s
-            )
-            if newest_ingest_s is not None and (fresh_sampled or arrived):
-                log(f"Cycle {cycle}: data freshness {max(0.0, time.time() - newest_ingest_s):.0f}s")
+            else:
+                tm_clock["end"] = time.time()
+                tm_clock["elapsed"] = tm_clock["end"] - now
+                # Gold was not refreshed while the pass ran: its staleness now
+                # includes the pass, so it is sampled again while data is moving
+                # -- the tick sampled, or bronze took rows during the pass that
+                # gold has not seen. A drained corpus's idle time never counts.
+                after_bronze_s = _newest_ingest_epoch_s(spark, f"{CATALOG}.{BRONZE_TABLE}")
+                arrived = (
+                    after_bronze_s is not None
+                    and newest_ingest_s is not None
+                    and after_bronze_s > newest_ingest_s
+                )
+                if newest_ingest_s is not None and (fresh_sampled or arrived):
+                    log(
+                        f"Cycle {cycle}: data freshness {max(0.0, time.time() - newest_ingest_s):.0f}s"
+                    )
         else:
             log(
                 # cycle=0: no operations pass has a number yet (they are
