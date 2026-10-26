@@ -183,7 +183,7 @@ def test_aml_tm_verdict(case, status, problems):
 
 def test_scoring_count_line_never_calls_every_typology_scored():
     """Live s1 run 2026-09-26 said '15 typologies scored' when 6 were."""
-    from lakebench.cli._run import scoring_count_line
+    from lakebench.cli._aml_post import scoring_count_line
 
     typs = [{"typology_type": f"t{i}", "detection_status": "scored"} for i in range(6)]
     typs += [{"typology_type": f"n{i}", "detection_status": "no_rule"} for i in range(8)]

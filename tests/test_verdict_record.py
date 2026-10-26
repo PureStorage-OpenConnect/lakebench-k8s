@@ -767,7 +767,7 @@ def test_local_run_exits_one_when_its_record_fails(tmp_path, monkeypatch) -> Non
     )
     monkeypatch.setattr(local, "print_local_summary", lambda *a, **k: None)
 
-    def jobs(collector, cfg, result):
+    def jobs(collector, result):
         for name, _ok, _e in result.stages:
             rows = 0 if name == "gold-finalize" else 100
             collector.record_job(
