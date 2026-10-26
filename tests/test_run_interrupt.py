@@ -57,7 +57,8 @@ def _assert_handlers_restored(sentinel) -> None:
     [
         ("batch_c360", "silver-build", "SIGINT"),
         ("batch_c360", "silver-build", "raise"),
-        ("batch_aml", "score-financial", "SIGTERM"),
+        # Financial scoring is a synchronous query now, not an interruptible
+        # SparkApplication, so there is no score-financial stage to interrupt.
     ],
 )
 def test_interrupt_batch_seals_interrupted(

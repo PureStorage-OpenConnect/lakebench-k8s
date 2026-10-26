@@ -59,9 +59,12 @@ def _cfg(scale=1, mode="batch", schema="customer360"):
     """
     from tests.conftest import make_config
 
+    # Financial scores through Trino (refused on `none`); the engine does not
+    # affect the capacity sizing this check exercises.
+    engine = "trino" if schema == "financial" else "none"
     return make_config(
         workload={"schema": schema, "datagen": {"scale": scale}},
-        architecture={"pipeline": {"mode": mode}, "query_engine": {"type": "none"}},
+        architecture={"pipeline": {"mode": mode}, "query_engine": {"type": engine}},
     )
 
 

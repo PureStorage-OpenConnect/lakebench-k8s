@@ -2910,6 +2910,24 @@ class ArchitectureConfig(ConfigModel):
         return self
 
     @model_validator(mode="after")
+    def validate_financial_has_a_query_engine(self) -> ArchitectureConfig:
+        """Refuse the financial workload without a query engine that can score.
+
+        Recall and precision are measured by SQL run through Trino (the
+        validated financial query engine); `none`, `duckdb` and the untested
+        spark-thrift path cannot score and the run would produce no result."""
+        if self.workload.schema_type.value != "financial":
+            return self
+        engine = self.query_engine.type.value
+        if engine != "trino":
+            raise ValueError(
+                f"The financial (AML) workload scores recall and precision with SQL on "
+                f"Trino, so it needs query_engine trino, not {engine}. Use a trino recipe "
+                f"(for example recipe: polaris-iceberg-spark-trino)."
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_component_combination(self) -> ArchitectureConfig:
         """Validate that the selected component combination is supported."""
         combo = (

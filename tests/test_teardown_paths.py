@@ -259,6 +259,9 @@ def test_teardown_covers_every_created_object(recipe, workload, monkeypatch, tmp
     from lakebench.deploy.engine import DeploymentEngine
     from lakebench.k8s.client import K8sClient
 
+    if workload == "aml-batch" and not recipe.split("+", 1)[0].endswith("-trino"):
+        pytest.skip("financial scores through Trino only")
+
     _instant_waits(monkeypatch)
     cfg = _config(recipe, workload, tmp_path)
     with recording() as rec:

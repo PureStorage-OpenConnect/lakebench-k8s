@@ -97,6 +97,22 @@ def test_aml_on_delta_is_refused_on_the_architecture():
     make_config(recipe="hive-iceberg-spark-trino", workload={"schema": "financial"})
 
 
+@pytest.mark.parametrize(
+    "recipe",
+    [
+        "hive-iceberg-spark-none",
+        "hive-iceberg-spark-duckdb",
+        "hive-iceberg-spark-thrift",
+    ],
+)
+def test_aml_without_a_scoring_query_engine_is_refused(recipe):
+    # Financial scores recall and precision with SQL on Trino, so none,
+    # duckdb and the untested spark-thrift path are refused at load.
+    with pytest.raises(ValidationError, match="it needs query_engine trino"):
+        make_config(recipe=recipe, workload={"schema": "financial"})
+    make_config(recipe="hive-iceberg-spark-trino", workload={"schema": "financial"})
+
+
 def test_iceberg_111_on_java11_spark_image_is_refused_at_load():
     with pytest.raises(ValueError, match="requires Java 17"):
         make_config(

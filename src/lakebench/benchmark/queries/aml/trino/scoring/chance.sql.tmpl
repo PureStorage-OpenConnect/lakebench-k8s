@@ -1,0 +1,92 @@
+-- Per-rule chance: the share of COVERED random-control instances a rule's
+-- alerts touch (compute_scores chance_by_rule / random_control_floor, over
+-- the covered pass). Integer counts only; the assembler divides by n_random.
+-- Only random-typology instances are considered, so this is cheap even though
+-- it repeats the covered test; it reads silver for the random instances only.
+-- Placeholders: {catalog}, {run_id}, pins as in coverage_recall, plus
+-- {account_parquet}.
+WITH manifest AS (
+  SELECT typology_id, typology_type, participant_uetrs, participant_entity_ids
+  FROM {catalog}.bronze.manifest {manifest_pin}
+  WHERE typology_type = 'random'
+),
+sealed AS (
+  SELECT DISTINCT t.uetr
+  FROM {catalog}.silver.transactions {txns_pin} t
+  JOIN {catalog}.silver.silver_batch_versions {versions_pin} v
+    ON t._stream_id = v.stream_id AND t._batch_id = v.batch_id
+  WHERE t.uetr IS NOT NULL
+),
+id_map AS (
+  SELECT dg_id, MIN(key) AS key
+  FROM (
+    SELECT CAST(a.holder_entity_id AS BIGINT) AS dg_id, a.iban
+    FROM parquet."{account_parquet}" a
+    WHERE a.iban IS NOT NULL
+  ) acct
+  JOIN (
+    SELECT iban, holder_entity_id AS key
+    FROM {catalog}.silver.accounts {accounts_pin}
+    WHERE iban IS NOT NULL
+  ) s ON acct.iban = s.iban
+  GROUP BY dg_id
+),
+entity_keys AS (
+  SELECT DISTINCT entity_id AS key FROM {catalog}.silver.entities {entities_pin}
+),
+by_uetr AS (
+  SELECT iu.typology_id,
+         COUNT(iu.uetr) AS n_uetr,
+         SUM(CASE WHEN iu.uetr IS NOT NULL AND s.uetr IS NULL THEN 1 ELSE 0 END) AS missing_uetr
+  FROM (
+    SELECT m.typology_id, u.uetr
+    FROM manifest m LEFT JOIN UNNEST(m.participant_uetrs) AS u(uetr) ON TRUE
+  ) iu
+  LEFT JOIN sealed s ON s.uetr = iu.uetr
+  GROUP BY iu.typology_id
+),
+by_entity AS (
+  SELECT ie.typology_id,
+         SUM(CASE WHEN ek.key IS NULL THEN 1 ELSE 0 END) AS missing_entity
+  FROM (
+    SELECT m.typology_id, CAST(p.pid AS BIGINT) AS dg_id
+    FROM manifest m LEFT JOIN UNNEST(m.participant_entity_ids) AS p(pid) ON TRUE
+  ) ie
+  LEFT JOIN id_map im ON im.dg_id = ie.dg_id
+  LEFT JOIN entity_keys ek ON ek.key = im.key
+  GROUP BY ie.typology_id
+),
+covered_random AS (
+  SELECT i.typology_id
+  FROM (SELECT DISTINCT typology_id FROM manifest) i
+  LEFT JOIN by_uetr bu ON bu.typology_id = i.typology_id
+  LEFT JOIN by_entity be ON be.typology_id = i.typology_id
+  WHERE COALESCE(bu.n_uetr, 0) > 0
+    AND COALESCE(bu.missing_uetr, 0) = 0
+    AND COALESCE(be.missing_entity, 0) = 0
+),
+random_uetr AS (
+  SELECT DISTINCT cr.typology_id, u.uetr
+  FROM covered_random cr
+  JOIN manifest m ON m.typology_id = cr.typology_id
+  CROSS JOIN UNNEST(m.participant_uetrs) AS u(uetr)
+  WHERE u.uetr IS NOT NULL
+),
+alert_uetr AS (
+  SELECT DISTINCT a.rule_id, u.uetr
+  FROM {catalog}.gold.alerts {alerts_pin} a
+  CROSS JOIN UNNEST(a.related_txn_ids) AS u(uetr)
+  WHERE a.run_id = '{run_id}'
+),
+hits AS (
+  SELECT DISTINCT au.rule_id, ru.typology_id
+  FROM random_uetr ru
+  JOIN alert_uetr au ON au.uetr = ru.uetr
+)
+SELECT
+  (SELECT COUNT(*) FROM covered_random) AS n_random,
+  h.rule_id,
+  COUNT(*) AS rule_random_hits
+FROM hits h
+GROUP BY h.rule_id
+ORDER BY h.rule_id;

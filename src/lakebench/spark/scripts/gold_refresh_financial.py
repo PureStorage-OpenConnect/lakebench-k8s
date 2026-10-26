@@ -97,6 +97,7 @@ Refresh discipline:
 
 from __future__ import annotations
 
+import json
 import signal
 import sys
 import time
@@ -108,6 +109,7 @@ from common import (
     TTD_SNAPSHOT_UNKNOWN,
     SealedFilterError,
     TtdBaseline,
+    alert_set_fingerprint,
     ensure_alert_columns,
     ensure_namespaces_for_ddl,
     ensure_partition_transform,
@@ -1215,12 +1217,25 @@ def run_tick(spark, state, cycle) -> dict:
 
     # This run's alerts only. Rules skipped in continuous mode keep alerts
     # from earlier runs, and counting those let the continuous gate pass with
-    # no continuous detection at all.
+    # no continuous detection at all. One aggregate gives both the row count
+    # and the alert-set fingerprint, so the scored tick carries the
+    # fingerprint the covered score compares against the batch run without a
+    # second pass over gold.alerts after the window.
     t = time.time()
-    total_alerts = int(
-        spark.table(f"{CATALOG}.{GOLD_ALERTS}").where(col("run_id") == RUN_ID).count()
+    alert_fp = alert_set_fingerprint(
+        spark.table(f"{CATALOG}.{GOLD_ALERTS}").where(col("run_id") == RUN_ID)
     )
+    total_alerts = int(alert_fp["rows"])
     phases["count"] = time.time() - t
+    # The scored tick's alert-set fingerprint, as one compact JSON line the
+    # covered score reads back (tick_records) instead of a second pass over
+    # gold.alerts after the window. run is a field inside the JSON so the
+    # nested object stays on one parseable line.
+    records.append(
+        f"Cycle {cycle}: alert-set "
+        + json.dumps({"run": RUN_ID, "alert_set": alert_fp}, separators=(",", ":"))
+    )
+    log(records[-1])
     elapsed = time.time() - tick
     log(f"[detection] cumulative gold.alerts rows: {total_alerts}")
     log(f"Tick complete in {elapsed:.1f}s (gold.alerts rows: {total_alerts})")

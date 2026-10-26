@@ -285,6 +285,19 @@ def _check(spark):
     tt1 = rec[0]["tt"]
     assert tt1["snapshot"] == rec[0]["pinned_txns"] and tt1["table"] == "silver.transactions"
     assert tt1["total_records"] == len(_rows(1)) and tt1["count_source"] == "summary", tt1
+    # The tick records the alert-set fingerprint of its run's gold.alerts, so
+    # the covered score reads it back instead of a second pass after the
+    # window. It must equal alert_set_fingerprint of the committed table.
+    from common import alert_set_fingerprint
+    from pyspark.sql.functions import col as _col
+
+    want_fp = alert_set_fingerprint(
+        spark.table("lakehouse.gold.alerts").where(_col("run_id") == "run-tick")
+    )
+    got_fp = rec[0]["alert_set"]
+    assert got_fp is not None, rec[0]
+    assert got_fp["rows"] == want_fp["rows"] and got_fp["h"] == want_fp["h"], (got_fp, want_fp)
+    assert got_fp["cols_sha"] == want_fp["cols_sha"], (got_fp, want_fp)
     order = [
         i
         for i, ln in enumerate(lines)

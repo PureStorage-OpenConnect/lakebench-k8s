@@ -182,6 +182,130 @@ def not_scored(reason: str) -> dict[str, Any]:
     return {"mode": "covered", "status": "not_scored", "reason": reason}
 
 
+def _account_parquet_uri(cfg) -> str:
+    """The bronze account-master parquet URI, as the Spark scorer's
+    ACCOUNT_PATH resolves it: ``{bronze}/{prefix}/bronze/account.parquet``."""
+    from lakebench.deploy.datagen import bronze_datagen_prefix
+
+    s3 = cfg.platform.storage.s3
+    prefix = bronze_datagen_prefix(cfg).rstrip("/")
+    return f"s3a://{s3.buckets.bronze}/{prefix}/bronze/account.parquet"
+
+
+def _rules_meta():
+    """RulesMeta from the pure rule metadata and the reason-code vocabulary.
+
+    The three rule mappings come from aml.rule_meta (pure); the reason-code
+    vocabulary from spark/scripts/aml_reason_codes.py, whose module top is
+    pure (its pyspark imports are function-local), so the CLI can import it."""
+    from lakebench.aml.rule_meta import (
+        CUSTOMER_SCOPED_RULES,
+        HIGH_PRIORITY_CUTOFFS,
+        RULE_TARGET_TYPOLOGY,
+    )
+    from lakebench.aml.scoring_queries import RulesMeta
+    from lakebench.spark.scripts.aml_reason_codes import REASON_CODES, vocabulary_digest
+
+    return RulesMeta(
+        reason_codes=REASON_CODES,
+        reason_code_vocabulary=vocabulary_digest(HIGH_PRIORITY_CUTOFFS),
+        customer_scoped_rules=CUSTOMER_SCOPED_RULES,
+        rule_target_typology=RULE_TARGET_TYPOLOGY,
+    )
+
+
+def _write_recall_json(cfg, run_id: str, record: dict) -> None:
+    """Write the record as recall.json under gold/scoring/<run_id>/, so the
+    held-out audit and anything else listing that prefix still find it."""
+    import json as _json
+
+    try:
+        _s3_client(cfg).raw_client().put_object(
+            Bucket=cfg.platform.storage.s3.buckets.gold,
+            Key=f"scoring/{run_id}/recall.json",
+            Body=_json.dumps(record).encode(),
+        )
+    except Exception as e:  # noqa: BLE001 -- best effort, never fails the run
+        print_warning(f"Could not write recall.json: {esc(str(e))}")
+
+
+def score_financial_via_queries(
+    cfg,
+    run_id: str,
+    *,
+    covered: dict | None,
+    timeout: int,
+) -> dict[str, Any] | None:
+    """Score recall and precision with SQL on the query engine (the scorer
+    that replaces the score_financial Spark job).
+
+    Covered mode: *covered* is the scored tick record; every table is read at
+    the snapshot that tick pinned and alert_set comes from the tick. Batch:
+    *covered* is None, tables read at their current snapshot. Returns the
+    financial_scoring record, or None only on an unexpected failure.
+    Best effort: a scoring failure never fails a pipeline that already
+    succeeded.
+    """
+    try:
+        from lakebench.aml import scoring_queries as sq
+        from lakebench.benchmark.executor import get_executor
+
+        executor = get_executor(cfg)
+        meta = _rules_meta()
+        account_parquet = _account_parquet_uri(cfg)
+        snapshot_ids = None
+        alert_set = None
+        if covered is not None:
+            snapshot_ids = {name: int(covered[key]) for name, key in COVERED_OPTIONS}
+            alert_set = covered.get("alert_set")
+
+        console.print()
+        console.print("[bold]Stage: financial score[/bold]")
+        if covered is not None:
+            print_info(
+                "Scoring recall over what the last completed tick saw "
+                f"(cycle {covered.get('cycle')})..."
+            )
+        else:
+            print_info("Scoring recall/precision against the datagen manifest...")
+
+        try:
+            record = sq.score(
+                executor.query_rows,
+                catalog=executor.catalog_name,
+                snapshot_ids=snapshot_ids,
+                run_id=run_id,
+                account_parquet=account_parquet,
+                meta=meta,
+                alert_set=alert_set,
+                timeout=timeout,
+            )
+        except sq.NotScored as e:
+            record = _not_scored_record(str(e), covered)
+
+        _write_recall_json(cfg, run_id, record)
+        print_success(scoring_count_line(record))
+        return record
+    except Exception as e:  # noqa: BLE001 -- best effort, never fails the run
+        print_warning(f"Financial scoring did not complete: {esc(str(e))}")
+        return None
+
+
+def _not_scored_record(reason: str, covered: dict | None) -> dict[str, Any]:
+    """The not_scored record, matching score_financial._write_not_scored:
+    batch has no covered block; covered carries the tick's snapshot ids."""
+    if covered is None:
+        return {"mode": "batch", "status": "not_scored", "reason": reason}
+    body: dict[str, Any] = {
+        "mode": "covered",
+        "status": "not_scored",
+        "reason": reason,
+        "computed_by": "lb-score-query",
+        "covered": {f"{name}_snapshot": covered.get(key) for name, key in COVERED_OPTIONS},
+    }
+    return body
+
+
 def continuous_scoring(
     cfg,
     run_id: str,
@@ -201,14 +325,13 @@ def continuous_scoring(
         return not_scored("the run failed its gates")
     if tick is None:
         return not_scored(tick_reason)
-    summary = run_financial_scoring(
-        cfg, run_id, job_manager, monitor, timeout, interrupt=interrupt, covered=tick
-    )
+    summary = score_financial_via_queries(cfg, run_id, covered=tick, timeout=timeout)
     if summary is None:
-        return not_scored("the score job did not complete")
+        return not_scored("the score query did not complete")
     if summary.get("mode") != "covered":
-        # A scorer that ignored the covered options must not pass for one.
-        return not_scored("the score job did not run in covered mode")
+        return not_scored("the score did not run in covered mode")
+    if summary.get("status") == "not_scored":
+        return summary
     summary["tick"] = {
         "cycle": tick.get("cycle"),
         "pinned_at": tick.get("pinned_at"),

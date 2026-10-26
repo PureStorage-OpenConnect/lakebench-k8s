@@ -22,6 +22,7 @@ Pure parsing: no cluster or Spark access.
 
 from __future__ import annotations
 
+import json
 import re
 import statistics
 from collections.abc import Iterable, Mapping
@@ -41,6 +42,9 @@ _TT_RECORD = re.compile(
     r"run=(\S+)\s*$"
 )
 _COMMITTED = re.compile(r"Cycle (\d+): committed alerts=(\S+) status=(\S+) run=(\S+)\s*$")
+#: The alert-set line carries a JSON tail (``{"run": ..., "alert_set": ...}``),
+#: so the run id is matched inside the JSON, not by a trailing ``run=`` token.
+_ALERT_SET = re.compile(r"Cycle (\d+): alert-set (\{.*\})\s*$")
 _RULE_STATUS = re.compile(r"Cycle (\d+): rule-status ((?:\S+=\S+ )*)run=(\S+)\s*$")
 _COMPLETED = re.compile(r"Cycle (\d+): completed run=(\S+)\s*$")
 
@@ -110,6 +114,7 @@ def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
                 "completed_at": None,
                 "tt": None,
                 "rule_status": None,
+                "alert_set": None,
             }
             order.append(key)
         return ticks[key]
@@ -151,6 +156,15 @@ def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
             t = tick(int(m.group(1)))
             t["committed_alerts"] = _token(m.group(2))
             t["committed_status"] = _token(m.group(3))
+            continue
+        m = _ALERT_SET.search(line)
+        if m:
+            try:
+                blob = json.loads(m.group(2))
+            except ValueError:
+                continue
+            if blob.get("run") == run_id:
+                tick(int(m.group(1)))["alert_set"] = blob.get("alert_set")
             continue
         m = _COMPLETED.search(line)
         if m and m.group(2) == run_id:

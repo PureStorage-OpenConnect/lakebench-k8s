@@ -284,6 +284,11 @@ class DuckDBExecutor:
         except Exception:
             return False
 
+    def query_rows(self, sql: str, timeout: int = 300) -> list[list[str | None]]:
+        """Not supported: financial scoring (the only caller) runs on Trino,
+        which config load enforces (duckdb is refused for financial)."""
+        raise NotImplementedError("financial scoring runs on Trino, not duckdb")
+
     def flush_cache(self) -> None:
         """DuckDB has no persistent cache between connections."""
         pass

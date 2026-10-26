@@ -1,4 +1,4 @@
-# Recipe: polaris-iceberg-spark-thrift, AML workload at scale 1
+# Recipe: polaris-iceberg-spark-trino, AML workload at scale 1
 #
 # Small AML config for a scale-1 developer sanity run on a small cluster.
 # Local mode (--local) runs Customer 360 batch only, so it refuses this file:
@@ -11,7 +11,7 @@
 # is excluded by config: the graph rules (W1-W4) run like the rest.
 
 name: polaris-iceberg-financial-local
-recipe: polaris-iceberg-spark-thrift
+recipe: polaris-iceberg-spark-trino
 
 images:
   spark: apache/spark:4.0.2-python3
@@ -55,7 +55,7 @@ architecture:
     gold_daily_dashboards: gold.daily_dashboards
 
   query_engine:
-    type: spark-thrift
+    type: trino
 
 workload:
   schema: financial

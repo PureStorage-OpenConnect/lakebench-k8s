@@ -4,6 +4,12 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.14] - 2026-10-25
+
+### Breaking
+
+- **AML recall and precision are scored by SQL run through Trino, not by a Spark job, so a scale-20 two-hour run scores in about a minute instead of exceeding the scorer's time budget; the financial workload now requires the Trino query engine.** The `score-financial` Spark job re-read the silver and gold tables for every figure it reported (about forty collects, over a thousand stages), so its cost grew with the window and a two-hour run's scorer ran past its 90-minute budget and recorded the run not-scored. Scoring now runs the same counts as integer-returning Trino statements pinned to the snapshots the last completed tick read, and assembles the `financial_scoring` record on the client from those counts; the per-typology recall, per-rule precision and the `recall.json` fields are unchanged. The financial workload is refused at load on the `none`, `duckdb` and spark-thrift query engines (only Trino scores), where before it would deploy and run; use a trino recipe. The `computed_by` field reads `lb-score-query`.
+
 ## [1.7.13] - 2026-10-24
 
 ### Breaking

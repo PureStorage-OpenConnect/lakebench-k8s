@@ -1,0 +1,140 @@
+-- Coverage and covered-recall per typology, as integer counts only.
+-- One statement so silver.transactions is scanned once (design finding 10).
+-- Placeholders: {catalog}; the table pins {txns_pin} {versions_pin}
+-- {accounts_pin} {entities_pin} {alerts_pin} {manifest_pin} each render as
+-- "FOR VERSION AS OF <id>" (covered mode) or "" (batch mode). {account_parquet}
+-- is the bronze account-master URI. {pairs_values} is a VALUES list of the
+-- (typology_type, rule_id) pairs for designated rules that ran, bound by the
+-- assembler; "" means no such pair (then designated hits are empty).
+--
+-- Mirrors score_financial.covered_instances + compute_scores recall halves:
+--  * manifest instance uetrs/entity ids are explode_outer (an instance that
+--    names none stays in the corpus, is never covered, counts in
+--    no_participant_txns);
+--  * covered = names >=1 uetr AND every uetr is in the sealed silver txns AND
+--    every participant entity resolves (bronze account IBAN -> silver account
+--    holder key -> silver entity);
+--  * alert uetrs are explode (an alert with no related payments is dropped);
+--  * designated hit = a covered instance has a participant uetr in an alert of
+--    one of the typology's designated rules that ran;
+--  * incidental hit = ... in an alert of any rule;
+--  * recall/incidental ratios are computed by the assembler from these counts.
+WITH manifest AS (
+  SELECT typology_id, typology_type, expected_workload,
+         participant_uetrs, participant_entity_ids
+  FROM {catalog}.bronze.manifest {manifest_pin}
+),
+-- explode_outer of participant uetrs: an instance with an empty/null array
+-- keeps one row with uetr = NULL.
+inst_uetr AS (
+  SELECT m.typology_id, m.typology_type, u.uetr
+  FROM manifest m
+  LEFT JOIN UNNEST(m.participant_uetrs) AS u(uetr) ON TRUE
+),
+-- Distinct over (typology_id, typology_type, expected_workload, uetr), as the
+-- Spark manifest_uetrs frame.
+manifest_uetrs AS (
+  SELECT DISTINCT m.typology_id, m.typology_type, m.expected_workload, u.uetr
+  FROM manifest m
+  LEFT JOIN UNNEST(m.participant_uetrs) AS u(uetr) ON TRUE
+),
+sealed AS (
+  SELECT DISTINCT t.uetr
+  FROM {catalog}.silver.transactions {txns_pin} t
+  JOIN {catalog}.silver.silver_batch_versions {versions_pin} v
+    ON t._stream_id = v.stream_id AND t._batch_id = v.batch_id
+  WHERE t.uetr IS NOT NULL
+),
+-- datagen id -> silver entity key: bronze account IBAN -> silver account
+-- holder key, min(key) per dg_id (aml_features._account_id_map).
+id_map AS (
+  SELECT dg_id, MIN(key) AS key
+  FROM (
+    SELECT CAST(a.holder_entity_id AS BIGINT) AS dg_id, a.iban
+    FROM parquet."{account_parquet}" a
+    WHERE a.iban IS NOT NULL
+  ) acct
+  JOIN (
+    SELECT iban, holder_entity_id AS key
+    FROM {catalog}.silver.accounts {accounts_pin}
+    WHERE iban IS NOT NULL
+  ) s ON acct.iban = s.iban
+  GROUP BY dg_id
+),
+entity_keys AS (
+  SELECT DISTINCT entity_id AS key FROM {catalog}.silver.entities {entities_pin}
+),
+-- Per-instance uetr coverage: how many participant uetrs, how many missing
+-- from the sealed set.
+by_uetr AS (
+  SELECT iu.typology_id,
+         COUNT(iu.uetr) AS n_uetr,
+         SUM(CASE WHEN iu.uetr IS NOT NULL AND s.uetr IS NULL THEN 1 ELSE 0 END) AS missing_uetr
+  FROM inst_uetr iu
+  LEFT JOIN sealed s ON s.uetr = iu.uetr
+  GROUP BY iu.typology_id
+),
+-- explode_outer of participant entity ids; an unresolved entity is missing.
+inst_entity AS (
+  SELECT m.typology_id, CAST(p.pid AS BIGINT) AS dg_id
+  FROM manifest m
+  LEFT JOIN UNNEST(m.participant_entity_ids) AS p(pid) ON TRUE
+),
+by_entity AS (
+  SELECT ie.typology_id,
+         SUM(CASE WHEN ek.key IS NULL THEN 1 ELSE 0 END) AS missing_entity
+  FROM inst_entity ie
+  LEFT JOIN id_map im ON im.dg_id = ie.dg_id
+  LEFT JOIN entity_keys ek ON ek.key = im.key
+  GROUP BY ie.typology_id
+),
+covered AS (
+  SELECT i.typology_id, i.typology_type,
+         (COALESCE(bu.n_uetr, 0) > 0
+          AND COALESCE(bu.missing_uetr, 0) = 0
+          AND COALESCE(be.missing_entity, 0) = 0) AS is_covered,
+         (COALESCE(bu.n_uetr, 0) = 0) AS no_participant
+  FROM (SELECT DISTINCT typology_id, typology_type FROM manifest) i
+  LEFT JOIN by_uetr bu ON bu.typology_id = i.typology_id
+  LEFT JOIN by_entity be ON be.typology_id = i.typology_id
+),
+-- Alerts of this run, exploded to (alert_id, rule_id, uetr), distinct.
+alert_uetr AS (
+  SELECT DISTINCT a.alert_id, a.rule_id, u.uetr
+  FROM {catalog}.gold.alerts {alerts_pin} a
+  CROSS JOIN UNNEST(a.related_txn_ids) AS u(uetr)
+  WHERE a.run_id = '{run_id}'
+),
+pairs AS (
+  {pairs_values}
+),
+-- Covered manifest uetrs only (recall_covered is over covered instances).
+covered_uetrs AS (
+  SELECT mu.typology_id, mu.typology_type, mu.uetr
+  FROM manifest_uetrs mu
+  JOIN covered c ON c.typology_id = mu.typology_id AND c.is_covered
+),
+designated_hit AS (
+  SELECT DISTINCT cu.typology_id
+  FROM covered_uetrs cu
+  JOIN pairs p ON p.typology_type = cu.typology_type
+  JOIN alert_uetr au ON au.rule_id = p.rule_id AND au.uetr = cu.uetr
+),
+incidental_hit AS (
+  SELECT DISTINCT cu.typology_id
+  FROM covered_uetrs cu
+  JOIN alert_uetr au ON au.uetr = cu.uetr
+)
+-- One row per instance, with integer flags. The assembler groups these in
+-- Python (counts only) so it also holds which typology_ids are covered, the
+-- grain score_covered's subject check and rescreen-only exclusion need.
+SELECT c.typology_id,
+       c.typology_type,
+       CASE WHEN c.is_covered THEN 1 ELSE 0 END AS is_covered,
+       CASE WHEN c.no_participant THEN 1 ELSE 0 END AS no_participant,
+       CASE WHEN dh.typology_id IS NOT NULL THEN 1 ELSE 0 END AS designated_hit,
+       CASE WHEN ih.typology_id IS NOT NULL THEN 1 ELSE 0 END AS incidental_hit
+FROM covered c
+LEFT JOIN designated_hit dh ON dh.typology_id = c.typology_id
+LEFT JOIN incidental_hit ih ON ih.typology_id = c.typology_id
+ORDER BY c.typology_id;

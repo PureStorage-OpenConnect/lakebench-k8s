@@ -13,11 +13,13 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-import pytest
-
 DETECTION_RULES_PATH = Path(__file__).resolve().parents[1] / (
     "src/lakebench/spark/scripts/detection_rules.py"
 )
+# The pure rule metadata (RULE_TARGET_TYPOLOGY, CUSTOMER_SCOPED_RULES,
+# HIGH_PRIORITY_CUTOFFS) lives here now and ships flat to the driver;
+# detection_rules re-exports it.
+RULE_META_PATH = Path(__file__).resolve().parents[1] / "src/lakebench/aml/rule_meta.py"
 
 
 def _module_ast():
@@ -66,8 +68,8 @@ def test_customer_scope_lists_agree_across_the_package_boundary():
 
     scripts = DETECTION_RULES_PATH.parent
     counterparty = _lit(DETECTION_RULES_PATH, "COUNTERPARTY_SCENARIOS")
-    scoped = _lit(DETECTION_RULES_PATH, "CUSTOMER_SCOPED_RULES")
-    dispatch = set(_lit(DETECTION_RULES_PATH, "RULE_TARGET_TYPOLOGY"))
+    scoped = _lit(RULE_META_PATH, "CUSTOMER_SCOPED_RULES")
+    dispatch = set(_lit(RULE_META_PATH, "RULE_TARGET_TYPOLOGY"))
     assert counterparty | scoped == dispatch and not counterparty & scoped
     assert _lit(scripts / "tm_operations.py", "DEFAULT_COUNTERPARTY_SCENARIOS") == counterparty
     assert set(TmOperationsConfig().counterparty_scenarios) == counterparty
@@ -91,72 +93,10 @@ def test_deploy_scripts_configmap_ships_aml_json():
     )
 
 
-@pytest.mark.parametrize(
-    ("node_gib", "expected"),
-    [
-        # No cluster capacity (offline autosizing): the AML default 24g
-        # (16g was on the edge; three-iter S1 crashed thrift mid-query).
-        (None, "24g"),
-        # Under the 36 GiB allocatable threshold the target is
-        # min(20, node - 8) GiB, leaving ~8 GiB for Spark overhead, kubelet
-        # and co-scheduled pods, so a small node never gets a Pending pod.
-        (16, "8g"),
-        (24, "16g"),
-        # At 36 GiB the cap branch is skipped: the full 24g.
-        (36, "24g"),
-    ],
-)
-def test_autosizer_sizes_spark_thrift_memory_for_financial(node_gib, expected):
-    """Spark-thrift default 4g OOMs on every AML benchmark query at scale 1.
-    The autosizer must set the resolved config's ``spark_thrift.memory`` to
-    24g when ``workload.schema=financial`` and the user did not override,
-    capped to fit the cluster's largest allocatable node.
-
-    The autosizer runs against a real financial config (not a source grep),
-    so a refactor that keeps the strings but breaks the mutation is caught.
-    """
-    from lakebench.config.autosizer import resolve_auto_sizing
-    from lakebench.config.schema import LakebenchConfig
-    from lakebench.k8s.client import ClusterCapacity
-
-    cfg = LakebenchConfig.model_validate(
-        {
-            "name": "aml-autosizer-test",
-            "recipe": "polaris-iceberg-spark-thrift",
-            "platform": {
-                "storage": {
-                    "s3": {
-                        "endpoint": "http://example:80",
-                        "access_key": "x",
-                        "secret_key": "y",
-                        "buckets": {
-                            "bronze": "aml-autosizer-test-bronze",
-                            "silver": "aml-autosizer-test-silver",
-                            "gold": "aml-autosizer-test-gold",
-                        },
-                    },
-                },
-            },
-            "architecture": {
-                "workload": {"schema": "financial", "datagen": {"scale": 1}},
-                "query_engine": {"type": "spark-thrift"},
-            },
-        }
-    )
-    cap = (
-        None
-        if node_gib is None
-        else ClusterCapacity(
-            total_cpu_millicores=8000,
-            total_memory_bytes=node_gib * 1024**3,
-            node_count=1,
-            largest_node_cpu_millicores=8000,
-            largest_node_memory_bytes=node_gib * 1024**3,
-        )
-    )
-    resolve_auto_sizing(cfg, cluster_capacity=cap)
-    resolved = cfg.architecture.query_engine.spark_thrift.memory
-    assert resolved == expected, f"expected {expected} on a {node_gib} GiB node, got {resolved!r}"
+# The financial spark-thrift autosizer memory bump is now unreachable:
+# financial scores through Trino only, so a financial spark-thrift config is
+# refused at load (test_config.test_aml_without_a_scoring_query_engine_is_refused).
+# The test that exercised that bump is removed with the path it covered.
 
 
 # ---------------------------------------------------------------------------
@@ -184,11 +124,11 @@ def test_rule_target_typology_matches_aml_queries():
     package boundary and score_financial relies on them agreeing."""
     from lakebench.benchmark.aml_queries import RULE_TARGETS
 
-    tree = _module_ast()
+    tree = ast.parse(RULE_META_PATH.read_text())
     driver_map = _module_const_dict(tree, "RULE_TARGET_TYPOLOGY")
     assert driver_map is not None, "RULE_TARGET_TYPOLOGY must be defined"
     assert driver_map == RULE_TARGETS, (
-        "RULE_TARGET_TYPOLOGY (detection_rules) and RULE_TARGETS (aml_queries) "
+        "RULE_TARGET_TYPOLOGY (aml.rule_meta) and RULE_TARGETS (aml_queries) "
         f"drifted: {driver_map} vs {RULE_TARGETS}"
     )
 
@@ -237,7 +177,7 @@ def test_every_targeted_rule_is_scheduled_or_declared_skipped():
                 return set(ast.literal_eval(n.value))
         raise AssertionError(name)
 
-    src = DETECTION_RULES_PATH.read_text()
+    src = RULE_META_PATH.read_text()
     block = _re.search(r"RULE_TARGET_TYPOLOGY = \{(.*?)\n\}", src, _re.S).group(1)
     targeted = set(_re.findall(r'"(W\d+_\w+)": "', block))
     batch = _tuple(scripts / "gold_finalize_financial.py", "DEFAULT_DETECTION_RULES")

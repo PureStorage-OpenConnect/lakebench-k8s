@@ -125,11 +125,11 @@ def test_every_request_field_enters_the_hash():
     ]:
         import dataclasses
 
-        aml_duck = make_config(
-            recipe="polaris-iceberg-spark-duckdb", workload={"schema": "financial"}
+        aml_trino = make_config(
+            recipe="polaris-iceberg-spark-trino", workload={"schema": "financial"}
         )
-        base = req.select_request(aml_duck, tools_digest="t")
-        assert base.py_reference and base.duckdb_version  # both groups selected
+        base = req.select_request(aml_trino, tools_digest="t")
+        assert base.py_reference  # the financial reference group is selected
         assert dataclasses.replace(base, **{field: value}).request_sha256 != base.request_sha256
 
 
@@ -143,10 +143,12 @@ def _with_deps(recipe="hive-iceberg-spark-trino", schema=None, **deps):
     "recipe,schema,deps",
     [
         ("hive-iceberg-spark-trino", None, {"maven_repository": "http://nexus/m2/"}),
-        ("polaris-iceberg-spark-duckdb", "financial", {"pypi_index": "http://pypi.lab/simple/"}),
+        # The py-reference group comes with the financial workload (Trino-only).
+        ("polaris-iceberg-spark-trino", "financial", {"pypi_index": "http://pypi.lab/simple/"}),
+        # The duckdb group comes with the DuckDB query engine (Customer 360).
         (
             "polaris-iceberg-spark-duckdb",
-            "financial",
+            None,
             {"duckdb_extension_repository": "http://ext.lab"},
         ),
     ],
@@ -170,12 +172,21 @@ def test_configured_maven_mirror_is_the_only_repository():
 
 
 def test_egress_hosts_follow_configured_mirrors():
-    cfg = _with_deps(
-        "polaris-iceberg-spark-duckdb",
-        "financial",
-        pypi_index="http://pypi.lab/simple/",
-        duckdb_extension_repository="http://ext.lab",
+    # The py-reference (financial, Trino) and duckdb-ext (Customer 360, DuckDB)
+    # mirrors cannot both apply to one config, so each is checked on the config
+    # that selects its group.
+    maven = {"repo1.maven.org", "maven-central.storage-download.googleapis.com"}
+    aml = _with_deps(
+        "polaris-iceberg-spark-trino", "financial", pypi_index="http://pypi.lab/simple/"
     )
-    assert req.egress_hosts(cfg) == sorted(
-        {"repo1.maven.org", "maven-central.storage-download.googleapis.com", "pypi.lab", "ext.lab"}
+    # Financial selects py-reference, whose wheels follow the configured pypi
+    # mirror; no duckdb group, so no duckdb hosts.
+    assert req.egress_hosts(aml) == sorted(maven | {"pypi.lab"})
+    duck = _with_deps(
+        "polaris-iceberg-spark-duckdb", None, duckdb_extension_repository="http://ext.lab"
+    )
+    # DuckDB selects the duckdb group: the extension repo follows the mirror,
+    # and its wheels still come from the default pypi.
+    assert req.egress_hosts(duck) == sorted(
+        maven | {"ext.lab", "pypi.org", "files.pythonhosted.org"}
     )

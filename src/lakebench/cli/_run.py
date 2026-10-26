@@ -14,7 +14,7 @@ import typer
 from rich.panel import Panel
 
 from lakebench._clock import utc_now
-from lakebench.cli._aml_post import run_financial_scoring as _run_financial_scoring
+from lakebench.cli._aml_post import score_financial_via_queries as _score_financial_via_queries
 from lakebench.cli._aml_post import scoring_count_line  # noqa: F401 -- re-exported
 from lakebench.cli._helpers import (
     _journal_safe,
@@ -3212,13 +3212,11 @@ def _run_once(
         ):
             _stage = "score-financial"
             _scoring_attempted = True
-            _financial_scoring = _run_financial_scoring(
+            _financial_scoring = _score_financial_via_queries(
                 cfg,
                 run_id,
-                job_manager,
-                monitor,
-                timeout,
-                interrupt=_interrupt,
+                covered=None,
+                timeout=timeout,
             )
             _stage = "pipeline"
 

@@ -1,0 +1,13 @@
+-- gold.detection_status rows for the run. One row per rule; free-text columns
+-- (reason) are returned so the assembler can carry them, with tabs/newlines
+-- stripped by the transport. Placeholders: {catalog}, {status_pin}.
+-- The assembler scopes to its own run id after reading (the status table holds
+-- exactly one run after gold-finalize/gold-refresh; more than one is refused).
+SELECT rule_id,
+       run_id,
+       status,
+       target_typology,
+       alert_count,
+       REPLACE(REPLACE(COALESCE(reason, ''), CHR(9), ' '), CHR(10), ' ') AS reason
+FROM {catalog}.gold.detection_status {status_pin}
+ORDER BY rule_id;

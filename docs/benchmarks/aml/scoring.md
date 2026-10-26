@@ -6,14 +6,16 @@ Recall and false-positive figures never decide the verdict. A batch run fails
 when its scorer counts zero alerts ([5](correctness.md#5-correctness-contract))
 or scoring produced no result.
 
-- The scorer is a Spark job; its `recall.json` is copied into
-  `financial_scoring`.
-- It joins `gold.alerts` to the manifest on payment UETRs and writes
-  `recall.parquet` and `recall.json` under `s3a://<gold>/scoring/<run_id>/`.
-- The manifest URI is a command-line argument. `lakebench run` derives it
-  from `s3a://<bronze>/pacs008/manifest/manifest*.parquet`, whose glob covers
-  a continuous corpus's one manifest per 24-month epoch
-  (`manifest-eNNNN.parquet`).
+- The scorer runs as SQL through the Trino query engine; its `recall.json`
+  is assembled into `financial_scoring`.
+- It joins `gold.alerts` to the `bronze.manifest` table on payment UETRs and
+  writes `recall.json` under `s3a://<gold>/scoring/<run_id>/`. The counts come
+  from integer-returning statements; the ratios and null rules are computed on
+  the client, so a figure never depends on a floating-point last bit.
+- `bronze.manifest` is the registered Iceberg copy of the generator's manifest
+  (bronze-verify registers it, gold-refresh re-registers it as the corpus
+  grows). Scoring reads it at its current snapshot and fails closed when it is
+  missing.
 - The scorecard shows `fp_rate_by_rule` as **Off-target** (by alert id, not
   payment), `txn_precision_by_rule` as **Txn precision**, and `fp_rate` in its
   footer as **Overall off-target rate** beside the total alert count. None is

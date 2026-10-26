@@ -1,0 +1,51 @@
+-- Per-rule false positives and txn precision, over the FULL manifest (an
+-- alert on a planted txn not yet covered is no false positive). Integer
+-- counts only. Reads gold.alerts and bronze.manifest only.
+-- Placeholders: {catalog}, {run_id}, {alerts_pin}, {manifest_pin},
+-- {targets_values} (VALUES of (rule_id, target_typology) for designated
+-- rules, or "" when none).
+-- Mirrors compute_scores FP half:
+--  * refs = one row per (alert_id, rule_id, uetr) with on_target =
+--    does the uetr belong to the alert rule's target typology (MAX over the
+--    uetr's typologies);
+--  * per_alert hit = MAX(on_target) over the alert; fp_by_rule = alerts with
+--    hit=0; txn_precision = AVG(on_target) over (alert,uetr) rows;
+--  * a rule with no target is left out (no FP meaning).
+WITH alert_uetr AS (
+  SELECT DISTINCT a.alert_id, a.rule_id, u.uetr
+  FROM {catalog}.gold.alerts {alerts_pin} a
+  CROSS JOIN UNNEST(a.related_txn_ids) AS u(uetr)
+  WHERE a.run_id = '{run_id}'
+),
+targets AS (
+  {targets_values}
+),
+-- manifest uetr -> its typology_type (distinct, non-null uetr).
+manifest_uetr AS (
+  SELECT DISTINCT u.uetr, m.typology_type
+  FROM {catalog}.bronze.manifest {manifest_pin} m
+  CROSS JOIN UNNEST(m.participant_uetrs) AS u(uetr)
+  WHERE u.uetr IS NOT NULL
+),
+refs AS (
+  SELECT au.alert_id, au.rule_id, au.uetr,
+         MAX(CASE WHEN mu.typology_type = t.target THEN 1 ELSE 0 END) AS on_target
+  FROM alert_uetr au
+  JOIN targets t ON t.rule_id = au.rule_id
+  LEFT JOIN manifest_uetr mu ON mu.uetr = au.uetr
+  GROUP BY au.alert_id, au.rule_id, au.uetr
+),
+per_alert AS (
+  SELECT alert_id, rule_id, MAX(on_target) AS hit
+  FROM refs
+  GROUP BY alert_id, rule_id
+)
+SELECT r.rule_id,
+       (SELECT COUNT(*) FROM per_alert pa WHERE pa.rule_id = r.rule_id) AS rule_alerts,
+       (SELECT SUM(CASE WHEN pa.hit = 0 THEN 1 ELSE 0 END)
+          FROM per_alert pa WHERE pa.rule_id = r.rule_id) AS off_alerts,
+       SUM(r.on_target) AS on_target_txn_pairs,
+       COUNT(*) AS txn_pairs
+FROM refs r
+GROUP BY r.rule_id
+ORDER BY r.rule_id;

@@ -1,0 +1,67 @@
+-- Per-reason-code counts for the designated rules that ran (_scores_by_code).
+-- Integer counts only; the assembler builds recall_by_code / fp_by_code /
+-- alerts_by_code from them and the REASON_CODES vocabulary.
+-- Returns one row per (rule_id, code):
+--   n_by        = distinct alerts of the rule carrying the code
+--   n_with_txn  = those with >=1 related payment (fp denominator)
+--   hit_inst    = distinct target-typology instances the rule's code-alerts hit
+--   hit_alerts  = distinct code-alerts that are on target
+-- Placeholders: {catalog}, {run_id}, {alerts_pin}, {manifest_pin},
+-- {targets_values} (VALUES of (rule_id, target_typology) for the designated
+-- rules that ran). The assembler also needs the uncoded-alert count and the
+-- per-typology instance counts; those come from by_code_meta.sql.tmpl.
+WITH ran_targets AS (
+  {targets_values}
+),
+codes AS (
+  SELECT DISTINCT a.alert_id, a.rule_id, c.code
+  FROM {catalog}.gold.alerts {alerts_pin} a
+  CROSS JOIN UNNEST(a.reason_codes) AS c(code)
+  JOIN ran_targets rt ON rt.rule_id = a.rule_id
+  WHERE a.run_id = '{run_id}'
+),
+alert_uetr AS (
+  SELECT DISTINCT a.alert_id, a.rule_id, u.uetr
+  FROM {catalog}.gold.alerts {alerts_pin} a
+  CROSS JOIN UNNEST(a.related_txn_ids) AS u(uetr)
+  WHERE a.run_id = '{run_id}'
+),
+code_uetrs AS (
+  SELECT c.alert_id, c.rule_id, c.code, au.uetr
+  FROM codes c
+  JOIN alert_uetr au ON au.alert_id = c.alert_id AND au.rule_id = c.rule_id
+),
+manifest_uetr AS (
+  SELECT DISTINCT u.uetr, m.typology_type, m.typology_id
+  FROM {catalog}.bronze.manifest {manifest_pin} m
+  CROSS JOIN UNNEST(m.participant_uetrs) AS u(uetr)
+  WHERE u.uetr IS NOT NULL
+),
+on_target AS (
+  SELECT cu.rule_id, cu.code, cu.alert_id, mu.typology_id
+  FROM code_uetrs cu
+  JOIN ran_targets rt ON rt.rule_id = cu.rule_id
+  JOIN manifest_uetr mu ON mu.uetr = cu.uetr AND mu.typology_type = rt.target
+),
+n_by AS (
+  SELECT rule_id, code, COUNT(DISTINCT alert_id) AS n FROM codes GROUP BY rule_id, code
+),
+n_with_txn AS (
+  SELECT rule_id, code, COUNT(DISTINCT alert_id) AS n FROM code_uetrs GROUP BY rule_id, code
+),
+hit_inst AS (
+  SELECT rule_id, code, COUNT(DISTINCT typology_id) AS n FROM on_target GROUP BY rule_id, code
+),
+hit_alerts AS (
+  SELECT rule_id, code, COUNT(DISTINCT alert_id) AS n FROM on_target GROUP BY rule_id, code
+)
+SELECT nb.rule_id, nb.code,
+       nb.n AS n_by,
+       COALESCE(nt.n, 0) AS n_with_txn,
+       COALESCE(hi.n, 0) AS hit_inst,
+       COALESCE(ha.n, 0) AS hit_alerts
+FROM n_by nb
+LEFT JOIN n_with_txn nt ON nt.rule_id = nb.rule_id AND nt.code = nb.code
+LEFT JOIN hit_inst hi ON hi.rule_id = nb.rule_id AND hi.code = nb.code
+LEFT JOIN hit_alerts ha ON ha.rule_id = nb.rule_id AND ha.code = nb.code
+ORDER BY nb.rule_id, nb.code;

@@ -171,6 +171,14 @@ class SparkThriftExecutor:
         except Exception:
             return False
 
+    def query_rows(self, sql: str, timeout: int = 300) -> list[list[str | None]]:
+        """Not supported: financial scoring runs on Trino, the validated
+        financial query engine (config load refuses financial on spark-thrift).
+        The Trino->Spark dialect of the scoring statements and beeline tsv2
+        quoting are not handled here; add them with a spark-thrift financial
+        validation row if that engine is ever validated for financial."""
+        raise NotImplementedError("financial scoring runs on Trino, not spark-thrift")
+
     def flush_cache(self) -> None:
         """Spark Thrift Server has no explicit metadata cache flush."""
         pass

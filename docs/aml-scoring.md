@@ -8,7 +8,7 @@ The workload reads pacs.008 wire messages into bronze, builds silver entity, acc
 
 **Recall and precision are uncalibrated and in-sample.** No held-out [Level-2](glossary.md#level-2) result is published. The default seed, 43, is the calibration corpus: the generator, the rule thresholds and the reference features were developed on it. A seed-43 figure says what the pipeline does on that corpus, not how the rules generalise.
 
-The scorer is a Spark job that a batch `lakebench run` submits after gold-finalize. It joins `gold.alerts` to the generator's manifest on payment UETRs, with no time window.
+The scorer runs as SQL through the Trino query engine after gold-finalize (batch) or after the window's last completed tick (continuous). It joins `gold.alerts` to the generator's manifest on payment UETRs, with no time window.
 
 | Scorecard figure | `recall.json` key | What it is |
 |---|---|---|

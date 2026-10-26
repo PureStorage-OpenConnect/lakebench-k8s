@@ -130,33 +130,25 @@ ALERT_COLUMNS = (
 #: The count or size at which a rule's alert is HIGH priority. The priority
 #: expressions and the matching reason codes (aml_reason_codes) both read it,
 #: so a code always means "a HIGH-priority alert of that kind".
-HIGH_PRIORITY_CUTOFFS = {
-    "W1_connected_components": 8,
-    "W2_structuring": 6,
-    "W3_round_tripping": 4,
-    "W4_risk_propagation": 3,
-    "W17_layering_chain": 5,
-}
-
-# Driver-side rule -> planted-typology-target map. This MUST stay in lock-step
-# with RULE_TARGETS in src/lakebench/benchmark/aml_queries.py (the
-# orchestrator-side authority); a consistency test asserts they match, because
-# the two live on opposite sides of the package boundary (this module ships to
-# the Spark driver under /opt/spark/scripts; aml_queries does not). It exists
-# here so score_financial can attribute a rule SKIP to the typologies that rule
-# was the sole detector for, and mark their recall "not run" instead of 0%
-# A None target means the rule has no planted typology.
-RULE_TARGET_TYPOLOGY = {
-    "W1_connected_components": "gather_scatter",
-    "W2_structuring": "micro_structuring",
-    "W3_round_tripping": "cycle",
-    "W4_risk_propagation": "rapid_layering",
-    "W5_sanctions_match": "sanctions_match",
-    "W6_pep_counterparty": "pep_match",
-    "W7_cross_border_high_risk": "corridor_high_risk",
-    "W8_dormant_reactivation": "dormant_reactivation",
-    "W17_layering_chain": "stack",
-}
+# High-priority cutoffs, the rule -> planted-typology map, and the
+# customer-scoped rule set are pure metadata the CLI-side scorer also needs
+# without pyspark, so they live in aml.rule_meta and ship flat to the driver.
+# RULE_TARGET_TYPOLOGY stays in lock-step with RULE_TARGETS in
+# benchmark/aml_queries.py (a consistency test asserts they match).
+# Re-exported: other Spark scripts do `from detection_rules import
+# RULE_TARGET_TYPOLOGY` etc., so these names stay in this module's namespace.
+try:
+    from lakebench.aml.rule_meta import (  # noqa: F401
+        CUSTOMER_SCOPED_RULES,
+        HIGH_PRIORITY_CUTOFFS,
+        RULE_TARGET_TYPOLOGY,
+    )
+except ImportError:
+    from rule_meta import (  # type: ignore[import-not-found,no-redef]  # noqa: F401
+        CUSTOMER_SCOPED_RULES,
+        HIGH_PRIORITY_CUTOFFS,
+        RULE_TARGET_TYPOLOGY,
+    )
 
 # Alert subject scope (GOALS P10 stage 0). The reporting FI monitors its own
 # customers: a customer-scoped rule raises an alert only when its subject
@@ -166,19 +158,7 @@ RULE_TARGET_TYPOLOGY = {
 # another bank; they are declared as counterparty scenarios instead.
 # COUNTERPARTY_SCENARIOS must match tm_operations.DEFAULT_COUNTERPARTY_SCENARIOS
 # and the TmOperationsConfig default (a test asserts both), or the TM layer's
-# noncustomer_alerts_declared invariant fails on every run. The typology
-# generator makes every planted subject a customer (typology::subject_index),
-# and each customer-scoped rule's entity_id is that subject, so the scope does
-# not change designated recall.
-CUSTOMER_SCOPED_RULES = frozenset(
-    {
-        "W2_structuring",
-        "W5_sanctions_match",
-        "W6_pep_counterparty",
-        "W7_cross_border_high_risk",
-        "W8_dormant_reactivation",
-    }
-)
+# noncustomer_alerts_declared invariant fails on every run.
 COUNTERPARTY_SCENARIOS = (
     "W1_connected_components",
     "W3_round_tripping",

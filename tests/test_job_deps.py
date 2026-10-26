@@ -37,6 +37,8 @@ def _configs():
     for recipe, schema in itertools.product(RECIPE_NAMES, ("customer360", "financial")):
         if schema == "financial" and "delta" in recipe:
             continue  # the financial workload does not support Delta
+        if schema == "financial" and not recipe.endswith("-trino"):
+            continue  # the financial workload scores through Trino only
         yield f"{recipe}-{schema}", make_config(recipe=recipe, workload={"schema": schema})
 
 

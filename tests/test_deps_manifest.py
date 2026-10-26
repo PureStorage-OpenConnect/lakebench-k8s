@@ -43,11 +43,14 @@ def _request(**cfg_over) -> req.DepsRequest:
 
 
 C360 = {"recipe": "hive-iceberg-spark-trino"}
-AML_DUCK = {"recipe": "polaris-iceberg-spark-duckdb", "workload": {"schema": "financial"}}
+# Financial is Trino-only; it carries the py-reference group. DuckDB carries
+# the duckdb-ext group (on Customer 360, the only workload DuckDB scores).
+AML = {"recipe": "polaris-iceberg-spark-trino", "workload": {"schema": "financial"}}
+DUCK = {"recipe": "polaris-iceberg-spark-duckdb"}
 DELTA = {"recipe": "hive-delta-spark-thrift"}
 
 
-@pytest.mark.parametrize("over", [C360, AML_DUCK, DELTA])
+@pytest.mark.parametrize("over", [C360, AML, DUCK, DELTA])
 def test_a_matching_set_passes(over):
     r = _request(**over)
     assert m.check_manifest(r, fake_shown(r)) == []
@@ -92,7 +95,7 @@ def test_another_request_or_resolver_is_refused(field, value, needle):
 
 
 def test_a_missing_or_extra_group_is_refused():
-    r = _request(**AML_DUCK)
+    r = _request(**AML)  # financial carries the py-reference group
     shown = fake_shown(r)
     del shown["groups"]["py-reference"]
     assert m.check_manifest(r, _rehash(shown)) != []
@@ -103,7 +106,7 @@ def test_a_missing_or_extra_group_is_refused():
 
 
 def test_an_empty_group_is_refused():
-    r = _request(**AML_DUCK)
+    r = _request(**DUCK)  # DuckDB carries the duckdb-ext group
     shown = fake_shown(r)
     shown["groups"]["duckdb-ext"] = []
     assert any("empty" in p for p in m.check_manifest(r, _rehash(shown)))
@@ -118,7 +121,7 @@ def test_an_empty_group_is_refused():
     ],
 )
 def test_unsafe_file_names_are_refused(group, name):
-    r = _request(**AML_DUCK)
+    r = _request(**DUCK) if group == "duckdb-ext" else _request(**C360)
     shown = fake_shown(r)
     shown["groups"][group][0]["file"] = name
     if group == "jars":
@@ -170,7 +173,7 @@ def test_unknown_overlaps_are_refused_and_known_ones_pass():
 
 
 def test_wheels_match_pins_one_to_one():
-    r = _request(**AML_DUCK)
+    r = _request(**AML)
     shown = fake_shown(r)
     shown["groups"]["py-reference"][0]["file"] = "numpy-9.9.9-cp310-cp310-x.whl"
     assert m.check_manifest(r, _rehash(shown)) != []
@@ -182,7 +185,7 @@ def test_wheels_match_pins_one_to_one():
 
 
 def test_duckdb_files_are_the_requested_version_and_extensions():
-    r = _request(**AML_DUCK)
+    r = _request(**DUCK)
     wrong_version = fake_shown(r)
     e = wrong_version["groups"]["duckdb-ext"][0]
     e["file"] = e["file"].replace(f"v{r.duckdb_version}/", "v0.0.1/")
@@ -301,9 +304,7 @@ def test_a_yaml_ambiguous_storage_class_stays_a_string():
     from lakebench.deploy.engine import TemplateRenderer
 
     s3 = {"endpoint": "http://m:9000", "access_key": "k", "secret_key": "s"}
-    cfg = make_config(
-        **AML_DUCK, platform={"storage": {"s3": s3}, "deps": {"storage_class": "true"}}
-    )
+    cfg = make_config(**AML, platform={"storage": {"s3": s3}, "deps": {"storage_class": "true"}})
     eng = MagicMock(config=cfg, renderer=TemplateRenderer(), dry_run=False)
     docs = {d["kind"]: d for d in DependencyServerDeployer(eng).render(req.select_request(cfg))}
     assert docs["PersistentVolumeClaim"]["spec"]["storageClassName"] == "true"

@@ -318,6 +318,44 @@ class TrinoExecutor:
                     found[parsed[0]] = parsed[1]
         return found
 
+    def query_rows(self, sql: str, timeout: int = 300) -> list[list[str | None]]:
+        """Run *sql* and return its data rows as lists of cell strings, an
+        empty cell as None (Trino TSV prints NULL as an empty field).
+
+        The scoring assembler's transport: unlike ``execute_query`` (ALIGNED
+        output, for humans), this is TSV, so the rows parse. A non-zero exit
+        or a client timeout raises, because a partial score is never written.
+        Values must be scalars with no tab or newline (the scoring templates
+        return integer counts and sanitised text); a cell with a tab would
+        split into extra columns.
+        """
+        pod = self._discover_pod()
+        source = f"lakebench-{uuid.uuid4().hex[:16]}"
+        cmd = self._exec_cmd(
+            pod,
+            "--source",
+            source,
+            "--session",
+            f"query_max_run_time={server_run_time_limit(timeout)}s",
+            "--output-format",
+            "TSV",
+            "--execute",
+            sql,
+        )
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            self._kill_by_source(pod, source)
+            raise RuntimeError(f"scoring query timed out ({timeout}s)") from e
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"scoring query failed: {summarise_engine_error(result.stderr or '')}"
+            )
+        rows: list[list[str | None]] = []
+        for line in (result.stdout or "").splitlines():
+            rows.append([c if c != "" else None for c in line.split("\t")])
+        return rows
+
     def health_check(self) -> bool:
         try:
             result = self.execute_query("SELECT 1", timeout=15)

@@ -123,11 +123,16 @@ SCRIPT_MAPS: dict[str, tuple[ScriptSource, ...]] = {
     # Library modules the AML jobs import: detection rules (gold) and
     # the P10 operations layer (gold, and the executors' workflow replay), and
     # continuous gold's incremental re-detection.
-    "aml-rules": _scripts(
-        "detection_rules.py",
-        "tm_operations.py",
-        "aml_reason_codes.py",
-        "incremental_detection.py",
+    "aml-rules": (
+        *_scripts(
+            "detection_rules.py",
+            "tm_operations.py",
+            "aml_reason_codes.py",
+            "incremental_detection.py",
+        ),
+        # detection_rules imports its pure rule metadata from here; it ships
+        # flat because the Spark image has no lakebench install.
+        _src("aml/rule_meta.py"),
     ),
     "aml-jobs": _scripts(
         "bronze_verify_financial.py",

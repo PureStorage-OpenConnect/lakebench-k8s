@@ -36,6 +36,13 @@ class QueryExecutor(Protocol):
 
     def execute_query(self, sql: str, timeout: int = 300) -> QueryExecutorResult: ...
 
+    def query_rows(self, sql: str, timeout: int = 300) -> list[list[str | None]]:
+        """Run *sql* and return its data rows as cell-string lists (an empty
+        or NULL cell as None), raising on failure. The scoring assembler's
+        transport. Engines that cannot score (duckdb, none) need not implement
+        it; financial is refused on them at config load."""
+        ...
+
     def engine_name(self) -> str: ...
 
     def health_check(self) -> bool: ...
