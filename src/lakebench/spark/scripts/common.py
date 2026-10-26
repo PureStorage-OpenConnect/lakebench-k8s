@@ -1059,21 +1059,28 @@ def iceberg_table_stats(spark, fq_table):
         return 0, 0.0
 
 
-def log_job_metrics(job, *, input_size_gb, input_rows, output_rows, elapsed_seconds, **extra):
+def log_job_metrics(
+    job, *, input_size_gb, input_rows, output_rows, elapsed_seconds, output_bytes=True, **extra
+):
     """Emit the ``=== JOB METRICS ===`` block the metrics collector parses.
 
-    ``extra`` carries per-table row counts (A2) and other numeric metrics
+    ``extra`` carries per-table row counts and other numeric metrics
     silver writes alongside the standard four. Keys land in JobMetrics
     via `_apply_metric`'s `silver_*_rows` allowlist; other keys are stored
     on JobMetrics.extra_metrics. Integer values are emitted as integers,
     floats as three-decimal, strings are passed verbatim.
+
+    ``output_bytes=False`` leaves out the ``output_bytes_*`` lines. Reading
+    them walks every job the driver's status store retains, so a caller
+    that emits a block per micro-batch passes False.
     """
     log(f"=== JOB METRICS: {job} ===")
     log(f"input_size_gb: {input_size_gb:.3f}")
     log(f"input_rows: {int(input_rows)}")
     log(f"output_rows: {int(output_rows)}")
     log(f"elapsed_seconds: {elapsed_seconds:.1f}")
-    log_driver_output_bytes()
+    if output_bytes:
+        log_driver_output_bytes()
     for key, value in extra.items():
         if isinstance(value, bool):
             log(f"{key}: {'true' if value else 'false'}")
