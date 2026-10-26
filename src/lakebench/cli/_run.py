@@ -14,6 +14,7 @@ import typer
 from rich.panel import Panel
 
 from lakebench._clock import utc_now
+from lakebench.cli._aml_post import _not_scored_record
 from lakebench.cli._aml_post import score_financial_via_queries as _score_financial_via_queries
 from lakebench.cli._cluster_ops import DATAGEN_JOB
 from lakebench.cli._helpers import (
@@ -573,6 +574,31 @@ _STAGE_POLL_S = 5
 DATAGEN_TIMED_OUT = "datagen timed out"
 
 
+def _gate_bronze_for_generate(cfg, regenerate: bool, allow_stale_bronze: bool, run_metrics):
+    """Clear the way for this run's generate and return the bronze gate.
+
+    An earlier datagen Job's pods could still land files after the gate
+    looked or cleared, so they are stopped first (bounded wait). The gate
+    refuses a non-empty bronze prefix unless --regenerate (owned bucket:
+    clear the datagen prefix) or --allow-stale-bronze (any other bucket,
+    recorded on *run_metrics*). The namespace's fleet sidecar describes the
+    corpus this run replaces: it goes once the gate lets the generate
+    proceed (a refused run keeps the corpus and its sidecar), or before the
+    gate with --regenerate, which may clear part of bronze and then fail.
+    """
+    from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+    stop_previous_datagen_or_exit(cfg)
+    if regenerate:
+        drop_sidecar(cfg.get_namespace())
+    gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
+    if run_metrics is not None:
+        run_metrics.datagen_stale_bronze = gate.record()
+    if not regenerate:
+        drop_sidecar(cfg.get_namespace())
+    return gate
+
+
 def _handle_datagen_timeout(
     *,
     datagen_deployer,
@@ -726,12 +752,7 @@ def _exclude_c360_check_time(job_metrics) -> float:
         secs = float(facts.get("check_seconds") or 0.0)
     except (TypeError, ValueError):
         return 0.0
-    if secs <= 0 or secs >= (job_metrics.elapsed_seconds or 0.0):
-        return 0.0
-    job_metrics.elapsed_seconds -= secs
-    if job_metrics.end_time is not None:
-        job_metrics.end_time -= timedelta(seconds=secs)
-    return secs
+    return _take_off_stage_end(job_metrics, secs)
 
 
 def _exclude_alert_set_time(job_metrics) -> float:
@@ -748,6 +769,13 @@ def _exclude_alert_set_time(job_metrics) -> float:
         secs = float(getattr(job_metrics, "alert_set_seconds", None) or 0.0)
     except (TypeError, ValueError):
         return 0.0
+    return _take_off_stage_end(job_metrics, secs)
+
+
+def _take_off_stage_end(job_metrics, secs: float) -> float:
+    """Take *secs* of Lakebench's own work off the end of a stage's time.
+    Returns the seconds removed: 0 when *secs* is not positive or not less
+    than the stage's elapsed seconds."""
     if secs <= 0 or secs >= (job_metrics.elapsed_seconds or 0.0):
         return 0.0
     job_metrics.elapsed_seconds -= secs
@@ -917,6 +945,20 @@ def _sample_note(kwargs: dict) -> str:
     if len(samples) < 2:
         return ""
     return f" [dim](median of {len(samples)}, {min(samples):.1f}-{max(samples):.1f}s)[/dim]"
+
+
+def _bench_progress(idx, total, name, phase, **kwargs) -> None:
+    """The console line of one benchmark query, started and done."""
+    if phase == "start":
+        console.print(f"  [{idx}/{total}] {name}...", end=" ")
+    elif phase == "done":
+        elapsed = kwargs.get("elapsed", 0)
+        error = kwargs.get("error", "")
+        if kwargs.get("success", False):
+            console.print(f"[green]{elapsed:.1f}s OK[/green]{_sample_note(kwargs)}")
+        else:
+            short_err = (error[:60] + "...") if len(error) > 60 else error
+            console.print(f"[red]FAIL[/red] ({esc(short_err)})")
 
 
 def _warm_benchmark(runner, query_timeout: int) -> None:
@@ -1146,6 +1188,10 @@ def empty_benchmark_queries(queries) -> list[str]:
     return out
 
 
+# Why a batch run has no financial_scoring result when the scorer returned none.
+_SCORING_INCOMPLETE = "the scoring queries did not complete (see the run log)"
+
+
 def _aml_batch_gate_problems(
     gold_jobs: list, scoring: dict | None = None
 ) -> tuple[list[str], list[str]]:
@@ -1172,9 +1218,7 @@ def _aml_batch_gate_problems(
         "anything. Check the gold-finalize driver log."
     )
     if scoring is None or scoring.get("status") == "not_scored":
-        why = (scoring or {}).get(
-            "reason"
-        ) or "the scoring queries did not complete (see the run log)"
+        why = (scoring or {}).get("reason") or _SCORING_INCOMPLETE
         problems.append(f"AML scoring did not produce a result: {why}")
     if scoring is not None and scoring.get("total_alerts") is not None:
         if int(scoring["total_alerts"]) == 0:
@@ -1368,6 +1412,16 @@ def no_query_engine_skip(cfg, skip_benchmark: bool) -> tuple[bool, bool]:
     return none, skip_benchmark or none
 
 
+def _new_run_id() -> str:
+    """A new run id, also exported as LB_RUN_ID: datagen pods and Spark
+    drivers carry it as their live observability grouping label."""
+    import uuid
+
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    os.environ["LB_RUN_ID"] = run_id
+    return run_id
+
+
 def _run_local_mode(
     cfg,
     config_file: Path,
@@ -1415,16 +1469,11 @@ def _run_local_mode(
 
     # Same collector and storage the cluster path uses, so `results`,
     # and `report` read local runs without special-casing them.
-    import uuid as _uuid
-
     from lakebench.metrics import MetricsCollector, MetricsStorage, build_config_snapshot
 
     collector = MetricsCollector()
     metrics_storage = MetricsStorage()
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + _uuid.uuid4().hex[:6]
-    # Share the run id with datagen pods and Spark drivers (live observability
-    # grouping label) via the orchestrator process env.
-    os.environ["LB_RUN_ID"] = run_id
+    run_id = _new_run_id()
     snapshot = build_config_snapshot(cfg, run_mode="batch", system="local", config_path=config_file)
     snapshot["local"] = True
     collector.start_run(run_id, cfg.name, snapshot, config_path=config_file)
@@ -1989,8 +2038,6 @@ def _run_once(
     *series* is the ``metrics.series.SeriesContext`` of a ``--repeat``
     repetition (None otherwise); *allow_auto_deploy* False makes a missing
     namespace an error instead of a deploy (repetitions 2 to N)."""
-    import uuid
-
     from lakebench.cli._sustained import (
         MaintenanceBudget,
         _collect_platform_metrics,
@@ -2261,10 +2308,7 @@ def _run_once(
     # Initialize metrics collection
     collector = MetricsCollector()
     metrics_storage = MetricsStorage()
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-    # Share the run id with datagen pods and Spark drivers (live observability
-    # grouping label) via the orchestrator process env.
-    os.environ["LB_RUN_ID"] = run_id
+    run_id = _new_run_id()
     from lakebench.metrics import build_config_snapshot
 
     config_snapshot = build_config_snapshot(cfg, run_mode="batch", config_path=config_file)
@@ -2310,10 +2354,29 @@ def _run_once(
     results: list[tuple[str, bool, float]] = []
     benchmark_qph: float | None = None
     _financial_scoring: dict | None = None
-    _scoring_attempted = False
     # Set when this run's TM layer ran (verdict pass or fail); the benchmark
     # includes the investigator queries only then.
     _tm_run_id: str | None = None
+    # Phase 5 maintenance state, read by the results in the finally block
+    # whether or not maintenance ran.
+    pre_compaction_qph = 0.0
+    _pre_record = None
+    _pre_result = None
+    _maint_value = None
+    # Set when pre-benchmark maintenance was stopped (timeout or cap): a
+    # statement may still be running, so the post-maintenance QpH is not
+    # a clean measurement.
+    maint_stop_reason = ""
+    # Set when streams were (or may have been) writing during pre-benchmark
+    # maintenance: the post-maintenance QpH was then measured under load.
+    maint_live_reason = ""
+    _maint_end = None
+    _settle = None
+    # Set when the settle wait was skipped because no statement ran.
+    _settle_skip: dict | None = None
+    pre_file_count = 0
+    post_file_count = 0
+    maint_elapsed = 0.0
     # Ctrl-C and SIGTERM seal the record INTERRUPTED and stop the objects
     # this run created (cli/_interrupt.py). Installed before the operator
     # check, whose watch-list heal can take the cluster lease: the lease
@@ -2412,24 +2475,9 @@ def _run_once(
 
                 from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
 
-                # The namespace's fleet sidecar describes a corpus this run
-                # is about to replace. With --regenerate it goes before the
-                # gate, which may empty part of bronze and then fail.
-                from lakebench.metrics.datagen_aggregator import drop_sidecar
-
-                # An earlier datagen Job's pods could still land files after
-                # the gate looked or cleared: stop them first (bounded wait).
-                stop_previous_datagen_or_exit(cfg)
-                if regenerate:
-                    drop_sidecar(cfg.get_namespace())
-                # Refuse a non-empty bronze prefix unless --regenerate
-                # (owned bucket: clear the datagen prefix) or
-                # --allow-stale-bronze (any other bucket, recorded).
-                _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
-                if collector.current_run is not None:
-                    collector.current_run.datagen_stale_bronze = _gate.record()
-                if not regenerate:
-                    drop_sidecar(cfg.get_namespace())
+                _gate = _gate_bronze_for_generate(
+                    cfg, regenerate, allow_stale_bronze, collector.current_run
+                )
 
                 dg_engine = DeploymentEngine(cfg)
                 # The gate's decision, not the flag: objects that appear after
@@ -2649,25 +2697,14 @@ def _run_once(
         _cycle_stale_allowed = False
         _cycle_stale_record: dict[str, Any] | None = None
         if _cycles_generate:
-            # Every cycle generates its own bronze: the namespace's fleet
-            # sidecar, and any fleet this run read before the cycles, describe
-            # a corpus the run replaces, and the cycle pods' fleet is not
-            # read, so the record carries no fleet. The sidecar goes once the
-            # gate lets the generate proceed (a refused run keeps the corpus
-            # and its sidecar), or before the gate with --regenerate, which
-            # may clear part of bronze and then fail.
-            from lakebench.metrics.datagen_aggregator import drop_sidecar
-
-            stop_previous_datagen_or_exit(cfg)
-            if regenerate:
-                drop_sidecar(cfg.get_namespace())
-            _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
+            # Every cycle generates its own bronze: any fleet this run read
+            # before the cycles describes a corpus the run replaces, and the
+            # cycle pods' fleet is not read, so the record carries no fleet.
+            _gate = _gate_bronze_for_generate(
+                cfg, regenerate, allow_stale_bronze, collector.current_run
+            )
             _cycle_stale_allowed = bool(_gate.stale_allowed)
             _cycle_stale_record = _gate.record()
-            if collector.current_run is not None:
-                collector.current_run.datagen_stale_bronze = _cycle_stale_record
-            if not regenerate:
-                drop_sidecar(cfg.get_namespace())
             _generated_here = True
             _run_fleet = None
         elif not (include_datagen and not skip_generate) and collector.current_run is not None:
@@ -3055,8 +3092,8 @@ def _run_once(
                 _cycle_health: dict[str, int] = {}
                 try:
                     _cycle_health = _probe_table_health(cfg, k8s)
-                except Exception:
-                    pass
+                except Exception as e:  # noqa: BLE001 -- the counts stay unknown
+                    logger.warning("cycle %d table health not read: %s", cycle_idx + 1, e)
                 from lakebench.metrics.collector import CycleMetrics as _CM
 
                 _cm = _CM(
@@ -3108,13 +3145,16 @@ def _run_once(
             and pipeline_success
         ):
             _stage = "score-financial"
-            _scoring_attempted = True
             _financial_scoring = _score_financial_via_queries(
                 cfg,
                 run_id,
                 covered=None,
                 timeout=timeout,
             )
+            if _financial_scoring is None:
+                # Recorded, so the verdict says the run's AML result is
+                # missing instead of omitting it.
+                _financial_scoring = _not_scored_record(_SCORING_INCOMPLETE, None)
             _stage = "pipeline"
 
         # AML batch honesty gate, after scoring so a single crashed rule
@@ -3193,24 +3233,6 @@ def _run_once(
         # Flow: [pre-compaction benchmark] -> maintenance -> [post-compaction benchmark]
         # Pre-compaction benchmark only runs at scale < 50 (OOMs at higher scales
         # due to 200K+ uncompacted files overwhelming Trino memory).
-        pre_compaction_qph = 0.0
-        _pre_record = None
-        _pre_result = None
-        _maint_value = None
-        # Set when pre-benchmark maintenance was stopped (timeout or cap): a
-        # statement may still be running, so the post-maintenance QpH is not
-        # a clean measurement.
-        maint_stop_reason = ""
-        # Set when streams were (or may have been) writing during pre-benchmark
-        # maintenance: the post-maintenance QpH was then measured under load.
-        maint_live_reason = ""
-        _maint_end = None
-        _settle = None
-        # Set when the settle wait was skipped because no statement ran.
-        _settle_skip: dict | None = None
-        pre_file_count = 0
-        post_file_count = 0
-        maint_elapsed = 0.0
         # What each maintenance and compaction call actually did, for the
         # experiment block's effective maintenance. [] when none ran.
         maint_outcomes: list = []
@@ -3247,28 +3269,14 @@ def _run_once(
         if do_maintenance:
             from lakebench.benchmark import BenchmarkRunner as _BR
 
-            def _bench_progress(idx, total, name, phase, **kwargs):
-                if phase == "start":
-                    console.print(f"  [{idx}/{total}] {name}...", end=" ")
-                elif phase == "done":
-                    elapsed = kwargs.get("elapsed", 0)
-                    success = kwargs.get("success", False)
-                    error = kwargs.get("error", "")
-                    if success:
-                        console.print(f"[green]{elapsed:.1f}s OK[/green]{_sample_note(kwargs)}")
-                    else:
-                        short_err = (error[:60] + "...") if len(error) > 60 else error
-                        console.print(f"[red]FAIL[/red] ({esc(short_err)})")
-
             _scale = cfg.architecture.workload.datagen.get_effective_scale()
 
             try:
                 # 1. Pre-maintenance file count
                 try:
-                    _pre_health = _probe_table_health(cfg, k8s)
-                    pre_file_count = _data_file_total(_pre_health)
-                except Exception:
-                    pass
+                    pre_file_count = _data_file_total(_probe_table_health(cfg, k8s))
+                except Exception as e:  # noqa: BLE001 -- the count stays unknown (0)
+                    logger.warning("pre-maintenance data file count not read: %s", e)
 
                 # 2. Pre-compaction benchmark (scale < 50 only)
                 if _scale < 50:
@@ -3379,10 +3387,9 @@ def _run_once(
 
                 # 4. Post-maintenance file count
                 try:
-                    _post_health = _probe_table_health(cfg, k8s)
-                    post_file_count = _data_file_total(_post_health)
-                except Exception:
-                    pass
+                    post_file_count = _data_file_total(_probe_table_health(cfg, k8s))
+                except Exception as e:  # noqa: BLE001 -- the count stays unknown (0)
+                    logger.warning("post-maintenance data file count not read: %s", e)
                 if not compaction_measurable(cfg):
                     # Delta OPTIMIZE never runs: equal counts are table
                     # health, not a compaction result, and must not publish
@@ -3488,19 +3495,6 @@ def _run_once(
                     details={"mode": "power", "cache": "hot"},
                 )
 
-                def _post_bench_progress(idx, total, name, phase, **kwargs):
-                    if phase == "start":
-                        console.print(f"  [{idx}/{total}] {name}...", end=" ")
-                    elif phase == "done":
-                        elapsed = kwargs.get("elapsed", 0)
-                        success = kwargs.get("success", False)
-                        error = kwargs.get("error", "")
-                        if success:
-                            console.print(f"[green]{elapsed:.1f}s OK[/green]{_sample_note(kwargs)}")
-                        else:
-                            short_err = (error[:60] + "...") if len(error) > 60 else error
-                            console.print(f"[red]FAIL[/red] ({esc(short_err)})")
-
                 bench_runner = BenchmarkRunner(cfg, tm_run_id=_tm_run_id)
                 # AML analytical queries can exceed the 300 s default at
                 # scale >= 5; a timeout here
@@ -3518,7 +3512,7 @@ def _run_once(
                 bench_result = bench_runner.run_power(
                     cache="hot",
                     iterations=cfg.architecture.benchmark.iterations,
-                    progress_callback=_post_bench_progress,
+                    progress_callback=_bench_progress,
                     query_timeout=_bench_timeout,
                 )
 
@@ -3788,14 +3782,6 @@ def _run_once(
             # persists into metrics.json and renders in the scorecard.
             if _financial_scoring is not None:
                 run_metrics.financial_scoring = _financial_scoring
-            elif _scoring_attempted:
-                # Scoring ran and produced nothing: recorded, so the verdict
-                # can say the run's AML result is missing instead of omitting it.
-                run_metrics.financial_scoring = {
-                    "mode": "batch",
-                    "status": "not_scored",
-                    "reason": "the scoring queries did not complete (see the run log)",
-                }
 
             # Collect platform metrics from Prometheus (best-effort)
             if _interrupted is None:
@@ -3824,44 +3810,41 @@ def _run_once(
                 )
                 run_metrics.pipeline_benchmark = pb
 
-                # Populate maintenance cost metrics (v1.3)
-                try:
-                    if maint_stop_reason:
-                        pb.maintenance_stopped = True
-                        pb.maintenance_stop_reason = maint_stop_reason
-                    if maint_live_reason:
-                        pb.maintenance_live_streams = True
-                        pb.maintenance_live_streams_reason = maint_live_reason
-                    if maint_elapsed > 0:
-                        pb.maintenance_elapsed_seconds = maint_elapsed
-                    if pre_file_count > 0 and post_file_count > 0:
-                        pb.pre_compaction_file_count = pre_file_count
-                        pb.post_compaction_file_count = post_file_count
-                        pb.compaction_ratio = pre_file_count / max(post_file_count, 1)
-                    if pre_compaction_qph > 0 and benchmark_qph:
-                        # Only a paired comparison after a compaction that
-                        # changed files is a maintenance value; otherwise
-                        # pre and post QpH are left out, since their
-                        # difference would read as one.
-                        if _maint_value is not None and _maint_value[0] is not None:
-                            pb.pre_compaction_qph = pre_compaction_qph
-                            pb.post_compaction_qph = benchmark_qph
-                            pb.maintenance_value_pct = _maint_value[0]
-                            pb.maintenance_paired_queries = _maint_value[1]
-                        elif _maint_value is not None:
-                            pb.maintenance_value_reason = _maint_value[2]
-                            pb.maintenance_paired_queries = _maint_value[1]
-                        pb.pre_compaction_benchmark = _pre_record
-                    if _settle_skip is not None:
-                        pb.maintenance_settle = _settle_skip
-                    if _settle is not None:
-                        pb.maintenance_settle_seconds = _settle.settle_seconds
-                        pb.maintenance_settled = _settle.settled
-                        pb.maintenance_settle_capped = _settle.capped
-                        pb.maintenance_settle_verified = _settle.verified
-                        pb.maintenance_settle = _settle.to_dict()
-                except Exception:
-                    pass  # Maintenance metrics are best-effort
+                # Maintenance cost and value.
+                if maint_stop_reason:
+                    pb.maintenance_stopped = True
+                    pb.maintenance_stop_reason = maint_stop_reason
+                if maint_live_reason:
+                    pb.maintenance_live_streams = True
+                    pb.maintenance_live_streams_reason = maint_live_reason
+                if maint_elapsed > 0:
+                    pb.maintenance_elapsed_seconds = maint_elapsed
+                if pre_file_count > 0 and post_file_count > 0:
+                    pb.pre_compaction_file_count = pre_file_count
+                    pb.post_compaction_file_count = post_file_count
+                    pb.compaction_ratio = pre_file_count / max(post_file_count, 1)
+                if pre_compaction_qph > 0 and benchmark_qph:
+                    # Only a paired comparison after a compaction that
+                    # changed files is a maintenance value; otherwise
+                    # pre and post QpH are left out, since their
+                    # difference would read as one.
+                    if _maint_value is not None and _maint_value[0] is not None:
+                        pb.pre_compaction_qph = pre_compaction_qph
+                        pb.post_compaction_qph = benchmark_qph
+                        pb.maintenance_value_pct = _maint_value[0]
+                        pb.maintenance_paired_queries = _maint_value[1]
+                    elif _maint_value is not None:
+                        pb.maintenance_value_reason = _maint_value[2]
+                        pb.maintenance_paired_queries = _maint_value[1]
+                    pb.pre_compaction_benchmark = _pre_record
+                if _settle_skip is not None:
+                    pb.maintenance_settle = _settle_skip
+                if _settle is not None:
+                    pb.maintenance_settle_seconds = _settle.settle_seconds
+                    pb.maintenance_settled = _settle.settled
+                    pb.maintenance_settle_capped = _settle.capped
+                    pb.maintenance_settle_verified = _settle.verified
+                    pb.maintenance_settle = _settle.to_dict()
 
                 # Print full scorecard panel, only for a record that passes
                 pipeline_success = apply_save_gate(run_metrics, pipeline_success, print_error)
