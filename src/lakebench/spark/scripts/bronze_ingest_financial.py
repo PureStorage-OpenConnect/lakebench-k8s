@@ -7,7 +7,7 @@ smooth downstream silver_stream load.
 Prerequisites:
 - bronze_verify_financial must have run first with LB_REGISTER_TABLE=schema
   (the continuous preflight) to create the empty target Iceberg table
-  (schema inferred from the first parquet).
+  (with the generator's schema, pacs008_schema.json).
   Structured Streaming's parquet source requires an explicit schema or a
   pre-existing table to sink into; we take the second route.
 - SIGTERM triggers a graceful stopQuery so an in-flight micro-batch commits
@@ -22,24 +22,13 @@ import sys
 import time
 from datetime import datetime
 
+from bronze_verify_financial import PACS_PREFIX, pacs008_schema
 from common import arrival_time, env, log, log_landing, stream_batch_lines
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
-# Honor LB_FINANCIAL_BRONZE_PREFIX with the same semantics as
-# bronze_verify_financial: the env var is the ROOT prefix datagen_rs was
-# invoked with (mirrored from path_template by job.py). Transactions
-# land under {root}/bronze/pacs008/. Pre-PR-F this file used the env
-# var as the *inner* path with default "bronze/pacs008/", which broke
-# whenever job.py set the env var to the outer prefix -- the same class
-# of drift that bit the batch path.
-BRONZE_ROOT_PREFIX = env("LB_FINANCIAL_BRONZE_PREFIX", "pacs008/")
-PACS_PREFIX = env(
-    "LB_FINANCIAL_PACS_PATH",
-    BRONZE_ROOT_PREFIX.rstrip("/") + "/bronze/pacs008/",
-)
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 CHECKPOINT_URI = env(
@@ -61,7 +50,6 @@ def check_first_file(spark) -> None:
     shipped pacs008_schema.json the continuous preflight created bronze
     from: a column the generator renamed or retyped would otherwise read as
     null in every row, silently."""
-    from bronze_verify_financial import pacs008_schema
 
     jvm = spark._jvm  # type: ignore[attr-defined]
     hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
@@ -136,12 +124,8 @@ def main() -> None:
     log("=" * 60)
 
     # Require the target table to exist so we have a schema to attach to the
-    # readStream. Reading against `.format("parquet")` alone requires either
-    # spark.sql.streaming.schemaInference=true or an explicit .schema(...),
-    # which the previous implementation had neither of -- streaming source
-    # failed immediately with "Schema must be specified when creating a
-    # streaming source" and the pod restarted on backoffLimit until the pod
-    # was declared failed.
+    # readStream: a streaming parquet source needs an explicit schema (or
+    # schema inference) and fails at start without one.
     try:
         target_schema = spark.table(f"{CATALOG}.{BRONZE_TABLE}").schema
     except Exception as e:  # noqa: BLE001
