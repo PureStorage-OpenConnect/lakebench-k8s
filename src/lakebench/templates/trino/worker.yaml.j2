@@ -37,7 +37,7 @@ spec:
         {% if observability_enabled | default(false) %}
         - name: jmx-exporter-init
           image: {{ jmx_exporter_image }}
-          command: ['sh', '-c', 'cp /opt/bitnami/jmx-exporter/jmx_prometheus_javaagent.jar /opt/jmx-exporter/ 2>/dev/null || cp /opt/jmx_exporter/jmx_prometheus_javaagent*.jar /opt/jmx-exporter/jmx_prometheus_javaagent.jar 2>/dev/null || echo "WARN: could not find JMX exporter JAR in image"']
+          command: ['sh', '-c', 'cp /opt/bitnami/jmx-exporter/jmx_prometheus_javaagent.jar /opt/jmx-exporter/ 2>/dev/null || cp /opt/jmx_exporter/jmx_prometheus_javaagent*.jar /opt/jmx-exporter/jmx_prometheus_javaagent.jar']
           volumeMounts:
             - name: jmx-exporter
               mountPath: /opt/jmx-exporter
@@ -45,7 +45,7 @@ spec:
         {% if s3_ca_cert_pem %}
         - name: import-ca-cert
           image: {{ trino_image | default('trinodb/trino:483') }}
-          command: ['bash', '-c', 'keytool -import -trustcacerts -alias custom-ca -file /etc/ssl/certs/custom-ca/ca.crt -keystore /truststore/truststore.jks -storepass changeit -noprompt 2>/dev/null || true']
+          command: ['bash', '-c', 'rm -f /truststore/truststore.jks && keytool -import -trustcacerts -alias custom-ca -file /etc/ssl/certs/custom-ca/ca.crt -keystore /truststore/truststore.jks -storepass changeit -noprompt']
           volumeMounts:
             - name: ca-cert
               mountPath: /etc/ssl/certs/custom-ca

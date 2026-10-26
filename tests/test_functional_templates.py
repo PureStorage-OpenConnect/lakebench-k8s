@@ -247,6 +247,8 @@ class TestTemplateConditionals:
         main = {c["name"]: c for c in spec["containers"]}[main_container]
         main_mounts = {m["name"]: m["mountPath"] for m in main["volumeMounts"]}
         assert main_mounts[store_vols[0]] == init_mounts[store_vols[0]]
+        # A failed import fails the pod here, not later as a TLS error.
+        assert "|| true" not in init["command"][-1]
 
     def test_trino_jvm_trusts_the_imported_store(self, renderer: TemplateRenderer, https_ctx):
         """Both Trino JVM configs point at the store the init container builds."""
