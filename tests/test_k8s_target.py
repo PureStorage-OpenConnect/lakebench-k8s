@@ -444,9 +444,7 @@ def test_sustained_prometheus_lookup_reuses_the_active_target(kubeconfig, hosts)
     from lakebench.cli._sustained import _find_prometheus_svc
 
     ClusterTarget.resolve(context="A").activate()
-    with patch("lakebench.cli._sustained.pinned_kubectl") as kubectl:
-        kubectl.return_value = MagicMock(returncode=1, stdout="", stderr="")
-        _find_prometheus_svc("obs", context=None)
+    assert _find_prometheus_svc("obs", context=None) is None
     assert hosts == [SERVER_A]
 
 
