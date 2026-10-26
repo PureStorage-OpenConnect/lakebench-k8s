@@ -30,21 +30,19 @@ logger = logging.getLogger(__name__)
 
 # SUBMISSION_FAILED is not final: the operator resubmits on its own
 # (restartPolicy onSubmissionFailureRetries) and settles on FAILED once the
-# retries run out. Treating it as final gave up on jobs the operator was
-# about to resubmit, e.g. after a shared-Ivy-cache download race. Waiting is
-# bounded in case the operator never settles.
+# retries run out. Waiting is bounded in case the operator never settles.
 # The operator backs off linearly (interval x attempt): 5 retries at 60 s
 # start at 60, 180, 360, 600 and 900 s after the first failure, and the app
-# stays SUBMISSION_FAILED throughout, so the grace must outlast 900 s plus a
-# slow Ivy resolve.
+# stays SUBMISSION_FAILED throughout, so the grace must outlast 900 s plus
+# the last submission.
 _SUBMISSION_FAILED_GRACE_S = 1800
 
 # A status read slower than this is logged: it separates a stalled poll on
 # this host from an operator that is slow to report the end.
 _SLOW_POLL_S = 45.0
 # A job that was RUNNING and then sits in a non-terminal, non-running state
-# (SUBMITTED, PENDING_RERUN, UNKNOWN, ...) this long is logged once per state.
-# A 2026-09-27 sweep lost ~10 min per stage this way with nothing on screen.
+# (SUBMITTED, PENDING_RERUN, UNKNOWN, ...) this long is logged once per state,
+# so a stage clock running on a stuck operator status shows on screen.
 _STALL_WARN_S = 60.0
 
 
@@ -449,14 +447,8 @@ class SparkJobMonitor:
         attempt's pod) is preferred; the SparkApplication's terminationTime
         is the fallback. (None, "") when neither is readable.
         """
-        from kubernetes import client as k8s_client
-
         try:
-            pods = k8s_client.CoreV1Api().list_namespaced_pod(
-                self.namespace,
-                label_selector=f"spark-role=driver,sparkoperator.k8s.io/app-name={job_name}",
-            )
-            for pod in pods.items or []:
+            for pod in self._driver_pods(job_name):
                 if (
                     status is not None
                     and status.driver_pod
@@ -556,6 +548,20 @@ class SparkJobMonitor:
                 )
             time.sleep(poll_interval)
 
+    def _driver_pods(self, job_name: str) -> list:
+        """The driver pods of a SparkApplication (raises on a failed list)."""
+        from kubernetes import client as k8s_client
+
+        return (
+            k8s_client.CoreV1Api()
+            .list_namespaced_pod(
+                self.namespace,
+                label_selector=f"spark-role=driver,sparkoperator.k8s.io/app-name={job_name}",
+            )
+            .items
+            or []
+        )
+
     def _init_failure(self, job_name: str) -> str | None:
         """A driver init container that failed (the reference wheels install
         from the dependency server), with its last log line."""
@@ -563,11 +569,7 @@ class SparkJobMonitor:
 
         try:
             core_v1 = k8s_client.CoreV1Api()
-            pods = core_v1.list_namespaced_pod(
-                self.namespace,
-                label_selector=f"spark-role=driver,sparkoperator.k8s.io/app-name={job_name}",
-            ).items
-            for pod in pods:
+            for pod in self._driver_pods(job_name):
                 for cs in (pod.status.init_container_statuses or []) if pod.status else []:
                     term = cs.state.terminated if cs.state else None
                     if term is not None and term.exit_code:
@@ -593,76 +595,15 @@ class SparkJobMonitor:
         from kubernetes import client as k8s_client
         from kubernetes.client.rest import ApiException
 
-        core_v1 = k8s_client.CoreV1Api()
-
         try:
-            # Find driver pod
-            pods = core_v1.list_namespaced_pod(
-                self.namespace,
-                label_selector=f"spark-role=driver,sparkoperator.k8s.io/app-name={job_name}",
-            )
-
-            if not pods.items:
+            pods = self._driver_pods(job_name)
+            if not pods:
                 return None
-
-            pod_name = pods.items[0].metadata.name
-
-            kwargs: dict = {
-                "container": "spark-kubernetes-driver",
-            }
+            kwargs: dict = {"container": "spark-kubernetes-driver"}
             if tail_lines is not None:
                 kwargs["tail_lines"] = tail_lines
-
-            logs = core_v1.read_namespaced_pod_log(
-                pod_name,
-                self.namespace,
-                **kwargs,
+            return k8s_client.CoreV1Api().read_namespaced_pod_log(
+                pods[0].metadata.name, self.namespace, **kwargs
             )
-
-            return logs
-
         except ApiException:
             return None
-
-    def get_executor_metrics(self, job_name: str) -> dict:
-        """Get metrics about job executors.
-
-        Args:
-            job_name: Name of the SparkApplication
-
-        Returns:
-            Dict with executor metrics
-        """
-        from kubernetes import client as k8s_client
-        from kubernetes.client.rest import ApiException
-
-        core_v1 = k8s_client.CoreV1Api()
-
-        try:
-            pods = core_v1.list_namespaced_pod(
-                self.namespace,
-                label_selector=f"spark-role=executor,sparkoperator.k8s.io/app-name={job_name}",
-            )
-
-            running = 0
-            pending = 0
-            failed = 0
-
-            for pod in pods.items:
-                phase = pod.status.phase
-                if phase == "Running":
-                    running += 1
-                elif phase == "Pending":
-                    pending += 1
-                elif phase in ("Failed", "Unknown"):
-                    failed += 1
-
-            return {
-                "total": len(pods.items),
-                "running": running,
-                "pending": pending,
-                "failed": failed,
-            }
-
-        except ApiException:
-            return {"total": 0, "running": 0, "pending": 0, "failed": 0}
