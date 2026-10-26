@@ -353,31 +353,29 @@ def ensure_column(spark, fq_table, name, sql_type):
 
 
 # ---------------------------------------------------------------------------
-# B5: bronze-checkpoint-reset guard (C360 silver streams)
+# Bronze-reset guard (C360 silver streams)
 # ---------------------------------------------------------------------------
 #
 # A Structured Streaming checkpoint stores the source-side snapshot id of every
 # committed micro-batch. When an operator wipes bronze and re-populates it
-# (DROP + re-ingest, or truncate-and-re-ingest), a brand-new snapshot lineage
-# appears under the same table name, and the OLD checkpoint's saved snapshot
-# id is no longer on the current ancestor chain. Iceberg then either fails
-# with "Cannot find snapshot" or, worse in the Delta case, silently starts
-# from version 0 and re-writes every row silver already wrote. Upstream
-# Iceberg PR #17599 tracks the same class of bug; no native helper today.
+# (DROP + re-ingest), a new lineage appears under the same table name and the
+# old checkpoint's offsets point into a lineage that no longer exists. Iceberg
+# then fails with "Cannot find snapshot" or, worse in the Delta case, silently
+# starts from version 0 and re-writes every row silver already wrote.
 #
-# The guard writes a small JSON sidecar next to the checkpoint on first start
-# with the current bronze snapshot fingerprint (Iceberg snapshot_id or Delta
-# commit version); on every subsequent start it re-reads the fingerprint and
-# compares:
+# The guard keeps a small JSON sidecar next to the checkpoint holding the
+# bronze position seen at the last start: the Iceberg snapshot id, or the
+# Delta commit version and table id. On each start it compares that with
+# bronze now:
 #
-# * MATCH -> continue silently. The stream is resuming from the same lineage.
-# * MISMATCH -> raise SilverAbort telling the operator to also reset silver.
-#   A checkpoint whose bronze source snapshot no longer exists cannot resume
-#   safely, and continuing would double-write or crash.
-# * SIDECAR MISSING -> fail-open (write it, log a warning, continue). This is
-#   the upgrade path from an older release. Refusing here would break every
-#   running deployment on first restart; the operator can rely on the guard
-#   from the next start onward.
+# * SAME LINEAGE -> resume and save the current position. Bronze commits on
+#   every ingest batch, so a position that moved forward is the normal case.
+# * RESET -> raise SilverAbort telling the operator to also reset silver.
+#   Iceberg: the saved snapshot is no longer an ancestor of the current one.
+#   Delta: the table id changed, or the saved version is ahead of the current.
+# * CANNOT TELL -> fail open with a log line: sidecar missing (written now),
+#   bronze unreadable, or an Iceberg saved snapshot that snapshot expiry has
+#   removed from the history.
 #
 # The helper is shared across silver_stream.py (Iceberg) and
 # silver_stream_delta.py (Delta) so one bug fix covers both formats.
@@ -388,36 +386,37 @@ def _bronze_fingerprint_sidecar_path(checkpoint_location):
     return checkpoint_location.rstrip("/") + "/bronze_fingerprint.json"
 
 
-def _read_bronze_snapshot_fingerprint(spark, bronze_tbl, source_format):
-    """Current bronze snapshot fingerprint as a string, or None if unavailable.
+def _read_bronze_lineage(spark, bronze_tbl, source_format):
+    """Bronze's current lineage as a dict, or None if unavailable.
 
-    * Iceberg: current-ancestor snapshot id from ``<table>.history``.
-    * Delta: latest commit version from ``DESCRIBE HISTORY``.
-    Any catalog error returns None -- the caller falls back to the fail-open
-    policy (no sidecar written, warning logged) so a transient catalog failure
-    never crashes a running stream.
+    ``fingerprint`` is the position the sidecar saves, as a string: the
+    current Iceberg snapshot id or the latest Delta commit version.
+
+    * Iceberg: ``ancestors`` holds the retained snapshot ids on the current
+      ancestor chain; ``truncated`` is true when snapshot expiry removed the
+      start of that chain (its oldest retained snapshot still has a parent).
+    * Delta: ``table_id`` is the id from ``DESCRIBE DETAIL``, which a DROP and
+      re-create changes.
+
+    Any catalog error returns None: the caller fails open so a transient
+    catalog failure never crashes a running stream.
     """
     try:
         if source_format == "delta":
-            rows = spark.sql(f"DESCRIBE HISTORY {bronze_tbl} LIMIT 1").collect()
-            if not rows:
-                return None
-            r = rows[0]
-            # Delta history row exposes ``version``; support both index and key.
-            try:
-                v = r["version"]
-            except Exception:  # noqa: BLE001
-                v = r[0]
-            return None if v is None else str(v)
-        # Default: Iceberg.
+            version = delta_table_version(spark, bronze_tbl)
+            table_id = spark.sql(f"DESCRIBE DETAIL {bronze_tbl}").collect()[0]["id"]
+            return {"fingerprint": str(version), "table_id": table_id}
         rows = spark.sql(
-            f"SELECT snapshot_id FROM {bronze_tbl}.history "
-            "WHERE is_current_ancestor ORDER BY made_current_at DESC LIMIT 1"
+            f"SELECT snapshot_id, parent_id FROM {bronze_tbl}.history "
+            "WHERE is_current_ancestor ORDER BY made_current_at"
         ).collect()
         if not rows:
             return None
-        v = rows[0][0]
-        return None if v is None else str(v)
+        return {
+            "fingerprint": str(rows[-1][0]),
+            "ancestors": {str(r[0]) for r in rows},
+            "truncated": rows[0][1] is not None,
+        }
     except Exception as e:  # noqa: BLE001
         log(f"[b5] bronze snapshot lookup failed on {bronze_tbl}: {one_line(e)}")
         return None
@@ -470,22 +469,33 @@ def check_bronze_fingerprint(
     source_format="iceberg",
     fs=None,
 ):
-    """B5 guard: refuse to resume a silver stream when bronze was reset.
+    """Refuse to resume a silver stream when bronze was reset.
 
     ``source_format`` is ``"iceberg"`` or ``"delta"`` -- the format of the
     bronze streaming source, not silver's own format. ``fs`` is a sidecar
     filesystem stub (used by tests); the default writes the JSON next to the
     Spark checkpoint through the same Hadoop-FS the checkpoint uses. Raises
-    ``SilverAbort`` on a real fingerprint mismatch; every other failure mode
-    is fail-open with a warning so a transient catalog error never crashes
-    a running stream.
+    ``SilverAbort`` when bronze's lineage no longer contains the saved
+    position; every other failure mode is fail-open with a warning so a
+    transient catalog error never crashes a running stream.
     """
     import json as _json
 
     sidecar_path = _bronze_fingerprint_sidecar_path(checkpoint_location)
     sidecar_fs = fs if fs is not None else _HadoopSidecarFS(spark)
 
-    current = _read_bronze_snapshot_fingerprint(spark, bronze_tbl, source_format)
+    lineage = _read_bronze_lineage(spark, bronze_tbl, source_format)
+    current = None if lineage is None else lineage["fingerprint"]
+
+    def save():
+        payload = {
+            "bronze_table": bronze_tbl,
+            "source_format": source_format,
+            "bronze_snapshot_fingerprint": current,
+            "bronze_table_id": lineage.get("table_id"),
+            "written_by": "check_bronze_fingerprint",
+        }
+        sidecar_fs.write(sidecar_path, _json.dumps(payload).encode("utf-8"))
 
     exists = False
     try:
@@ -510,7 +520,22 @@ def check_bronze_fingerprint(
                 "keeping sidecar untouched"
             )
             return
-        if saved_s != current:
+        saved_id = payload.get("bronze_table_id")
+        if source_format == "delta":
+            reset = (
+                (saved_id is not None and saved_id != lineage["table_id"])
+                or not (saved_s or "").isdigit()
+                or int(saved_s) > int(current)
+            )
+        else:
+            reset = saved_s not in lineage["ancestors"]
+            if reset and lineage["truncated"]:
+                log(
+                    f"[b5] saved snapshot {saved_s} is no longer in the history of "
+                    f"{bronze_tbl} (expired); cannot check the lineage, resuming stream"
+                )
+                reset = False
+        if reset:
             raise SilverAbort(
                 "B5: bronze snapshot fingerprint mismatch at "
                 f"{sidecar_path}: sidecar={saved_s!r} vs current={current!r} "
@@ -519,9 +544,14 @@ def check_bronze_fingerprint(
                 "silver (drop the silver table and this checkpoint) before restarting."
             )
         log(
-            f"[b5] bronze fingerprint match on {bronze_tbl} "
-            f"(fingerprint={current}); resuming stream"
+            f"[b5] bronze lineage unchanged on {bronze_tbl} "
+            f"(saved={saved_s}, current={current}); resuming stream"
         )
+        if saved_s != current or saved_id != lineage.get("table_id"):
+            try:
+                save()
+            except Exception as e:  # noqa: BLE001
+                log(f"[b5] sidecar write failed at {sidecar_path}: {one_line(e)}; fail-open")
         return
 
     # Sidecar missing: fail-open. Only write it when we have a real
@@ -533,13 +563,7 @@ def check_bronze_fingerprint(
         )
         return
     try:
-        payload = {
-            "bronze_table": bronze_tbl,
-            "source_format": source_format,
-            "bronze_snapshot_fingerprint": current,
-            "written_by": "check_bronze_fingerprint",
-        }
-        sidecar_fs.write(sidecar_path, _json.dumps(payload).encode("utf-8"))
+        save()
         log(
             f"[b5] WARNING: sidecar {sidecar_path} was missing; wrote current "
             f"fingerprint ({current}). Guard is active from next start onward."
