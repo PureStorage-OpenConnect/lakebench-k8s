@@ -87,7 +87,7 @@ def _storage_tile(record: Mapping[str, Any]) -> Tile:
     gaps = sorted(
         {
             str(n.get("source"))
-            for n in (io.get("not_measured") if isinstance(io, Mapping) else None) or []
+            for n in io.get("not_measured") or []
             if isinstance(n, Mapping) and n.get("stage") != "query"
         }
     )
@@ -121,7 +121,7 @@ def _storage_tile(record: Mapping[str, Any]) -> Tile:
     return Tile("Storage", span, f"read{out} - {where}", EVIDENCE_DERIVED, "io.totals.trino")
 
 
-def _gates_tile(record: Mapping[str, Any], gates: Mapping[str, str] | None) -> Tile:
+def _gates_tile(gates: Mapping[str, str] | None) -> Tile:
     if not gates:
         return _nr("Gates", "no gate outcomes", "verdict.gates")
     passed = sum(1 for v in gates.values() if v == "PASS")
@@ -159,11 +159,38 @@ _PACE = {
 }
 
 
+def _schema(record: Mapping[str, Any]) -> str:
+    return str((record.get("config_snapshot") or {}).get("workload_schema") or "customer360")
+
+
+def _kept(record: Mapping[str, Any], offered: bool) -> str:
+    """Whether the pipeline kept pace (``scores.pipeline_saturated``), as the
+    Pace tile's sub text says it: after "offered load" for the offered-load
+    figure, else as a suffix (empty when not recorded)."""
+    saturated = ((record.get("pipeline_benchmark") or {}).get("scores") or {}).get(
+        "pipeline_saturated"
+    )
+    if offered:
+        return (
+            "offered load"
+            if saturated is None
+            else "offered load; the pipeline fell behind it"
+            if saturated
+            else "offered load; the pipeline kept pace"
+        )
+    return (
+        ""
+        if saturated is None
+        else "; the pipeline fell behind the load"
+        if saturated
+        else "; the pipeline kept pace"
+    )
+
+
 def _pace_batch(record: Mapping[str, Any]) -> Tile:
     """Units of operation per second from the first stage's start to gold
     ready (``time_to_value_seconds``), and the bytes per second behind them."""
-    schema = str((record.get("config_snapshot") or {}).get("workload_schema") or "customer360")
-    stage_name, field, did, noun = _PACE.get(schema, _PACE["customer360"])
+    stage_name, field, did, noun = _PACE.get(_schema(record), _PACE["customer360"])
     stages = [
         s
         for s in (record.get("pipeline_benchmark") or {}).get("stages") or []
@@ -221,22 +248,11 @@ def _pace_offered(record: Mapping[str, Any]) -> Tile:
     rps = _num(record, "pipeline_benchmark", "scores", "sustained_throughput_rps")
     if rps is None:
         return _nr("Pace", "not in the run record", path)
-    schema = str((record.get("config_snapshot") or {}).get("workload_schema") or "customer360")
-    noun = _PACE.get(schema, _PACE["customer360"])[3]
-    saturated = ((record.get("pipeline_benchmark") or {}).get("scores") or {}).get(
-        "pipeline_saturated"
-    )
-    kept = (
-        "offered load"
-        if saturated is None
-        else "offered load; the pipeline fell behind it"
-        if saturated
-        else "offered load; the pipeline kept pace"
-    )
+    noun = _PACE.get(_schema(record), _PACE["customer360"])[3]
     return Tile(
         "Pace",
         dv.total(rps, paths=path, fmt=",.0f", suffix=f" {noun}/s"),
-        kept,
+        _kept(record, offered=True),
         EVIDENCE_RECORDED,
         path,
     )
@@ -257,20 +273,10 @@ def _pace_cleaned(record: Mapping[str, Any], secs: Any) -> Tile:
         return _pace_offered(record)
     a_path = dv.path("pipeline_benchmark", "stages", idx or 0, "output_rows")
     b_path = "continuous.window.seconds"
-    saturated = ((record.get("pipeline_benchmark") or {}).get("scores") or {}).get(
-        "pipeline_saturated"
-    )
-    kept = (
-        ""
-        if saturated is None
-        else "; the pipeline fell behind the load"
-        if saturated
-        else "; the pipeline kept pace"
-    )
     return Tile(
         "Pace",
         dv.ratio(count, secs, a_path=a_path, b_path=b_path, fmt=",.0f", suffix=" interactions/s"),
-        f"{count:,.0f} interactions cleaned in {secs:,.0f} s{kept}",
+        f"{count:,.0f} interactions cleaned in {secs:,.0f} s{_kept(record, offered=False)}",
         EVIDENCE_DERIVED,
         f"{a_path} / {b_path}",
         unit_label="Interactions",
@@ -285,27 +291,16 @@ def _pace_continuous(record: Mapping[str, Any]) -> Tile:
     window = (record.get("continuous") or {}).get("window") or {}
     secs = window.get("seconds")
     path = "continuous.time_travel.ticks[*].total_records / continuous.window.seconds"
-    screened = screened_by_cycle(record)
-    schema = str((record.get("config_snapshot") or {}).get("workload_schema") or "customer360")
+    schema = _schema(record)
     if schema == "customer360":
         return _pace_cleaned(record, secs)
     if schema != "financial":
         return _pace_offered(record)
+    screened = screened_by_cycle(record)
     if not screened or not isinstance(secs, (int, float)) or secs <= 0:
         return _nr("Pace", "no verified evaluation cycle in the run record", path)
-    schema = str((record.get("config_snapshot") or {}).get("workload_schema") or "customer360")
     noun = _PACE[schema][3]
     count = max(screened.values())
-    saturated = ((record.get("pipeline_benchmark") or {}).get("scores") or {}).get(
-        "pipeline_saturated"
-    )
-    kept = (
-        ""
-        if saturated is None
-        else "; the pipeline fell behind the load"
-        if saturated
-        else "; the pipeline kept pace"
-    )
     return Tile(
         "Pace",
         dv.ratio(
@@ -316,7 +311,7 @@ def _pace_continuous(record: Mapping[str, Any]) -> Tile:
             fmt=",.0f",
             suffix=f" {noun}/s",
         ),
-        f"{count:,.0f} {noun} screened in {secs:,.0f} s{kept}",
+        f"{count:,.0f} {noun} screened in {secs:,.0f} s{_kept(record, offered=False)}",
         EVIDENCE_DERIVED,
         path,
         unit_label=noun.capitalize(),
@@ -392,7 +387,7 @@ def build_tiles(
             sub="stage-input GiB per core-hour",
         ),
         _storage_tile(record),
-        _gates_tile(record, gates),
+        _gates_tile(gates),
         _support_tile(record),
     ]
     out: list[Tile] = []
