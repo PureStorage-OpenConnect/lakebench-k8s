@@ -87,17 +87,6 @@ ALIASED_FLAGS: dict[str, dict[str, FlagAlias]] = {
     ),
 }
 
-#: Hidden on purpose, not renamed or removed: the deprecated ``-f`` short
-#: flags (cli/_helpers.py), init's ``--no-interactive`` (accepted silently:
-#: it asks for what init always does) and two flags for harnesses that only
-#: add a refusal.
-HIDDEN_FLAGS: dict[str, tuple[str, ...]] = {
-    "*": ("-f",),
-    "init": ("--no-interactive",),
-    "deploy": ("--require-new",),
-    "destroy": ("--expect-incarnation",),
-}
-
 _RECLAIM = (
     "; on a bucket this deployment did not create, `lakebench admin reclaim-bucket` first "
     "(an owner action)"
