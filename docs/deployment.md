@@ -164,6 +164,9 @@ step, including the wait for the cluster lease.
     recover by retrying fails at once.
 14. **DuckDB** -- When the query engine is `duckdb`. Its wheel and
     extensions come from the dependency set the same way.
+    - The financial (AML) workload requires `query_engine.type: trino`:
+      it scores recall and precision with SQL on Trino, so a financial
+      config on `spark-thrift`, `duckdb` or `none` is refused at load.
 15. **Observability** -- Only with `observability.enabled: true`.
     - Deploys Prometheus, Grafana and the Pushgateway in this deployment's
       namespace, so two deployments on one cluster never collide.
