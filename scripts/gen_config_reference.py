@@ -19,8 +19,7 @@ Usage:
     python3.11 scripts/gen_config_reference.py           # rewrite the blocks
     python3.11 scripts/gen_config_reference.py --check   # exit 1 on drift
 
-``--check`` writes nothing; ``tests/test_config_reference_drift.py`` runs the
-same comparison in the unit suite.
+``--check`` writes nothing.
 """
 
 from __future__ import annotations
@@ -117,7 +116,7 @@ SECTIONS: tuple[tuple[str, tuple[str, ...], str], ...] = (
 
 #: Default cells for keys whose schema default is not what a run uses: a
 #: value derived from the deployment name, or one auto-sizing or the run
-#: resolves. Keys must exist (tests/test_config_reference_drift.py).
+#: resolves. A key that names no config field is silently ignored.
 DEFAULT_OVERRIDES: dict[str, str] = {
     "name": "**(required)**",
     "platform.storage.s3.endpoint": "**(required)**",
