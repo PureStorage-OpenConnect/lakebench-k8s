@@ -505,7 +505,7 @@ Code: `src/lakebench/modules/pipeline_engines/spark/job.py:_JOB_PROFILES`,
 
 **Cause:** the stage needs longer than the timeout. When `--timeout` is not
 given it is `max(3600, scale * 120)` seconds per job; the AML workload adds
-900 s and never goes below its bronze-verify budget for the scale. At scale 100 (about 1 TB), silver-build can take 30 to 60 minutes,
+900 s. At scale 100 (about 1 TB), silver-build can take 30 to 60 minutes,
 depending on cluster resources.
 
 **Fix:** pass a larger `--timeout`, for example `--timeout 7200` on `run`.

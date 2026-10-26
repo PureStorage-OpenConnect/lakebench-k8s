@@ -62,8 +62,10 @@ Every recipe uses Spark as the pipeline engine. Image defaults:
 - **ETL only, no interactive queries?** Use a `none` recipe (Standard
   Headless, Polaris Headless or Hive Delta Headless). No query engine is
   deployed.
-- **AML (financial) workload?** Use an Iceberg recipe. AML on Delta is
-  refused at config load.
+- **AML (financial) workload?** Use a Trino + Iceberg recipe (Standard or
+  Polaris). The financial workload scores recall and precision with SQL on
+  Trino, so a config on Delta, or on a `none`, `duckdb` or `spark-thrift`
+  recipe, is refused at config load.
 
 ## Choosing a catalog
 

@@ -38,7 +38,9 @@ If you want the light, scan-and-aggregate end of the spectrum instead, run
 [Customer 360](c360-overview.md). Choosing between the two workloads is
 choosing which architectural stress you want to measure.
 
-AML runs on Iceberg recipes. It is not supported on Delta.
+AML runs on Iceberg recipes with a Trino query engine: recall and precision
+are scored with SQL on Trino, so `none`, `duckdb` and `spark-thrift` are
+refused at load. It is not supported on Delta.
 
 ## What each stage is designed to stress
 

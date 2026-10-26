@@ -24,7 +24,7 @@ Lakebench deploys a lakehouse stack on Kubernetes in three layers and runs bench
 | Layer | Contents |
 |---|---|
 | 1. Platform | Any Kubernetes distribution (vanilla, OpenShift, EKS, GKE); any S3-compatible store (AWS S3, MinIO, Pure Storage FlashBlade); PostgreSQL for catalog metadata |
-| 2. Data architecture | Catalog: Hive Metastore or Apache Polaris. Table format: Iceberg or Delta (Delta only with Hive). Spark runs the medallion pipeline. Query engine: Trino, Spark Thrift Server or DuckDB (DuckDB only with Iceberg) |
+| 2. Data architecture | Catalog: Hive Metastore or Apache Polaris. Table format: Iceberg or Delta (Delta only with Hive). Spark runs the medallion pipeline. Query engine: Trino, Spark Thrift Server or DuckDB (DuckDB only with Iceberg; the financial workload requires Trino) |
 | 3. Observability | Optional Prometheus and Grafana. The CLI writes local JSON metrics and an HTML report per run |
 
 With `observability.enabled`, each deployment runs its own Prometheus, Grafana and Pushgateway in its namespace. Prometheus scrapes Trino JMX, per-pod CPU and memory from the kubelet, and the Pushgateway that datagen and the Spark stages push to. Spark engine metrics are not exported. See [Observability](component-observability.md).

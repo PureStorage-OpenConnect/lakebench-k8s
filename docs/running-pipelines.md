@@ -71,7 +71,9 @@ Aggregates silver into daily KPI summaries (daily active customers, total revenu
 ### Stage 4: benchmark
 
 Runs the workload's query set on the active engine against silver and gold:
-8 queries for Customer 360, 12 for AML.
+8 queries for Customer 360, 12 for AML. AML also scores recall and precision
+with SQL on Trino after the pipeline, so the financial workload requires a
+Trino query engine; `none`, `duckdb` and `spark-thrift` are refused at load.
 
 | Class | Customer 360 | AML | What it tests |
 |---|---|---|---|

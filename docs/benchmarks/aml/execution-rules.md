@@ -4,7 +4,8 @@
 
 | Item | Rule | Enforced by |
 |---|---|---|
-| Composition | Iceberg and one of the 8 Iceberg 4-tuples ([11](../AML.md#11-supported-compositions)); `custom` refused | config load |
+| Composition | Iceberg with a Trino query engine ([11](../AML.md#11-supported-compositions)); `custom` refused | config load |
+| Query engine | `trino` required; `none`, `duckdb` and `spark-thrift` refused, because recall and precision are scored with SQL on Trino | config load |
 | Scale | above 800 refused; above 300 up to 800 runs as unverified, with a note ([3.2](generation.md#32-scale-factor)) | config load, run start |
 | Support state | `unsupported` refused at run start (exit 2); `--local` refused for AML | `lakebench run` |
 | Stages | batch: bronze-verify, silver-build, gold-finalize, then scoring and the AML gates; continuous: bronze-ingest, silver-stream, gold-refresh, then covered scoring over the last tick inside the window | `run`; scoring and gates only on a full run (no `--stage`) whose stages succeeded |
