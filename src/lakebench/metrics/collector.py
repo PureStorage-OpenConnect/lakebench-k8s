@@ -2749,20 +2749,25 @@ def round_is_scorable(rnd, passed_ever: set) -> bool:
     any other failed query drops the round."""
     if (rnd.qph or 0) <= 0:
         return False
+    return all(
+        tolerated_round_failure(
+            str(q.get("name") or ""), bool(q.get("timed_out", False)), passed_ever
+        )
+        for q in rnd.queries or []
+        if isinstance(q, dict) and not q.get("success", True)
+    )
+
+
+def tolerated_round_failure(name: str, timed_out: bool, passed_ever: set) -> bool:
+    """A failed in-stream round query that does not count against the round:
+    a Q9 contention failure (gold refresh replaces the table Q9 reads) or a
+    measured SLA crossing (a timeout on a query that passed in some round,
+    *passed_ever*). The QpH median and the verdict both judge by it."""
     from lakebench.benchmark.result import is_sla_crossing
 
-    for q in rnd.queries or []:
-        if not isinstance(q, dict) or q.get("success", True):
-            continue
-        name = str(q.get("name") or "")
-        if name.startswith("Q9"):
-            continue
-        if is_sla_crossing(
-            timed_out=bool(q.get("timed_out", False)), name=name, passed_ever=passed_ever
-        ):
-            continue
-        return False
-    return True
+    return name.startswith("Q9") or is_sla_crossing(
+        timed_out=timed_out, name=name, passed_ever=passed_ever
+    )
 
 
 def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetrics:

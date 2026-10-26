@@ -535,7 +535,7 @@ def test_save_gate_fails_closed_when_the_record_cannot_be_judged(monkeypatch) ->
     def boom(record):
         raise RuntimeError("bad record")
 
-    monkeypatch.setattr(V, "_recompute", boom)
+    monkeypatch.setattr(V, "verdict_from_record", boom)
     said: list[str] = []
     assert V.apply_save_gate(m, True, said.append) is False
     assert any("could not be computed" in s for s in said)
@@ -882,7 +882,7 @@ def test_report_labels_the_gold_stage_bounded_by_a_rule_cap() -> None:
 def test_verdict_of_takes_the_strictest(monkeypatch, stored, success, recomputed, want) -> None:
     from types import SimpleNamespace
 
-    monkeypatch.setattr(V, "_recompute", lambda rec: SimpleNamespace(status=recomputed, reasons=[]))
+    monkeypatch.setattr(V, "verdict_from_record", lambda rec: SimpleNamespace(status=recomputed, reasons=[]))
     rec = sr.load_record(C360_BATCH)
     rec["success"] = success
     if stored is None:
