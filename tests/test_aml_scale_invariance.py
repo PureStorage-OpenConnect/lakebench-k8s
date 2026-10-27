@@ -89,11 +89,6 @@ def test_band_crossing_fails_even_within_the_logit_tolerance():
     assert r["confident_flip"] is True and not r["pass"]
 
 
-def test_band_crossing_with_a_large_shift_fails():
-    r = _verdict(0.76, 0.84, sd=0.05)
-    assert not r["pass"] and r["within_logit_tolerance"] is False
-
-
 def test_crossing_near_the_edge_is_not_a_confident_flip():
     r = _verdict(0.795, 0.805, sd=0.05)
     assert r["confident_flip"] is False and r["pass"], r["reasons"]

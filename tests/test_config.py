@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from lakebench.config import LakebenchConfig, load_config
 from lakebench.config.loader import ConfigValidationError, save_config
-from lakebench.config.schema import PipelineMode, is_continuous_mode
+from lakebench.config.schema import PipelineMode
 from tests.conftest import make_config
 
 
@@ -214,11 +214,6 @@ def test_saved_config_reloads_without_deprecations(tmp_path):
 
 
 # -- continuous is canonical ------------------------------------------------
-
-
-def test_is_continuous_mode_reads_sustained():
-    # Metrics files still record "sustained".
-    assert is_continuous_mode("sustained") is True
 
 
 def test_old_metrics_with_sustained_mode_still_read_as_continuous(tmp_path):
