@@ -17,7 +17,7 @@ from lakebench.benchmark.result import (
     last_json_line,
     summarise_engine_error,
 )
-from lakebench.k8s import pinned_kubectl
+from lakebench.modules.query_engines import PodExecutor, call_args_end
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +32,11 @@ _SIGALRM_EXIT_CODES = (-14, 142)  # killed by signal 14, as seen locally / via k
 # Python statement that turns ``rel`` (a DuckDB relation, or None for a
 # statement with no result) into ``rows``. Spark writes TIMESTAMP columns as
 # Iceberg timestamptz, and DuckDB can only hand a TIMESTAMP WITH TIME ZONE
-# back to Python through pytz, which the query pod does not install. Every
-# query that returned one (FQ4, FQ6, FQ8) failed after it had finished
-# running. The cast to text happens inside DuckDB instead; positional
-# references keep duplicate or quoted column names intact, and a projection
-# does not disturb the query's ORDER BY.
-# String literals (with '' escapes), double-quoted identifiers and comments.
-_SQL_NON_CODE = re.compile(r"('(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|--[^\n]*|/\*.*?\*/)", re.DOTALL)
-
+# back to Python through pytz, which the query pod does not install, so a
+# query returning one would fail after it had finished running. The cast to
+# text happens inside DuckDB instead; positional references keep duplicate or
+# quoted column names intact, and a projection does not disturb the query's
+# ORDER BY.
 FETCH_ROWS = (
     "cols = [('CAST(#%d AS VARCHAR)' if 'TIME ZONE' in str(t) else '#%d') % (i + 1) "
     "for i, t in enumerate(rel.types)] if rel is not None else []; "
@@ -48,16 +45,19 @@ FETCH_ROWS = (
 )
 
 # Session settings every DuckDB query runs with. The progress bar goes to
-# stdout even when it is a pipe, once a query passes 2 s: the JSON payload
-# was then the second line, json.loads failed and the old fallback counted
-# 2 rows. The zone pins timestamptz rendering and date arithmetic.
+# stdout even when it is a pipe, once a query passes 2 s, and would push the
+# JSON payload off the last line. The zone pins timestamptz rendering and
+# date arithmetic.
 SESSION_SETTINGS = (
     "conn.execute('SET enable_progress_bar = false'); conn.execute(\"SET TimeZone = 'UTC'\")"
 )
 
 
-class DuckDBExecutor:
+class DuckDBExecutor(PodExecutor):
     """Executes queries via ``kubectl exec`` into the DuckDB pod."""
+
+    pod_component = "duckdb"
+    pod_label = "DuckDB"
 
     def __init__(
         self,
@@ -91,43 +91,6 @@ class DuckDBExecutor:
 
     def engine_name(self) -> str:
         return "duckdb"
-
-    def _kubectl_prefix(self) -> list[str]:
-        """The ``kubectl`` argv prefix with the configured context pinned.
-
-        With no configured context, the process's active cluster target
-        supplies it (``k8s/target.py``), so a current-context switch
-        mid-run does not move the queries.
-        """
-        from lakebench.k8s.target import cli_args
-
-        return ["kubectl", *cli_args("kubectl", self.kube_context)]
-
-    def _discover_pod(self) -> str:
-        """Find the DuckDB pod."""
-        if self._pod:
-            return self._pod
-        result = pinned_kubectl(
-            self.kube_context,
-            [
-                "get",
-                "pods",
-                "-n",
-                self.namespace,
-                "-l",
-                "app.kubernetes.io/component=duckdb",
-                "-o",
-                "jsonpath={.items[0].metadata.name}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        pod = result.stdout.strip()
-        if not pod:
-            raise RuntimeError(f"No DuckDB pod found in namespace {self.namespace}")
-        self._pod = pod
-        return pod
 
     def _build_python_script(self, sql: str, timeout: int | None = None) -> str:
         """Build a Python one-liner that executes SQL via duckdb.
@@ -244,8 +207,7 @@ class DuckDBExecutor:
         output = result.stdout.strip()
         payload = last_json_line(output)
         if payload is None or not isinstance(payload.get("rows"), int):
-            # Never count lines instead: that turned a progress bar into a
-            # 2-row result (invariant 3).
+            # Never count lines instead: a progress bar would read as rows.
             return QueryExecutorResult(
                 sql=sql,
                 engine="duckdb",
@@ -277,13 +239,6 @@ class DuckDBExecutor:
         (with pruning). write_bytes is 0: benchmark queries do not write."""
         return {s: self._io[s] for s in sources if s in self._io}
 
-    def health_check(self) -> bool:
-        try:
-            result = self.execute_query("SELECT 1", timeout=15)
-            return result.success
-        except Exception:
-            return False
-
     def query_rows(self, sql: str, timeout: int = 300) -> list[list[str | None]]:
         """Not supported: financial scoring (the only caller) runs on Trino,
         which config load enforces (duckdb is refused for financial)."""
@@ -296,13 +251,7 @@ class DuckDBExecutor:
     def adapt_query(self, sql: str) -> str:
         """Rewrite Trino SQL to DuckDB dialect."""
         for layer, fq_name in self.table_names.items():
-            # The auxiliary financial tables are keyed by name
-            # ("silver_entities", "gold_alerts"), not by layer. They live in
-            # the bucket of the job that writes them, which the key's prefix
-            # names. Looking the key up directly found no bucket, left the
-            # catalog-qualified name in place, and DuckDB then failed with
-            # 'Catalog "lakehouse" does not exist' (FQ3, FQ4, FQ5, FQ8).
-            bucket = self.s3_buckets.get(layer) or self.s3_buckets.get(layer.split("_", 1)[0], "")
+            bucket = self.s3_buckets.get(layer, "")
             if not bucket or not fq_name:
                 continue
             parts = fq_name.split(".", 1)
@@ -324,26 +273,7 @@ class DuckDBExecutor:
 
         sql = self._rewrite_date_add(sql)
         sql = self._rewrite_date_diff(sql)
-        sql = self._rewrite_cardinality(sql)
         return sql
-
-    @staticmethod
-    def _rewrite_cardinality(sql: str) -> str:
-        """Rewrite Trino ``cardinality(array)`` to DuckDB ``len(array)``.
-
-        DuckDB's ``cardinality`` accepts only MAPs and raises a Binder Error
-        on a list. Every benchmark use is on an array column
-        (``related_txn_ids`` in FQ8); ``len`` returns NULL for a NULL list,
-        as Trino's ``cardinality`` does. A MAP argument would break (``len``
-        rejects it); no benchmark query passes one. String literals, quoted
-        identifiers and comments are left alone.
-        """
-        # The capture group makes re.split keep the literals, quoted
-        # identifiers and comments at odd indices; only code is rewritten.
-        pieces = _SQL_NON_CODE.split(sql)
-        for i in range(0, len(pieces), 2):
-            pieces[i] = re.sub(r"\bcardinality\s*\(", "len(", pieces[i], flags=re.IGNORECASE)
-        return "".join(pieces)
 
     @staticmethod
     def _rewrite_date_diff(sql: str) -> str:
@@ -360,15 +290,8 @@ class DuckDBExecutor:
         unit = m.group(1).upper()
         n = m.group(2)
         start = m.end()
-        depth = 1
-        i = start
-        while i < len(sql) and depth > 0:
-            if sql[i] == "(":
-                depth += 1
-            elif sql[i] == ")":
-                depth -= 1
-            i += 1
-        if depth != 0:
+        i = call_args_end(sql, start)
+        if i is None:
             return sql
         expr = sql[start : i - 1]
         replacement = f"({expr} + INTERVAL {n} {unit})"

@@ -13,6 +13,7 @@ import uuid
 
 from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
 from lakebench.k8s import pinned_kubectl
+from lakebench.modules.query_engines import PodExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,9 @@ _SOURCE_RE = re.compile(r"^lakebench-[0-9a-f]{16}$")
 _IO_LOOKUP_SOURCE = "lakebench-io"
 # Sources per lookup query: keeps the kubectl argv short.
 _IO_LOOKUP_BATCH = 40
+# Bound on each I/O lookup query (one per batch of sources), so a saturated
+# coordinator cannot stretch the post-run I/O collection.
+_IO_LOOKUP_TIMEOUT_SECONDS = 10
 
 
 def _io_number(cell: str, kind: type) -> float | int | None:
@@ -76,8 +80,11 @@ def _is_time_limit_error(stderr: str) -> bool:
     return "exceeded_time_limit" in low or "exceeded maximum time limit" in low
 
 
-class TrinoExecutor:
+class TrinoExecutor(PodExecutor):
     """Executes queries via ``kubectl exec`` into the Trino CLI."""
+
+    pod_component = "trino-coordinator"
+    pod_label = "Trino coordinator"
 
     def __init__(
         self,
@@ -94,43 +101,6 @@ class TrinoExecutor:
 
     def engine_name(self) -> str:
         return "trino"
-
-    def _discover_pod(self) -> str:
-        """Find the Trino coordinator pod."""
-        if self._pod:
-            return self._pod
-        result = pinned_kubectl(
-            self.kube_context,
-            [
-                "get",
-                "pods",
-                "-n",
-                self.namespace,
-                "-l",
-                "app.kubernetes.io/component=trino-coordinator",
-                "-o",
-                "jsonpath={.items[0].metadata.name}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        pod = result.stdout.strip()
-        if not pod:
-            raise RuntimeError(f"No Trino coordinator pod found in namespace {self.namespace}")
-        self._pod = pod
-        return pod
-
-    def _kubectl_prefix(self) -> list[str]:
-        """The ``kubectl`` argv prefix with the configured context pinned.
-
-        With no configured context, the process's active cluster target
-        supplies it (``k8s/target.py``), so a current-context switch
-        mid-run does not move the queries.
-        """
-        from lakebench.k8s.target import cli_args
-
-        return ["kubectl", *cli_args("kubectl", self.kube_context)]
 
     def _exec_cmd(self, pod: str, *trino_args: str) -> list[str]:
         return [
@@ -296,7 +266,7 @@ class TrinoExecutor:
                         "--source",
                         _IO_LOOKUP_SOURCE,
                         "--session",
-                        f"query_max_run_time={server_run_time_limit(_CLEANUP_TIMEOUT_SECONDS)}s",
+                        f"query_max_run_time={server_run_time_limit(_IO_LOOKUP_TIMEOUT_SECONDS)}s",
                         "--output-format",
                         "TSV",
                         "--execute",
@@ -304,7 +274,7 @@ class TrinoExecutor:
                     ),
                     capture_output=True,
                     text=True,
-                    timeout=_CLEANUP_TIMEOUT_SECONDS,
+                    timeout=_IO_LOOKUP_TIMEOUT_SECONDS,
                 )
             except (subprocess.SubprocessError, OSError) as e:
                 logger.warning("Trino I/O lookup failed: %s", e)
@@ -341,9 +311,8 @@ class TrinoExecutor:
             # alerts) on the left of each join and the small, manifest-derived
             # side on the right, the hash build. No reordering and a
             # partitioned join keep that: the UNNEST outputs have no
-            # statistics, and a planner that guessed wrong would build on
-            # hundreds of millions of rows and exceed the cluster's query
-            # memory (a 60-minute scale-20 run did, at 143 GB).
+            # statistics, so a planner free to reorder could build the hash on
+            # hundreds of millions of rows and exceed the query memory limit.
             "--session",
             "join_reordering_strategy=NONE",
             "--session",
@@ -366,13 +335,6 @@ class TrinoExecutor:
         for line in (result.stdout or "").splitlines():
             rows.append([c if c != "" else None for c in line.split("\t")])
         return rows
-
-    def health_check(self) -> bool:
-        try:
-            result = self.execute_query("SELECT 1", timeout=15)
-            return result.success
-        except Exception:
-            return False
 
     def flush_cache(self) -> None:
         """Flush Trino's Iceberg metadata cache."""
