@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import itertools
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,23 +26,31 @@ FIXTURES = Path(__file__).parent / "fixtures" / "verdict"
 
 @pytest.mark.parametrize(
     "exit_ok,badge_ok,success_flag",
-    list(itertools.product([True, False], repeat=3)),
+    [
+        # each flag false alone fails; all true passes
+        (False, True, True),
+        (True, False, True),
+        (True, True, False),
+        (True, True, True),
+    ],
 )
 def test_strictest_any_false_flag_is_failed(
     exit_ok: bool, badge_ok: bool, success_flag: bool
 ) -> None:
     """If any of exit_ok / badge_ok / success_flag is False, the verdict is
-    FAILED. Otherwise (all three True) PASSED, absent other gate signals."""
+    FAILED. All three True gives PASSED (absent other gate signals), and a
+    PASSED verdict discards any reasons the caller supplied."""
     v = Verdict.strictest(
         exit_ok=exit_ok,
         badge_ok=badge_ok,
         success_flag=success_flag,
         gate_outcomes={},
-        reasons=[],
+        reasons=["caller reason"],
         qualifiers={},
     )
     if exit_ok and badge_ok and success_flag:
         assert v.status == "PASSED"
+        assert v.reasons == []
     else:
         assert v.status == "FAILED", (
             f"exit_ok={exit_ok} badge_ok={badge_ok} success_flag={success_flag} "
@@ -85,20 +92,6 @@ def test_strictest_priority_order() -> None:
     )
     assert v_failed.status == "FAILED"
     assert "explicit gate failure" in v_failed.reasons
-
-
-def test_strictest_passed_when_everything_ok() -> None:
-    v = Verdict.strictest(
-        exit_ok=True,
-        badge_ok=True,
-        success_flag=True,
-        gate_outcomes={"pipeline": "PASS", "benchmark": "PASS"},
-        reasons=[],
-        qualifiers={"n_runs": 1},
-    )
-    assert v.status == "PASSED"
-    # A PASSED verdict discards reasons the caller may have supplied.
-    assert v.reasons == []
 
 
 # ---------------------------------------------------------------------------

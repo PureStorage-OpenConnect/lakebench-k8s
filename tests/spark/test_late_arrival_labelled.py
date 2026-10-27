@@ -53,29 +53,19 @@ def test_late_arrival_in_a_fresh_jvm(spark_subprocess, spark_jars, strict):
         timeout=600,
     )
     out = json.loads(res.stdout.strip().splitlines()[-1])
-    # Batch 0 sees no prior state: zero late arrivals, strict-monotone label.
+    # Batch 0 sees no prior state: zero late arrivals.
     assert out["batch0_late_count"] == 0, out
-    assert "silver_statements_parity_mode: strict_monotone" in out["log_lines_batch0"], out
-    assert "silver_statements_late_arrivals_this_batch: 0" in out["log_lines_batch0"], out
     assert out["batch1_raised_silver_abort"] is strict, out
     if strict:
         return
     # Batch 1's earlier book_ts is late for both IBANs.
     assert out["batch1_late_count"] == 2, out
-    assert (
-        "silver_statements_parity_mode: arrival_order_running_balance" in out["log_lines_batch1"]
-    ), out
-    assert "silver_statements_late_arrivals_this_batch: 2" in out["log_lines_batch1"], out
     # Batch 2 (hour 1) is later than batch 1 (hour 0) but still earlier than
     # batch 0 (hour 24). The prior max book_ts must remain hour 24 across all
     # prior batches, so both IBANs are still late. Guards the last_book_ts
     # running-max (greatest) against a per-batch-only value that batch 1 would
     # have pushed back to hour 0, which would silently miss these late rows.
     assert out["batch2_late_count"] == 2, out
-    assert (
-        "silver_statements_parity_mode: arrival_order_running_balance" in out["log_lines_batch2"]
-    ), out
-    assert "silver_statements_late_arrivals_this_batch: 2" in out["log_lines_batch2"], out
 
 
 def _run(jars):

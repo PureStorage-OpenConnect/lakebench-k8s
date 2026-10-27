@@ -172,6 +172,9 @@ def test_thrift_fetches_the_set_and_resolves_nothing(recipe):
     (fetch,) = [c for c in tpl["spec"]["initContainers"] if c["name"] == "lb-deps-fetch"]
     assert f"{m.TOOLS_MOUNT}/lb_deps.py" in fetch["command"] and "fetch" in fetch["command"]
     assert fetch["command"][fetch["command"].index("--url") + 1] == handle.base_url
+    mounted = {v["name"]: v["mountPath"] for v in fetch["volumeMounts"]}
+    assert mounted["lb-deps-tools"] == m.TOOLS_MOUNT
+    assert mounted["lb-deps-manifest"] == m.MANIFEST_MOUNT
     vols = {v["name"]: v for v in tpl["spec"]["volumes"]}
     assert vols["lb-deps-tools"]["configMap"]["name"] == m.tools_configmap_name(
         handle.request_sha256
@@ -193,9 +196,16 @@ def test_duckdb_installs_from_the_set_with_hashes():
     assert "lb_deps.py fetch --group duckdb-ext" in script
     assert f"--trusted-host {host}" in script and "--require-hashes" in script
     assert "--no-index" in script
+    fetch_mounted = {v["name"]: v["mountPath"] for v in init["volumeMounts"]}
+    assert fetch_mounted["lb-deps-tools"] == m.TOOLS_MOUNT
+    assert fetch_mounted["lb-deps-manifest"] == m.MANIFEST_MOUNT
     main = tpl["spec"]["containers"][0]
     assert main["command"] == ["sleep", "infinity"]
     assert {"name": "PYTHONPATH", "value": "/opt/lb-deps/py"} in main["env"]
+    main_mounted = {v["name"]: v["mountPath"] for v in main["volumeMounts"]}
+    # Without these the extensions the init container fetched are invisible.
+    assert main_mounted["duckdb-ext"] == "/tmp/.duckdb/extensions"
+    assert main_mounted["lb-deps-py"] == "/opt/lb-deps/py"
     probe = " ".join(main["startupProbe"]["exec"]["command"])
     assert "autoinstall_known_extensions=false" in probe
     assert "INSTALL" not in yaml.safe_dump(dep)
@@ -240,21 +250,3 @@ def test_the_driver_downloads_into_a_bounded_tmp_and_waits_for_its_set():
     assert f"{urlsplit(mgr.deps.base_url).hostname}:{m.PORT}/ready" in script
     assert mgr.deps.pinset_sha256 in script
     compile(script, "lb-deps-ready", "exec")  # the init container's Python parses
-
-
-def test_consumer_init_containers_mount_what_they_read():
-    for recipe, template in (
-        ("hive-iceberg-spark-thrift", "spark-thrift/sparkapplication.yaml.j2"),
-        ("hive-iceberg-spark-duckdb", "duckdb/deployment.yaml.j2"),
-    ):
-        dep, _ = _render(make_config(recipe=recipe), template)
-        spec = dep["spec"]["template"]["spec"]
-        (fetch,) = [c for c in spec["initContainers"] if c["name"] == "lb-deps-fetch"]
-        mounted = {v["name"]: v["mountPath"] for v in fetch["volumeMounts"]}
-        assert mounted["lb-deps-tools"] == m.TOOLS_MOUNT
-        assert mounted["lb-deps-manifest"] == m.MANIFEST_MOUNT
-        if "duckdb" in recipe:
-            main = {v["name"]: v["mountPath"] for v in spec["containers"][0]["volumeMounts"]}
-            # Without it the extensions the init container fetched are invisible.
-            assert main["duckdb-ext"] == "/tmp/.duckdb/extensions"
-            assert main["lb-deps-py"] == "/opt/lb-deps/py"

@@ -71,9 +71,11 @@ def test_reset_drops_every_table_the_continuous_run_writes(spark, load_script, m
         tables = tuple(bvf.CONTINUOUS_SILVER_TABLES)
         assert set(STREAM_SILVER) <= set(tables)
     else:
-        # Until gold-refresh's first tick, the previous run's alerts and
-        # detection status would read as this run's.
-        tables = STREAM_GOLD
+        # The script's own set, so a gold table added there is populated and
+        # checked too; until gold-refresh's first tick, the previous run's
+        # alerts and detection status would read as this run's.
+        tables = tuple(bvf.CONTINUOUS_GOLD_TABLES)
+        assert set(STREAM_GOLD) <= set(tables)
     _populate(spark, tables)
     bvf._continuous_reset(spark, spark.createDataFrame([("x",)], "msg_id string"))
     left = [t for t in tables if _exists(spark, t)]

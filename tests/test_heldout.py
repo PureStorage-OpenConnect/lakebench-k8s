@@ -150,13 +150,6 @@ def test_missing_file_fails_closed(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def aml_features(monkeypatch, load_script):
-    for mod in ("pyspark", "pyspark.sql", "pyspark.sql.functions"):
-        monkeypatch.setitem(sys.modules, mod, MagicMock())
-    return load_script("aml_features")
-
-
 def test_screening_rows_check_against_the_recovered_seed(held):
     rows = ts.manifest_rows(43, 60) + ts.screening_rows(43, 20)
     assert ds.recover_corpus_seeds(rows) == {43}
@@ -170,9 +163,10 @@ def test_screening_rows_check_against_the_recovered_seed(held):
         ds.recover_corpus_seeds(ts.screening_rows(43, 5))
 
 
-def test_heldout_behind_row_201_found(held, aml_features):
+def test_heldout_behind_row_201_found(held):
     # 250 calibration rows sort first by typology_id, the fixture evaluation
-    # seed's 50 rows after them: a 200-row sample sees only calibration.
+    # seed's 50 rows after them: the verdict still finds the evaluation seed
+    # hiding past row 200 and refuses the manifest.
     cal = ts.manifest_rows(43, 250, typologies=(("GATHER_SCATTER", 0),))
     ev = ts.manifest_rows(EV, 50, typologies=(("STACK", 3),))
     rows = cal + ev
@@ -184,9 +178,6 @@ def test_heldout_behind_row_201_found(held, aml_features):
         2,
         False,
     )
-    # The reverted behaviour: recovery capped at the first 200 sorted rows.
-    capped = ds.corpus_verdict(iter(sorted(rows)[:200]), claimed=43, spent=[42])
-    assert capped.verdict == "ok"
 
 
 def test_corpus_verdict_roles_and_claim(held):
@@ -477,15 +468,37 @@ def test_spent_append_checked_under_the_floor_salt(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_planted_token_fails(held):
-    texts = {f"m/k{i}": f"x = {tok}\n" for i, tok in enumerate(_spellings(EV))}
-    texts["m/rb"] = f'{{"seed": {RB}}}'
-    texts["m/word"] = f"word{EV}"
-    texts["m/clean"] = f"seed = 43; big = {EV + 1}"
-    problems = ds.absence_problems(texts, held, exclude=[])
-    named = {p.split(":")[0] for p in problems}
-    assert named == {"m/k0", "m/k1", "m/k2", "m/k3", "m/rb", "m/word"}
-    assert all(_no_seed_in(p) for p in problems)
+def test_absence_finds_planted_embedded_and_grouped_seeds(held):
+    """Every spelling of a held-out seed is flagged by key, never with the
+    seed in the text; near misses and a look-spent seed stay clean."""
+    # Planted tokens: each _spellings form, a JSON seed, and a word-glued seed.
+    planted = {f"m/k{i}": f"x = {tok}\n" for i, tok in enumerate(_spellings(EV))}
+    planted["m/rb"] = f'{{"seed": {RB}}}'
+    planted["m/word"] = f"word{EV}"
+    planted["m/clean"] = f"seed = 43; big = {EV + 1}"  # not a held-out seed
+    flagged_keys = {f"m/k{i}" for i in range(len(_spellings(EV)))} | {"m/rb", "m/word"}
+    # Embedded and comma/space-grouped spellings.
+    embedded = {
+        "m/e0": f"20261001{EV}1",  # inside a longer digit run
+        "m/e1": f"0xff{EV}",  # decimal digits after a hex prefix
+        "m/e2": f"{EV:,}",  # comma-grouped
+        "m/e3": f"{EV:,}".replace(",", " "),  # space-grouped
+        "m/e4": f"id={EV}{EV}",
+    }
+
+    cases = [
+        # (texts, keys that must be flagged, why)
+        (planted, flagged_keys, "planted tokens"),
+        (embedded, set(embedded), "embedded and grouped spellings"),
+    ]
+    for texts, expected_keys, why in cases:
+        problems = ds.absence_problems(texts, held, exclude=[])
+        assert {p.split(":")[0] for p in problems} == expected_keys, (why, problems)
+        assert all(_no_seed_in(p) for p in problems), why
+
+    # Near misses stay clean.
+    clean = {"m/a": f"{EV + 1:,}", "m/b": f"1{EV + 1}2"}
+    assert ds.absence_problems(clean, held, exclude=[]) == []
     # A seed spent by a recorded look is no longer held out.
     assert ds.absence_problems({"m/k": str(EV)}, held, exclude=[EV]) == []
 
@@ -700,23 +713,6 @@ def test_ledger_message_names_an_unspent_heldout_seed_by_role(held, monkeypatch,
 # ---------------------------------------------------------------------------
 # Absence check over embedded and grouped spellings
 # ---------------------------------------------------------------------------
-
-
-def test_absence_finds_embedded_and_grouped_seeds(held):
-    shapes = [
-        f"20261001{EV}1",  # inside a longer digit run
-        f"0xff{EV}",  # decimal digits after a hex prefix
-        f"{EV:,}",  # comma-grouped
-        f"{EV:,}".replace(",", " "),  # space-grouped
-        f"id={EV}{EV}",
-    ]
-    texts = {f"m/{i}": t for i, t in enumerate(shapes)}
-    problems = ds.absence_problems(texts, held, exclude=[])
-    assert {p.split(":")[0] for p in problems} == set(texts), problems
-    assert all(_no_seed_in(p) for p in problems)
-    # Near misses stay clean.
-    clean = {"m/a": f"{EV + 1:,}", "m/b": f"1{EV + 1}2"}
-    assert ds.absence_problems(clean, held, exclude=[]) == []
 
 
 # ---------------------------------------------------------------------------

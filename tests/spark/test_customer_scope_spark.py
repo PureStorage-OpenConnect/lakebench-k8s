@@ -335,11 +335,14 @@ def test_missing_customer_master_is_a_skip(spark):
 
 
 @pytest.mark.parametrize("rule", CUSTOMER_ONLY + GRAPH)
-def test_rule_alerts_have_the_alert_columns(alerts, rule):
-    """Every rule's alert frame has exactly the ALERT_COLUMNS names
-    and types, in order (gold_finalize's INSERT is positional), and the
-    fixture gives every rule at least one alert, so the check is not over
-    an empty frame alone."""
+def test_rule_alerts_have_the_alert_columns_and_base_code_first(alerts, rule):
+    """Every rule's alert frame has exactly the ALERT_COLUMNS names and types,
+    in order (gold_finalize's INSERT is positional); the fixture gives every
+    rule at least one alert; and every alert carries reason codes with its
+    rule's base code first, all from that rule's vocabulary (the per-code union
+    identity rests on the base code; without _alert_frame's guard W8, which has
+    no conditional code, would write empty lists)."""
+    from aml_reason_codes import BASE_CODE, REASON_CODES
     from detection_rules import ALERT_COLUMNS
     from pyspark.sql.types import _parse_datatype_string
 
@@ -348,19 +351,21 @@ def test_rule_alerts_have_the_alert_columns(alerts, rule):
     want = [(name, _parse_datatype_string(ddl)) for name, ddl, _ in ALERT_COLUMNS]
     assert got == want, rule
     assert rows, rule
+    for r in rows:
+        codes = list(r["reason_codes"])
+        assert codes and codes[0] == BASE_CODE[rule], (rule, codes)
+        assert set(codes) <= set(REASON_CODES[rule]), (rule, codes)
 
 
-def test_shared_screening_base_gives_the_same_alerts(spark, monkeypatch):
-    """W5 and W6 build their screening input once when the driver
-    passes it as screen_base. Their alerts are the same rows either way, and
-    with the base _screen_txns runs once for both instead of once each."""
+def test_shared_screening_base_gives_the_same_alerts(spark):
+    """W5 and W6 produce the same alert rows whether they build their
+    screening input each or share one screen_base from the driver. (That the
+    base is screened once for both is covered by
+    test_detection_driver_iceberg_spark's screen-base check.)"""
     import detection_rules as dr
     from common import frame_fingerprint
 
     txns, entities = _silver(spark)
-    calls = []
-    real = dr._screen_txns
-    monkeypatch.setattr(dr, "_screen_txns", lambda *a, **k: calls.append(1) or real(*a, **k))
 
     def fp(df):
         cols = [c for c in df.columns if c not in ("alert_id", "detected_ts")]
@@ -370,33 +375,14 @@ def test_shared_screening_base_gives_the_same_alerts(spark, monkeypatch):
         r: fp(dr.get_rule(r)(txns, silver_entities=entities, run_id="r"))
         for r in ("W5_sanctions_match", "W6_pep_counterparty")
     }
-    assert len(calls) == 2
-    calls.clear()
     base = dr.screen_base_frame(txns, entities).persist()
     shared = {
         r: fp(dr.get_rule(r)(txns, silver_entities=entities, run_id="r", screen_base=base))
         for r in ("W5_sanctions_match", "W6_pep_counterparty")
     }
     base.unpersist()
-    assert len(calls) == 1
     assert shared == alone
     assert all(f[0] > 0 for f in alone.values()), alone
-
-
-@pytest.mark.parametrize("rule", CUSTOMER_ONLY + GRAPH)
-def test_every_alert_carries_its_base_code_first(alerts, rule):
-    """Every alert of every rule carries reason codes, its rule's base
-    code first, all from the rule's vocabulary (the per-code union identity
-    rests on the base code; without _alert_frame's guard W8, which has no
-    conditional code, would write empty lists)."""
-    from aml_reason_codes import BASE_CODE, REASON_CODES
-
-    rows = alerts[rule][1]
-    assert rows, rule
-    for r in rows:
-        codes = list(r["reason_codes"])
-        assert codes and codes[0] == BASE_CODE[rule], (rule, codes)
-        assert set(codes) <= set(REASON_CODES[rule]), (rule, codes)
 
 
 def test_conditional_codes_reach_real_rule_output(spark):

@@ -79,6 +79,10 @@ class TestSeriesHash:
         assert cd.corpus_series_sha256(markers) is None
 
     def test_listing_digest_sees_a_same_size_rewrite(self):
+        # An empty scope has no digest; a populated one has a sha256.
+        assert cd.listing_digest(bucket(data=()), BUCKET, SCOPE) is None
+        assert cd.is_sha256_hex(cd.listing_digest(bucket(), BUCKET, SCOPE))
+        # A same-size rewrite (a changed etag) changes the digest.
         boto = bucket()
         before = cd.listing_digest(boto, BUCKET, "customer/interactions")
         boto.etags[f"{SCOPE}part-0.parquet"] = "different"
@@ -130,32 +134,41 @@ class TestCorpusBlock:
         assert "scale" in at10["warnings"][0] and "follows the corpus" in at10["warnings"][0]
         assert at10["declared"]["scale"] == 10
 
-    def test_marker_disagreement_is_corpus_problem(self):
-        obs, _ = observe([marker(node=0, h=H1), marker(node=1, h=H2)], series())
-        corpus = corpus_of(obs=obs)
-        assert corpus["id_v2"] is None and corpus["id_v2_unavailable"] == ci.NOT_ONE_CORPUS
-        assert any("different arguments (cycle 0)" in p for p in corpus["problems"])
+    def _disagreeing_markers(self):
+        return corpus_of(obs=observe([marker(node=0, h=H1), marker(node=1, h=H2)], series())[0])
 
-    def test_missing_node_is_corpus_problem(self):
-        obs, _ = observe([marker(node=0, total=3), marker(node=2, total=3)], series())
-        corpus = corpus_of(obs=obs)
-        assert "cycle 0 nodes [1] have no corpus marker" in corpus["problems"]
-        assert corpus["id_v2"] is None
+    def _missing_node(self):
+        return corpus_of(
+            obs=observe([marker(node=0, total=3), marker(node=2, total=3)], series())[0]
+        )
+
+    def _foreign_model(self):
+        obs, _ = observe(two_nodes(model_version="datagen-v2-rs-0.2", schema="financial"), series())
+        return corpus_of(_cfg("financial"), obs=obs)
+
+    def _extra_cycle(self):
+        markers = [marker(0, 0, total=1, cycles=1), marker(1, 0, total=1, cycles=1)]
+        return corpus_of(obs=observe(markers, series())[0])
+
+    def test_marker_problems_name_the_fault(self):
+        # (label, corpus, problem substring, whether this fault withholds id v2)
+        for label, corpus, needle, no_v2 in [
+            ("disagreement", self._disagreeing_markers(), "different arguments (cycle 0)", True),
+            ("missing-node", self._missing_node(), "cycle 0 nodes [1] have no corpus marker", True),
+            ("foreign-model", self._foreign_model(), "model 'datagen-v2-rs-0.2'", False),
+            ("extra-cycle", self._extra_cycle(), "beyond the corpus's 1 cycles", True),
+        ]:
+            assert any(needle in p for p in corpus["problems"]), (label, corpus["problems"])
+            if no_v2:
+                assert corpus["id_v2"] is None, label
+        # The disagreement names why v2 is unavailable.
+        assert self._disagreeing_markers()["id_v2_unavailable"] == ci.NOT_ONE_CORPUS
 
     def test_cycles_change_corpus_id_v2(self):
         one, _ = observe(two_nodes(), series())
         three_markers = [marker(c, n, cycles=3) for c in range(3) for n in range(2)]
         three, _ = observe(three_markers, series(cycles_total=3))
         assert corpus_of(obs=one)["id_v2"] != corpus_of(obs=three)["id_v2"]
-
-    def test_model_version_differs_from_the_workload(self):
-        cfg = _cfg("financial")
-        obs, _ = observe(
-            two_nodes(model_version="datagen-v2-rs-0.2", schema="financial"),
-            series(),
-        )
-        corpus = corpus_of(cfg, obs=obs)
-        assert any("model 'datagen-v2-rs-0.2'" in p for p in corpus["problems"])
 
 
 class TestLineage:
@@ -298,12 +311,6 @@ class TestMarkerReadLimits:
         ms = cd.read_corpus_markers(bucket(two_nodes()), BUCKET, SCOPE)
         assert "more than 1" in ms.error and not ms.markers
 
-    def test_extra_cycle_is_a_problem(self):
-        markers = [marker(0, 0, total=1, cycles=1), marker(1, 0, total=1, cycles=1)]
-        obs, _ = observe(markers, series())
-        problems = corpus_of(obs=obs)["problems"]
-        assert any("beyond the corpus's 1 cycles" in p for p in problems)
-
 
 class TestLineageFromSeries:
     """series.json lends lineage only when it describes the same generation."""
@@ -384,8 +391,3 @@ class TestRecordObservation:
         assert obs["bronze_listing_sha256"] is None
         assert obs["markers"]["error"]
         assert run.to_dict()["experiment"]["corpus"]["id_v2"] is None
-
-
-def test_listing_digest_of_an_empty_scope_is_none():
-    assert cd.listing_digest(bucket(data=()), BUCKET, SCOPE) is None
-    assert cd.is_sha256_hex(cd.listing_digest(bucket(), BUCKET, SCOPE))

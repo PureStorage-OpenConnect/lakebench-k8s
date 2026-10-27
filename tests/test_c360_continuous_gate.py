@@ -4,15 +4,22 @@
 from lakebench.cli._sustained import _c360_continuous_gate_problems
 
 
-def test_zero_rows_fails():
-    probs = _c360_continuous_gate_problems({"bronze-ingest": 10, "silver-stream": 0})
-    assert len(probs) == 1 and "silver-stream processed 0 rows" in probs[0]
-
-
-def test_missing_logs_fail():
-    assert _c360_continuous_gate_problems({"bronze-ingest": None, "silver-stream": 5})
-
-
-def test_data_moving_passes_and_absent_stage_is_ignored():
-    assert _c360_continuous_gate_problems({"bronze-ingest": 10, "silver-stream": 7}) == []
-    assert _c360_continuous_gate_problems({"silver-stream": 7}) == []
+def test_c360_continuous_gate_problems():
+    cases = [
+        # a stage that processed zero rows fails, naming it
+        ("zero-rows", {"bronze-ingest": 10, "silver-stream": 0}, "silver-stream processed 0 rows"),
+        # a stage with missing logs fails
+        ("missing-logs", {"bronze-ingest": None, "silver-stream": 5}, True),
+        # data moving everywhere passes
+        ("data-moving", {"bronze-ingest": 10, "silver-stream": 7}, None),
+        # an absent stage is ignored
+        ("absent-stage", {"silver-stream": 7}, None),
+    ]
+    for label, stages, expect in cases:
+        probs = _c360_continuous_gate_problems(stages)
+        if expect is None:
+            assert probs == [], label
+        elif expect is True:
+            assert probs, label
+        else:
+            assert len(probs) == 1 and expect in probs[0], label

@@ -633,10 +633,6 @@ def _seed_leftover_spark_crd(rec):
     rec.add_crd("sparkapplications", "sparkoperator.k8s.io", "SparkApplication")
 
 
-def _seed_observability_only(rec):
-    _seed_observability(rec)
-
-
 def _seed_partial_stackable(rec):
     rec.add_namespace("stackable")
     for op in STACKABLE_OPS[:3]:

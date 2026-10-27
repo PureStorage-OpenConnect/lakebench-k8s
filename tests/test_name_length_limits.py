@@ -33,8 +33,7 @@ class TestHiveLimit:
         _cfg(_exact(23), "hive-iceberg-spark-trino")
         with pytest.raises(ValidationError, match="it is 24"):
             _cfg(_exact(24), "hive-iceberg-spark-trino")
-
-    def test_default_catalog_is_hive(self):
+        # The default catalog is hive, so the same limit bites with no recipe.
         with pytest.raises(ValidationError):
             _cfg(_exact(24))
 

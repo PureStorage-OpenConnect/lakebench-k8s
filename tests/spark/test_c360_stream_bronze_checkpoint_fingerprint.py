@@ -157,26 +157,22 @@ def test_delta_reset_raises_silver_abort(monkeypatch, saved_version, lineage):
         _guard(monkeypatch, fs, "delta", lineage)
 
 
-def test_no_snapshot_available_fails_open_no_sidecar_written(monkeypatch):
-    """Bronze not created yet: a sidecar with an unknown value would poison
-    the next start."""
+def test_unavailable_snapshot_fails_open_no_sidecar_written(monkeypatch):
+    """Bronze not created yet, or a transient catalog failure: the guard fails
+    open and writes no sidecar (an unknown value would poison the next start;
+    only a reset raises)."""
+    # Bronze not created yet.
     fs = _FakeFS()
-
     _guard(monkeypatch, fs, "iceberg", None)
-
     assert fs.writes == 0
 
-
-def test_snapshot_lookup_error_does_not_kill_the_stream(monkeypatch):
-    """A transient catalog failure must not raise; only a reset does."""
-    fs = _FakeFS()
-
+    # A transient catalog failure must not raise.
     class _Boom:
         def sql(self, stmt):
             raise RuntimeError("catalog unreachable: connection reset")
 
+    fs = _FakeFS()
     _guard(monkeypatch, fs, "iceberg", None, spark=_Boom())
-
     assert fs.writes == 0
 
 

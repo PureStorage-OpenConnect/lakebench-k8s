@@ -94,23 +94,19 @@ def _bronze(spark):
     )
 
 
-def test_build_accounts_one_row_per_iban(spark):
-    from silver_build_financial import build_accounts
-
-    accts = build_accounts(_bronze(spark), kyc=None).collect()
-    ibans = [r["iban"] for r in accts]
-    # Every iban present exactly once.
-    assert sorted(ibans) == sorted(set(ibans))
-    assert set(ibans) == {"US01", "US02", "GB02", "GB03"}
-
-
-def test_build_accounts_row_fields_from_single_side(spark):
-    """For the shared iban US01, the winning row's (holder_entity_id,
-    bank_bic, opened_date) must be one whole observed triple, not a
-    per-column blend across sides.
-    """
+def test_build_accounts_one_row_per_iban_from_a_single_side(spark):
+    """Every iban appears exactly once, and for the shared iban US01 the
+    winning row's (holder_entity_id, bank_bic, opened_date) is one whole
+    observed triple, not a per-column blend across sides."""
     from pyspark.sql.functions import lit
     from silver_build_financial import _entity_id_from, build_accounts
+
+    rows = build_accounts(_bronze(spark), kyc=None).collect()
+
+    # Every iban present exactly once.
+    ibans = [r["iban"] for r in rows]
+    assert sorted(ibans) == sorted(set(ibans))
+    assert set(ibans) == {"US01", "US02", "GB02", "GB03"}
 
     def holder(name, ctry, city, lei):
         return (
@@ -123,9 +119,7 @@ def test_build_accounts_row_fields_from_single_side(spark):
     bob = holder("BOB", "GB", "LONDON", "LEIBOB")
     assert alice != bob
 
-    accts = {r["iban"]: r for r in build_accounts(_bronze(spark), kyc=None).collect()}
-    us01 = accts["US01"]
-
+    us01 = {r["iban"]: r for r in rows}["US01"]
     # Side A (dbtr): ALICE, Z_BANK1, 2024-03-01. Side B (cdtr): BOB, A_BANK1, 2024-04-01.
     observed = {
         (alice, "Z_BANK1", dt.date(2024, 3, 1)),

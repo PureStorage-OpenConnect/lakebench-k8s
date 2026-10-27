@@ -60,6 +60,10 @@ def _requested(rec: dict, strategy: str) -> None:
         # An older script logged no strategy: the request cannot be judged.
         (None, None, False),
         ("two_phase_agg", None, False),
+        # The script saw the override but no request was recorded: derive()
+        # reads the request back from the override source, so requested ==
+        # effective and nothing is labelled.
+        (None, ("two_phase_agg", "override"), False),
     ],
     ids=[
         "auto-ran-incremental",
@@ -69,6 +73,7 @@ def _requested(rec: dict, strategy: str) -> None:
         "auto-simple-agg",
         "unrecorded-strategy",
         "request-unrecorded-effective",
+        "override-without-recorded-request",
     ],
 )
 def test_gold_strategy_label(requested, reported, labelled) -> None:
@@ -87,6 +92,10 @@ def test_gold_strategy_label(requested, reported, labelled) -> None:
             entry = re_.derive(_metrics(rec))["gold_strategy"]
             assert entry["effective"] == re_.NOT_RECORDED
             assert re_.mismatches({"gold_strategy": entry}) == []
+        elif requested is None and reported[1] == "override":
+            # The override source lets derive() recover the request.
+            entry = re_.derive(_metrics(rec))["gold_strategy"]
+            assert entry["requested"] == entry["effective"] == reported[0]
         return
     label = v.qualifiers["requested_effective"]
     assert list(label) == ["gold_strategy"]
@@ -135,22 +144,27 @@ def test_configured_trickle_is_requested_as_set() -> None:
     assert re_.mismatches({"trickle": entry}) == []
 
 
-def test_executor_override_run_with_fewer_is_labelled() -> None:
+@pytest.mark.parametrize(
+    ("override", "observed", "labelled"),
+    [
+        # ran with fewer than asked: labelled
+        (8, 4, True),
+        # a replaced executor reads one more than asked (the observed count
+        # counts every pod the operator listed): not a mismatch
+        (8, 9, False),
+    ],
+)
+def test_executor_override_labelled_only_when_run_with_fewer(override, observed, labelled) -> None:
     rec = sr.load_record(C360_BATCH)
     entry = rec["experiment"]["limits"]["executors"][1]
-    entry.update(override=8, observed=4)
+    entry.update(override=override, observed=observed)
     v = V.verdict_from_record(rec)
-    key = f"executors[{entry['job_type']}]"
     assert v.status == "PASSED"
-    assert v.qualifiers["requested_effective"][key]["requested"] == 8
-
-
-def test_executor_replaced_mid_job_is_not_labelled() -> None:
-    """The observed count counts every executor pod the operator listed, so
-    a replaced executor reads one more than asked for: not a mismatch."""
-    rec = sr.load_record(C360_BATCH)
-    rec["experiment"]["limits"]["executors"][1].update(override=8, observed=9)
-    assert "requested_effective" not in V.verdict_from_record(rec).qualifiers
+    key = f"executors[{entry['job_type']}]"
+    if labelled:
+        assert v.qualifiers["requested_effective"][key]["requested"] == override
+    else:
+        assert "requested_effective" not in v.qualifiers
 
 
 def test_executor_profile_request_is_its_count() -> None:
@@ -284,13 +298,6 @@ def test_snapshot_records_the_configured_gold_strategy(value, want) -> None:
         **({"spark": spark} if spark else {}),
     )
     assert build_config_snapshot(cfg)["requested"] == {"gold_strategy": want}
-
-
-def test_override_seen_by_the_script_without_a_recorded_request() -> None:
-    rec = sr.load_record(C360_BATCH)
-    _gold_reports(rec, "two_phase_agg", "override")
-    entry = re_.derive(_metrics(rec))["gold_strategy"]
-    assert (entry["requested"], entry["effective"]) == ("two_phase_agg", "two_phase_agg")
 
 
 @pytest.mark.parametrize("schema", ["financial", None])

@@ -49,21 +49,17 @@ def _continuous_pb(**kw) -> PipelineBenchmark:
 
 
 class TestContinuousFreshnessHeadline:
-    def test_pipeline_score_prints_the_scored_freshness(self):
+    def test_pipeline_score_freshness_headline(self):
         from lakebench.cli._sustained import pipeline_score_freshness
 
-        pb = _continuous_pb()
-        pb.data_freshness_seconds = 71.0
-        pb.corpus_drained = False
-        assert pb.query_time_event_age_seconds > 5e7
-        assert pipeline_score_freshness(pb) == "71.0s"
-
-    def test_pipeline_score_without_a_scored_freshness_is_na(self):
-        from lakebench.cli._sustained import pipeline_score_freshness
-
-        pb = _continuous_pb()
-        pb.data_freshness_seconds = None
-        assert pipeline_score_freshness(pb) == "n/a"
+        # A scored freshness prints in seconds; a missing one is n/a. Either
+        # way the (huge) event age is never what the headline shows.
+        for freshness, expected in [(71.0, "71.0s"), (None, "n/a")]:
+            pb = _continuous_pb()
+            pb.data_freshness_seconds = freshness
+            pb.corpus_drained = False
+            assert pb.query_time_event_age_seconds > 5e7
+            assert pipeline_score_freshness(pb) == expected, freshness
 
     def test_event_age_is_a_diagnostic_never_a_score(self):
         """Event age (wall clock minus synthetic event dates) is kept under

@@ -69,13 +69,10 @@ def test_query_memory_sized_from_workers(scale):
     assert max_memory <= workers * (w_heap - w_headroom)
     # Never below the cap Trino's defaults gave: min(20GB, workers x 30% heap).
     assert max_memory > min(_TRINO_DEFAULT_MAX_MEMORY, workers * 0.3 * w_heap)
-
-
-def test_scale_100_lifts_the_20gb_default():
-    """The shape that failed live: 4 x 48Gi workers."""
-    cm = configmap(engine(**_scale_overrides(100)).context)
-    props = parse_props(cm["config.properties.coordinator"])
-    assert size_bytes(props["query.max-memory"]) > 2.5 * _TRINO_DEFAULT_MAX_MEMORY
+    if scale == 100:
+        # The shape that failed live (4 x 48Gi workers) lifts the cap well
+        # past Trino's 20GB default.
+        assert max_memory > 2.5 * _TRINO_DEFAULT_MAX_MEMORY
 
 
 def test_explicit_worker_count_drives_cluster_cap():

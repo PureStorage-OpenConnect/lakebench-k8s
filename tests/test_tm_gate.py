@@ -8,6 +8,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from lakebench.metrics import JobMetrics, MetricsCollector, MetricsStorage, PipelineMetrics
 from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_ops, tm_gate_problems
 
@@ -111,26 +113,42 @@ def test_status_lines_parse_and_last_wins():
     }
 
 
-def test_continuous_window_without_the_manifest_is_not_run():
-    from lakebench.metrics.tm_ops import parse_tm_status, tm_verdict
+_WAITING_ALL_WINDOW = "".join(
+    f"[tm-status] status=waiting cycle={c} reason=no manifest yet\n" for c in range(1, 9)
+)
+_WAITING_THEN_RAN = (
+    "[tm-status] status=waiting cycle=1 reason=no manifest yet\n"
+    "[tm-status] status=ran cycle=1 reason=ok\n"
+    "[tm-invariant] reconciliation: status=pass cycle=1 detail=a\n"
+)
+_INTERRUPTED_MID_CYCLE_2 = (
+    "[tm-status] status=started cycle=1 reason=writing the TM tables\n"
+    "[tm-status] status=ran cycle=1 reason=ok\n"
+    "[tm-invariant] reconciliation: status=pass cycle=1 detail=a\n"
+    "[tm-status] status=started cycle=2 reason=writing the TM tables\n"
+)
 
-    logs = "".join(
-        f"[tm-status] status=waiting cycle={c} reason=no manifest yet\n" for c in range(1, 9)
-    )
-    v = tm_verdict({}, parse_tm_status(logs), continuous=True)
-    assert v["status"] == "not_run" and "window ended" in v["reason"] and not v["problems"]
 
-
-def test_continuous_waiting_then_running_passes():
+@pytest.mark.parametrize(
+    ("logs", "status", "reason_contains"),
+    [
+        # the manifest never arrived in the window: not run, window ended
+        (_WAITING_ALL_WINDOW, "not_run", "window ended"),
+        # waiting then running in the same cycle passes
+        (_WAITING_THEN_RAN, "pass", ""),
+        # a cycle that started but never ran: unknown, naming the cycle
+        (_INTERRUPTED_MID_CYCLE_2, "unknown", "[2]"),
+    ],
+    ids=["no-manifest", "waiting-then-ran", "interrupted-mid-cycle"],
+)
+def test_continuous_tm_verdict(logs, status, reason_contains):
     from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_status, tm_verdict
 
-    logs = (
-        "[tm-status] status=waiting cycle=1 reason=no manifest yet\n"
-        "[tm-status] status=ran cycle=1 reason=ok\n"
-        "[tm-invariant] reconciliation: status=pass cycle=1 detail=a\n"
-    )
     v = tm_verdict(parse_tm_invariants(logs), parse_tm_status(logs), continuous=True)
-    assert v["status"] == "pass"
+    assert v["status"] == status, logs
+    assert not v["problems"], logs
+    if reason_contains:
+        assert reason_contains in v["reason"], logs
 
 
 def test_continuous_section_renders_from_the_run_record():

@@ -188,13 +188,17 @@ def test_held_out_seed_is_refused_and_never_printed(monkeypatch, mutate, role) -
     with pytest.raises(scrub.ScrubError, match=f"{role} seed") as exc:
         scrub.scrub_record(rec)
     assert str(seed) not in str(exc.value)
+    # A stored seed is named by its path, not its value.
+    if rec.get("experiment", {}).get("corpus", {}).get("seed") == seed:
+        assert ".experiment.corpus.seed" in str(exc.value)
     problems = scrub.check_clean(rec)
     assert problems
     assert not any(str(seed)[:5] in p for p in problems)
-    try:
-        scrub.scrub_text("x", rec)
-    except scrub.ScrubError as e:
-        assert str(seed) not in str(e)
+    # A driver-log line carrying the seed is refused by the text scrub, and
+    # the refusal never prints the seed.
+    with pytest.raises(scrub.ScrubError) as text_exc:
+        scrub.scrub_text(f"gen seed={seed}", rec)
+    assert str(seed) not in str(text_exc.value)
 
 
 def test_seed_in_a_bucket_name_refuses_text_scrub(monkeypatch) -> None:
@@ -205,15 +209,6 @@ def test_seed_in_a_bucket_name_refuses_text_scrub(monkeypatch) -> None:
     with pytest.raises(scrub.ScrubError) as exc:
         scrub.scrub_text("x", rec)
     assert str(SEED) not in str(exc.value)
-
-
-def test_stored_seed_is_named_by_path_not_value(monkeypatch) -> None:
-    rec = sr.load_record("1320bd")
-    seed = rec["experiment"]["corpus"]["seed"]
-    _stub_heldout(monkeypatch, seed, "evaluation")
-    with pytest.raises(scrub.ScrubError) as exc:
-        scrub.scrub_record(rec)
-    assert ".experiment.corpus.seed" in str(exc.value)
 
 
 def test_seed_in_plain_text_is_refused(monkeypatch) -> None:

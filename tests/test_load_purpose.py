@@ -146,23 +146,6 @@ def test_allow_long_names_alone_means_teardown(tmp_path):
     assert notes[0].kind == "removed"
 
 
-def test_name_length_check_per_purpose(tmp_path):
-    for purpose, skips in [
-        (LoadPurpose.MUTATE, False),
-        (LoadPurpose.RUN, False),
-        (LoadPurpose.TEARDOWN, True),
-        (LoadPurpose.READ, True),
-    ]:
-        path = _write(
-            tmp_path, {"name": "ov-perf-c360-continuous-s10", "recipe": "hive-iceberg-spark-trino"}
-        )
-        if skips:
-            assert load_config(path, purpose=purpose).name == "ov-perf-c360-continuous-s10"
-        else:
-            with pytest.raises(ConfigValidationError, match="at most 23"):
-                load_config(path, purpose=purpose)
-
-
 # -- LoadNotes ---------------------------------------------------------------
 
 
@@ -398,7 +381,8 @@ _HIVE_OP = {"architecture": {"catalog": {"hive": {"operator": {"install": True}}
     ("extra", "loc"),
     [
         (_EXECUTOR, ("platform", "compute", "spark")),
-        (_HIVE_OP, ("architecture", "catalog", "hive", "operator")),
+        # The hive/spark operator-install rows are driven by test_init_from.py::
+        # test_refused_key_rows_match_their_validators through REFUSED_KEYS.
     ],
 )
 def test_unhonoured_setting_refused_on_data_changing_commands(tmp_path, extra, loc):

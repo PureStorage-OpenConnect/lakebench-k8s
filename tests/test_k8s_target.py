@@ -76,12 +76,6 @@ def _config_file(tmp_path: Path, context: str = "A") -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_prefers_the_config_context(kubeconfig) -> None:
-    cfg = MagicMock()
-    cfg.platform.kubernetes.context = "A"
-    assert ClusterTarget.resolve(cfg).context == "A"
-
-
 def test_activate_second_context_raises(kubeconfig) -> None:
     from kubernetes import client
 
@@ -111,7 +105,8 @@ def test_unknown_context_refused_not_replaced_by_in_cluster(kubeconfig, monkeypa
 
 
 def test_in_cluster_only_without_a_kubeconfig(tmp_path, monkeypatch) -> None:
-    point_kubeconfig_at(monkeypatch, tmp_path / "missing")
+    missing = tmp_path / "missing"
+    point_kubeconfig_at(monkeypatch, missing)
     monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
     with pytest.raises(ConfigException):
         ClusterTarget.resolve(None)
@@ -122,10 +117,11 @@ def test_in_cluster_only_without_a_kubeconfig(tmp_path, monkeypatch) -> None:
     # A named context never falls back to in-cluster credentials.
     with pytest.raises(ConfigException):
         ClusterTarget.resolve(context="A")
-
-
-def test_kubeconfig_wins_over_in_cluster(kubeconfig, monkeypatch) -> None:
-    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.1.50")
+    # In-cluster is the last resort: a readable kubeconfig wins over it even
+    # when the in-cluster host is set.
+    path = tmp_path / "kubeconfig"
+    write_kubeconfig(path, {"A": SERVER_A, "B": SERVER_B}, current="B")
+    point_kubeconfig_at(monkeypatch, path)
     assert ClusterTarget.resolve(None).context == "B"
 
 
@@ -177,17 +173,25 @@ def test_cli_args_pins_the_current_context_on_a_first_tool_call(kubeconfig) -> N
         ClusterTarget.resolve(context="A").activate()
 
 
-def test_current_context_follows_kubectl_first_file_rule(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("second_current", ["admin", "", "nowhere"])
+def test_current_context_follows_kubectl_first_file_rule(
+    tmp_path, monkeypatch, second_current
+) -> None:
     """kubectl takes current-context from the first file that sets it; the
-    Python client's merger takes the last. Resolution follows kubectl."""
+    Python client's merger takes the last. Resolution follows kubectl, whether
+    the later file names another context, nothing, or a dangling one."""
     first = tmp_path / "first"
     second = tmp_path / "second"
     write_kubeconfig(first, {"A": SERVER_A}, current="A")
     write_kubeconfig(second, {"admin": SERVER_B}, current="admin")
+    if second_current != "admin":
+        doc = yaml.safe_load(second.read_text())
+        doc["current-context"] = second_current
+        second.write_text(yaml.safe_dump(doc))
     point_kubeconfig_at(monkeypatch, f"{first}{os.pathsep}{second}")
-    assert ClusterTarget.resolve(None).context == "A"
+    assert ClusterTarget.resolve(None).context == "A", second_current
     t = ClusterTarget.resolve(None).activate()
-    assert t.api_server == SERVER_A
+    assert t.api_server == SERVER_A, second_current
 
 
 def test_activate_freezes_the_ca_fingerprint(tmp_path, monkeypatch) -> None:
@@ -276,21 +280,6 @@ def test_cli_args_refuses_when_the_pinned_ca_changed(tmp_path, monkeypatch) -> N
         cli_args("kubectl", None)
 
 
-@pytest.mark.parametrize("later", ["", "nowhere"])
-def test_first_file_current_context_wins_over_a_later_empty_or_dangling_one(
-    tmp_path, monkeypatch, later
-) -> None:
-    first = tmp_path / "first"
-    second = tmp_path / "second"
-    write_kubeconfig(first, {"A": SERVER_A}, current="A")
-    write_kubeconfig(second, {"B": SERVER_B}, current="B")
-    doc = yaml.safe_load(second.read_text())
-    doc["current-context"] = later
-    second.write_text(yaml.safe_dump(doc))
-    point_kubeconfig_at(monkeypatch, f"{first}{os.pathsep}{second}")
-    assert ClusterTarget.resolve(None).context == "A"
-
-
 def test_cli_args_refuses_a_second_context(kubeconfig) -> None:
     ClusterTarget.resolve(None).activate()  # B
     with pytest.raises(ContextConflictError, match="--context A"):
@@ -330,29 +319,28 @@ def test_pin_command_raises_on_a_broken_kubeconfig(tmp_path, monkeypatch) -> Non
         get_executor(make_config())
 
 
-def test_query_executor_prefix_uses_the_active_target(kubeconfig) -> None:
-    for module_cls in [
+def test_query_executor_prefix_uses_the_pinned_target(kubeconfig) -> None:
+    """benchmark and query run only ``kubectl exec`` subprocesses, so every
+    executor's prefix carries the pinned context. ``get_executor`` pins before
+    the first query, so a use-context during the run cannot move the rest."""
+    import importlib
+
+    for module, name in [
         ("lakebench.modules.query_engines.trino.executor", "TrinoExecutor"),
         ("lakebench.modules.query_engines.duckdb.executor", "DuckDBExecutor"),
         ("lakebench.modules.query_engines.spark_thrift.executor", "SparkThriftExecutor"),
     ]:
-        import importlib
-
-        cls = getattr(importlib.import_module(module_cls[0]), module_cls[1])
+        cls = getattr(importlib.import_module(module), name)
         ClusterTarget.resolve(None).activate()
         ex = cls.__new__(cls)
         ex.kube_context = None
-        assert ex._kubectl_prefix() == ["kubectl", "--context", "B"]
+        assert ex._kubectl_prefix() == ["kubectl", "--context", "B"], name
 
-
-def test_get_executor_pins_before_the_first_query(kubeconfig) -> None:
-    """benchmark and query run only ``kubectl exec`` subprocesses; a
-    use-context during the run must not move the remaining queries."""
     from lakebench.benchmark.executor import get_executor
     from tests.conftest import make_config
 
     ex = get_executor(make_config())
-    _use_context(kubeconfig, "A")
+    _use_context(kubeconfig, "A")  # a use-context during the run must not move it
     assert ex._kubectl_prefix() == ["kubectl", "--context", "B"]
 
 

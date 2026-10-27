@@ -74,14 +74,21 @@ def test_several_senders_into_one_beneficiary(spark):
     assert sorted(a["related_entity_ids"]) == [1, 2, 3]
 
 
-def test_two_credits_or_different_days_do_not_fire(spark):
-    rows = [  # three senders, but only two within any 24 h
+def test_window_negatives_do_not_fire(spark):
+    # three senders, but only two within any 24 h
+    not_within_a_day = [
         ("d1", 1, 9, 1, 9500, "USD"),
         ("d2", 2, 9, 5, 9600, "USD"),
-        # Next UTC day.
-        ("d3", 3, 9, 30, 9700, "USD"),
+        ("d3", 3, 9, 30, 9700, "USD"),  # next UTC day
     ]
-    assert _alerts(spark, rows) == []
+    # credits exactly 24 h apart are not within one window
+    exactly_24h = [
+        ("w0", 1, 9, 0, 9500, "USD"),
+        ("w1", 2, 9, 12, 9500, "USD"),
+        ("w2", 3, 9, 24, 9500, "USD"),
+    ]
+    for label, rows in [("not-within-a-day", not_within_a_day), ("exactly-24h", exactly_24h)]:
+        assert _alerts(spark, rows) == [], label
 
 
 def test_originator_form_unchanged(spark):
@@ -97,12 +104,17 @@ def test_originator_form_unchanged(spark):
     assert out[0]["alert_score"] == pytest.approx(0.5)
 
 
-def test_single_sender_is_only_the_originator_kind(spark):
-    """One smurf paying one account three times raised both kinds on the
-    same transactions; the beneficiary kind now needs two senders."""
-    rows = [(f"u{i}", 7, 9, i, 9500 + i, "USD") for i in range(3)]
-    out = _alerts(spark, rows)
-    assert [a["alert_type"] for a in out] == ["structuring"]
+def test_beneficiary_kind_needs_three_senders(spark):
+    """The beneficiary kind needs three distinct senders. One smurf paying one
+    account three times raises only the originator kind; one structurer paying
+    B three times plus one other sender also raises only the originator kind."""
+    single_sender = [(f"u{i}", 7, 9, i, 9500 + i, "USD") for i in range(3)]
+    one_plus_one = [(f"o{i}", 7, 9, i, 9500, "USD") for i in range(3)] + [
+        ("s1", 8, 9, 4, 9600, "USD")
+    ]
+    for label, rows in [("single-sender", single_sender), ("one-plus-one", one_plus_one)]:
+        out = _alerts(spark, rows)
+        assert [a["alert_type"] for a in out] == ["structuring"], label
 
 
 def test_burst_across_day_boundaries_is_caught(spark):
@@ -141,20 +153,6 @@ def test_steady_stream_is_one_alert(spark):
     orig = [a for a in out if a["alert_type"] == "structuring"]
     assert orig and all(a["evidence"]["txns_truncated"] == "false" for a in orig)
     assert all(int(a["evidence"]["txn_total"]) == len(a["related_txn_ids"]) for a in orig)
-
-
-def test_one_structurer_plus_one_other_is_not_multiple_depositors(spark):
-    """O structures into B three times and S pays B once: the originator kind
-    fires; the beneficiary kind needs three senders and does not."""
-    rows = [(f"o{i}", 7, 9, i, 9500, "USD") for i in range(3)] + [("s1", 8, 9, 4, 9600, "USD")]
-    assert [a["alert_type"] for a in _alerts(spark, rows)] == ["structuring"]
-
-
-def test_window_is_shorter_than_24_hours(spark):
-    """Credits exactly 24 h apart are not within one window."""
-    rows = [("w0", 1, 9, 0, 9500, "USD"), ("w1", 2, 9, 12, 9500, "USD")]
-    rows.append(("w2", 3, 9, 24, 9500, "USD"))
-    assert _alerts(spark, rows) == []
 
 
 def test_score_is_capped(spark):

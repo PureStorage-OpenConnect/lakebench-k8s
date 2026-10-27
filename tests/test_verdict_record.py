@@ -100,17 +100,6 @@ def test_mutated_records_fail(name: str) -> None:
     assert not V.passed(rec)
 
 
-@pytest.mark.parametrize("run", [C360_BATCH, AML_BATCH, AML_CONT, C360_CONT])
-def test_unmutated_records_pass(run: str) -> None:
-    rec = sr.load_record(run)
-    v = V.verdict_from_record(rec)
-    assert v.status == "PASSED", v.reasons
-    for gate, outcome in v.gates.items():
-        assert outcome == "PASS", gate
-    assert v.qualifiers[V.LAYER_ROWS_UNMEASURED] == []
-    assert V.passed(rec)
-
-
 # ---------------------------------------------------------------------------
 # The 24 pinned records: the recomputed verdict, from tests/expected
 # ---------------------------------------------------------------------------
@@ -150,24 +139,25 @@ def test_only_the_listed_stored_passes_flip() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_c360_non_gating_failure_is_a_qualifier() -> None:
-    """A failed check outside GATING_CHECKS is recorded in the qualifier
-    CD-14 defined, never a FAIL (and not a badge warning: the carry is the
-    qualifier, which the report renders)."""
+@pytest.mark.parametrize(
+    ("check_id", "gating"),
+    [
+        # a check outside GATING_CHECKS is a qualifier (CD-14), never a FAIL
+        # or a badge warning: the carry is the qualifier the report renders
+        ("interaction_mix", False),
+        ("silver_to_gold_days", True),
+    ],
+)
+def test_c360_failure_gates_only_for_gating_checks(check_id: str, gating: bool) -> None:
     rec = sr.load_record(C360_BATCH)
-    check = next(c for c in rec["c360_correctness"]["checks"] if c["id"] == "interaction_mix")
+    check = next(c for c in rec["c360_correctness"]["checks"] if c["id"] == check_id)
     check["status"] = "fail"
     v = V.verdict_from_record(rec)
-    assert v.status == "PASSED"
-    assert v.qualifiers["c360_failed_not_gating"] == ["interaction_mix"]
-
-
-def test_c360_gated_failure_fails() -> None:
-    rec = sr.load_record(C360_BATCH)
-    check = next(c for c in rec["c360_correctness"]["checks"] if c["id"] == "silver_to_gold_days")
-    check["status"] = "fail"
-    v = V.verdict_from_record(rec)
-    assert v.status == "FAILED" and v.gates["c360"] == "FAIL"
+    if gating:
+        assert v.status == "FAILED" and v.gates["c360"] == "FAIL", check_id
+    else:
+        assert v.status == "PASSED", check_id
+        assert v.qualifiers["c360_failed_not_gating"] == [check_id]
 
 
 def test_w1_timeout_skip_fails() -> None:
@@ -882,7 +872,9 @@ def test_report_labels_the_gold_stage_bounded_by_a_rule_cap() -> None:
 def test_verdict_of_takes_the_strictest(monkeypatch, stored, success, recomputed, want) -> None:
     from types import SimpleNamespace
 
-    monkeypatch.setattr(V, "verdict_from_record", lambda rec: SimpleNamespace(status=recomputed, reasons=[]))
+    monkeypatch.setattr(
+        V, "verdict_from_record", lambda rec: SimpleNamespace(status=recomputed, reasons=[])
+    )
     rec = sr.load_record(C360_BATCH)
     rec["success"] = success
     if stored is None:

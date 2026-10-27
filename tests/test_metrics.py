@@ -625,12 +625,12 @@ class TestAggregateBenchmarkRounds:
         q1 = next(q for q in result.queries if q["name"] == "q1")
         assert q1["elapsed_seconds"] == 4.5
 
-    def test_even_count_median_is_the_mean_of_the_middle_two(self):
-        rounds = [
+        # An even count takes the mean of the middle two: median([200, 300]) = 250.
+        even = [
             self._make_round(1, qph=200.0, total_seconds=30.0),
             self._make_round(2, qph=300.0, total_seconds=20.0),
         ]
-        assert aggregate_benchmark_rounds(rounds).qph == 250.0
+        assert aggregate_benchmark_rounds(even).qph == 250.0
 
 
 class TestSustainedScoringEdgeCases:

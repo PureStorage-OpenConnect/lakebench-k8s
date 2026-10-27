@@ -248,27 +248,30 @@ class TestUnknownWatchState:
             st = mgr.ensure_namespace_watched(can_heal=True)
         assert st.ready is False
 
-    def test_check_status_error_is_unknown_not_absent(self):
+    @pytest.mark.parametrize(
+        "run",
+        [
+            # _run raises: the API is unreachable
+            {"side_effect": RuntimeError("api down")},
+            # kubectl returns non-zero (not an exception) when the API is down
+            # or the CRD read is refused: that is not "not installed"
+            {"return_value": _fail("Unable to connect to the server: i/o timeout")},
+            {
+                "return_value": _fail(
+                    'Error from server (Forbidden): customresourcedefinitions "x" is forbidden'
+                )
+            },
+            # the CRD reads but the deployment list is refused
+            {"side_effect": [_ok("crd"), _fail("Forbidden")]},
+        ],
+        ids=["run-raises", "crd-unreachable", "crd-forbidden", "deployments-unlistable"],
+    )
+    def test_check_status_is_unknown_not_absent_on_a_read_fault(self, run):
         mgr = _mgr()
-        with patch.object(mgr, "_run", side_effect=RuntimeError("api down")):
+        with patch.object(mgr, "_run", **run):
             st = mgr.check_status()
         assert st.installed is None
         assert st.ready is False
-
-    @pytest.mark.parametrize(
-        "stderr",
-        [
-            "Unable to connect to the server: dial tcp 10.0.1.50:6443: i/o timeout",
-            'Error from server (Forbidden): customresourcedefinitions "x" is forbidden',
-        ],
-    )
-    def test_unreadable_crd_is_unknown(self, stderr):
-        """kubectl returns non-zero (not an exception) when the API is down
-        or the read is refused: that is not "not installed"."""
-        mgr = _mgr()
-        with patch.object(mgr, "_run", return_value=_fail(stderr)):
-            st = mgr.check_status()
-        assert st.installed is None
 
     def test_missing_crd_is_not_installed(self):
         mgr = _mgr()
@@ -276,12 +279,6 @@ class TestUnknownWatchState:
         with patch.object(mgr, "_run", return_value=_fail(err)):
             st = mgr.check_status()
         assert st.installed is False
-
-    def test_unlistable_deployments_are_unknown(self):
-        mgr = _mgr()
-        with patch.object(mgr, "_run", side_effect=[_ok("crd"), _fail("Forbidden")]):
-            st = mgr.check_status()
-        assert st.installed is None
 
 
 class TestSetWatchList:
@@ -353,11 +350,27 @@ class TestSetWatchList:
 
 
 class TestReleaseState:
-    def test_status_and_revision(self):
+    @pytest.mark.parametrize(
+        ("output", "expected"),
+        [
+            # a status and revision read from the release doc
+            (
+                _ok(json.dumps({"info": {"status": "pending-upgrade"}, "version": 7})),
+                ("pending-upgrade", 7),
+            ),
+            # no release: absent at revision 0
+            (_fail("Error: release: not found"), ("absent", 0)),
+            # the API is unreachable: unknown
+            (_fail("connection refused"), None),
+            # the doc is not JSON: unknown
+            (_ok("not json"), None),
+        ],
+        ids=["status-and-revision", "absent", "unreadable", "not-json"],
+    )
+    def test_release_state_from_helm_output(self, output, expected):
         mgr = _mgr()
-        doc = {"info": {"status": "pending-upgrade"}, "version": 7}
-        with patch.object(mgr, "_run", return_value=_ok(json.dumps(doc))):
-            assert mgr.release_state() == ("pending-upgrade", 7)
+        with patch.object(mgr, "_run", return_value=output):
+            assert mgr.release_state() == expected
 
     @pytest.mark.parametrize(
         ("value", "expected"),
@@ -383,18 +396,6 @@ class TestReleaseState:
         with patch.object(mgr, "_run", return_value=_fail("NotFound")):
             assert mgr.revision_created(5) is None
 
-    def test_absent(self):
-        mgr = _mgr()
-        with patch.object(mgr, "_run", return_value=_fail("Error: release: not found")):
-            assert mgr.release_state() == ("absent", 0)
-
-    def test_unreadable(self):
-        mgr = _mgr()
-        with patch.object(mgr, "_run", return_value=_fail("connection refused")):
-            assert mgr.release_state() is None
-        with patch.object(mgr, "_run", return_value=_ok("not json")):
-            assert mgr.release_state() is None
-
     def test_good_revisions_skip_failed_and_pending(self):
         rows = [
             {"revision": 3, "status": "superseded"},
@@ -408,9 +409,19 @@ class TestReleaseState:
             assert mgr.good_revisions(4) == [3]
             assert mgr.good_revisions(3) == []
 
-    def test_good_revisions_unreadable(self):
+    @pytest.mark.parametrize(
+        "output",
+        [
+            # the history read failed
+            _fail(),
+            # the history parsed but a revision is not an integer
+            _ok(json.dumps([{"revision": "x", "status": "deployed"}])),
+        ],
+        ids=["history-unreadable", "bad-revision"],
+    )
+    def test_good_revisions_is_unreadable(self, output):
         mgr = _mgr()
-        with patch.object(mgr, "_run", return_value=_fail()):
+        with patch.object(mgr, "_run", return_value=output):
             assert mgr.good_revisions(6) is None
 
     def test_values_at_a_revision(self):
@@ -434,12 +445,6 @@ class TestReleaseState:
         doc = {"spark": {"jobNamespaces": ["", "team-a"]}}
         with patch.object(mgr, "_run", return_value=_ok(json.dumps(doc))):
             assert mgr._get_watched_namespaces() is None
-
-    def test_history_with_a_bad_revision_is_unreadable(self):
-        mgr = _mgr()
-        rows = [{"revision": "x", "status": "deployed"}]
-        with patch.object(mgr, "_run", return_value=_ok(json.dumps(rows))):
-            assert mgr.good_revisions(6) is None
 
     def test_rollback_failure_is_reported(self):
         mgr = _mgr()

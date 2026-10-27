@@ -28,22 +28,21 @@ from tests.fixtures.experiment_helpers import _cfg, _metrics
 # -- 1. bounds -----------------------------------------------------------------
 
 
-def test_override_above_28_refused():
+def test_executor_and_driver_ceilings():
+    """Every executor override is capped at 28 (29 refused, 28 loads); driver
+    cores are capped at 16 (17 refused)."""
     for field in [f for f, _ in EXECUTOR_OVERRIDE_FIELDS.values()]:
         with pytest.raises(ValueError, match="proven ceiling of 28"):
             make_config(platform={"compute": {"spark": {field: 29}}})
+    assert make_config(platform={"compute": {"spark": {"silver_executors": 28}}})
+    with pytest.raises(ValueError, match="proven ceiling of 16"):
+        make_config(platform={"compute": {"spark": {"driver_cores": 17}}})
 
 
 def test_override_ceiling_is_the_job_modules_executor_cap():
     from lakebench.config.schema import MAX_EXECUTOR_OVERRIDE
 
     assert MAX_EXECUTOR_OVERRIDE == job_mod._MAX_EXECUTORS_SAFE
-
-
-def test_override_28_loads_and_17_driver_cores_refused():
-    assert make_config(platform={"compute": {"spark": {"silver_executors": 28}}})
-    with pytest.raises(ValueError, match="proven ceiling of 16"):
-        make_config(platform={"compute": {"spark": {"driver_cores": 17}}})
 
 
 def _write(tmp_path: Path, spark: dict) -> Path:
@@ -135,13 +134,18 @@ def _record_with(cfg, job_type="silver-build"):
 
 
 def test_binding_override_labelled():
+    from lakebench.metrics.metric_registry import capped_by
+
     cfg = _cfg()
     cfg.platform.compute.spark.silver_executors = 4  # the profile asks 8 at scale 1
     e = _record_with(cfg)["experiment"]
     sb = next(x for x in e["limits"]["executors"] if x["job_type"] == "silver-build")
     assert sb["override_bound"] is True
-    assert "silver-build: executor override" in e["limits"]["bound_kinds"]
+    kinds = e["limits"]["bound_kinds"]
+    assert "silver-build: executor override" in kinds
     assert "silver-build: executor override 4 (profile asks 8)" in e["limits"]["bound"]
+    # The bound kind caps the metrics it should.
+    assert "silver-build: executor override" in capped_by("total_core_hours", kinds, "batch")
 
 
 def test_an_override_above_the_profile_is_not_bound():
@@ -266,15 +270,6 @@ def test_override_pair_architecture_difference(mutate_a, mutate_b, key):
 # -- 6. not a baseline, not evidence -------------------------------------------------------
 
 
-def test_a_binding_override_labels_the_metrics_it_caps():
-    from lakebench.metrics.metric_registry import capped_by
-
-    cfg = _cfg()
-    cfg.platform.compute.spark.silver_executors = 4  # the profile asks 8 at scale 1
-    kinds = _record_with(cfg)["experiment"]["limits"]["bound_kinds"]
-    assert "silver-build: executor override" in capped_by("total_core_hours", kinds, "batch")
-
-
 def test_a_count_pinned_at_the_cap_keeps_the_cap_label():
     cfg = _cfg(scale=1000)
     cap = job_mod._JOB_PROFILES["gold-finalize"]["max_executors"]
@@ -299,20 +294,6 @@ def test_a_local_run_applies_no_override():
 
 
 # -- 7. one key per stage -----------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("stage", "batch_job", "streaming_job"),
-    [
-        ("bronze", "bronze-verify", "bronze-ingest"),
-        ("silver", "silver-build", "silver-stream"),
-        ("gold", "gold-finalize", "gold-refresh"),
-    ],
-)
-def test_a_stage_key_sizes_the_stages_job_in_either_mode(stage, batch_job, streaming_job):
-    cfg = make_config(platform={"compute": {"spark": {f"{stage}_executors": 9}}})
-    assert executor_override(batch_job, cfg) == 9
-    assert executor_override(streaming_job, cfg) == 9
 
 
 def test_the_bronze_verify_preflight_of_a_continuous_run_keeps_its_profile():

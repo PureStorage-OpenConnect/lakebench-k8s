@@ -73,19 +73,6 @@ def _write_legacy_run(
 class TestGetLatestRunForDeployment:
     """Direct tests of the storage helper."""
 
-    def test_returns_matching_deployment_ignoring_newer_other(self, tmp_path: Path) -> None:
-        storage = MetricsStorage(tmp_path / "runs")
-        base = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
-        _write_run(storage, "a-001", "dep-a", base)
-        # B is strictly newer -- an unscoped lookup would return it.
-        _write_run(storage, "b-001", "dep-b", base + timedelta(hours=1))
-
-        latest = storage.get_latest_run_for_deployment("dep-a")
-
-        assert latest is not None
-        assert latest.run_id == "a-001"
-        assert latest.deployment_name == "dep-a"
-
     def test_returns_none_when_no_records_match_and_no_legacy(self, tmp_path: Path) -> None:
         storage = MetricsStorage(tmp_path / "runs")
         _write_run(storage, "b-001", "dep-b", datetime(2026, 9, 28, tzinfo=timezone.utc))
@@ -129,19 +116,6 @@ class TestGetLatestRunForDeployment:
 # ---------------------------------------------------------------------------
 
 
-def _make_two_deployments(
-    tmp_path: Path,
-) -> tuple[MetricsStorage, Path, Path]:
-    """Create runs for dep-a and (strictly newer) dep-b. Return storage and
-    both metrics.json paths."""
-    storage = MetricsStorage(tmp_path / "runs")
-    base = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
-    a_path = _write_run(storage, "a-001", "dep-a", base)
-    # B is newer: an unscoped get_latest_run() returns it.
-    b_path = _write_run(storage, "b-001", "dep-b", base + timedelta(hours=1))
-    return storage, a_path, b_path
-
-
 # ---------------------------------------------------------------------------
 # Generator scope: the report renderer takes a deployment_name too
 # ---------------------------------------------------------------------------
@@ -152,31 +126,24 @@ class TestGeneratorScope:
     "latest run" lookup so ``lakebench report --render`` under parallel
     deployments cannot render another deployment's record."""
 
-    def test_generator_latest_is_scoped(self, tmp_path: Path) -> None:
+    def test_generator_scopes_to_the_deployment_else_latest(self, tmp_path: Path) -> None:
+        """With two deployments sharing one runs tree (dep-b strictly newer),
+        ``deployment_name="dep-a"`` renders a-001 (not the newer b-001), and
+        ``deployment_name=None`` keeps the previous unscoped behaviour: the
+        newest record, b-001."""
         from lakebench.reports.generator import ReportGenerator
 
         runs_dir = tmp_path / "runs"
-        _storage, _a_path, _b_path = _make_two_deployments(tmp_path)
+        storage = MetricsStorage(runs_dir)
+        base = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+        _write_run(storage, "a-001", "dep-a", base)
+        # B is newer: an unscoped get_latest_run() returns it.
+        _write_run(storage, "b-001", "dep-b", base + timedelta(hours=1))
         gen = ReportGenerator(runs_dir)
 
-        # Without a run_id the generator picks the latest -- scoped to dep-a
-        # this must be a-001, not the newer b-001.
-        report_path = gen.generate_report(deployment_name="dep-a")
-        assert report_path.exists()
-        html = report_path.read_text()
-        assert "a-001" in html
-        assert "b-001" not in html
+        scoped = gen.generate_report(deployment_name="dep-a").read_text()
+        assert "a-001" in scoped, "scoped lookup must pick dep-a's run"
+        assert "b-001" not in scoped, "scoped lookup must ignore the newer dep-b"
 
-    def test_generator_none_is_unscoped(self, tmp_path: Path) -> None:
-        """Backwards-compat: ``deployment_name=None`` matches the previous
-        unscoped behaviour."""
-        from lakebench.reports.generator import ReportGenerator
-
-        runs_dir = tmp_path / "runs"
-        _storage, _a_path, _b_path = _make_two_deployments(tmp_path)
-        gen = ReportGenerator(runs_dir)
-
-        report_path = gen.generate_report()
-        html = report_path.read_text()
-        # B is newer, so the unscoped default is B.
-        assert "b-001" in html
+        unscoped = gen.generate_report().read_text()
+        assert "b-001" in unscoped, "unscoped default must be the newest run"

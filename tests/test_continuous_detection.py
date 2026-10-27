@@ -17,9 +17,8 @@ import pytest
 @pytest.mark.parametrize(
     ("logs", "alerts"),
     [
+        # no detection line of any shape is unknown (None), never 0
         (None, None),
-        ("", None),
-        ("some unrelated driver log\nRefreshed dashboards", None),
         ("[detection] cumulative gold.alerts rows: 0", 0),
         (
             "[detection] cumulative gold.alerts rows: 12\n"
@@ -37,24 +36,19 @@ def test_aml_cumulative_alerts(logs, alerts):
 
 
 @pytest.mark.parametrize(
-    ("logs", "alerts"),
+    ("logs", "alerts", "fails"),
     [
-        ("[detection] cumulative gold.alerts rows: 0", 0),
-        ("Refreshed dashboards", None),
-        (None, None),
+        ("[detection] cumulative gold.alerts rows: 0", 0, True),  # zero alerts
+        ("Refreshed dashboards", None, True),  # detection did not run
+        (None, None, True),  # no gold log
+        ("[detection] cumulative gold.alerts rows: 40", 40, False),  # positive alerts pass
     ],
-    ids=["zero_alerts", "detection_did_not_run", "no_gold_log"],
 )
-def test_alert_gate_fails(logs, alerts):
+def test_alert_gate(logs, alerts, fails):
     from lakebench.cli._sustained import _aml_alert_gate_failure
 
-    assert _aml_alert_gate_failure(logs, alerts) is not None
-
-
-def test_alert_gate_passes_on_positive_alerts():
-    from lakebench.cli._sustained import _aml_alert_gate_failure
-
-    assert _aml_alert_gate_failure("[detection] cumulative gold.alerts rows: 40", 40) is None
+    failure = _aml_alert_gate_failure(logs, alerts)
+    assert (failure is not None) == fails, (logs, failure)
 
 
 def test_aml_bronze_verify_timeout_budget_clears_measured_cost():

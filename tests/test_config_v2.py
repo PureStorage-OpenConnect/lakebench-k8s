@@ -41,20 +41,39 @@ def test_flat_field_overrides_nested(tmp_path, flat, nested, read):
 
 
 @pytest.mark.parametrize(
-    ("key", "value", "read"),
+    ("key", "value", "read", "extra", "also"),
     [
-        ("namespace", "lb-flat", lambda c: c.platform.kubernetes.namespace),
-        ("mode", "continuous", lambda c: c.architecture.pipeline.mode.value),
+        ("namespace", "lb-flat", lambda c: c.platform.kubernetes.namespace, {}, None),
+        ("mode", "continuous", lambda c: c.architecture.pipeline.mode.value, {}, None),
+        # flat scale lands in the top-level workload block
+        (
+            "scale",
+            7,
+            lambda c: c.workload.datagen.scale,
+            {"workload": {"schema": "customer360"}},
+            None,
+        ),
+        # flat scale beside a legacy architecture.workload block is no conflict:
+        # the scale promotes and the legacy schema still resolves
+        (
+            "scale",
+            7,
+            lambda c: c.workload.datagen.scale,
+            {"architecture": {"workload": {"schema": "financial"}}},
+            lambda c: c.workload.schema_type.value == "financial",
+        ),
     ],
 )
-def test_flat_field_is_promoted(tmp_path, key, value, read):
+def test_flat_field_is_promoted(tmp_path, key, value, read, extra, also):
     cfg_file = tmp_path / "lakebench.yaml"
-    cfg_file.write_text(
-        yaml.safe_dump({"name": "test", "recipe": "hive-iceberg-spark-trino", key: value})
-    )
+    data = {"name": "test", "recipe": "hive-iceberg-spark-trino", key: value}
+    data.update(extra)
+    cfg_file.write_text(yaml.safe_dump(data))
     with pytest.warns(DeprecationWarning):
         cfg = load_config(cfg_file)
     assert read(cfg) == value
+    if also is not None:
+        assert also(cfg)
 
 
 class TestFlatConfigIntegration:

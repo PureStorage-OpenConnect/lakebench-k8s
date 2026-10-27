@@ -49,6 +49,13 @@ _X_GATED = frozenset({"x", "benchmark_rows_Q1"})
 _NO_FACTS = {"facts_present": False, "reason": "boom", "checks": []}
 
 
+def _repeated_gated_id():
+    # a gated id that appears twice, one entry failing, fails overall
+    rec = _gated_record()
+    rec["checks"].insert(0, c3._check("bronze_to_silver_rows", "reconcile", False, 1, 0))
+    return rec
+
+
 @pytest.mark.parametrize(
     ("rec", "gating", "fails"),
     [
@@ -76,6 +83,10 @@ _NO_FACTS = {"facts_present": False, "reason": "boom", "checks": []}
         (_NO_FACTS, frozenset(), False),
         (None, frozenset(), False),
         (None, None, True),
+        # a repeated gated id passes only when every entry passes
+        (_repeated_gated_id(), None, True),
+        # facts_present must be the boolean True, not a "false" string
+        (dict(_gated_record(), facts_present="false"), None, True),
     ],
     ids=[
         "pass",
@@ -93,6 +104,8 @@ _NO_FACTS = {"facts_present": False, "reason": "boom", "checks": []}
         "empty-set-no-facts",
         "empty-set-no-record",
         "no-record",
+        "repeated-gated-id",
+        "facts-present-string",
     ],
 )
 def test_verdict_gate_and_cli_gate_agree(monkeypatch, rec, gating, fails):
@@ -186,19 +199,6 @@ def test_reporting_failures_lists_only_checks_outside_the_list():
     rec = _gated_record(interaction_mix=False, silver_to_gold_days=False, dates_in_window=None)
     assert c3.reporting_failures(rec) == ["interaction_mix"]
     assert c3.reporting_failures(None) == []
-
-
-def test_repeated_gated_id_passes_only_when_every_entry_passes():
-    rec = _gated_record()
-    rec["checks"].insert(0, c3._check("bronze_to_silver_rows", "reconcile", False, 1, 0))
-    assert c3.gating_outcome(rec)[0] == "FAIL"
-    assert c3.gating_problems(rec)
-
-
-def test_facts_present_must_be_true():
-    rec = dict(_gated_record(), facts_present="false")
-    assert c3.gating_outcome(rec)[0] == "FAIL"
-    assert c3.gating_problems(rec)
 
 
 def test_pass_requires_every_core_check():

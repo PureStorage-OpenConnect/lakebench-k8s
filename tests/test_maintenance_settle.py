@@ -377,54 +377,52 @@ def test_run_records_a_stopped_maintenance_budget_on_the_saved_run(tmp_path, mon
     assert scores["maintenance_stop_reason"] == reason
 
 
-def test_stopped_maintenance_is_persisted_and_flags_the_report(tmp_path):
+@pytest.mark.parametrize(
+    ("field", "reason_field", "reason", "section_phrases", "html_phrase"),
+    [
+        (
+            "maintenance_stopped",
+            "maintenance_stop_reason",
+            "OPTIMIZE lakehouse.gold.t timed out after 1800s",
+            ("maintenance stopped before completion", "not a clean measurement"),
+            "maintenance stopped before completion",
+        ),
+        (
+            "maintenance_live_streams",
+            "maintenance_live_streams_reason",
+            "stream apps present or unreadable: lakebench-silver-stream",
+            ("Streams during maintenance", "writers active"),
+            "streams were live",
+        ),
+    ],
+    ids=["stopped", "live-streams"],
+)
+def test_maintenance_flag_is_persisted_and_flags_the_report(
+    tmp_path, field, reason_field, reason, section_phrases, html_phrase
+):
     from lakebench.metrics.storage import MetricsStorage
     from lakebench.reports.generator import ReportGenerator
 
     rg = ReportGenerator(metrics_dir=tmp_path)
     pm, pb = _pb_with_settle(None)
     # Completed maintenance is not flagged anywhere.
-    assert "maintenance_stopped" not in pb.to_dict()["scorecard"]
-    assert "stopped before completion" not in rg._generate_maintenance_section(pm)
+    assert field not in pb.to_dict()["scorecard"]
     assert "qph-stop-warning" not in rg._generate_batch_summary(pm).guards["Query rate"]
     assert "qph-stop-warning" not in rg._generate_qph_card(pm)
-    pb.maintenance_stopped = True
-    pb.maintenance_stop_reason = "OPTIMIZE lakehouse.gold.t timed out after 1800s"
+
+    setattr(pb, field, True)
+    setattr(pb, reason_field, reason)
     path = MetricsStorage(tmp_path).save_run(pm)
     scores = json.loads(path.read_text())["pipeline_benchmark"]["scores"]
-    assert scores["maintenance_stopped"] is True
-    assert scores["maintenance_stop_reason"].startswith("OPTIMIZE")
+    assert scores[field] is True
+    assert scores[reason_field] == reason
     loaded = MetricsStorage(tmp_path).load_run(pm.run_id)
     section = rg._generate_maintenance_section(loaded)
-    assert "maintenance stopped before completion" in section
-    assert "not a clean measurement" in section
+    for phrase in section_phrases:
+        assert phrase in section, phrase
     for html in (
         rg._generate_batch_summary(loaded).guards["Query rate"],
         rg._generate_qph_card(loaded),
     ):
         assert "qph-stop-warning" in html
-        assert "maintenance stopped before completion" in html
-
-
-def test_live_streams_are_persisted_and_flagged_in_the_report(tmp_path):
-    from lakebench.metrics.storage import MetricsStorage
-    from lakebench.reports.generator import ReportGenerator
-
-    pm, pb = _pb_with_settle(None)
-    pb.maintenance_live_streams = True
-    pb.maintenance_live_streams_reason = (
-        "stream apps present or unreadable: lakebench-silver-stream"
-    )
-    path = MetricsStorage(tmp_path).save_run(pm)
-    scores = json.loads(path.read_text())["pipeline_benchmark"]["scores"]
-    assert scores["maintenance_live_streams"] is True
-    loaded = MetricsStorage(tmp_path).load_run(pm.run_id)
-    assert loaded.pipeline_benchmark.maintenance_live_streams is True
-    rg = ReportGenerator(metrics_dir=tmp_path)
-    section = rg._generate_maintenance_section(loaded)
-    assert "Streams during maintenance" in section and "writers active" in section
-    for html in (
-        rg._generate_batch_summary(loaded).guards["Query rate"],
-        rg._generate_qph_card(loaded),
-    ):
-        assert "qph-stop-warning" in html and "streams were live" in html
+        assert html_phrase in html, html_phrase

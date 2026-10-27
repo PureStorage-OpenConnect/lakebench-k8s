@@ -117,26 +117,18 @@ def test_repeat_three_records_one_series(tmp_path, monkeypatch):
         obs = r["config_snapshot"]["experiment_inputs"]["corpus_observation"]
         assert obs["bronze_listing_sha256"] == d1
 
-
-def test_repeat_forces_rebuild_after_first(tmp_path, monkeypatch):
-    result, rec, records, manifest = _series(tmp_path, monkeypatch)
+    # The first repetition builds silver; the later two force a rebuild.
     silver = _submits(rec, "silver-build")
     assert [s[2]["LB_FORCE_REBUILD"] for s in silver] == [None, "1", "1"]
 
 
-def test_repeat_datagen_once(tmp_path, monkeypatch):
-    result, rec, records, manifest = _series(
-        tmp_path, monkeypatch, argv=["--generate", "--yes", "--repeat", "3"]
-    )
-    assert result.exit_code == 0, result.output
-    assert sum(1 for c in rec.calls if c[:2] == ["Datagen", "deploy"]) == 1
-    assert manifest["passed"] == 3
-
-
-def test_repeat_allow_stale_bronze_only_reaches_repetition_1(tmp_path, monkeypatch):
-    """--allow-stale-bronze is a generate option: repetition 1 takes it, the
-    later repetitions do not generate and so run without it (the run-args
-    rule would otherwise refuse repetition 2)."""
+def test_repeat_datagen_once_and_allow_stale_bronze_only_reaches_repetition_1(
+    tmp_path, monkeypatch
+):
+    """--generate --repeat 3: datagen deploys once, and --allow-stale-bronze is
+    a generate option so repetition 1 takes it while the later repetitions do
+    not generate and run without it (the run-args rule would otherwise refuse
+    repetition 2)."""
     import lakebench.cli._run as run_mod
 
     seen = []
@@ -151,6 +143,7 @@ def test_repeat_allow_stale_bronze_only_reaches_repetition_1(tmp_path, monkeypat
         tmp_path, monkeypatch, argv=["--generate", "--allow-stale-bronze", "--yes", "--repeat", "3"]
     )
     assert result.exit_code == 0, result.output
+    assert sum(1 for c in rec.calls if c[:2] == ["Datagen", "deploy"]) == 1
     assert seen == [True, False, False]
     assert manifest["passed"] == 3
 

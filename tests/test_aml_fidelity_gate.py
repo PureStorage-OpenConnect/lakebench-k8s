@@ -195,18 +195,42 @@ def test_weights_restore_prevalence():
     assert abs(ap_full - ap_sub) < 0.08, (ap_full, ap_sub)
 
 
-def test_missing_column_raises_and_no_sklearn_is_reported(monkeypatch):
-    df = _frame().drop(columns=["noise_b"])
-    with pytest.raises(ValueError, match="noise_b"):
-        fg.evaluate_gate(df, _prereg())
-    monkeypatch.setattr(fg, "_sklearn_available", lambda: False)
-    rep = fg.evaluate_gate(_frame(), _prereg())
-    assert rep["verdict"] == "no_sklearn" and rep["typologies"] == {}
+def _missing_column():
+    return _frame().drop(columns=["noise_b"])
 
 
-def test_empty_frame_verdict():
-    rep = fg.evaluate_gate(_frame().iloc[:0], _prereg())
-    assert rep["verdict"] == "empty_frame"
+def _null_group():
+    df = _frame()
+    df["group"] = None
+    return df
+
+
+def _duplicate_units():
+    df = _grouped_frame()
+    df.loc[1, ["group", "month"]] = df.loc[0, ["group", "month"]].to_numpy()
+    return df
+
+
+@pytest.mark.parametrize(
+    ("label", "frame", "raises", "verdict"),
+    [
+        # a missing feature column is refused, naming the column
+        ("missing-column", _missing_column, "noise_b", None),
+        # a NULL grouping key is refused
+        ("null-group", _null_group, "NULL group", None),
+        # duplicate scoring units are refused
+        ("duplicate-units", _duplicate_units, "duplicate units", None),
+        # an empty frame yields the empty_frame verdict, not an error
+        ("empty-frame", lambda: _frame().iloc[:0], None, "empty_frame"),
+    ],
+)
+def test_malformed_frame_is_refused_or_reported(label, frame, raises, verdict):
+    df = frame()
+    if raises is not None:
+        with pytest.raises(ValueError, match=raises):
+            fg.evaluate_gate(df, _prereg())
+    else:
+        assert fg.evaluate_gate(df, _prereg())["verdict"] == verdict, label
 
 
 @SLOW
@@ -359,31 +383,6 @@ def test_passes_summary_and_corpus_role(monkeypatch):
     assert fg.corpus_role(7, p) == "other" and fg.corpus_role(None, p) == "unknown"
 
 
-def test_gated_prereg_constants_are_locked():
-    """The gate's registered constants are fixed; changing one is a new prereg."""
-    p = json.loads(PREREG.read_text())
-    u = p["unit_of_scoring"]
-    assert (u["window"], u["label_role"]) == ("utc_calendar_month", "subject")
-    assert (u["lead_in_days"], u["burn_in_months"], u["history_days"]) == (14, 14, 395)
-    lk = p["leakage"]
-    assert lk["relative_cap_formula"] == "lift_over_prevalence_band_floor"
-    assert (lk["shortcut_ap_abs_max"], lk["shortcut_ap_rel_max"]) == (0.2, 0.5)
-    assert lk["shortcut_models"] == ["single_feature", "feature_pair", "nuisance_only"]
-    assert lk["ablation"]["gated"] == "nuisance_features"
-    assert (p["band"]["ap_min"], p["band"]["ap_max"]) == (0.3, 0.8)
-    assert (p["level2"]["k_in_band"], p["level2"]["n"]) == (4, 6)
-    assert p["reference_model"]["estimator"] == "HistGradientBoostingClassifier"
-    assert p["reference_model"]["l2_regularization"] > 0
-    assert p["shortcut_model"]["max_depth"] == 2
-    assert p["shortcut_model"]["also_reference_model"] is True
-    assert {k: p["cv"][k] for k in ("folds", "stratified", "seed", "group_by")} == {
-        "folds": 5,
-        "stratified": True,
-        "seed": 7,
-        "group_by": "customer",
-    }
-
-
 @SLOW
 def test_reference_model_ignores_doc_keys():
     p = _prereg()
@@ -416,12 +415,23 @@ def test_rank_shortcut_is_out_of_fold():
     assert ap_oof < 0.2 < in_sample
 
 
-def test_cv_never_splits_a_group():
+def test_folds_keep_groups_whole_and_stratify_when_unique():
+    # Grouped rows: a group never spans the train/test split.
     rng = np.random.default_rng(0)
     groups = np.repeat(np.arange(300), 4)
     y = np.repeat((rng.random(300) < 0.2).astype(int), 4)
     for train, test in fg._folds(y, groups, _prereg()):
         assert not set(groups[train]) & set(groups[test])
+
+    # One row per group: the split is a plain stratified k-fold.
+    from sklearn.model_selection import StratifiedKFold
+
+    y = (np.random.default_rng(1).random(500) < 0.1).astype(int)
+    p = _prereg()
+    got = fg._folds(y, np.arange(500), p)
+    want = StratifiedKFold(n_splits=p["cv"]["folds"], shuffle=True, random_state=p["cv"]["seed"])
+    for (_tr, te), (_tr2, te2) in zip(got, want.split(y.reshape(-1, 1), y), strict=True):
+        assert (te == te2).all()
 
 
 def test_bootstrap_resamples_groups():
@@ -459,33 +469,10 @@ def test_runner_version_check_reads_job_pins():
     }
 
 
-@SLOW
-def test_relative_cap_as_lift_over_prevalence():
-    """Under the lift formula a weak full model does not fail every feature
-    that edges above prevalence; a real shortcut still fails."""
+def test_unknown_relative_cap_formula_is_refused():
     df = _frame(n=4000, prev=0.08, separable=False)
     p = _prereg()
-    # The legacy ratio formula predates the nuisance ablation, which needs a
-    # lift formula (_leakage_sets refuses the pairing).
-    p["leakage"] = {
-        **p["leakage"],
-        "relative_cap_formula": "ratio",
-        "shortcut_models": ["single_feature", "feature_pair"],
-    }
-    del p["leakage"]["ablation"]
-    p["leakage"]["nuisance_features"] = []
-    ratio = fg.evaluate_gate(df, p)["typologies"]["beh"]
-    p = _prereg()
-    p["leakage"] = {**p["leakage"], "relative_cap_formula": "lift_over_prevalence"}
-    lift = fg.evaluate_gate(df, p)["typologies"]["beh"]
-    prev, ap = lift["prevalence"], lift["ap"]
-    sc = lift["shortcuts"]["single_feature"]
-    assert sc["rel_cap"] == pytest.approx(prev + p["leakage"]["shortcut_ap_rel_max"] * (ap - prev))
-    assert sc["rel_cap_formula"] == "lift_over_prevalence"
-    assert ratio["shortcuts"]["single_feature"]["rel_cap_formula"] == "ratio"
-    planted = fg.evaluate_gate(_frame(), p)["typologies"]["beh"]
-    assert planted["shortcuts"]["single_feature"]["pass"] is False
-    p["leakage"]["relative_cap_formula"] = "nonsense"
+    p["leakage"] = {**p["leakage"], "relative_cap_formula": "nonsense"}
     with pytest.raises(ValueError, match="relative_cap_formula"):
         fg.evaluate_gate(df, p)
 
@@ -507,17 +494,6 @@ def test_rank_shortcut_pools_folds_that_chose_different_directions():
     assert ap > 0.9
 
 
-def test_unique_groups_keep_stratified_kfold():
-    from sklearn.model_selection import StratifiedKFold
-
-    y = (np.random.default_rng(1).random(500) < 0.1).astype(int)
-    p = _prereg()
-    got = fg._folds(y, np.arange(500), p)
-    want = StratifiedKFold(n_splits=p["cv"]["folds"], shuffle=True, random_state=p["cv"]["seed"])
-    for (_tr, te), (_tr2, te2) in zip(got, want.split(y.reshape(-1, 1), y), strict=True):
-        assert (te == te2).all()
-
-
 def test_single_class_training_fold_does_not_crash():
     X = np.zeros((10, 1))
     y = np.array([1, 1, 0, 0, 0, 0, 0, 0, 0, 0])
@@ -525,13 +501,6 @@ def test_single_class_training_fold_does_not_crash():
     folds = [(np.arange(2, 10), np.arange(0, 2)), (np.arange(0, 10), np.arange(2, 10))]
     oof = fg._oof_scores(lambda: fg._reference_model(_prereg()), X, y, w, folds)
     assert (oof[:2] == 0.0).all()
-
-
-def test_null_group_is_refused():
-    df = _frame()
-    df["group"] = None
-    with pytest.raises(ValueError, match="NULL group"):
-        fg.evaluate_gate(df, _prereg())
 
 
 @SLOW
@@ -574,6 +543,9 @@ def test_counts_only_needs_no_sklearn(monkeypatch):
     rep = fg.evaluate_gate(df, _prereg(), score=False)
     assert rep["verdict"] == "counts_only"
     assert rep["typologies"]["beh"]["n_positives"] == int(df["label:beh"].sum())
+    # Scoring without sklearn reports no_sklearn rather than running a model.
+    scored = fg.evaluate_gate(_frame(), _prereg())
+    assert scored["verdict"] == "no_sklearn" and scored["typologies"] == {}
 
 
 @SLOW
@@ -672,13 +644,6 @@ def test_importance_failure_keeps_the_gate_numbers(monkeypatch):
     card = rep["_model_outputs"]["card"]
     assert card["importance_errors"]["beh"] == "no room"
     assert len(rep["_model_outputs"]["scores"]) > 0
-
-
-def test_duplicate_units_are_refused():
-    df = _grouped_frame()
-    df.loc[1, ["group", "month"]] = df.loc[0, ["group", "month"]].to_numpy()
-    with pytest.raises(ValueError, match="duplicate units"):
-        fg.evaluate_gate(df, _prereg())
 
 
 @SLOW

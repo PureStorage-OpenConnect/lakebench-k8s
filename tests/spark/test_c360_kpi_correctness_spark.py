@@ -194,8 +194,20 @@ def test_correct_corpus_passes_every_check(pipeline):
         assert st[cid] == "pass", cid
 
 
-def test_old_all_rows_average_fails_the_check(pipeline):
-    """The pre-fix KPI (average over every interaction) is caught."""
+@pytest.mark.parametrize(
+    ("kpi_col", "source_col", "daily_status_key", "violation_key"),
+    [
+        # pre-fix KPI: average over every interaction, not revenue/transactions
+        ("avg_transaction_value", "transaction_amount", "avg_transaction_value_daily", None),
+        ("avg_estimated_ltv", "lifetime_value_estimate", None, "avg_estimated_ltv_mismatch"),
+    ],
+    ids=["transaction-value", "estimated-ltv"],
+)
+def test_old_all_rows_average_fails_the_check(
+    pipeline, kpi_col, source_col, daily_status_key, violation_key
+):
+    """The pre-fix KPI (average over every interaction) is caught: gold's daily
+    identity check fails."""
     from common import c360_check_facts
     from pyspark.sql.functions import avg
     from pyspark.sql.functions import round as round_
@@ -203,36 +215,18 @@ def test_old_all_rows_average_fails_the_check(pipeline):
     from lakebench.metrics.c360_correctness import pipeline_checks, verdict
 
     bronze, silver, gold = pipeline
-    old = gold.drop("avg_transaction_value").join(
-        silver.groupBy("interaction_date").agg(
-            round_(avg("transaction_amount"), 2).alias("avg_transaction_value")
-        ),
+    old = gold.drop(kpi_col).join(
+        silver.groupBy("interaction_date").agg(round_(avg(source_col), 2).alias(kpi_col)),
         "interaction_date",
     )
     rec = verdict(pipeline_checks(c360_check_facts(silver, old), _bronze_counts(bronze), _ctx()))
     st = _statuses(rec)
-    assert st["avg_transaction_value_daily"] == "fail"
+    if daily_status_key is not None:
+        assert st[daily_status_key] == "fail"
     assert st["gold_daily_identities"] == "fail"  # avg != revenue / transactions
-
-
-def test_old_all_rows_ltv_average_fails_the_check(pipeline):
-    from common import c360_check_facts
-    from pyspark.sql.functions import avg
-    from pyspark.sql.functions import round as round_
-
-    from lakebench.metrics.c360_correctness import pipeline_checks, verdict
-
-    bronze, silver, gold = pipeline
-    old = gold.drop("avg_estimated_ltv").join(
-        silver.groupBy("interaction_date").agg(
-            round_(avg("lifetime_value_estimate"), 2).alias("avg_estimated_ltv")
-        ),
-        "interaction_date",
-    )
-    rec = verdict(pipeline_checks(c360_check_facts(silver, old), _bronze_counts(bronze), _ctx()))
-    chk = next(c for c in rec["checks"] if c["id"] == "gold_daily_identities")
-    assert chk["status"] == "fail"
-    assert chk["observed"]["violations"]["avg_estimated_ltv_mismatch"] == DAYS
+    if violation_key is not None:
+        chk = next(c for c in rec["checks"] if c["id"] == "gold_daily_identities")
+        assert chk["observed"]["violations"][violation_key] == DAYS
 
 
 def test_double_counted_cycle_fails_reconciliation(pipeline):

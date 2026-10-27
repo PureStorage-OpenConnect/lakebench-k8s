@@ -65,20 +65,27 @@ def test_trino_unregisters_each_table_of_the_layer_only():
     assert "lakehouse.silver.entity_profiles" in res.unregistered
 
 
-def test_a_table_already_gone_is_not_a_failure():
-    cfg = _cfg()
-    err = lambda sql: RuntimeError(  # noqa: E731
-        "exec_sql failed (rc=1): Query 1 failed: Table 'lakehouse.gold.x' does not exist"
-    )
-    res, _ = _run(cfg, "gold", "my-clean-gold", ("trino", "pod", "lakehouse"), exec_error=err)
-    assert res.failed == [] and res.unregistered == []
-
-
-def test_a_failed_statement_is_reported():
-    cfg = _cfg()
-    err = lambda sql: RuntimeError("exec_sql failed (rc=1): Access Denied")  # noqa: E731
-    res, _ = _run(cfg, "gold", "my-clean-gold", ("trino", "pod", "lakehouse"), exec_error=err)
-    assert [t for t, _ in res.failed] == ["lakehouse.gold.customer_executive_dashboard"]
+@pytest.mark.parametrize(
+    ("text", "failed"),
+    [
+        # a table already gone is not a failure
+        (
+            "exec_sql failed (rc=1): Query 1 failed: Table 'lakehouse.gold.x' does not exist",
+            [],
+        ),
+        # any other statement failure is reported
+        (
+            "exec_sql failed (rc=1): Access Denied",
+            ["lakehouse.gold.customer_executive_dashboard"],
+        ),
+    ],
+)
+def test_trino_unregister_error_handling(text, failed):
+    err = lambda sql: RuntimeError(text)  # noqa: E731
+    res, _ = _run(_cfg(), "gold", "my-clean-gold", ("trino", "pod", "lakehouse"), exec_error=err)
+    assert [t for t, _ in res.failed] == failed
+    if not failed:
+        assert res.unregistered == []
 
 
 def test_spark_thrift_iceberg_drops_without_purge():
@@ -87,25 +94,37 @@ def test_spark_thrift_iceberg_drops_without_purge():
     assert res.unregistered == ["spark_catalog.silver.customer_interactions_enriched"]
 
 
+def _raise_timeout(sql):
+    raise RuntimeError("exec_sql failed (rc=1): timed out reading")
+
+
 @pytest.mark.parametrize(
-    ("detail", "dropped"),
+    ("detail", "dropped", "failed"),
     [
-        ("location | s3a://my-clean-silver/warehouse/silver.db/t", True),
-        ("location | s3a://someone-else/warehouse/silver.db/t", False),
+        # inside the bucket being emptied: dropped
+        (lambda sql: "location | s3a://my-clean-silver/warehouse/silver.db/t", True, False),
+        # outside it: kept, not dropped
+        (lambda sql: "location | s3a://someone-else/warehouse/silver.db/t", False, False),
+        # location unreadable: a failure, not kept and not dropped
+        (_raise_timeout, False, True),
     ],
 )
-def test_spark_thrift_delta_drops_only_inside_the_bucket_being_emptied(detail, dropped):
-    """DROP deletes a managed Delta table's directory: never outside it."""
+def test_spark_thrift_delta_drops_only_inside_the_bucket_being_emptied(detail, dropped, failed):
+    """DROP deletes a managed Delta table's directory: never outside it, and
+    never when the location cannot be read."""
     res, sent = _run(
         _cfg("delta"),
         "silver",
         "my-clean-silver",
         ("spark-thrift", "pod", "spark_catalog"),
-        detail=lambda sql: detail,
+        detail=detail,
     )
     assert any(s.startswith("DROP TABLE") for s in sent) is dropped
     assert bool(res.unregistered) is dropped
-    assert bool(res.kept) is not dropped
+    if failed:
+        assert res.failed and not res.kept and not res.may_empty
+    else:
+        assert bool(res.kept) is not dropped
 
 
 def test_no_engine_pod_skips_with_a_reason():
@@ -193,18 +212,6 @@ def test_no_engine_pod_empties_with_a_warning(tmp_path):
 
     order, code = _clean(tmp_path, lambda layer: LayerUnregister(skipped="no pod"), target="gold")
     assert ("empty", "my-clean-gold") in order and code in (None, 0)
-
-
-def test_an_unreadable_delta_location_is_a_failure_not_kept():
-    res, sent = _run(
-        _cfg("delta"),
-        "silver",
-        "my-clean-silver",
-        ("spark-thrift", "pod", "spark_catalog"),
-        detail=lambda sql: RuntimeError("exec_sql failed (rc=1): timed out reading"),
-    )
-    assert res.failed and not res.kept and not res.may_empty
-    assert not any(s.startswith("DROP") for s in sent)
 
 
 @pytest.mark.parametrize(

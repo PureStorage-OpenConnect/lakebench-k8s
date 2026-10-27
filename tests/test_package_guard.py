@@ -60,17 +60,33 @@ def test_planted_key_pattern_fails_without_printing_it():
     assert FAKE_PSFB not in " ".join(f.render() for f in found)
 
 
-def test_link_member_in_an_sdist_fails(tmp_path):
+def _link_sdist(tmp_path):
     path = tmp_path / "x.tar.gz"
     with tarfile.open(path, "w:gz") as t:
         info = tarfile.TarInfo("lakebench_k8s-9.9.9/evil")
         info.type = tarfile.SYMTYPE
         info.linkname = "/etc/passwd"
         t.addfile(info)
-    members = pg.sdist_members(path)
+    return pg.sdist_members(path), "evil"
+
+
+def _link_wheel(tmp_path):
+    path = tmp_path / "x.whl"
+    with zipfile.ZipFile(path, "w") as z:
+        info = zipfile.ZipInfo("lakebench/evil")
+        info.external_attr = 0o120777 << 16
+        z.writestr(info, "/etc/passwd")
+        z.writestr("lakebench/ok.py", "x = 1\n")
+    return pg.wheel_members(path), "lakebench/evil"
+
+
+@pytest.mark.parametrize("build", [_link_sdist, _link_wheel], ids=["sdist", "wheel"])
+def test_a_link_member_in_an_archive_fails(tmp_path, build):
+    members, member = build(tmp_path)
+    assert members[member] == pg.LINK_MARK
     links = [n for n, d in members.items() if d == pg.LINK_MARK]
     assert [f.detail for f in pg.check_names(members, links)] == [
-        "evil: a link member must not ship"
+        f"{member}: a link member must not ship"
     ]
     assert pg.check_content(members) == []
 
@@ -180,21 +196,6 @@ def test_heldout_check_states(tmp_path, monkeypatch, hash_text, ds_patch, absenc
 
     (found,) = pg.check_heldout({"a": b"1"}, check, hashes)
     assert found.status == getattr(pg, status) and detail in found.detail
-
-
-def test_symlink_in_a_wheel_fails(tmp_path):
-    path = tmp_path / "x.whl"
-    with zipfile.ZipFile(path, "w") as z:
-        info = zipfile.ZipInfo("lakebench/evil")
-        info.external_attr = 0o120777 << 16
-        z.writestr(info, "/etc/passwd")
-        z.writestr("lakebench/ok.py", "x = 1\n")
-    members = pg.wheel_members(path)
-    assert members["lakebench/evil"] == pg.LINK_MARK
-    links = [n for n, d in members.items() if d == pg.LINK_MARK]
-    assert [f.detail for f in pg.check_names(members, links)] == [
-        "lakebench/evil: a link member must not ship"
-    ]
 
 
 def test_planted_heldout_token_with_the_datagen_fixture(monkeypatch):

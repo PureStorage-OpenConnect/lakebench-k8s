@@ -207,22 +207,33 @@ def test_clean_world_exits_zero(audit_mod, tmp_path, monkeypatch):
 
 
 def test_raw_config_fields_follow_the_loader(audit_mod, tmp_path):
-    flat = tmp_path / "flat.yaml"
-    flat.write_text(f"name: x\nworkload:\n  schema: financial\n  datagen:\n    seed: {pc.EV}\n")
-    assert audit_mod.raw_corpus_fields(flat) == ("financial", pc.EV, None)
-    nested = tmp_path / "nested.yaml"
-    nested.write_text(
-        "name: x\narchitecture:\n  workload:\n    schema: financial\n"
-        "    datagen:\n      corpus_role: robustness\n"
-    )
-    assert audit_mod.raw_corpus_fields(nested) == ("financial", None, "robustness")
+    """The flat, nested and split workload shapes each give the right schema,
+    seed and role."""
+    cases = [
+        # (yaml body, expected (schema, seed, role))
+        (
+            f"name: x\nworkload:\n  schema: financial\n  datagen:\n    seed: {pc.EV}\n",
+            ("financial", pc.EV, None),
+        ),
+        (
+            "name: x\narchitecture:\n  workload:\n    schema: financial\n"
+            "    datagen:\n      corpus_role: robustness\n",
+            ("financial", None, "robustness"),
+        ),
+        (
+            # split: schema under architecture.workload, role under top-level workload
+            "name: x\narchitecture:\n  workload:\n    schema: financial\n"
+            "workload:\n  datagen:\n    corpus_role: evaluation\n",
+            ("financial", None, "evaluation"),
+        ),
+    ]
+    for i, (body, expected) in enumerate(cases):
+        c = tmp_path / f"c{i}.yaml"
+        c.write_text(body)
+        assert audit_mod.raw_corpus_fields(c) == expected, body
 
 
 # -- review regressions: none of these may read as clean ---------------------
-
-
-def _env(tmp_path, monkeypatch):
-    pc.use_heldout(monkeypatch)
 
 
 def _journal(dirpath: Path, config: Path | str) -> Path:
@@ -247,7 +258,7 @@ def _rc(audit_mod, tmp_path, *extra):
 
 
 def test_unreadable_record_is_not_clean(audit_mod, tmp_path, monkeypatch):
-    _env(tmp_path, monkeypatch)
+    pc.use_heldout(monkeypatch)
     d = tmp_path / "runs" / "run-x"
     d.mkdir(parents=True)
     (d / "metrics.json").write_text('{"run_id": "x", "experiment": {"corpus": {"corpus_role": "ev')
@@ -257,17 +268,8 @@ def test_unreadable_record_is_not_clean(audit_mod, tmp_path, monkeypatch):
     assert rc == 2
 
 
-def test_split_workload_blocks_are_both_read(audit_mod, tmp_path):
-    c = tmp_path / "c.yaml"
-    c.write_text(
-        "name: x\narchitecture:\n  workload:\n    schema: financial\n"
-        "workload:\n  datagen:\n    corpus_role: evaluation\n"
-    )
-    assert audit_mod.raw_config_reason(audit_mod._raw_config(c)) == "corpus_role evaluation"
-
-
 def test_journal_config_with_unset_variables_is_still_checked(audit_mod, tmp_path, monkeypatch):
-    _env(tmp_path, monkeypatch)
+    pc.use_heldout(monkeypatch)
     monkeypatch.delenv("LB_PROBE_UNSET", raising=False)
     c = tmp_path / "c.yaml"
     c.write_text(
@@ -280,7 +282,7 @@ def test_journal_config_with_unset_variables_is_still_checked(audit_mod, tmp_pat
 def test_journal_config_on_a_registered_prefix_is_found(audit_mod, tmp_path, monkeypatch):
     from lakebench.config import datagen_seed as ds
 
-    _env(tmp_path, monkeypatch)
+    pc.use_heldout(monkeypatch)
     ds.append_corpus_ledger(
         {
             "kind": "registered_corpus",
@@ -299,7 +301,7 @@ def test_journal_config_on_a_registered_prefix_is_found(audit_mod, tmp_path, mon
 
 
 def test_relative_journal_config_resolves_beside_lakebench_output(audit_mod, tmp_path, monkeypatch):
-    _env(tmp_path, monkeypatch)
+    pc.use_heldout(monkeypatch)
     (tmp_path / "c.yaml").write_text(
         "name: x\nworkload:\n  schema: financial\n  datagen:\n    corpus_role: robustness\n"
     )
@@ -326,14 +328,14 @@ def test_ledger_shapes_found_in_real_ledgers(audit_mod, tmp_path):
 
 
 def test_an_unparsable_ledger_section_is_not_clean(audit_mod, tmp_path, monkeypatch):
-    _env(tmp_path, monkeypatch)
+    pc.use_heldout(monkeypatch)
     led = tmp_path / "E.md"
     led.write_text("## Deployments ledger\n\nsomething that is not a row\n")
     assert _rc(audit_mod, tmp_path, "--ledger", str(led)) == 2
 
 
 def test_a_non_utf8_journal_is_scanned_lossily(audit_mod, tmp_path, monkeypatch):
-    _env(tmp_path, monkeypatch)
+    pc.use_heldout(monkeypatch)
     j = tmp_path / "j"
     j.mkdir()
     journal = j / "session-bin.jsonl"
@@ -362,7 +364,7 @@ def _sessions(path: Path, *sessions) -> Path:
 
 
 def test_every_session_of_a_journal_is_checked(audit_mod, tmp_path, monkeypatch):
-    _env(tmp_path, monkeypatch)
+    pc.use_heldout(monkeypatch)
     dev = tmp_path / "dev.yaml"
     dev.write_text("name: x\nworkload:\n  schema: financial\n")
     ev = tmp_path / "eval.yaml"
@@ -390,7 +392,7 @@ def test_every_session_of_a_journal_is_checked(audit_mod, tmp_path, monkeypatch)
 def test_variables_in_the_corpus_fields_are_substituted(
     audit_mod, tmp_path, monkeypatch, datagen, seed_env, expected
 ):
-    _env(tmp_path, monkeypatch)
+    pc.use_heldout(monkeypatch)
     monkeypatch.delenv("LB_T_SEED", raising=False)
     monkeypatch.delenv("LB_T_ROLE", raising=False)
     if seed_env is not None:
@@ -407,7 +409,7 @@ def test_variables_in_the_corpus_fields_are_substituted(
 
 
 def test_a_ledger_row_config_naming_a_protected_role_is_found(audit_mod, tmp_path, monkeypatch):
-    _env(tmp_path, monkeypatch)
+    pc.use_heldout(monkeypatch)
     c = tmp_path / "eval.yaml"
     c.write_text(
         "name: lb-eval\nworkload:\n  schema: financial\n  datagen:\n    corpus_role: evaluation\n"
@@ -419,7 +421,7 @@ def test_a_ledger_row_config_naming_a_protected_role_is_found(audit_mod, tmp_pat
 
 
 def test_a_config_changed_since_its_session_is_not_clean(audit_mod, tmp_path, monkeypatch):
-    _env(tmp_path, monkeypatch)
+    pc.use_heldout(monkeypatch)
     c = tmp_path / "c.yaml"
     c.write_text("name: x\nworkload:\n  schema: financial\n")
     j = _sessions(tmp_path / "j" / "session-x.jsonl", ("s1", c, {"config_hash": "0" * 16}))
@@ -429,7 +431,7 @@ def test_a_config_changed_since_its_session_is_not_clean(audit_mod, tmp_path, mo
 def test_a_nameless_config_uses_the_session_name_for_its_bucket(audit_mod, tmp_path, monkeypatch):
     from lakebench.config import datagen_seed as ds
 
-    _env(tmp_path, monkeypatch)
+    pc.use_heldout(monkeypatch)
     ds.append_corpus_ledger(
         {
             "kind": "registered_corpus",
@@ -446,7 +448,7 @@ def test_a_nameless_config_uses_the_session_name_for_its_bucket(audit_mod, tmp_p
 
 
 def test_malformed_session_entries_do_not_crash(audit_mod, tmp_path, monkeypatch):
-    _env(tmp_path, monkeypatch)
+    pc.use_heldout(monkeypatch)
     j = tmp_path / "j"
     j.mkdir()
     (j / "session-x.jsonl").write_text(

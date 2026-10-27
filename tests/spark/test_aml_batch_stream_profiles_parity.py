@@ -261,20 +261,15 @@ def value_problems(batch_rows, stream_rows):
     return out
 
 
-def test_batch_and_stream_profile_the_same_entities(profiles):
-    assert not coverage_problems(*profiles)
-
-
-def test_batch_and_stream_profile_sums_match(profiles):
-    problems = sum_problems(*profiles)
-    assert not problems, problems
-
-
-def test_batch_and_stream_profile_sums_agree_on_null(profiles):
-    problems = null_problems(*profiles)
-    assert not problems, problems
-
-
 def test_batch_and_stream_produce_equivalent_profiles(profiles):
-    problems = value_problems(*profiles)
+    """Batch and stream silver.entity_profiles agree for the one bronze corpus:
+    the same entities, matching sent/received sums (and matching NULLs where a
+    side was never used), and equal counts, timestamps, derived columns and
+    Welford accumulators."""
+    problems = (
+        coverage_problems(*profiles)
+        + sum_problems(*profiles)
+        + null_problems(*profiles)
+        + value_problems(*profiles)
+    )
     assert not problems, problems

@@ -87,14 +87,26 @@ def _operator(clock):
     return m
 
 
-def test_no_shared_upgrade_after_the_deadline(clock):
-    m = _operator(clock)
-    m._run = MagicMock()
-    with deadline.deploy_deadline(10):
-        clock.sleep(10)
-        with pytest.raises(deadline.DeployTimeout):
-            m._add_namespace_to_watch_impl("mine")
-    m._run.assert_not_called()
+def test_no_shared_helm_mutation_starts_after_the_deadline(clock):
+    """Neither the watch-list upgrade nor the RBAC recreate starts helm once
+    the deadline has passed: each raises DeployTimeout and runs no command."""
+    for setup, op in [
+        (lambda m: None, lambda m: m._add_namespace_to_watch_impl("mine")),
+        (
+            lambda m: setattr(
+                m, "_get_watched_namespaces", MagicMock(return_value=["other-ns", "mine"])
+            ),
+            lambda m: m._recreate_namespace_rbac_impl("mine"),
+        ),
+    ]:
+        m = _operator(clock)
+        m._run = MagicMock()
+        setup(m)
+        with deadline.deploy_deadline(10):
+            clock.sleep(10)
+            with pytest.raises(deadline.DeployTimeout):
+                op(m)
+        m._run.assert_not_called()
 
 
 def test_a_committed_upgrade_is_restarted_and_verified_past_the_deadline(clock):
@@ -142,17 +154,6 @@ def test_rbac_recreate_re_adds_after_a_committed_removal(clock):
     with deadline.deploy_deadline(10):
         assert m._recreate_namespace_rbac_impl("mine") is True
     assert m._run.call_count == 2  # removal, then the re-add
-
-
-def test_rbac_recreate_does_not_start_after_the_deadline(clock):
-    m = _operator(clock)
-    m._get_watched_namespaces = MagicMock(return_value=["other-ns", "mine"])
-    m._run = MagicMock()
-    with deadline.deploy_deadline(10):
-        clock.sleep(10)
-        with pytest.raises(deadline.DeployTimeout):
-            m._recreate_namespace_rbac_impl("mine")
-    m._run.assert_not_called()
 
 
 def test_no_operator_install_after_the_deadline(clock):

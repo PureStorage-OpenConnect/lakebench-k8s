@@ -127,7 +127,8 @@ def test_no_io_means_no_storage_lane() -> None:
 
 @pytest.mark.parametrize(
     ("mode", "schema"),
-    [("continuous", "customer360"), ("sustained", "unknown"), ("batch", "unknown")],
+    # The two unknown-schema cases (sustained, batch) take one branch; keep one.
+    [("continuous", "customer360"), ("sustained", "unknown")],
 )
 def test_no_profile_no_replay(mode: str, schema: str) -> None:
     assert build_replay(_record(mode, schema)) is None

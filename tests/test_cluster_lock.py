@@ -51,16 +51,15 @@ def _api_exc(status: int) -> ApiException:
 
 
 class TestReadClusterLock:
-    def test_returns_none_when_absent(self):
+    @pytest.mark.parametrize("status", [404, 500])
+    def test_absent_is_none_other_errors_raise(self, status):
         core = MagicMock()
-        core.read_namespaced_config_map.side_effect = _api_exc(404)
-        assert read_cluster_lock(core) is None
-
-    def test_raises_on_non_404(self):
-        core = MagicMock()
-        core.read_namespaced_config_map.side_effect = _api_exc(500)
-        with pytest.raises(ClusterLockError):
-            read_cluster_lock(core)
+        core.read_namespaced_config_map.side_effect = _api_exc(status)
+        if status == 404:
+            assert read_cluster_lock(core) is None
+        else:
+            with pytest.raises(ClusterLockError):
+                read_cluster_lock(core)
 
 
 class TestAcquireClusterLock:
@@ -199,19 +198,6 @@ class _FakeLockApi:
 class TestStealBetweenReadAndDelete:
     """A steal landing after the releaser's read must survive the delete."""
 
-    def test_release_leaves_a_recreated_lease(self):
-        api = _FakeLockApi()
-        api.put("me@here@abc", "2026-09-21T12:00:00+00:00", 60)
-        handle = LeaseHandle("me@here@abc", "2026-09-21T12:00:00+00:00", 60, "1")
-
-        def _recreate():
-            api.cm = None
-            api.put("other@host@q", _now_iso(), 3600, uid="uid-2")
-
-        api.after_read = _recreate
-        release_cluster_lock(api, handle)
-        assert api.cm is not None and api.cm.data["holder"] == "other@host@q"
-
     def test_release_still_deletes_when_unchanged(self):
         api = _FakeLockApi()
         api.put("me@here@abc", "2026-09-21T12:00:00+00:00", 60)
@@ -230,10 +216,17 @@ class TestStealBetweenReadAndDelete:
         assert ei.value.holder == "fresh@host@y"
         assert api.cm is not None and api.cm.data["holder"] == "fresh@host@y"
 
-    def test_expired_only_deletes_when_unchanged(self):
+    @pytest.mark.parametrize(
+        "touch_between", [False, True], ids=["unchanged", "write-kept-expired"]
+    )
+    def test_expired_only_deletes_the_expired_lease(self, touch_between):
+        # A no-op write (label/annotation bump) that keeps the lease expired
+        # must not stop the delete.
         api = _FakeLockApi()
         past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
         api.put("ghost@host@x", past, 60)
+        if touch_between:
+            api.after_read = api.touch
         state = force_release_cluster_lock(api, expired_only=True)
         assert state is not None and state.holder == "ghost@host@x"
         assert api.cm is None
@@ -247,12 +240,20 @@ class TestStealBetweenReadAndDelete:
         assert api.cm is None
 
     @pytest.mark.parametrize(
-        "how", ["taken_before_release", "stolen_after_read", "acquire_cas", "context_manager"]
+        "how",
+        [
+            "taken_before_release",
+            "stolen_after_read",
+            "acquire_cas",
+            "context_manager",
+            "recreated",
+        ],
     )
     def test_release_leaves_a_lease_changed_after_our_read(self, how):
         """A lease re-taken before the release, or between its read and its
-        delete (a plain steal or the real acquire CAS on the expired lease),
-        survives the release, also when cluster_lock's exit runs it."""
+        delete (a plain steal, a delete-and-recreate, or the real acquire CAS
+        on the expired lease), survives the release, also when cluster_lock's
+        exit runs it."""
         from lakebench.deploy.cluster_lock import _try_acquire_once
 
         api = _FakeLockApi()
@@ -261,6 +262,17 @@ class TestStealBetweenReadAndDelete:
         if how == "context_manager":
             with cluster_lock(api, ttl_seconds=60, timeout=1, holder="me@here@abc"):
                 api.after_read = lambda: api.steal(thief)
+        elif how == "recreated":
+            api.put("me@here@abc", "2026-09-21T12:00:00+00:00", 60)
+
+            def _recreate():
+                api.cm = None
+                api.put(thief, _now_iso(), 3600, uid="uid-2")
+
+            api.after_read = _recreate
+            release_cluster_lock(
+                api, LeaseHandle("me@here@abc", "2026-09-21T12:00:00+00:00", 60, "1")
+            )
         else:
             api.put(thief if how == "taken_before_release" else "me@here@abc", past, 60)
             stolen: list = []
@@ -272,15 +284,6 @@ class TestStealBetweenReadAndDelete:
             if how == "acquire_cas":
                 assert isinstance(stolen[0], LeaseHandle)
         assert api.cm is not None and api.cm.data["holder"] == thief
-
-    def test_expired_only_deletes_after_a_write_that_kept_it_expired(self):
-        api = _FakeLockApi()
-        past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
-        api.put("ghost@host@x", past, 60)
-        api.after_read = api.touch
-        state = force_release_cluster_lock(api, expired_only=True)
-        assert state is not None and state.holder == "ghost@host@x"
-        assert api.cm is None
 
     def test_expired_only_names_a_holder_who_stole_on_the_last_attempt(self):
         api = _FakeLockApi()

@@ -14,7 +14,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import typer
 
+from lakebench.exit_codes import ExitCode
 from lakebench.metrics import time_travel as tt
 
 T1, T2, T3 = 101, 102, 103
@@ -384,7 +386,7 @@ def _cfg():
     )
 
 
-def _step(cont, s3, *, submit_state=None, success=True, run_failed=False):
+def _step(cont, s3, *, submit_state=None, success=True, run_failed=False, wait_error=None):
     from lakebench.cli import _aml_post
     from lakebench.spark.job import JobState
 
@@ -393,7 +395,10 @@ def _step(cont, s3, *, submit_state=None, success=True, run_failed=False):
         state=submit_state or JobState.SUBMITTED, message="m"
     )
     mon = MagicMock()
-    mon.wait_for_completion.return_value = SimpleNamespace(success=success, message="timed out")
+    if wait_error is not None:
+        mon.wait_for_completion.side_effect = wait_error
+    else:
+        mon.wait_for_completion.return_value = SimpleNamespace(success=success, message="timed out")
     with patch.object(_aml_post, "_s3_client", return_value=s3):
         out = _aml_post.run_time_travel(
             _cfg(),
@@ -447,9 +452,19 @@ def test_step_deadline_follows_the_cluster_clock():
     assert argv[argv.index("--deadline-epoch") + 1] == f"{1_000_000.0 + 1080 - 30:.3f}"
 
 
-def test_a_wait_that_ends_first_deletes_the_job():
-    out, jm, _mon = _step(_continuous([_rec(2, T2)], []), _S3(), success=False)
-    assert out["verdict"] == "not_run" and "did not complete" in out["reason"]
+@pytest.mark.parametrize(
+    ("kw", "reason_contains"),
+    [
+        # the wait ends first (the run did not complete)
+        ({"success": False}, "did not complete"),
+        # the wait raises (a status read error)
+        ({"wait_error": RuntimeError("status read 500")}, "status read 500"),
+    ],
+    ids=["wait-ends-first", "wait-raises"],
+)
+def test_a_wait_that_does_not_finish_deletes_the_job(kw, reason_contains):
+    out, jm, _mon = _step(_continuous([_rec(2, T2)], []), _S3(), **kw)
+    assert out["verdict"] == "not_run" and reason_contains in out["reason"]
     jm._delete_job.assert_called_once_with("lakebench-time-travel-financial")
 
 
@@ -488,16 +503,29 @@ def test_step_never_raises():
     assert out["verdict"] == "not_run" and "S3 down" in out["reason"]
 
 
-def test_settle_gives_an_unfinished_run_a_verdict():
+def test_settle_time_travel_verdicts():
     from lakebench.cli._aml_post import settle_time_travel
 
+    # An unfinished run gets a not_run verdict, keeping its ticks.
     run = SimpleNamespace(continuous={"time_travel": {"ticks": [_rec(2, T2)]}})
     settle_time_travel(_cfg(), run, "interrupted before the time-travel reads")
     assert run.continuous["time_travel"]["verdict"] == "not_run"
     assert run.continuous["time_travel"]["ticks"] == [_rec(2, T2)]
+
+    # A finished run's verdict is left untouched.
     done = SimpleNamespace(continuous={"time_travel": {"verdict": "pass"}})
     settle_time_travel(_cfg(), done, "x")
     assert done.continuous["time_travel"] == {"verdict": "pass"}
+
+    # A run that failed its gates after the reads loses the reads' verdict but
+    # keeps the ticks.
+    failed = SimpleNamespace(
+        continuous={"time_travel": {"verdict": "pass", "ticks": [_rec(2, T2)]}}
+    )
+    settle_time_travel(_cfg(), failed, "x", pipeline_success=False)
+    tt_rec = failed.continuous["time_travel"]
+    assert tt_rec["verdict"] == "not_run" and tt_rec["reason"] == "the run failed its gates"
+    assert tt_rec["ticks"] == [_rec(2, T2)]
 
 
 # --- maintenance rounds -------------------------------------------------------
@@ -564,7 +592,7 @@ def test_profile_is_small_and_one_attempt():
     schema = "financial"
     from lakebench.modules.pipeline_engines.spark import job as job_mod
     from lakebench.spark.job import JobType, SparkJobManager
-    from tests.test_spark import _mock_k8s
+    from tests.fixtures.spark_helpers import _mock_k8s
 
     profile = job_mod._resolve_job_profile("time-travel-financial", schema)
     assert profile is not None
@@ -580,7 +608,7 @@ def test_profile_is_small_and_one_attempt():
 def test_the_verdict_shows_the_time_travel_check_and_never_fails_on_it():
     from lakebench.metrics.verdict import compute_verdict
     from lakebench.reports.front_matter import _qualifier_lines
-    from tests.test_experiment import _cfg, _metrics
+    from tests.fixtures.experiment_helpers import _cfg, _metrics
 
     m = _metrics(_cfg(schema="financial", mode="continuous"))
     before = compute_verdict(m)
@@ -610,32 +638,6 @@ def test_a_hash_pass_cut_short_leaves_the_rest_not_read_not_mismatched(job, monk
     out = _run(job, [_rec(2, T2), _rec(3, T3)])
     assert _states(out) == ["not_read", "verified"]
     assert out["incomplete"] is True
-
-
-def test_a_run_that_failed_after_the_reads_does_not_keep_their_verdict():
-    from lakebench.cli._aml_post import settle_time_travel
-
-    run = SimpleNamespace(continuous={"time_travel": {"verdict": "pass", "ticks": [_rec(2, T2)]}})
-    settle_time_travel(_cfg(), run, "x", pipeline_success=False)
-    tt_rec = run.continuous["time_travel"]
-    assert tt_rec["verdict"] == "not_run" and tt_rec["reason"] == "the run failed its gates"
-    assert tt_rec["ticks"] == [_rec(2, T2)]
-
-
-def test_a_wait_that_raises_deletes_the_job():
-    from lakebench.cli import _aml_post
-    from lakebench.spark.job import JobState
-
-    jm = MagicMock()
-    jm.submit_job.return_value = SimpleNamespace(state=JobState.SUBMITTED, message="m")
-    mon = MagicMock()
-    mon.wait_for_completion.side_effect = RuntimeError("status read 500")
-    with patch.object(_aml_post, "_s3_client", return_value=_S3()):
-        out = _aml_post.run_time_travel(
-            _cfg(), "run-1", _continuous([_rec(2, T2)], []), jm, mon, 1200
-        )
-    assert out["verdict"] == "not_run" and "status read 500" in out["reason"]
-    jm._delete_job.assert_called_once_with("lakebench-time-travel-financial")
 
 
 # --- the hash covers the business columns ---
@@ -760,8 +762,15 @@ def test_the_reads_follow_the_tick_record_the_stop_and_the_scorer(monkeypatch, t
     monkeypatch.setattr(_aml_post, "continuous_scoring", score)
     monkeypatch.setattr(_aml_post, "run_time_travel", reads)
     monkeypatch.setattr(_aml_post, "settle_time_travel", lambda *a, **kw: None)
-    with pytest.raises(BaseException) as ei:  # noqa: B017, PT011 -- the exit is not asserted
+    # The record carries MagicMock fields the fakes left; the run-end save is
+    # not what this test checks, so stub it so the real exit is not masked by a
+    # serialization error in the cleanup.
+    from lakebench.metrics import MetricsStorage
+
+    monkeypatch.setattr(MetricsStorage, "save_run", lambda self, m: tmp_path / "metrics.json")
+    with pytest.raises(typer.Exit) as ei:
         _sustained._run_sustained(cfg, tmp_path / "cfg.yaml", 60, True, 60, skip_generate=True)
-    assert order == ["record-ticks", "stop", "score", "reads"], repr(ei.value)
+    assert ei.value.exit_code == ExitCode.FAILED
+    assert order == ["record-ticks", "stop", "score", "reads"]
     assert "run_failed" in seen
     assert seen["rounds"] == []

@@ -180,6 +180,13 @@ def test_installed_package_reads_its_build_info(tmp_path, monkeypatch):
     }
     assert len(s["tree_sha256"]) == 64
 
+    # With no build info, the install and git fields are unknown.
+    nobuild = tmp_path / "nobuild"
+    nobuild.mkdir()
+    _fake_package(nobuild, monkeypatch, None)
+    s = prov_mod.sample()
+    assert (s["install"], s["git_sha"], s["git_dirty"]) == ("unknown", None, None)
+
 
 def test_tree_hash_sees_an_edit_git_cannot(tmp_path, monkeypatch):
     """An edited file in an installed wheel: the build info still names the
@@ -211,12 +218,6 @@ def test_failed_git_read_at_end_is_not_a_change_when_files_match():
     # No file hash on one side: every code field counts, a failed read too.
     no_tree = {**start, "tree_sha256": None}
     assert prov_mod.code_changed(no_tree, {**no_tree, "git_sha": None}) is True
-
-
-def test_package_without_build_info_is_unknown(tmp_path, monkeypatch):
-    _fake_package(tmp_path, monkeypatch, None)
-    s = prov_mod.sample()
-    assert (s["install"], s["git_sha"], s["git_dirty"]) == ("unknown", None, None)
 
 
 # --- run end -----------------------------------------------------------------
@@ -504,19 +505,14 @@ def _scratch_config(scale=1, silver_executors=None):
     )
 
 
-@pytest.mark.parametrize(
-    ("scale", "silver_executors", "size"),
-    [
-        # silver-build: 60 GiB per scale unit shared by its executors.
-        (10, None, "75Gi"),  # 600 / 8
-    ],
-)
-def test_scratch_as_ran_from_manifest(scale, silver_executors, size):
+def test_scratch_as_ran_from_manifest():
     """The SparkApplication the manager builds for silver-build carries a
     scratch PVC sized to the scale and its executor count; the status read
     returns it, and the record holds what the cluster held."""
     from lakebench.spark.job import JobType, SparkJobManager
 
+    # silver-build: 60 GiB per scale unit shared by its executors (600 / 8).
+    scale, silver_executors, size = 10, None, "75Gi"
     k8s = MagicMock()
     k8s.get_cluster_capacity.return_value = None
     mgr = SparkJobManager(_scratch_config(scale, silver_executors), k8s)
