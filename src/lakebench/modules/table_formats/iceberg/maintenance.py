@@ -25,8 +25,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Label selectors for discovering engine pods
-_TRINO_SELECTOR = "app=lakebench-trino,component=coordinator"
+# Label selector for discovering the Spark Thrift engine pod. The Trino
+# coordinator selector is owned by the Trino deployer and imported where used.
 _SPARK_THRIFT_SELECTOR = "app.kubernetes.io/component=spark-thrift-server"
 
 
@@ -55,12 +55,14 @@ def find_maintenance_engine(
     if engine_type != "spark-thrift":
         engines_to_try.append("spark-thrift")
 
+    from lakebench.modules.query_engines.trino.deployer import COORDINATOR_SELECTOR
+
     for engine in engines_to_try:
         if engine == "trino":
             try:
                 pods = core_v1.list_namespaced_pod(
                     namespace,
-                    label_selector=_TRINO_SELECTOR,
+                    label_selector=COORDINATOR_SELECTOR,
                 )
                 if pods.items:
                     catalog = cfg.architecture.query_engine.trino.catalog_name
@@ -127,15 +129,12 @@ ORPHAN_MIN_RETENTION_SECONDS = 24 * 3600 + 600
 # never left without the snapshot it is positioned on.
 LIVE_EXPIRE_MIN_RETENTION_SECONDS = 3600
 # How far before a live stream's referenced snapshot the expire cutoff is held.
-# The cutoff is sent to Trino as a relative duration computed on the CLI host's
-# clock but evaluated against the engine pod's clock, so the two clocks' skew
-# (plus statement latency) is added to the effective cutoff. A one-second
-# margin does not survive that: a Trino coordinator measured 8 s ahead of the
-# CLI host pushed the cutoff past the protected snapshot and expired it,
-# killing the silver stream after ~4.5 h of a 24 h run. The margin must exceed
-# any plausible pod-to-host skew and round latency; ten minutes of bronze
-# snapshots cost nothing to retain one extra round, and the next round reclaims
-# them.
+# The cutoff is a relative duration computed on the CLI host's clock but
+# evaluated against the engine pod's clock, so the two clocks' skew plus
+# statement latency is added to the effective cutoff. The margin must exceed
+# any plausible pod-to-host skew and round latency, or expiry can remove the
+# protected snapshot and kill the stream; ten minutes of extra bronze
+# snapshots cost nothing and the next round reclaims them.
 STREAM_OFFSET_PROTECT_MARGIN_SECONDS = 600
 
 
@@ -170,40 +169,24 @@ def build_maintenance_sql(
     below ``ORPHAN_MIN_RETENTION_SECONDS`` (24 h + 10 min).
 
     ``protect_from`` (when given) is the commit time of the oldest snapshot a
-    live streaming reader still references on this table. The expire cutoff is
-    then held ``STREAM_OFFSET_PROTECT_MARGIN_SECONDS`` before it, so
-    ``expire_snapshots`` never removes the snapshot a stream is positioned on
-    or any newer one. A streaming source tracks its position by snapshot id in
-    its checkpoint offset; expiring that snapshot kills the stream with "Cannot
-    load current offset at snapshot ... the snapshot was expired or removed".
-    The configured retention only bounds how far back expiry reaches, never how
-    recent, so capping the cutoff here can only expire less, never more. The
-    margin is minutes, not a second: the cutoff is a relative duration computed
-    on this host but evaluated on the engine pod, so the pod-to-host clock skew
-    is added to it, and a one-second margin let a pod running 8 s ahead expire
-    the protected snapshot.
+    live streaming reader still references on this table; the expire cutoff is
+    held ``STREAM_OFFSET_PROTECT_MARGIN_SECONDS`` before it (see that
+    constant), so ``expire_snapshots`` never removes the snapshot a stream is
+    positioned on or any newer one. Capping the cutoff can only expire less,
+    never more, since retention bounds how far back expiry reaches, not how
+    recent.
 
     Trino: ``ALTER TABLE ... EXECUTE`` with a duration, prefixed in the same
     submission by ``SET SESSION <catalog>.<proc>_min_retention`` equal to the
-    requested threshold. Without it Trino refuses anything under its 7-day
-    system minimum ("Retention specified (30.00m) is shorter than the
-    minimum retention configured in the system (7.00d)"), verified live
-    2026-09-26; the SET only lasts for its own CLI process, hence one
-    submission (a single ``trino --execute "SET SESSION ...; ALTER TABLE
-    ..."`` succeeded live for both procedures, 2026-09-26). Spark:
-    ``CALL <catalog>.system.<proc>`` with a TIMESTAMP literal computed here
-    in UTC with an explicit ``+00:00`` offset; the old ``CAST((UNIX_TIMESTAMP() - N) *
-    1000 AS BIGINT)`` always failed "number of args and params must match
-    after binding" (live, 2026-09-26).
+    requested threshold, so Trino does not refuse a threshold under its 7-day
+    system minimum. The SET lasts only for its own CLI process, so both go in
+    one submission. Spark: ``CALL <catalog>.system.<proc>`` with a TIMESTAMP
+    literal computed here in UTC with an explicit ``+00:00`` offset.
     """
     now = now or datetime.now(timezone.utc)
     expire_s = _parse_threshold_seconds(retention_threshold)
     # Hold the cutoff a margin before the oldest snapshot a live stream still
-    # references, so expiry never removes it. The margin absorbs the clock skew
-    # between this host and the engine pod the duration is evaluated on; one
-    # second did not (a pod 8 s ahead expired the snapshot). This only ever
-    # makes the window older (expires less); it never reaches more recent than
-    # retention asked.
+    # references, so expiry never removes it (see STREAM_OFFSET_PROTECT_MARGIN_SECONDS).
     if protect_from is not None:
         protect = protect_from.astimezone(timezone.utc) - timedelta(
             seconds=STREAM_OFFSET_PROTECT_MARGIN_SECONDS
@@ -314,35 +297,24 @@ class CompactionPartitioning:
 
 # Partitions per Trino optimize statement on an identity-partitioned table.
 # Trino's Iceberg connector refuses a write that opens more than
-# max_partitions_per_writer (default 100) writers: "Exceeded limit of 100
-# open writers for partitions: 101" (seen in run-20260929-204941-1d17f4).
-# What trips it is the number of partitions one optimize rewrites, not the
-# number the table holds: batch C360 s1 silver (366 interaction_date
-# partitions, a few large files each) compacted in one statement
-# (run-20260929-212900-5105a0), while continuous silver, with small
-# micro-batch files in every partition, did not. The plan chunks every table
-# above 90 partitions anyway, so a run never depends on how many of them hold
-# small files; 90 leaves 10 writers of margin below the default. (Both runs
-# had 366 distinct interaction dates, c360_correctness distinct_dates.)
+# max_partitions_per_writer (default 100) open writers. What trips it is the
+# number of partitions one optimize rewrites, not the number the table holds,
+# and only when those partitions hold small files to rewrite. Chunking every
+# table above 90 partitions keeps the writer count below the default
+# regardless, with 10 writers of margin.
 COMPACTION_CHUNK_PARTITIONS = 90
 
 # Months that need a rewrite per Trino optimize statement on a
 # months()-partitioned AML table. Each partition an optimize rewrites keeps
 # open Parquet writers that buffer up to a row group
 # (parquet_writer_block_size, 128 MB) before they flush, so writer memory
-# grows with the partitions rewritten at once, not with the table:
-# continuous AML s1 silver.transactions at about 4,320 s, with small
-# micro-batch files in 12 to 13 months (the main lane's diagnosis), failed
-# one unchunked optimize on "Query exceeded per-node memory limit of 2.24GB
-# [TableWriterOperator=2.06GB ...]" on its one Trino worker
-# (lb17-qr32-cont, run-20261003-175243-5496fc), about 160 MB a month.
-# Only months optimize rewrites count: Trino 483 drops a data file above
-# the file size threshold, then skips a partition's only remaining file when
-# it has no deletes (IcebergSplitSource.processFileScanTask), so the read
-# counts the data files at or under the threshold per month and a month
-# with fewer than two shares a statement with the month before it. A month
-# that gains its second small file between the read and its statement is
-# rewritten in its neighbour's statement: two months, not every month.
+# grows with the partitions rewritten at once, not with the table; one
+# unchunked optimize over a dozen months exceeds the worker's per-node memory
+# limit. Only months optimize rewrites count: Trino drops a data file above
+# the file size threshold and skips a partition's only remaining file when it
+# has no deletes, so the read counts the data files at or under the threshold
+# per month, and a month with fewer than two shares a statement with the month
+# before it.
 COMPACTION_CHUNK_MONTHS = 1
 
 # Lakebench-created tables compaction chunks, from Lakebench's own DDL:
@@ -564,21 +536,9 @@ def build_table_health_sql(
     a single integer count each.
     """
     if engine == "trino":
-        # Trino system tables use "$files" / "$snapshots" suffix on the table
-        # name.  Only the table-name segment needs quoting (because of the "$"),
-        # not the catalog.schema prefix.
-        # Input: "catalog.schema.table" -> 'catalog.schema."table$files"'
-        parts = table.rsplit(".", 1)
-        if len(parts) == 2:
-            prefix, tbl = parts
-            files_ref = f'{prefix}."{tbl}$files"'
-            snaps_ref = f'{prefix}."{tbl}$snapshots"'
-        else:
-            files_ref = f'"{table}$files"'
-            snaps_ref = f'"{table}$snapshots"'
         return {
-            "data_file_count": f"SELECT count(*) FROM {files_ref}",
-            "snapshot_count": f"SELECT count(*) FROM {snaps_ref}",
+            "data_file_count": f"SELECT count(*) FROM {_system_table_ref(table, 'files')}",
+            "snapshot_count": f"SELECT count(*) FROM {_system_table_ref(table, 'snapshots')}",
         }
     if engine == "spark-thrift":
         return {
@@ -590,9 +550,7 @@ def build_table_health_sql(
 
 def build_drop_table_sql(engine: str, table: str) -> str:
     """Build DROP TABLE SQL for the given engine."""
-    if engine == "trino":
-        return f"DROP TABLE IF EXISTS {table}"
-    if engine == "spark-thrift":
+    if engine in ("trino", "spark-thrift"):
         return f"DROP TABLE IF EXISTS {table}"
     return ""
 
@@ -604,6 +562,24 @@ class ExecSqlTimeout(RuntimeError):
 
 # K8sClient.exec_in_pod's result for an expired timeout.
 _EXEC_TIMEOUT_SENTINEL = "Command timed out"
+
+
+def _engine_argv(engine: str, sql: str) -> list[str]:
+    """The ``exec_in_pod`` command that runs *sql* on *engine*."""
+    if engine == "trino":
+        return ["trino", "--execute", sql]
+    if engine == "spark-thrift":
+        # Options before -e: after it, beeline reads them as more -e
+        # statements and drops them.
+        return [
+            "/opt/spark/bin/beeline",
+            "-u",
+            "jdbc:hive2://localhost:10000",
+            "--silent=true",
+            "-e",
+            sql,
+        ]
+    raise ValueError(f"Unsupported engine: {engine}")
 
 
 def exec_sql(
@@ -621,28 +597,10 @@ def exec_sql(
     the engine's stdout and stderr in the message. ``K8sClient.exec_in_pod``
     never raises, so ignoring its result reported every failure as success.
     """
-    if engine == "trino":
-        result = k8s.exec_in_pod(pod_name, ["trino", "--execute", sql], namespace, timeout=timeout)
-    elif engine == "spark-thrift":
-        result = k8s.exec_in_pod(
-            pod_name,
-            [
-                # Options before -e: after it, beeline reads them as more
-                # -e statements and drops them.
-                "/opt/spark/bin/beeline",
-                "-u",
-                "jdbc:hive2://localhost:10000",
-                "--silent=true",
-                "-e",
-                sql,
-            ],
-            namespace,
-            container="spark-thrift",
-            timeout=timeout,
-        )
-    else:
-        raise ValueError(f"Unsupported engine for exec_sql: {engine}")
-    rc, stdout, stderr = result
+    container = "spark-thrift" if engine == "spark-thrift" else None
+    rc, stdout, stderr = k8s.exec_in_pod(
+        pod_name, _engine_argv(engine, sql), namespace, container=container, timeout=timeout
+    )
     if rc != 0 and (stderr or "").strip() == _EXEC_TIMEOUT_SENTINEL and not (stdout or "").strip():
         raise ExecSqlTimeout(
             f"exec_sql timed out after {timeout}s (the statement may still be running)"
@@ -665,32 +623,10 @@ def query_sql(
     Like :func:`exec_sql` but returns the raw stdout for result parsing.
     Raises ``RuntimeError`` on non-zero exit code.
     """
-    if engine == "trino":
-        rc, stdout, stderr = k8s.exec_in_pod(
-            pod_name,
-            ["trino", "--execute", sql],
-            namespace,
-            timeout=timeout,
-        )
-    elif engine == "spark-thrift":
-        rc, stdout, stderr = k8s.exec_in_pod(
-            pod_name,
-            [
-                # Options before -e: after it, beeline reads them as more
-                # -e statements and drops them.
-                "/opt/spark/bin/beeline",
-                "-u",
-                "jdbc:hive2://localhost:10000",
-                "--silent=true",
-                "-e",
-                sql,
-            ],
-            namespace,
-            container="spark-thrift",
-            timeout=timeout,
-        )
-    else:
-        raise ValueError(f"Unsupported engine for query_sql: {engine}")
+    container = "spark-thrift" if engine == "spark-thrift" else None
+    rc, stdout, stderr = k8s.exec_in_pod(
+        pod_name, _engine_argv(engine, sql), namespace, container=container, timeout=timeout
+    )
 
     if rc != 0:
         raise RuntimeError(f"query_sql failed (rc={rc}): {stderr}")
