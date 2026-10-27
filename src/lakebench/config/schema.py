@@ -1103,9 +1103,9 @@ class PolarisConfig(ConfigModel):
 
     ``client_secret`` is optional. Empty: ``deploy`` generates one
     per deployment, once, into the Secret ``lakebench-polaris-client``, and
-    ``run``, ``benchmark`` and ``destroy`` read it back from there, so
-    separate invocations agree (a value generated at config load would
-    differ per invocation). Set: it is used as is and stored in that Secret.
+    ``run`` and ``benchmark`` read it back from there, so separate invocations
+    agree (a value generated at config load would differ per invocation).
+    Set: it is used as is and stored in that Secret.
     """
 
     port: int = Field(default=8181, ge=1, le=65535)
