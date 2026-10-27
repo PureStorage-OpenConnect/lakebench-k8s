@@ -441,10 +441,6 @@ class IncrementalDetection:
 
         _delete_uri(self.spark, path, "incremental")
 
-    def discard_all(self) -> None:
-        """Delete this driver's state (at the drain)."""
-        self._delete(self.root)
-
     # -- the wrapped rule ---------------------------------------------------
 
     def _mode_for(self, rule_id: str):
