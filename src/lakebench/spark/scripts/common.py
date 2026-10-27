@@ -3599,3 +3599,210 @@ def log_landing(batch_id, oldest, newest, committed=None) -> None:
         f"[landing] batch={int(batch_id)} oldest={oldest:.3f} newest={newest:.3f} "
         f"committed={committed:.3f}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Customer 360 batch silver build (silver_build.py, silver_build_delta.py)
+# ---------------------------------------------------------------------------
+
+SILVER_STRATEGIES = ("simple", "streaming")
+
+
+def silver_strategy_override(spark):
+    """The strategy ``spark.lb.silver.strategy`` (or LB_SILVER_STRATEGY)
+    names, or None for auto.
+
+    ``salted`` is refused before any log line names a strategy: it once
+    ran as SIMPLE while the metrics reported ``Strategy: salted``. An
+    unknown value is logged and ignored.
+    """
+    override = spark.conf.get("spark.lb.silver.strategy", None)
+    if override is None:
+        override = os.environ.get("LB_SILVER_STRATEGY", None)
+    if not override or override.lower() == "auto":
+        return None
+    if override.lower() == "salted":
+        raise SilverAbort("SALTED strategy is deferred to v1.7; see plan Block J")
+    if override.lower() in SILVER_STRATEGIES:
+        return override.lower()
+    log(f"Warning: Invalid strategy override '{override}', using auto")
+    return None
+
+
+def determine_silver_strategy(spark, input_size_gb):
+    """``simple`` or ``streaming``: the override, else STREAMING from 100 GB
+    of bronze up.
+
+    Silver's transforms are per-row column operations with no joins, so the
+    choice depends on size alone, never on customer skew.
+    """
+    override = silver_strategy_override(spark)
+    if override:
+        log(f"Using override strategy: {override}")
+        return override
+    strategy = "streaming" if input_size_gb >= 100 else "simple"
+    log(f"Auto-selected strategy: {strategy}")
+    return strategy
+
+
+def profile_bronze_data(spark, txn_path):
+    """(size in GB, skew factor) of the bronze files at *txn_path*.
+
+    The size comes from the file system (``path_size_gb_strict``, which
+    raises on a listing failure, so an S3 outage cannot look like an empty
+    bronze). Customers and skew come from a seeded sample of at most 0.1% or
+    10M rows (LB_SEED, default 0, so a rerun samples the same rows), sized
+    from an estimate of 250K rows per GB.
+    """
+    from pyspark.sql.functions import col, to_date
+    from pyspark.sql.functions import max as max_
+    from pyspark.sql.functions import min as min_
+
+    log("Profiling Bronze data (lightweight)...")
+    txn_size_gb = path_size_gb_strict(spark, txn_path)
+    log(f"  Size from filesystem: {txn_size_gb:.1f} GB")
+
+    sample_estimate = int(txn_size_gb * 250_000)
+    sample_fraction = min(0.001, 10_000_000 / max(sample_estimate, 1))
+    sample_seed = int(os.getenv("LB_SEED", "0"))
+    sample_df = spark.read.parquet(txn_path).sample(sample_fraction, seed=sample_seed)
+
+    sample_stats = sample_df.agg(
+        min_(to_date(col("event_timestamp"))).alias("min_date"),
+        max_(to_date(col("event_timestamp"))).alias("max_date"),
+    ).collect()[0]
+    # The distinct count is estimated from the sample's frequency profile
+    # (Chao1), not scaled by 1 / sample_fraction, which counted every sampled
+    # customer as unique to the sample.
+    approx_customer_count, skew_factor = sample_key_profile(
+        sample_df, "customer_id", sample_estimate
+    )
+    min_date = sample_stats.min_date
+    max_date = sample_stats.max_date
+    date_range_days = (max_date - min_date).days if min_date and max_date else 1
+
+    log(f"  Approx customers: {approx_customer_count:,}")
+    log(f"  Date range: {min_date} to {max_date} ({date_range_days} days)")
+    log(f"  Skew factor: {skew_factor:.1f}")
+    log("Profile complete (lightweight, no shuffles)")
+    return txn_size_gb, skew_factor
+
+
+def silver_input(spark, bronze_source):
+    """(input size in GB, skew factor, size source) for the silver build.
+
+    ``spark.lb.silver.size_gb`` (or LB_SILVER_SIZE_GB) above 0 replaces the
+    profile and is labelled ``operator_override``, so a report never shows
+    it as measured. Otherwise the bronze files are profiled
+    (``filesystem``), and an empty bronze stops the job with exit 1.
+    """
+    override = spark.conf.get("spark.lb.silver.size_gb", None)
+    if override is None:
+        override = os.environ.get("LB_SILVER_SIZE_GB", None)
+    size_override = None
+    if override:
+        try:
+            size_override = float(override)
+        except ValueError:
+            log(f"Warning: Invalid size override '{override}', using profiling")
+    if size_override and size_override > 0:
+        log(f"Using size override: {size_override:.1f} GB (skipping profiling)")
+        return size_override, 1.0, "operator_override"
+    # Reached only when nothing asserted a positive size, so the profiled
+    # size is measured: a zero really is an empty bronze. An override of 0
+    # or less once skipped this check, because it left size_override set.
+    size_gb, skew_factor = profile_bronze_data(spark, bronze_source)
+    if size_gb == 0:
+        log("ERROR: Bronze dataset is empty - run Bronze job first")
+        spark.stop()
+        raise SystemExit(1)
+    return size_gb, skew_factor, "filesystem"
+
+
+def apply_silver_dynamic_config(spark, input_size_gb, skew_factor):
+    """Shuffle partitions at 256 MB of input each (200 to 10,000), larger
+    AQE partitions above 1 TB, and AQE skew-join handling above 10x skew."""
+    shuffle_partitions = max(200, min(10000, int(input_size_gb * 1024 / 256)))
+    spark.conf.set("spark.sql.shuffle.partitions", shuffle_partitions)
+    log(f"Dynamic shuffle partitions: {shuffle_partitions}")
+    if input_size_gb > 1000:
+        spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "256m")
+        spark.conf.set("spark.sql.adaptive.coalescePartitions.minPartitionSize", "64m")
+    if skew_factor > 10:
+        spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+        spark.conf.set("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "5")
+        log("Enabled AQE skew join handling")
+
+
+def refuse_unforced_rebuild(spark, silver_tbl):
+    """Refuse a full build over a silver table that holds rows unless
+    --force-rebuild (LB_FORCE_REBUILD=1) opted in.
+
+    A full build replaces the table, dropping rows the deployment already
+    wrote. A read that fails says nothing about the rows, so it refuses
+    too rather than count the table as empty.
+    """
+    force = os.environ.get("LB_FORCE_REBUILD", "0") == "1"
+    try:
+        has_rows = spark.table(silver_tbl).limit(1).count() > 0
+    except Exception as e:  # noqa: BLE001
+        if not force:
+            raise SilverAbort(
+                f"silver-build: cannot tell whether {silver_tbl} holds rows ({one_line(e)}); "
+                "refusing a full rebuild without --force-rebuild"
+            ) from e
+        has_rows = True
+    if has_rows and not force:
+        raise SilverAbort(
+            f"silver-build: refusing full rebuild of populated {silver_tbl}; "
+            "re-run with --force-rebuild to opt in"
+        )
+
+
+def finish_silver_build(
+    spark,
+    *,
+    title,
+    strategy,
+    silver_tbl,
+    silver_count,
+    bronze_rows,
+    input_size_gb,
+    input_size_gb_source,
+    total_time,
+    unknown_reason,
+):
+    """Log the silver build's summary and JOB METRICS block, then stop.
+
+    ``silver_count`` None (the commit's row count was unreadable) is logged
+    as ``output_rows: unknown`` and then fails the job, as does a zero-row
+    build: a cumulative table count is never published as this cycle's
+    output. Both checks run after the metrics block, so a failed run still
+    leaves it on stdout. ``unknown_reason`` names the missing source in the
+    failure message.
+    """
+    log("=" * 60)
+    log(f"{title} COMPLETED")
+    log("=" * 60)
+    log(f"Strategy: {strategy}")
+    log(f"Records written: {silver_count if silver_count is not None else 'unknown'}")
+    log(f"Table: {silver_tbl}")
+    log("Partitioned by: interaction_date")
+    log(f"Duration: {total_time:.1f}s ({total_time / 60:.1f} min)")
+    log("=== JOB METRICS: silver-build ===")
+    log(f"input_size_gb: {input_size_gb:.3f}")
+    log(f"input_size_gb_source: {input_size_gb_source}")
+    # The rung of the LB_DATA_CLOCK resolution that produced the clock.
+    log(f"data_clock_source: {env('LB_DATA_CLOCK_SOURCE', 'unknown')}")
+    log(f"bronze_rows: {bronze_rows}")
+    log(f"output_rows: {'unknown' if silver_count is None else silver_count}")
+    log(f"elapsed_seconds: {total_time:.1f}")
+    log_driver_output_bytes()
+    log("=" * 60)
+    if silver_count is None:
+        spark.stop()
+        raise SilverAbort(
+            f"silver-build: output_rows unknown ({unknown_reason}); refusing exit-0 pass"
+        )
+    assert_progress(silver_count, "silver-build")
+    spark.stop()

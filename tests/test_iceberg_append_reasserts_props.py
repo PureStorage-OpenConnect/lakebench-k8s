@@ -14,7 +14,6 @@ import ast
 import re
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -35,7 +34,7 @@ _WANTED = {
     "_SILVER_ICEBERG_STATIC_PROPS",
     "silver_iceberg_props",
     "reassert_silver_iceberg_props",
-    "create_silver_table",
+    "write_silver",
     "silver_simple",
     "silver_streaming",
 }
@@ -70,6 +69,7 @@ def silver_build(monkeypatch, load_script):
         "apply_silver_transformations_anchored": lambda df, _anchor: df,
         "batch_id_last": lambda df: df,
         "drop_if_columns_move": lambda *_a: None,
+        "ensure_column": lambda *_a: None,
         "rows_added_by_last_commit": lambda _spark, _tbl: 5,
     }
     exec(compile(ast.fix_missing_locations(ast.Module(nodes, [])), str(_SILVER_BUILD), "exec"), ns)
@@ -147,9 +147,9 @@ def test_full_build_creates_the_table_with_the_conf_properties(
     df = spark.read.parquet.return_value
     df.count.return_value = 5
     df.writeTo.return_value = writer = _Writer()
-    args = (spark, "s3a://lb-bronze/", TABLE, "ice")
+    args = (spark, "s3a://lb-bronze/", TABLE)
     if strategy == "silver_streaming":
-        args += (SimpleNamespace(total_size_gb=200.0),)
+        args += (200.0,)
     silver_build[strategy](*args)
     assert writer.created
     assert writer.props == dict(silver_build["silver_iceberg_props"](spark))
