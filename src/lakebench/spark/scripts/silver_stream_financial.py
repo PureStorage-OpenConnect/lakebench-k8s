@@ -479,9 +479,8 @@ def _maintain_statements(
                     f"(this-batch min book_ts < prior max book_ts). "
                     f"{STATEMENTS_STRICT_PARITY_ENV}=1 is set: refusing to "
                     f"write an arrival-order running_balance that would "
-                    f"silently diverge from batch mode. Remedies: single-pod "
-                    f"datagen (DatagenConfig.parallelism=1), or wait for the "
-                    f"out-of-order-tolerant D-full slated for v1.7."
+                    f"silently diverge from batch mode. Remedy: single-pod "
+                    f"datagen (DatagenConfig.parallelism=1)."
                 )
 
             # 3. Join, fill first-touch defaults, cumulative sum per account.

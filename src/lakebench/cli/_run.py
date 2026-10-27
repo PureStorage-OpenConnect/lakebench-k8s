@@ -1304,7 +1304,7 @@ def _report_tm_verdict(verdict: dict, label: str) -> bool:
     else:
         print_warning(
             f"{label}: TM operations {str(status).replace('_', ' ')}: {verdict.get('reason')}. "
-            "The P10 gate is not met; detection results are unaffected."
+            "The TM operations gate is not met; detection results are unaffected."
         )
     return False
 

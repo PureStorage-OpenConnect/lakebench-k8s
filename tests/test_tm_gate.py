@@ -164,7 +164,7 @@ def test_continuous_section_renders_from_the_run_record():
     html = FinancialScorecardBlock().render_detail_html(
         SimpleNamespace(jobs=[], financial_scoring=None, config_snapshot={}, tm_operations=verdict)
     )
-    gate = html.split("P10 gate")[1].split("</p>")[0]
+    gate = html.split("TM operations gate")[1].split("</p>")[0]
     assert "not run" in gate and "var(--success)" not in gate
 
 

@@ -1096,7 +1096,7 @@ def _render_tm_operations(
         unit = "operations pass" if mode == "continuous" else "cycle"
         colour = {"pass": "success", "fail": "danger"}.get(tm_record["status"], "warning")
         parts.append(
-            f"<p>P10 gate ({escape(mode)}, per {unit}): "
+            f"<p>TM operations gate ({escape(mode)}, per {unit}): "
             f'<strong style="color: var(--{colour});">'
             f"{escape(str(tm_record['status']).replace('_', ' '))}</strong>"
             + (f" -- {escape(str(tm_record.get('reason')))}" if tm_record.get("reason") else "")

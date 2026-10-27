@@ -1550,7 +1550,7 @@ def resolve_data_clock(df_fallback=None, strict=False):
             "LB_DATA_CLOCK is unset. Silver C360 mains require a resolved "
             "data clock so recency scores stay reproducible across cycles "
             "and batch/stream. job.py._build_env_vars should always export "
-            "LB_DATA_CLOCK for silver jobs (see silver-plan C2)."
+            "LB_DATA_CLOCK for silver jobs."
         )
     if df_fallback is None:
         log("Data clock: LB_DATA_CLOCK unset and no data to measure; recency is NULL")
