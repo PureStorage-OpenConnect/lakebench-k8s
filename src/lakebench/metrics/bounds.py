@@ -38,9 +38,6 @@ BOUND_MAINTENANCE = "pre-benchmark maintenance budget"
 #: Not a bound kind (see the module docstring); readers pass it to
 #: ``metric_registry.capped_by`` as ``extra`` when ``trickle_bound`` holds.
 BOUND_TRICKLE = "trickle"
-#: The ML loop's executor cap; it sits in the loop's own limits, never in the
-#: pipeline's ``bound_kinds``.
-BOUND_ML_LOOP_EXECUTOR_CAP = "ML loop executor cap"
 
 #: ``limits.bound`` lines that come from the trickle start with this.
 TRICKLE_LINE_PREFIX = "trickle:"
