@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -143,20 +144,20 @@ def generate(
     record = _registered_corpus_record(
         cfg, config_file, registered_corpus, yes, allow_stale_bronze=allow_stale_bronze
     )
-    if record is None:
-        _generate_loaded(cfg, config_file, timeout, yes, regenerate, allow_stale_bronze)
-        return
     try:
         fleet = _generate_loaded(
             cfg, config_file, timeout, yes, regenerate, allow_stale_bronze, record=record
         )
     except typer.Exit as e:
-        if e.exit_code:
+        if record is not None and e.exit_code:
             record.close("failed", exit_code=str(int(e.exit_code)))
         raise
     except (LakebenchError, ContextConflictError, K8sConnectionError) as e:
-        record.close("failed", error=type(e).__name__)
+        if record is not None:
+            record.close("failed", error=type(e).__name__)
         raise
+    if record is None:
+        return
     fingerprint = _s3_corpus_fingerprint(cfg)
     record.close(
         "generated",
@@ -262,8 +263,6 @@ class _CorpusRecord:
 
 
 def _utc() -> str:
-    import time
-
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
@@ -366,6 +365,31 @@ def _registered_corpus_record(
     return _CorpusRecord(entry)
 
 
+def datagen_pod_failure(prog: dict, namespace: str, bar) -> str | None:
+    """The failure one datagen progress read (``DatagenDeployer.get_progress``)
+    shows, said on the console. OOMKilled or crash-looping pods stop *bar*
+    (a Rich ``Progress``), print why, and return the journal message; the
+    caller then exits FAILED. A crash-looping generator never finishes, so
+    waiting out the timeout (hours at large scale) only hides the failure.
+    Pending pods are printed under the bar and return None: the wait goes on.
+    """
+    if prog.get("oom_pods"):
+        bar.stop()
+        print_error(f"OOMKilled: {', '.join(prog['oom_pods'])}")
+        print_info("Increase datagen memory or reduce parallelism")
+        return "OOMKilled pods detected"
+    if prog.get("crash_pods"):
+        bar.stop()
+        details = prog.get("crash_details", {})
+        for pod in prog["crash_pods"]:
+            print_error(f"Datagen pod crash-looping: {pod} {details.get(pod, '')}")
+        print_info(f"See why with: kubectl logs -n {namespace} {prog['crash_pods'][0]} --previous")
+        return "Datagen pods crash-looping"
+    if prog.get("pending_pods"):
+        bar.console.print(f"  [yellow]{len(prog['pending_pods'])} pod(s) pending[/yellow]")
+    return None
+
+
 def _generate_loaded(
     cfg,
     config_file: Path,
@@ -404,18 +428,14 @@ def _generate_loaded(
     datagen_cfg = workload.datagen
     dims = cfg.get_scale_dimensions()
 
-    # Auto-compute --timeout when the operator passed 0 (the new default).
-    # Anchored on live UAT: scale 100 (~730 GB) with 30 pods took ~4500 s,
-    # so per-pod effective throughput is ~5 MB/s to S3-A after row build,
-    # partitioning, and parquet encoding. Formula:
+    # --timeout 0 computes the wait from the corpus size. Scale 100
+    # (~730 GB) on 30 pods took ~4500 s, about 5 MB/s per pod after row
+    # build, partitioning and parquet encoding, so
     #   time = (gb * 1024) / (pods * 5 MB/s) * 2   (100% headroom)
-    # Floor 900 s so small scales still have room for pod scheduling and
-    # image pull; ceiling 86400 s (24 h) to keep a typo from parking a
-    # runaway wait forever. If `approx_bronze_gb` isn't populated the
-    # formula cannot estimate wall time -- fall back to a fixed 7200 s
-    # default (matching the older hard-coded value) rather than
-    # let it clamp to the 900 s floor and declare a 75-minute job
-    # failed after 15 minutes.
+    # The 900 s floor leaves room for pod scheduling and image pull; the
+    # 86400 s ceiling keeps a typo from parking a wait forever. Without
+    # approx_bronze_gb there is no estimate, and 7200 s is used rather than
+    # the 900 s floor, which would fail a 75-minute job after 15 minutes.
     if timeout <= 0:
         pods = max(1, int(datagen_cfg.parallelism or 1))
         gb = max(0.0, float(dims.approx_bronze_gb or 0.0))
@@ -468,6 +488,9 @@ def _generate_loaded(
         },
     )
 
+    # The journal's end message for a failure exit below; every failure
+    # exit ends the command in the journal.
+    failure = ""
     try:
         # Share a run id with the datagen pods (live-observability grouping
         # label) so a standalone `generate` is correlatable in Grafana and a
@@ -518,7 +541,7 @@ def _generate_loaded(
 
         if result.status != DeploymentStatus.SUCCESS:
             print_error(f"Failed to submit job: {result.message}")
-            _journal_safe(j.end_command, success=False, message=result.message)
+            failure = result.message
             # A refusal (stale bronze, live datagen pods) exits 3.
             from lakebench.cli._exit import refused_result_code
 
@@ -542,8 +565,6 @@ def _generate_loaded(
         )
 
         # Wait for completion with progress bar
-        import time
-
         from rich.progress import (
             BarColumn,
             Progress,
@@ -555,9 +576,8 @@ def _generate_loaded(
 
         start = time.time()
 
-        # Get initial progress to determine total completions
-        initial_progress = datagen.get_progress()
-        total_completions = initial_progress.get("completions", 1)
+        prog = datagen.get_progress()
+        total_completions = prog.get("completions", 1)
 
         with Progress(
             SpinnerColumn(),
@@ -571,8 +591,6 @@ def _generate_loaded(
             task = progress_bar.add_task("Generating data", total=total_completions)
 
             while time.time() - start < timeout:
-                prog = datagen.get_progress()
-
                 if not prog.get("running", False):
                     if prog.get("error"):
                         progress_bar.stop()
@@ -582,46 +600,19 @@ def _generate_loaded(
                     progress_bar.update(task, completed=total_completions)
                     break
 
-                # Surface pod failures early
-                if prog.get("oom_pods"):
-                    progress_bar.stop()
-                    print_error(f"OOMKilled: {', '.join(prog['oom_pods'])}")
-                    print_info("Increase datagen memory or reduce parallelism")
-                    _journal_safe(j.end_command, success=False, message="OOMKilled pods detected")
+                failure = datagen_pod_failure(prog, cfg.get_namespace(), progress_bar) or ""
+                if failure:
                     raise typer.Exit(ExitCode.FAILED)
-                if prog.get("crash_pods"):
-                    # A crash-looping generator never finishes; waiting out the
-                    # timeout (hours at large scale) only hides the failure.
-                    progress_bar.stop()
-                    details = prog.get("crash_details", {})
-                    for pod in prog["crash_pods"]:
-                        print_error(f"Datagen pod crash-looping: {pod} {details.get(pod, '')}")
-                    ns = cfg.get_namespace()
-                    print_info(
-                        f"See why with: kubectl logs -n {ns} {prog['crash_pods'][0]} --previous"
-                    )
-                    _journal_safe(
-                        j.end_command, success=False, message="Datagen pods crash-looping"
-                    )
-                    raise typer.Exit(ExitCode.FAILED)
-                if prog.get("pending_pods"):
-                    progress_bar.console.print(
-                        f"  [yellow]{len(prog['pending_pods'])} pod(s) pending[/yellow]"
-                    )
 
                 succeeded = prog.get("succeeded", 0)
                 progress_bar.update(task, completed=succeeded)
 
                 time.sleep(30)
+                prog = datagen.get_progress()
 
-        # Final result. Give the finalizer whatever budget remains under
-        # the operator's --timeout so a job that was still running when
-        # the polling loop's outer timeout hit gets one more real check
-        # before being declared failed. Prior code hard-coded 10s here,
-        # which meant --timeout 3600 on a real UAT declared a still-
-        # running datagen a failure ~10s after the polling loop's own
-        # timeout expired -- exit code 0 but "Generation Failed" logged
-        # while the pods kept generating for another half hour.
+        # The finalizer gets whatever remains of --timeout (at least 30 s),
+        # so a job still running when the poll loop ran out gets one real
+        # check before it is declared failed.
         elapsed = time.time() - start
         final_budget = max(30, int(timeout - elapsed))
         completion_result = datagen.wait_for_completion(timeout_seconds=final_budget)
@@ -683,7 +674,7 @@ def _generate_loaded(
             # The corpus series marker: this generate's cycle is complete
             # (deploy.corpus), with the image digest its pods ran.
             from lakebench.deploy.corpus import pod_image_digest, record_cycle
-            from lakebench.deploy.datagen import _s3_client_for
+            from lakebench.deploy.datagen import _s3_client_for, bronze_datagen_prefix
 
             _digest, _why = pod_image_digest(cfg.get_namespace())
             _mark = record_cycle(
@@ -696,10 +687,8 @@ def _generate_loaded(
                     "namespace are not supported; run again once the other has finished."
                 )
                 # The fleet just written describes the other run's corpus.
-                from lakebench.metrics.datagen_aggregator import drop_sidecar
-
                 drop_sidecar(cfg.get_namespace())
-                _journal_safe(j.end_command, success=False, message="series marker conflict")
+                failure = "series marker conflict"
                 raise typer.Exit(ExitCode.REFUSED)
             if _mark != "written":
                 print_warning(
@@ -722,8 +711,6 @@ def _generate_loaded(
             _journal_safe(j.end_command, success=True)
 
             # The prefix DatagenDeployer wrote under.
-            from lakebench.deploy.datagen import bronze_datagen_prefix
-
             written_prefix = bronze_datagen_prefix(cfg)
             console.print(
                 Panel(
@@ -751,7 +738,7 @@ def _generate_loaded(
                     "elapsed_seconds": completion_result.elapsed_seconds,
                 },
             )
-            _journal_safe(j.end_command, success=False, message=completion_result.message)
+            failure = completion_result.message
 
             console.print(
                 Panel(
@@ -762,6 +749,10 @@ def _generate_loaded(
             )
             raise typer.Exit(ExitCode.FAILED)
 
+    except typer.Exit as e:
+        if e.exit_code:
+            _journal_safe(j.end_command, success=False, message=failure)
+        raise
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))

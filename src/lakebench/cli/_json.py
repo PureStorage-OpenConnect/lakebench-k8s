@@ -179,25 +179,19 @@ def active() -> bool:
     return _active is not None
 
 
-def _stdout_consoles() -> list[Any]:
-    """The module-level Rich consoles that print to stdout."""
-    from lakebench.cli import _config, _financial, _helpers, _recommend
-
-    return [m.console for m in (_helpers, _config, _financial, _recommend)]
-
-
 def start(command: str) -> None:
     """Enter JSON mode for *command*: human output goes to stderr until
     ``finish``. Idempotent within one command run."""
     global _active
     if _active is not None:
         return
+    from lakebench.cli._helpers import console
+
     run = _Run(command)
-    for c in _stdout_consoles():
-        # The set file, not the property: unset, Rich follows sys.stdout as
-        # it is at each write, and restoring a captured stream would pin it.
-        run.redirected.append((c, getattr(c, "_file", None)))
-        c.file = sys.stderr
+    # The set file, not the property: unset, Rich follows sys.stdout as it
+    # is at each write, and restoring a captured stream would pin it.
+    run.redirected.append((console, getattr(console, "_file", None)))
+    console.file = sys.stderr
     _active = run
 
 

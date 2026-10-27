@@ -64,18 +64,21 @@ LATER_REPETITION = {
 
 class _Stop(Exception):
     """The series stops here with *code*; *reason* goes into the manifest.
-    *corpus* marks a stop this module raised because bronze or the corpus
-    differs (exit 3, ``series.corpus_changed``)."""
+    *corpus* marks a stop raised because bronze or the corpus differs (exit
+    3, ``series.corpus_changed``). *kind* names the stop for the handler:
+    ``corpus_rep1`` (bronze moved while repetition 1 read it) or
+    ``no_verified_corpus`` (repetition 1 left nothing to reuse)."""
 
-    def __init__(self, code: int, reason: str, *, corpus: bool = False) -> None:
+    def __init__(self, code: int, reason: str, *, corpus: bool = False, kind: str = "") -> None:
         super().__init__(reason)
         self.code = code
         self.reason = reason
         self.corpus = corpus
+        self.kind = kind
 
 
-def _corpus_stop(reason: str) -> _Stop:
-    return _Stop(ExitCode.REFUSED, f"series.corpus_changed: {reason}", corpus=True)
+def _corpus_stop(reason: str, *, kind: str = "") -> _Stop:
+    return _Stop(ExitCode.REFUSED, f"series.corpus_changed: {reason}", corpus=True, kind=kind)
 
 
 def bronze_listing(cfg: Any) -> tuple[str | None, int, int, str]:
@@ -320,6 +323,7 @@ def run_series(
                     raise _Stop(
                         ExitCode.FAILED,
                         "repeat.no_verified_corpus: repetition 1's bronze-verify did not pass",
+                        kind="no_verified_corpus",
                     )
                 if not stage_succeeded(record, "silver-build"):
                     raise _Stop(
@@ -333,6 +337,7 @@ def run_series(
                         ExitCode.FAILED,
                         f"repeat.no_verified_corpus: the datagen Job is {state}, so bronze "
                         "may still be changing",
+                        kind="no_verified_corpus",
                     )
                 inherited = inherited_corpus_from(record)
                 d1 = inherited.get("bronze_listing_sha256")
@@ -341,9 +346,10 @@ def run_series(
                         ExitCode.FAILED,
                         "repeat.no_verified_corpus: repetition 1's record carries no observed "
                         "corpus to reuse",
+                        kind="no_verified_corpus",
                     )
                 if not generates and d0 != d1:
-                    raise _corpus_stop("bronze changed during repetition 1")
+                    raise _corpus_stop("bronze changed during repetition 1", kind="corpus_rep1")
                 now, objects, size, scope = _listing_or_stop(pristine, "after repetition 1")
                 if now != d1:
                     raise _corpus_stop("bronze changed after repetition 1 was saved")
@@ -374,7 +380,7 @@ def run_series(
         stop = s_
         manifest.stopped_reason = s_.reason
         code = int(s_.code)
-        if s_.corpus and manifest.runs and "during repetition 1" in s_.reason:
+        if s_.kind == "corpus_rep1" and manifest.runs:
             # Repetition 1 read a corpus that did not hold still: not a member.
             manifest.runs[0]["member"] = False
             manifest.runs[0]["corpus_changed"] = True
@@ -405,7 +411,7 @@ def run_series(
             next="regenerate the corpus or start a new series",
             path="series.corpus_changed",
         )
-    if stop is not None and stop.reason.startswith("repeat.no_verified_corpus"):
+    if stop is not None and stop.kind == "no_verified_corpus":
         raise LakebenchError(
             "no verified corpus to reuse; the series stopped after repetition 1",
             why=stop.reason,

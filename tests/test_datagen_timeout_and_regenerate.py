@@ -342,3 +342,68 @@ class TestRunGenerateRegenerate:
         )
         assert res.exit_code == 9, (res.output[-2000:], repr(res.exception))
         assert call_order == ["empty", "deploy"], call_order
+
+
+# --- generate journal -------------------------------------------------------
+
+
+@pytest.mark.parametrize("refusal", ["stop_previous_datagen_or_exit", "enforce_bronze_gate"])
+def test_a_refused_generate_ends_its_journal_command(
+    monkeypatch: pytest.MonkeyPatch, refusal: str
+) -> None:
+    """A generate refused after its journal command began still ends that
+    command, as failed, so the journal does not show it running forever."""
+    from lakebench.cli import _generate as gen
+
+    class _Journal:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, dict]] = []
+
+        def begin_command(self, *a, **k) -> None:
+            self.calls.append(("begin", k))
+
+        def end_command(self, **k) -> None:
+            self.calls.append(("end", k))
+
+    journal = _Journal()
+
+    def _refuse(*a, **k):
+        raise typer.Exit(ExitCode.REFUSED)
+
+    monkeypatch.setattr(gen, "check_datagen_scale", lambda cfg: None)
+    monkeypatch.setattr(gen, "get_k8s_client", MagicMock(side_effect=RuntimeError("no cluster")))
+    monkeypatch.setattr("lakebench.config.autosizer.resolve_auto_sizing", lambda *a: [])
+    monkeypatch.setattr(gen, "journal_open", lambda *a, **k: journal)
+    monkeypatch.setattr(gen, "stop_previous_datagen_or_exit", lambda cfg: None)
+    monkeypatch.setattr("lakebench.metrics.datagen_aggregator.drop_sidecar", lambda ns: None)
+    monkeypatch.setattr(gen, refusal, _refuse)
+
+    with pytest.raises(typer.Exit) as exc:
+        gen._generate_loaded(_cfg(), "cfg.yaml", 60, True, False, False)
+    assert exc.value.exit_code == ExitCode.REFUSED
+    assert journal.calls[-1] == ("end", {"success": False, "message": ""})
+
+
+@pytest.mark.parametrize(
+    ("prog", "failure", "stopped"),
+    [
+        ({"oom_pods": ["p0"]}, "OOMKilled pods detected", True),
+        (
+            {"crash_pods": ["p1"], "crash_details": {"p1": "exit 101"}},
+            "Datagen pods crash-looping",
+            True,
+        ),
+        ({"pending_pods": ["p2", "p3"]}, None, False),
+        ({"succeeded": 4}, None, False),
+    ],
+)
+def test_datagen_pod_failure(prog: dict, failure: str | None, stopped: bool) -> None:
+    """Failed pods stop the bar and name the failure; pending pods are only
+    shown, and the wait goes on."""
+    from lakebench.cli._generate import datagen_pod_failure
+
+    bar = MagicMock()
+    assert datagen_pod_failure(prog, "ns", bar) == failure
+    assert bar.stop.called is stopped
+    if "pending_pods" in prog:
+        bar.console.print.assert_called_once_with("  [yellow]2 pod(s) pending[/yellow]")

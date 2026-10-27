@@ -17,18 +17,14 @@ runs inside ``lakebench run``.
 
 from __future__ import annotations
 
-import logging
 import time
 from pathlib import Path
 from typing import Annotated
 
 import typer
-from rich.console import Console
 
-from lakebench.cli._helpers import esc, print_error
+from lakebench.cli._helpers import console, esc, print_error
 from lakebench.exit_codes import ExitCode, LakebenchError
-
-logger = logging.getLogger(__name__)
 
 financial_app = typer.Typer(
     name="financial",
@@ -36,7 +32,6 @@ financial_app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
-console = Console()
 
 
 def _assert_financial_schema(cfg) -> None:
@@ -50,7 +45,7 @@ def _assert_financial_schema(cfg) -> None:
         )
 
 
-def _load_config(config_path: Path, verb: str = "financial"):
+def _load_config(config_path: Path, verb: str):
     from lakebench.config import ConfigError, LoadPurpose, load_config
 
     try:
@@ -200,11 +195,13 @@ def reference_score(
             str(leakage_threshold),
         ],
     )
-    console.print(f"  submitted: {status.message}")
+    console.print(f"  submitted: {esc(status.message)}")
     _require_submitted(status)
 
     if wait:
-        result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-score-financial-reference")
+        result = _wait_for_sparkapp(
+            cfg.get_namespace(), f"lakebench-{JobType.SCORE_FINANCIAL_REFERENCE.value}"
+        )
         console.print(f"[bold]reference-score result:[/bold] {result}")
         if result != "COMPLETED":
             raise typer.Exit(ExitCode.FAILED)

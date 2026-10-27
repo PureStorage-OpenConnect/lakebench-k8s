@@ -14,9 +14,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from lakebench.cli._helpers import console, esc, print_info, print_success, print_warning
-
-GOLD_REFRESH_APP = "lakebench-gold-refresh"
+from lakebench.cli._helpers import console, print_info, print_success, print_warning
 
 #: The covered-mode table names, in tick-record terms.
 COVERED_OPTIONS = (
@@ -105,7 +103,7 @@ def _write_recall_json(cfg, run_id: str, record: dict) -> None:
             Body=_json.dumps(record).encode(),
         )
     except Exception as e:  # noqa: BLE001 -- best effort, never fails the run
-        print_warning(f"Could not write recall.json: {esc(str(e))}")
+        print_warning(f"Could not write recall.json: {e}")
 
 
 def score_financial_via_queries(
@@ -115,15 +113,15 @@ def score_financial_via_queries(
     covered: dict | None,
     timeout: int,
 ) -> dict[str, Any] | None:
-    """Score recall and precision with SQL on the query engine (the scorer
-    that replaces the score_financial Spark job).
+    """Score recall and precision with SQL on the query engine.
 
     Covered mode: *covered* is the scored tick record; every table is read at
     the snapshot that tick pinned and alert_set comes from the tick. Batch:
     *covered* is None, tables read at their current snapshot. Returns the
-    financial_scoring record, or None only on an unexpected failure.
-    Best effort: a scoring failure never fails a pipeline that already
-    succeeded.
+    financial_scoring record; a query that fails on the engine returns
+    ``not_scored`` with the engine's error as its reason. None only on an
+    unexpected failure. Best effort: a scoring failure never fails a
+    pipeline that already succeeded.
     """
     try:
         from lakebench.aml import scoring_queries as sq
@@ -159,18 +157,26 @@ def score_financial_via_queries(
             )
         except sq.NotScored as e:
             record = _not_scored_record(str(e), covered)
+        except RuntimeError as e:
+            # An engine failure: said here, and its text is the record's
+            # reason, in the record the callers write when no score came back.
+            print_warning(f"Financial scoring did not complete: {e}")
+            if covered is None:
+                reason = f"the scoring queries did not complete: {e}"
+                return {"mode": "batch", "status": "not_scored", "reason": reason}
+            return not_scored(f"the score query did not complete: {e}")
 
         _write_recall_json(cfg, run_id, record)
         print_success(scoring_count_line(record))
         return record
     except Exception as e:  # noqa: BLE001 -- best effort, never fails the run
-        print_warning(f"Financial scoring did not complete: {esc(str(e))}")
+        print_warning(f"Financial scoring did not complete: {e}")
         return None
 
 
 def _not_scored_record(reason: str, covered: dict | None) -> dict[str, Any]:
-    """The not_scored record, in the shape the Spark scorer wrote: batch has
-    no covered block; covered carries the tick's snapshot ids."""
+    """The record of a score the queries refused: batch has no covered
+    block; covered carries the tick's snapshot ids."""
     if covered is None:
         return {"mode": "batch", "status": "not_scored", "reason": reason}
     body: dict[str, Any] = {
@@ -329,11 +335,11 @@ def run_time_travel(
         )
         if interrupt is not None:
             interrupt.submitted(status)
-        submitted = status.state != JobState.FAILED
         if status.state == JobState.FAILED:
             return tt_mod.not_run(
                 continuous, f"the job was not submitted: {status.message}", policy
             )
+        submitted = True
         result = monitor.wait_for_completion(app_name, timeout_seconds=timeout, poll_interval=15)
         if interrupt is not None and result.success:
             interrupt.finished("SparkApplication", app_name)

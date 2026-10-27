@@ -1,7 +1,6 @@
-"""Shared CLI helpers for Lakebench.
-
-Extracted from cli/__init__.py so that submodules (_sustained.py,
-_config.py) can import these without circular dependencies.
+"""Shared CLI helpers for Lakebench: console output, config loading,
+the journal and the datagen guards. Kept out of cli/__init__.py so the
+command modules can import them without a circular import.
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.console import Console
@@ -129,13 +128,15 @@ def print_error(message: object) -> None:
 
 def load_config_or_exit(
     path: Path,
-    purpose: LoadPurpose,
     *,
+    purpose: LoadPurpose,
     name_override: str | None = None,
     allow_long_names: bool = False,
 ) -> LakebenchConfig:
-    """``load_config(path, purpose=purpose, ...)``, or the load error on
-    stderr (each validation error on its own line) and exit USAGE."""
+    """``load_config(path, purpose=purpose, ...)``, or report the load error
+    and exit USAGE. The error line goes to stderr; a validation failure then
+    lists each error on its own line on stdout. *purpose* is keyword-only
+    because tests/test_look_guard.py finds each load by its ``purpose=``."""
     from lakebench.config import (
         ConfigError,
         ConfigFileNotFoundError,
@@ -263,6 +264,21 @@ def check_datagen_scale(cfg: object) -> None:
     print_warning(f"Unverified scale: {basis}")
 
 
+def manual_capacity(cores: int, memory_gb: int) -> Any:
+    """A ``ClusterCapacity`` for ``--cores/--memory``: the whole cluster
+    stands in for its largest node, so the per-node largest-pod check is
+    skipped (``node_count`` 0)."""
+    from lakebench.k8s.client import ClusterCapacity
+
+    return ClusterCapacity(
+        total_cpu_millicores=cores * 1000,
+        total_memory_bytes=memory_gb * 1024**3,
+        node_count=0,
+        largest_node_cpu_millicores=cores * 1000,
+        largest_node_memory_bytes=memory_gb * 1024**3,
+    )
+
+
 # ``-f`` means ``--file`` (the config path) on every command. Commands where it
 # used to mean something else keep the old meaning for one release behind a
 # hidden option and call this, so scripts keep working and users see the move.
@@ -327,7 +343,8 @@ def print_info(message: object) -> None:
 
 
 def _journal_safe(fn, *args, **kwargs) -> None:
-    """Call a journal function, logging failures instead of silently dropping them."""
+    """Call a journal function. A failure never stops the command; the first
+    one in a process is logged at debug level, later ones are not."""
     global _journal_warned
     try:
         fn(*args, **kwargs)
@@ -358,18 +375,11 @@ def stop_previous_datagen_or_exit(cfg, what: str = "Refusing to generate") -> No
         stop_previous_datagen(cfg)
     except DatagenRefused as e:
         print_error(f"{what}: {e}")
-        if e.exit_path:
-            code = path_code(e.exit_path)
-        elif isinstance(e, DatagenPodsUnknown):
-            code = path_code("k8s.unreachable")
-        else:
-            code = ExitCode.FAILED
+        path = e.exit_path or ("k8s.unreachable" if isinstance(e, DatagenPodsUnknown) else "")
         from lakebench.cli._exit import note_exit_paths
 
-        note_exit_paths(
-            [e.exit_path or ("k8s.unreachable" if isinstance(e, DatagenPodsUnknown) else "")]
-        )
-        raise typer.Exit(code) from None
+        note_exit_paths([path])
+        raise typer.Exit(path_code(path) if path else ExitCode.FAILED) from None
 
 
 def enforce_bronze_gate(cfg, regenerate: bool, allow_stale_bronze: bool = False):
@@ -461,7 +471,7 @@ def load_stale_bronze(cfg) -> dict | None:
 
 
 def write_run_report(metrics_storage, run_id: str) -> Path | None:
-    """Write report.html next to a run's saved metrics.json (P1.4).
+    """Write report.html next to a run's saved metrics.json.
 
     Every run writes its report, failed ones included: a run that exits 1
     still saved metrics for diagnosis, and the report is how they are read.

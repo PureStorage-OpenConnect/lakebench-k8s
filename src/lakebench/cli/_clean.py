@@ -244,46 +244,48 @@ def clean(
             print_warning(decision.hint)
 
     if bucket_targets:
+        from kubernetes import client as k8s_client
+        from kubernetes.client.rest import ApiException
+
+        from lakebench.cli._cluster_ops import (
+            FINISHED_APP_STATES,
+            SPARK_GROUP,
+            SPARK_PLURAL,
+            SPARK_VERSION,
+        )
+
+        def _unchecked(what: str, e: Exception) -> None:
+            # A 404 is no datagen Job or no Spark Operator CRD: no writer.
+            # Anything else (403, timeout) means writers were not checked.
+            if not (isinstance(e, ApiException) and e.status == 404):
+                print_warning(f"Could not check for running writers ({what}): {e}")
+
         active_writers: list[str] = []
+        ns = cfg.get_namespace()
         try:
-            from kubernetes import client as k8s_client
-
-            from lakebench.cli._cluster_ops import (
-                FINISHED_APP_STATES,
-                SPARK_GROUP,
-                SPARK_PLURAL,
-                SPARK_VERSION,
+            job = k8s_client.BatchV1Api().read_namespaced_job("lakebench-datagen", ns)
+            active_pods = job.status.active or 0
+            if active_pods > 0:
+                active_writers.append(f"datagen job ({active_pods} active pod(s))")
+        except Exception as e:  # noqa: BLE001
+            _unchecked("datagen job", e)
+        try:
+            apps = k8s_client.CustomObjectsApi().list_namespaced_custom_object(
+                group=SPARK_GROUP,
+                version=SPARK_VERSION,
+                namespace=ns,
+                plural=SPARK_PLURAL,
             )
-
-            ns = cfg.get_namespace()
-            try:
-                job = k8s_client.BatchV1Api().read_namespaced_job("lakebench-datagen", ns)
-                active_pods = job.status.active or 0
-                if active_pods > 0:
-                    active_writers.append(f"datagen job ({active_pods} active pod(s))")
-            except Exception:
-                pass  # no datagen job
-            try:
-                apps = k8s_client.CustomObjectsApi().list_namespaced_custom_object(
-                    group=SPARK_GROUP,
-                    version=SPARK_VERSION,
-                    namespace=ns,
-                    plural=SPARK_PLURAL,
-                )
-                for app in apps.get("items", []):
-                    state = ((app.get("status") or {}).get("applicationState") or {}).get(
-                        "state", ""
+            for app in apps.get("items", []):
+                state = ((app.get("status") or {}).get("applicationState") or {}).get("state", "")
+                # SUBMISSION_FAILED is not final: the operator resubmits
+                # it (restartPolicy), so the app may start writing.
+                if state not in FINISHED_APP_STATES:
+                    active_writers.append(
+                        f"Spark application {app['metadata']['name']} ({state or 'pending'})"
                     )
-                    # SUBMISSION_FAILED is not final: the operator resubmits
-                    # it (restartPolicy), so the app may start writing.
-                    if state not in FINISHED_APP_STATES:
-                        active_writers.append(
-                            f"Spark application {app['metadata']['name']} ({state or 'pending'})"
-                        )
-            except Exception:
-                pass  # no Spark Operator CRD or K8s unavailable
-        except Exception:
-            pass  # K8s client unavailable -- nothing to check
+        except Exception as e:  # noqa: BLE001
+            _unchecked("Spark applications", e)
         if active_writers:
             for w in active_writers:
                 print_warning(f"Still writing: {w}")
@@ -296,9 +298,8 @@ def clean(
             from lakebench.s3 import s3_client_from_config
 
             s3 = s3_client_from_config(s3_cfg)
-            # F1-A: bail on S3 init failure with a clean refusal.
-            # Without this guard, `raw_client` returns None and every
-            # verify_bucket_ownership call raises AttributeError.
+            # Without a client, raw_client is None and every ownership
+            # check below would raise AttributeError.
             if s3._init_error:
                 print_error(f"S3 client init failed: {s3._init_error}")
                 raise typer.Exit(ExitCode.PREREQUISITE)
@@ -306,7 +307,7 @@ def clean(
             def _clean_progress(bkt: str, count: int) -> None:
                 console.print(f"  Deleting from s3://{esc(bkt)}/... ({count:,} objects so far)")
 
-            # F-1: ownership check per bucket before touching contents.
+            # Ownership check per bucket before touching contents.
             # Foreign-tagged buckets always refuse; legacy (untagged)
             # buckets need --force-legacy. This mirrors the deploy and
             # destroy paths so `clean` cannot be used as a bypass.
@@ -322,17 +323,19 @@ def clean(
             # destroy uses, which needs the other deployments' names. None
             # means the enumeration failed, and the fallback then refuses.
             other_deployments: list[str] | None
+            # The namespace records below read through the same client; None
+            # when it cannot be built, and those reads then prove nothing.
+            core = None
             try:
-                from kubernetes import client as _k8s
-
                 from lakebench.k8s import get_k8s_client
 
                 get_k8s_client(
                     context=cfg.platform.kubernetes.context or "",
                     namespace=cfg.get_namespace(),
                 )
+                core = k8s_client.CoreV1Api()
                 other_deployments = list_lakebench_deployment_names(
-                    _k8s.CoreV1Api(), exclude=cfg.get_namespace()
+                    core, exclude=cfg.get_namespace()
                 )
             except ContextConflictError:
                 raise
@@ -348,11 +351,8 @@ def clean(
 
             my_cluster = api_server_fingerprint(cfg.platform.kubernetes.context or "")
             try:
-                from kubernetes import client as _k8s_record
-
-                _core = _k8s_record.CoreV1Api()
-                # The created record only (not 1.6's adopted-empty one).
-                ns_record = read_created_buckets(_core, cfg.get_namespace())
+                # The created record only, not the adopted-empty one.
+                ns_record = read_created_buckets(core, cfg.get_namespace())
             except Exception:  # noqa: BLE001 -- unreadable: nothing is proven by it
                 ns_record = set()
 
@@ -366,8 +366,8 @@ def clean(
                         created_record=ns_record,
                     )
                     if v.verdict is IdentityVerdict.LEGACY_PROVEN:
-                        # Row 3: a tagged one is ours as a MATCH is; a
-                        # tagless one takes the record branch below.
+                        # A tagged one is ours as a MATCH is; a tagless one
+                        # takes the record branch below.
                         v = dataclasses.replace(
                             v,
                             verdict=(
@@ -421,14 +421,12 @@ def clean(
                         # created it or adopted it empty.
                         if prefix_ok and not force_legacy:
                             try:
-                                from kubernetes import client as _k8s_rec
-
                                 from lakebench.deploy.ownership import (
                                     tagless_contents_are_ours,
                                 )
 
                                 recorded = tagless_contents_are_ours(
-                                    _k8s_rec.CoreV1Api(), cfg.get_namespace(), bucket
+                                    core, cfg.get_namespace(), bucket
                                 )
                             except Exception:  # noqa: BLE001
                                 recorded = False
@@ -530,8 +528,8 @@ def _unregister_before_empty(cfg, layer: str, bucket: str, errors: list[str]) ->
     A table still registered with its files in place is an error and keeps
     the bucket, so a re-run can finish (emptying it first left an entry no
     engine could drop). An entry whose files are already gone is an error
-    too, but the bucket is emptied. No engine pod is a warning, as before
-    this step existed.
+    too, but the bucket is emptied. No engine pod is a warning and the
+    bucket is emptied.
     """
     try:
         from lakebench.deploy.unregister import unregister_layer_tables

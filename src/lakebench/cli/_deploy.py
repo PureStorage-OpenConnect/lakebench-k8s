@@ -1,8 +1,4 @@
-"""Deploy command for Lakebench CLI.
-
-Extracted from ``cli/__init__.py`` -- contains the ``deploy()`` function
-and its helper functions ``_preflight_check()`` and ``_build_component_list()``.
-"""
+"""The ``deploy`` command and its preflight and component-list helpers."""
 
 from __future__ import annotations
 
@@ -80,7 +76,7 @@ def _preflight_check(cfg) -> None:
 
     capacity = deploy_capacity_check(cfg)
     if not capacity.passed:
-        print_error(f"cluster-capacity: {esc(capacity.message)}")
+        print_error(f"cluster-capacity: {capacity.message}")
         for line in (capacity.hint or "").split("\n"):
             if line:
                 console.print(f"  [dim]{esc(line)}[/dim]")
@@ -89,23 +85,21 @@ def _preflight_check(cfg) -> None:
     if capacity.message.startswith("WARNING"):
         print_warning(f"cluster-capacity: {capacity.message}")
     else:
-        print_info(f"cluster-capacity: {esc(capacity.message)}")
+        print_info(f"cluster-capacity: {capacity.message}")
 
     # 4. Check Stackable CRDs if catalog=hive
     if cfg.architecture.catalog.type.value == "hive":
         _missing_stackable: list[str] = []
         try:
-            # Check CRDs directly without instantiating a full deployer
             from kubernetes import client as k8s_client
 
+            from lakebench.deploy.prereqs import STACKABLE_CRDS
+
             api_ext = k8s_client.ApiextensionsV1Api()
-            crds = api_ext.list_custom_resource_definition()
-            crd_names = {crd.metadata.name for crd in crds.items}
-            required_crds = {
-                "hiveclusters.hive.stackable.tech": "hive-operator",
-                "secretclasses.secrets.stackable.tech": "secret-operator",
+            crd_names = {
+                crd.metadata.name for crd in api_ext.list_custom_resource_definition().items
             }
-            _missing_stackable = [op for crd, op in required_crds.items() if crd not in crd_names]
+            _missing_stackable = [op for crd, op in STACKABLE_CRDS.items() if crd not in crd_names]
         except Exception:
             logger.debug("Preflight CRD check skipped (K8s not reachable)", exc_info=True)
 
@@ -119,23 +113,18 @@ def _preflight_check(cfg) -> None:
             )
             raise typer.Exit(ExitCode.PREREQUISITE)
 
-    # 4. Observability runs per deployment, in this namespace: deploy
-    # applies it. Warn if the kubelet-metrics ClusterRole is missing (the
-    # one piece a cluster admin installs); the stack still deploys, but
-    # per-pod CPU and memory read "not collected" in the report.
+    # Observability runs per deployment, in this namespace: deploy applies
+    # it. Warn if the kubelet-metrics ClusterRole is missing (the one piece a
+    # cluster admin installs); the stack still deploys, but per-pod CPU and
+    # memory read "not collected" in the report.
     if cfg.observability.enabled:
-        try:
-            from lakebench.deploy.observability import (
-                KUBELET_METRICS_CLUSTER_ROLE,
-                kubelet_cluster_role_exists,
-            )
+        from lakebench.deploy.observability import (
+            KUBELET_METRICS_CLUSTER_ROLE,
+            kubelet_cluster_role_exists,
+        )
 
-            present = kubelet_cluster_role_exists(
-                context=cfg.platform.kubernetes.context or None,
-            )
-        except Exception:
-            logger.debug("Preflight observability check skipped", exc_info=True)
-            present = None
+        # Returns None, never raises, when the cluster cannot be read.
+        present = kubelet_cluster_role_exists(context=cfg.platform.kubernetes.context or None)
         if present is False:
             print_warning(
                 f"ClusterRole {KUBELET_METRICS_CLUSTER_ROLE} is not present; "
@@ -267,6 +256,23 @@ def _namespace_identity(cfg):
         ) from e
 
 
+def _state_path_or_refuse(cfg, config_file: Path) -> Path:
+    """The deploy state file's path for this config, or exit 4 when the name
+    makes it unrecordable."""
+    from lakebench.config import deploy_state as ds
+    from lakebench.exit_codes import PrerequisiteError
+
+    try:
+        return ds.state_path(config_file, cfg.name)
+    except ds.StateError as e:
+        raise PrerequisiteError(
+            str(e),
+            why="deploy records the nonce in <config dir>/.lakebench/<name>.json",
+            next="give the config a name without '/', a leading '.', or the value 'state'",
+            path="deploy.state_unrecordable",
+        ) from e
+
+
 def _record_deploy_nonce(cfg, config_file: Path, *, dry_run: bool, nonce: str | None) -> str | None:
     """Lock, reconcile, choose and record the nonce this deploy stamps.
 
@@ -283,15 +289,7 @@ def _record_deploy_nonce(cfg, config_file: Path, *, dry_run: bool, nonce: str | 
     from lakebench.exit_codes import PrerequisiteError, SafetyRefusal
 
     name = cfg.name
-    try:
-        path = ds.state_path(config_file, name)
-    except ds.StateError as e:
-        raise PrerequisiteError(
-            str(e),
-            why="deploy records the nonce in <config dir>/.lakebench/<name>.json",
-            next="give the config a name without '/', a leading '.', or the value 'state'",
-            path="deploy.state_unrecordable",
-        ) from e
+    path = _state_path_or_refuse(cfg, config_file)
     if dry_run:
         ident = _namespace_identity(cfg)
         try:
@@ -530,12 +528,11 @@ def _deploy_impl(
     force_legacy: bool = False,
     require_new: bool = False,
     next_steps: bool = True,
-) -> str | None:
+) -> None:
     """The body of ``deploy``.
 
     ``require_new`` refuses an existing namespace or bucket (exit 3,
-    ``deploy.existing_namespace``) instead of adopting it. Returns the nonce
-    this deploy recorded and stamped, or None for a dry run or local mode.
+    ``deploy.existing_namespace``) instead of adopting it.
     """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
@@ -545,18 +542,7 @@ def _deploy_impl(
     if not local:
         # A name the deploy state cannot record stops here, before the
         # prompt and preflight, not after them.
-        from lakebench.config import deploy_state as _ds
-        from lakebench.exit_codes import PrerequisiteError
-
-        try:
-            _ds.state_path(config_file, cfg.name)
-        except _ds.StateError as e:
-            raise PrerequisiteError(
-                str(e),
-                why="deploy records the nonce in <config dir>/.lakebench/<name>.json",
-                next="give the config a name without '/', a leading '.', or the value 'state'",
-                path="deploy.state_unrecordable",
-            ) from e
+        _state_path_or_refuse(cfg, config_file)
 
     # Local mode has its own path: no namespace, no operator, no preflight
     # against a cluster that is not there.
@@ -568,7 +554,7 @@ def _deploy_impl(
 
     namespace = cfg.get_namespace()
 
-    # Pre-flight validation (BUG-012)
+    # Pre-flight validation.
     if not dry_run:
         _preflight_check(cfg)
     else:
@@ -576,13 +562,12 @@ def _deploy_impl(
 
         preview = deploy_capacity_check(cfg)
         print_info(
-            f"cluster-capacity: {esc(preview.message)}"
+            f"cluster-capacity: {preview.message}"
             + ("" if preview.passed else " (deploy would refuse it, exit 4)")
         )
 
-    # Confirmation prompt (mirrors destroy command pattern)
+    components = _build_component_list(cfg)
     if not yes and not dry_run:
-        components = _build_component_list(cfg)
         console.print(
             Panel(
                 f"Deploying to namespace [bold]{namespace}[/bold]\n\nComponents: {components}",
@@ -593,7 +578,6 @@ def _deploy_impl(
         typer.confirm("Proceed with deployment?", abort=True)
 
     # Display deployment info
-    components = _build_component_list(cfg)
     header = f"[bold]{cfg.name}[/bold]  ·  namespace: [bold]{namespace}[/bold]"
     if dry_run:
         header = f"[yellow]DRY RUN[/yellow]  ·  {header}"
@@ -771,4 +755,3 @@ def _deploy_impl(
         # An ownership refusal (deploy.identity_foreign) is 3, any other failed step 1.
         note_exit_paths(refusal_paths(results))
         raise typer.Exit(refused_result_code(results) or ExitCode.FAILED)
-    return recorded
