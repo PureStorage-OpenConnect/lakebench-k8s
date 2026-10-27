@@ -171,7 +171,7 @@ def watch_list_fix_hint() -> str:
     """User-facing remedy for a namespace missing from ``spark.jobNamespaces``.
 
     Never suggests a raw ``helm upgrade --reuse-values``: that bypasses the
-    ``lakebench-cluster-lock`` lease (category 4 shared state) and a user
+    ``lakebench-cluster-lock`` lease and a user
     who copies it with a stale list overwrites other deployments' entries.
     ``lakebench deploy`` adds the namespace under the lease.
     """
@@ -216,15 +216,11 @@ class SparkOperatorManager:
         # past the revision this upgrade's --reuse-values read expected,
         # between the read and the write. Helm reports this as a missing
         # release Secret rather than a generic conflict, e.g. `secrets
-        # "sh.helm.release.v1.spark-operator.v32" not found`. Live-verified
-        # 2026-07-27 under concurrent UAT: two deploys adding different
-        # namespaces to the shared spark-operator release both raced this
-        # error, and a same-revision retry on each succeeded on the next
-        # attempt. The Secret name itself is transient by design (`v32` was
-        # gone from `kubectl get secrets` minutes later, well within normal
-        # Helm history churn), so matching on the literal release name would
-        # be wrong -- `sh.helm.release.v1.` is the stable, chart-agnostic
-        # substring that identifies this failure class.
+        # "sh.helm.release.v1.spark-operator.v32" not found`, and a
+        # same-revision retry succeeds. The Secret name is transient by
+        # design, so matching the literal release name would be wrong:
+        # `sh.helm.release.v1.` is the stable, chart-agnostic substring that
+        # identifies this failure class.
         'secrets "sh.helm.release.v1.',
     )
 
@@ -238,17 +234,15 @@ class SparkOperatorManager:
     # controller's own flag parser rejects at startup: `invalid argument ""
     # for "--metrics-job-submit-latency-buckets" flag: strconv.ParseFloat:
     # parsing "": invalid syntax` -- a crash loop, not a webhook/RBAC issue.
-    # Verified live 2026-07-26 upgrading an existing 2.4.0 release to 2.5.1.
     # Backfilling this explicitly on every version-pinned upgrade closes the
     # gap regardless of what the stored release happens to already have.
     #
     # Helm's own --set parser splits on unescaped commas to separate keys
     # (`--set` docs: "key1=val1,key2=val2") -- this is Helm's parser, not
     # shell word-splitting, so passing the raw value through subprocess.run's
-    # argv list does NOT avoid it. A first attempt at this fix passed the
-    # bare comma-separated bucket list and failed live with `Error: failed
-    # parsing --set data: key "1" has no value (cannot end with ,)` --
-    # every comma must be backslash-escaped.
+    # argv list does NOT avoid it: a bare comma-separated bucket list fails
+    # with `Error: failed parsing --set data: key "1" has no value (cannot
+    # end with ,)`, so every comma must be backslash-escaped.
     _JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT = r"0.5\,1\,2\,4\,8\,16\,32\,64\,128\,256"
 
     def _reuse_values_backfill(
@@ -955,8 +949,8 @@ class SparkOperatorManager:
                 cluster-wide ``lakebench-cluster-lock`` (serialises
                 parallel destroys mutating the shared watch list) and
                 any failure raises ``WatchListMutationError`` instead of
-                returning False. Destroy paths use strict=True; older
-                internal callers keep the historical bool contract.
+                returning False. Destroy paths use strict=True; the
+                internal callers return a bool.
             precondition: Called right before the watch list is read and
                 changed; with ``strict`` it runs while the cluster lease is
                 held. Raising aborts the call with the watch list untouched
@@ -1005,8 +999,8 @@ class SparkOperatorManager:
             # widen the operator's scope to the whole cluster.
             ns_set = ",".join(remaining) if remaining else "default"
 
-            # LB-ux-safety C2: skip the helm upgrade when the desired
-            # list already matches the current one. The remove path
+            # Skip the helm upgrade when the desired list already matches
+            # the current one. The remove path
             # already short-circuits when the namespace is absent
             # above; this catches the case where the desired list
             # collapses to the same effective content (chart-default
@@ -1218,8 +1212,8 @@ class SparkOperatorManager:
         failure or as a lost update.  Both are handled by re-reading the list
         and retrying rather than by assuming the first read is still valid.
 
-        ADR-F5: this method is lease-gated (symmetric with the strict
-        remove path). Without the lease a concurrent strict destroy of
+        This method is lease-gated (symmetric with the strict remove
+        path). Without the lease a concurrent strict destroy of
         namespace Y racing this add of namespace X can produce a
         watch-list that includes Y even after Y's destroy dropped it --
         Y then gets deleted, and the operator crash-loops on the stale
@@ -1241,8 +1235,8 @@ class SparkOperatorManager:
             proceeding unlocked would reopen the exact race F5 closes,
             so we refuse rather than press on.
         """
-        # ADR-F5b: distinguish lease-infra-genuinely-absent (workstation
-        # without a cluster, unit tests) from real contention. The
+        # Distinguish lease-infra-genuinely-absent (workstation without a
+        # cluster, unit tests) from real contention. The
         # first case is safe to proceed unlocked -- there is no other
         # writer to race with. The second case must NOT proceed
         # unlocked; if we did, a concurrent strict destroy holding the
@@ -1350,14 +1344,11 @@ class SparkOperatorManager:
             # someone else is mutating the same state. Either way,
             # refuse rather than paper over.
             #
-            # LB-ux-safety C2: "timed out" used to fall through to
-            # "unlocked" here. That is exactly the case where another
-            # holder is likely doing something with the shared watch
-            # list, so proceeding unlocked would silently overwrite
-            # their edit. Failing closed refuses the request instead.
-            # "Connection refused" and DNS-resolution failures remain
-            # unlocked: those are workstation-with-no-cluster, where
-            # there is no other writer to race by definition.
+            # A timeout refuses rather than proceeding unlocked: another
+            # holder is likely mutating the shared watch list, so an
+            # unlocked write would overwrite their edit. "Connection
+            # refused" and DNS-resolution failures stay unlocked: those are
+            # a workstation with no cluster, where no other writer exists.
             msg = str(e).lower()
             if "connection refused" in msg or "not resolve" in msg:
                 logger.warning(
@@ -1398,9 +1389,8 @@ class SparkOperatorManager:
     ) -> bool:
         """Non-lease-gated body of ``_add_namespace_to_watch``.
 
-        Split out so ADR-F5's lease acquisition wraps only the mutation
-        loop, and existing test callers that patch the mutation body
-        keep working. Callers on the deploy path must go through
+        Split out so the lease acquisition wraps only the mutation loop.
+        Callers on the deploy path must go through
         ``_add_namespace_to_watch`` (which lease-gates); this variant is
         internal.
         """
@@ -1439,8 +1429,8 @@ class SparkOperatorManager:
             live_namespaces = self._filter_existing_namespaces(watched)
             new_list = live_namespaces + [namespace]
 
-            # LB-ux-safety C2: if the desired list already matches the
-            # current one, skip helm upgrade entirely -- and the
+            # If the desired list already matches the current one, skip
+            # the helm upgrade entirely -- and the
             # operator restart that would otherwise follow. The chart
             # is rendered from stored values plus --set, so an
             # "upgrade" with no change still churns the release
@@ -2094,8 +2084,8 @@ class SparkOperatorManager:
         pin = self._get_helm_version()
         if not pin:
             # Without --version Helm would move the shared release to the
-            # repo's latest chart (gotcha 3b); the config's pin may differ
-            # from what is installed.
+            # repo's latest chart; the config's pin may differ from what
+            # is installed.
             logger.error(
                 "Cannot read the installed chart version; not resizing the controller /tmp"
             )
