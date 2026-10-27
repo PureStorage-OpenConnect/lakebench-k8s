@@ -219,15 +219,26 @@ class HiveDeployer:
         """Wait for the Stackable HiveCluster to be ready.
 
         Ready when the HiveCluster reports ``Available=True`` or a pod of the
-        cluster has all containers ready. A read error other than 404 (the CR
-        not created yet) is transient and the wait continues, bounded by the
-        deploy deadline.
+        cluster has all containers ready. A 404 (the CR not created yet) and a
+        server or connection error are transient and the wait continues,
+        bounded by the deploy deadline. A 401/403 cannot recover without
+        operator action, so it fails the wait at once with the cause named.
         """
         from kubernetes import client as k8s_client
         from kubernetes.client.rest import ApiException
 
+        from lakebench.k8s import WaitTerminal, wait_for_condition
+
         custom_api = k8s_client.CustomObjectsApi()
         core_v1 = k8s_client.CoreV1Api()
+
+        def _terminal_if_forbidden(e: ApiException, what: str) -> None:
+            if e.status in (401, 403):
+                raise WaitTerminal(
+                    f"cannot read {what} ({e.status} {e.reason}): the deploy "
+                    "ServiceAccount is missing RBAC for the Stackable Hive CRD "
+                    "(hive.stackable.tech/v1alpha1)"
+                )
 
         def check() -> tuple[bool, str]:
             try:
@@ -241,23 +252,26 @@ class HiveDeployer:
             except ApiException as e:
                 if e.status == 404:
                     return False, "HiveCluster not created yet"
+                _terminal_if_forbidden(e, "the HiveCluster")
                 return False, f"reading HiveCluster: {e.reason}"
 
             for cond in hc.get("status", {}).get("conditions", []):
                 if cond.get("type") == "Available" and cond.get("status") == "True":
                     return True, "HiveCluster available"
 
-            pods = core_v1.list_namespaced_pod(
-                namespace,
-                label_selector="app.kubernetes.io/name=hive,app.kubernetes.io/instance=lakebench-hive",
-            )
+            try:
+                pods = core_v1.list_namespaced_pod(
+                    namespace,
+                    label_selector="app.kubernetes.io/name=hive,app.kubernetes.io/instance=lakebench-hive",
+                )
+            except ApiException as e:
+                _terminal_if_forbidden(e, "the HiveCluster pods")
+                return False, f"listing HiveCluster pods: {e.reason}"
             for pod in pods.items:
                 if pod.status.phase == "Running" and pod.status.container_statuses:
                     if all(c.ready for c in pod.status.container_statuses):
                         return True, f"HiveCluster pod ready: {pod.metadata.name}"
             return False, "HiveCluster not ready"
-
-        from lakebench.k8s import wait_for_condition
 
         return wait_for_condition(
             check,

@@ -26,6 +26,7 @@ from .wait import (
     WaitError,
     WaitResult,
     WaitStatus,
+    WaitTerminal,
     wait_for_condition,
     wait_for_deployment_ready,
     wait_for_pod_ready,
@@ -46,6 +47,7 @@ __all__ = [
     "K8sConnectionError",
     "K8sResourceError",
     "WaitError",
+    "WaitTerminal",
     # Wait
     "WaitResult",
     "WaitStatus",

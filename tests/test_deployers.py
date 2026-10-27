@@ -55,6 +55,81 @@ class TestHiveDeployerDeploy:
         deployer.k8s.apply_manifest.assert_not_called()
 
 
+class TestHiveDeployerWaitClassifiesErrors:
+    """_wait_for_hivecluster: a 401/403 fails fast with the cause named; a
+    server/connection error is transient and the wait polls to the deadline."""
+
+    def _deployer(self):
+        from lakebench.modules.catalogs.hive.deployer import HiveDeployer
+
+        engine = MagicMock()
+        engine.config = make_config()
+        engine.dry_run = False
+        return HiveDeployer(engine)
+
+    def _api_exception(self, status, reason):
+        from kubernetes.client.rest import ApiException
+
+        return ApiException(status=status, reason=reason)
+
+    def test_a_forbidden_cr_read_fails_fast_naming_the_rbac_cause(self):
+        from lakebench.k8s import WaitStatus
+
+        deployer = self._deployer()
+        custom_api = MagicMock()
+        custom_api.get_namespaced_custom_object.side_effect = self._api_exception(403, "Forbidden")
+        with (
+            patch("kubernetes.client.CustomObjectsApi", return_value=custom_api),
+            patch("kubernetes.client.CoreV1Api", return_value=MagicMock()),
+        ):
+            result = deployer._wait_for_hivecluster("test-ns", timeout_seconds=0)
+
+        # Terminal, not a 300s timeout: it must not have polled.
+        assert result.status == WaitStatus.FAILED
+        assert result.attempts == 1
+        assert "403 Forbidden" in result.message
+        assert "RBAC" in result.message and "hive.stackable.tech" in result.message
+
+    def test_a_forbidden_pod_list_fails_fast(self):
+        from lakebench.k8s import WaitStatus
+
+        deployer = self._deployer()
+        custom_api = MagicMock()
+        custom_api.get_namespaced_custom_object.return_value = {"status": {"conditions": []}}
+        core_v1 = MagicMock()
+        core_v1.list_namespaced_pod.side_effect = self._api_exception(403, "Forbidden")
+        with (
+            patch("kubernetes.client.CustomObjectsApi", return_value=custom_api),
+            patch("kubernetes.client.CoreV1Api", return_value=core_v1),
+        ):
+            result = deployer._wait_for_hivecluster("test-ns", timeout_seconds=0)
+
+        assert result.status == WaitStatus.FAILED
+        assert result.attempts == 1
+        assert "403 Forbidden" in result.message
+
+    def test_a_server_error_is_transient_and_polls_to_the_deadline(self):
+        from lakebench.k8s import WaitStatus
+
+        deployer = self._deployer()
+        custom_api = MagicMock()
+        custom_api.get_namespaced_custom_object.side_effect = self._api_exception(
+            500, "Internal Server Error"
+        )
+        with (
+            patch("kubernetes.client.CustomObjectsApi", return_value=custom_api),
+            patch("kubernetes.client.CoreV1Api", return_value=MagicMock()),
+        ):
+            # timeout 0 so the first elapsed check ends it without a real sleep.
+            result = deployer._wait_for_hivecluster("test-ns", timeout_seconds=0)
+
+        # Not failed-fast: a server error is retried, so this reads as a timeout
+        # that still carries the underlying reason, not a terminal RBAC failure.
+        assert result.status == WaitStatus.TIMEOUT
+        assert "Internal Server Error" in result.message
+        assert "RBAC" not in result.message
+
+
 # ===========================================================================
 # DuckDBDeployer
 # ===========================================================================
