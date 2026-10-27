@@ -230,8 +230,9 @@ def _pace_batch(record: Mapping[str, Any]) -> Tile:
 
 def screened_by_cycle(record: Mapping[str, Any]) -> dict[Any, float]:
     """Payments each gold evaluation cycle screened: the rows in the
-    transactions table at the snapshot the cycle pinned, from the run's
-    time-travel verification. Only cycles that were verified appear."""
+    transactions table at the snapshot the cycle pinned, from the ticks the
+    run recorded for the time-travel check. Only cycles that recorded a
+    transactions snapshot appear."""
     out: dict[Any, float] = {}
     for tk in ((record.get("continuous") or {}).get("time_travel") or {}).get("ticks") or []:
         if (
