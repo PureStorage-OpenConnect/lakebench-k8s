@@ -66,19 +66,10 @@ def _capacity_from(
     detect_capacity: Callable[[], ClusterCapacity | None] | None,
 ) -> tuple[ClusterCapacity | None, bool, str]:
     """``(capacity, node shape known, source label)``."""
-    from lakebench.k8s.client import ClusterCapacity
-
     if cluster_cores is not None and cluster_memory_gb is not None:
-        # Node shape unknown: the whole cluster stands in for its largest
-        # node, and the largest-pod check is skipped.
-        cap = ClusterCapacity(
-            total_cpu_millicores=cluster_cores * 1000,
-            total_memory_bytes=cluster_memory_gb * _GIB,
-            node_count=0,
-            largest_node_cpu_millicores=cluster_cores * 1000,
-            largest_node_memory_bytes=cluster_memory_gb * _GIB,
-        )
-        return cap, False, "user-provided"
+        from lakebench.cli._helpers import manual_capacity
+
+        return manual_capacity(cluster_cores, cluster_memory_gb), False, "user-provided"
     if detect_capacity is None:
         return None, False, ""
     from lakebench.k8s.target import ContextConflictError
@@ -95,6 +86,8 @@ def _capacity_from(
         return None, False, ""
     if detected is None:
         return None, False, ""
+    from lakebench.k8s.client import ClusterCapacity
+
     cap = ClusterCapacity(
         total_cpu_millicores=(
             cluster_cores * 1000 if cluster_cores is not None else detected.total_cpu_millicores

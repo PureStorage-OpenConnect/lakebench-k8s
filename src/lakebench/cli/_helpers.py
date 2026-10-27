@@ -10,7 +10,7 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.console import Console
@@ -262,6 +262,21 @@ def check_datagen_scale(cfg: object) -> None:
         print_error(f"Unsupported scale, refused: {basis}")
         raise typer.Exit(ExitCode.USAGE)
     print_warning(f"Unverified scale: {basis}")
+
+
+def manual_capacity(cores: int, memory_gb: int) -> Any:
+    """A ``ClusterCapacity`` for ``--cores/--memory``: the whole cluster
+    stands in for its largest node, so the per-node largest-pod check is
+    skipped (``node_count`` 0)."""
+    from lakebench.k8s.client import ClusterCapacity
+
+    return ClusterCapacity(
+        total_cpu_millicores=cores * 1000,
+        total_memory_bytes=memory_gb * 1024**3,
+        node_count=0,
+        largest_node_cpu_millicores=cores * 1000,
+        largest_node_memory_bytes=memory_gb * 1024**3,
+    )
 
 
 # ``-f`` means ``--file`` (the config path) on every command. Commands where it
