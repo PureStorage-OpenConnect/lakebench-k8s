@@ -1,6 +1,5 @@
 ---
 # PostgreSQL StatefulSet for Hive Metastore backend
-# Based on Addendum B.1
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -34,8 +33,8 @@ spec:
       {% endif %}
       containers:
         - name: postgres
-          image: {{ postgres_image | default('postgres:18') }}
-          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          image: {{ postgres_image }}
+          imagePullPolicy: {{ image_pull_policy }}
           env:
             - name: POSTGRES_USER
               valueFrom:
@@ -75,7 +74,7 @@ spec:
             limits:
               cpu: "2"
               memory: "4Gi"
-          # CRITICAL: Use pg_isready for liveness/readiness (Addendum E.1)
+          # pg_isready checks that the server accepts connections.
           livenessProbe:
             exec:
               command:
@@ -114,4 +113,4 @@ spec:
         {% endif %}
         resources:
           requests:
-            storage: {{ postgres_storage | default('10Gi') }}
+            storage: {{ postgres_storage }}

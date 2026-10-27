@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """AML D8 scale-invariance verdict from the s2 runs and the s10 shard runs.
 
-D8 (pre-registration 3.6.0 scale_invariance, AML-GOALS section 9 #45) is a
+D8 (pre-registration 3.6.0, scale_invariance block) is a
 registered decision rule, not an equivalence test. Per behavioural typology
 it compares the logit-mean AP of the scale-2 runs (one per registered s2
 seed: corpora.calibration_seed plus corpora.calibration_replicate_seeds)

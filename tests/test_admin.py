@@ -254,10 +254,12 @@ class _Repair:
         active_in_lease=None,
         state=None,
         after=None,
-        tmp=TmpVolume(True, "8Gi"),
+        tmp=None,
     ):
         from contextlib import contextmanager
 
+        if tmp is None:
+            tmp = TmpVolume(True, "8Gi")
         self.held = False
         self.rolled_back = False
         self.calls: list[tuple[str, bool]] = []

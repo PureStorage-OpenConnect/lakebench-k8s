@@ -12,7 +12,7 @@ metadata:
     app.kubernetes.io/managed-by: lakebench
 rules:
   # Pod management for executor lifecycle
-  # NOTE: deletecollection required for Spark 3.5.x driver cleanup
+  # The Spark driver deletes its executors with deletecollection
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "create", "delete", "deletecollection", "patch", "update"]

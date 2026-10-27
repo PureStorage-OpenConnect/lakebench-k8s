@@ -169,7 +169,7 @@ spec:
   {% endif %}
   resources:
     requests:
-      storage: {{ prometheus_storage | default('10Gi') }}
+      storage: {{ prometheus_storage }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -195,7 +195,7 @@ spec:
         app.kubernetes.io/component: prometheus
     spec:
       serviceAccountName: lakebench-prometheus
-      {% if not openshift_mode | default(false) %}
+      {% if not openshift_mode %}
       # Vanilla k8s has no automatic fsGroup: make the RWO volume group-
       # writable by nobody (65534). On OpenShift the restricted-v2 SCC
       # assigns fsGroup + arbitrary UID (same path as the Pushgateway).
@@ -209,7 +209,7 @@ spec:
           args:
             - --config.file=/etc/prometheus/prometheus.yml
             - --storage.tsdb.path=/prometheus
-            - --storage.tsdb.retention.time={{ prometheus_retention | default('7d') }}
+            - --storage.tsdb.retention.time={{ prometheus_retention }}
             - --web.enable-lifecycle
           ports:
             - name: http

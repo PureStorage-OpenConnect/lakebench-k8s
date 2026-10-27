@@ -9,7 +9,6 @@ network error, checks every file against its pinned sha256, and caches them
 under their Maven file names, which the harness (tests/spark/conftest.py)
 classifies by name.
 
-    python scripts/fetch_test_jars.py --leg 4.0 --print-env >> "$GITHUB_ENV"
     jars=$(python scripts/fetch_test_jars.py --leg auto --print-env) && export "$jars"
 
 A cached file is hashed again on every run, never trusted. A download whose
@@ -48,7 +47,7 @@ DEFAULT_CACHE = Path.home() / ".cache" / "lakebench-test-jars"
 CENTRAL = "https://repo1.maven.org/maven2/"
 # The same mirror job.py hands Spark (_MAVEN_MIRROR_REPOS).
 MIRROR = "https://maven-central.storage-download.googleapis.com/maven2/"
-# The pyspark release each leg runs in CI and in /home/lb-toolchain.
+# The pyspark release each leg runs against.
 LEG_PYSPARK = {"4.0": "4.0.1", "4.1": "4.1.1"}
 _TIMEOUT = 120
 

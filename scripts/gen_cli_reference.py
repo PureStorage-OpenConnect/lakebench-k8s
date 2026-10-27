@@ -23,8 +23,7 @@ Usage:
     python3.11 scripts/gen_cli_reference.py           # rewrite the blocks
     python3.11 scripts/gen_cli_reference.py --check   # exit 1 on drift
 
-``--check`` writes nothing; ``tests/test_cli_reference.py`` runs the same
-comparison in the unit suite.
+``--check`` writes nothing.
 """
 
 from __future__ import annotations

@@ -56,13 +56,39 @@ def test_main_exit_code_follows_failures(monkeypatch, capsys):
     assert rg.main(["--require-all"]) == 1
 
 
-def test_gitleaks_history_check_refuses_a_shallow_clone(monkeypatch, tmp_path):
+def test_gitleaks_history_check_runs_the_scanner(monkeypatch):
+    # The gate hands off to gitleaks_history.py, which owns the shallow-clone
+    # and missing-baseline refusals; it does not repeat them inline.
     monkeypatch.setattr(rg.shutil, "which", lambda name: "/bin/true")
-    monkeypatch.setattr(rg, "_is_shallow", lambda root: True)
-    res = rg.check_gitleaks_history()
-    assert res.status == rg.FAIL and "shallow" in res.detail
-    monkeypatch.setattr(rg, "_is_shallow", lambda root: None)
-    assert rg.check_gitleaks_history().status == rg.FAIL
+    seen = {}
+
+    def fake_command_check(name, argv, cwd=rg.ROOT, env=None):
+        seen["argv"] = argv
+        return rg.Result(name, rg.PASS, "")
+
+    monkeypatch.setattr(rg, "command_check", fake_command_check)
+    assert rg.check_gitleaks_history().status == rg.PASS
+    assert str(rg._HISTORY_SCAN) in seen["argv"]
+
+
+def test_scanner_refuses_a_shallow_clone(monkeypatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "gitleaks_history", ROOT / "scripts" / "gitleaks_history.py"
+    )
+    gh = importlib.util.module_from_spec(spec)
+    sys.modules["gitleaks_history"] = gh
+    spec.loader.exec_module(gh)
+
+    import subprocess
+
+    monkeypatch.setattr(
+        gh,
+        "_git",
+        lambda repo, *args: subprocess.CompletedProcess(args, 0, "true\n", ""),
+    )
+    assert gh.scan(ROOT, ROOT / ".gitleaks.toml", ROOT / ".gitleaksignore") == 2
 
 
 def test_gitleaks_history_check_skips_without_gitleaks(monkeypatch):

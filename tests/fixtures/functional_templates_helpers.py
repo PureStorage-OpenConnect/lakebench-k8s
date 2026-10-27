@@ -43,6 +43,9 @@ def _enrich_context(engine: DeploymentEngine) -> dict:
     ctx.setdefault("prometheus_image", cfg.observability.prometheus_image)
     ctx.setdefault("grafana_image", cfg.observability.grafana_image)
     ctx.setdefault("grafana_admin_password", "test-grafana-password")
+    ctx.setdefault("pushgateway_image", cfg.observability.pushgateway_image)
+    ctx.setdefault("pushgateway_storage", cfg.observability.pushgateway_storage)
+    ctx.setdefault("pushgateway_storage_class", cfg.observability.pushgateway_storage_class)
     # Both grafana and prometheus templates use ``pull_policy``.
     ctx.setdefault("pull_policy", cfg.images.pull_policy.value)
 
