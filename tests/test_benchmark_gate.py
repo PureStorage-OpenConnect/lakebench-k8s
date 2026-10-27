@@ -101,3 +101,22 @@ def test_paired_qph():
     assert _paired_qph([_q("Q1", True, 2.0)], [_q("Q2", True, 2.0)]) is None
     assert _paired_qph([_q("Q1", True, 0.0)], [_q("Q1", True, 0.0)]) is None
     assert _paired_qph([_q("Q1", False, 2.0)], [_q("Q1", True, 2.0)]) is None
+
+
+def test_q9_retry_keeps_failed_queries_out_of_qph():
+    """After a successful Q9 retry the round's QpH follows the power-run rule:
+    a query that timed out in the same round is not counted as answered, and
+    its timeout seconds stay out of the denominator."""
+    from types import SimpleNamespace
+
+    from lakebench.cli._sustained import _replace_q9_result
+
+    queries = [_q("Q1", True, 10.0), _q("Q2", False, 300.0, timed_out=True), _q("Q9", False, 5.0)]
+    bench_result = SimpleNamespace(queries=queries, total_seconds=315.0, qph=0.0)
+
+    _replace_q9_result(bench_result, _q("Q9", True, 20.0))
+
+    assert bench_result.queries[2].success
+    assert bench_result.total_seconds == 330.0
+    # Two answered queries over their own 30 s, not three over 330 s.
+    assert bench_result.qph == 2 / 30.0 * 3600

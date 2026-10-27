@@ -2036,6 +2036,22 @@ def gold_event_age_sql(engine: str, fq_gold: str, ts_column: str = "interaction_
     return f"SELECT {expr} FROM {fq_gold}"
 
 
+def _replace_q9_result(bench_result: Any, retry_result: Any) -> None:
+    """Put a successful Q9 retry in the round and recompute its totals.
+
+    QpH follows the power-run rule (``power_qph``), so another query that
+    failed in the same round is still not counted as answered.
+    """
+    from lakebench.benchmark.runner import power_qph
+
+    for i, qr in enumerate(bench_result.queries):
+        if qr.query.name.startswith("Q9"):
+            bench_result.queries[i] = retry_result
+            break
+    bench_result.total_seconds = sum(qr.elapsed_seconds for qr in bench_result.queries)
+    bench_result.qph = power_qph(bench_result.queries)
+
+
 def _run_benchmark_round(
     cfg,
     bench_runner,
@@ -2167,19 +2183,7 @@ def _run_benchmark_round(
                 retry_result = bench_runner._execute_single_query(q9_query)
                 if retry_result.success:
                     round_meta.q9_retry_used = True
-                    # Replace Q9 in results
-                    for i, qr in enumerate(bench_result.queries):
-                        if qr.query.name.startswith("Q9"):
-                            bench_result.queries[i] = retry_result
-                            break
-                    # Recompute total_seconds and qph
-                    bench_result.total_seconds = sum(
-                        qr.elapsed_seconds for qr in bench_result.queries
-                    )
-                    if bench_result.total_seconds > 0:
-                        bench_result.qph = (
-                            len(bench_result.queries) / bench_result.total_seconds
-                        ) * 3600
+                    _replace_q9_result(bench_result, retry_result)
                     break
 
     # 5. Build BenchmarkMetrics with round_meta
