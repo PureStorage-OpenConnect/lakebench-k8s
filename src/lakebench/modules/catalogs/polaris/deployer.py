@@ -140,7 +140,7 @@ class PolarisDeployer:
                 return DeploymentResult(
                     component="polaris",
                     status=DeploymentStatus.FAILED,
-                    message="Polaris bootstrap job did not complete in time",
+                    message="Polaris bootstrap job did not complete",
                     elapsed_seconds=time.time() - start,
                 )
 
@@ -274,9 +274,6 @@ class PolarisDeployer:
                 )
 
         except DeploymentSecretError:
-            raise
-        except Exception as e:
-            logger.warning(f"Could not create polaris database: {e}")
             raise
 
     def _delete_old_bootstrap_job(self, namespace: str) -> None:

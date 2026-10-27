@@ -36,20 +36,11 @@ class PrometheusQueryError(Exception):
 
 @dataclass
 class EngineMetrics:
-    """Engine-level Tier 2 metrics from Spark and Trino.
+    """Engine-level metrics from Trino's JMX exporter.
 
-    Populated when Prometheus scrapes engine-native metrics (Spark
-    PrometheusServlet sink or Trino JMX exporter). All fields are
-    best-effort -- None means the metric was not available.
+    Best-effort: None means the metric was not available.
     """
 
-    # Spark
-    spark_gc_seconds_total: float | None = None
-    spark_shuffle_read_bytes: float | None = None
-    spark_shuffle_write_bytes: float | None = None
-    spark_task_count: int | None = None
-    # Trino
-    trino_running_queries: int | None = None
     trino_completed_queries: int | None = None
     trino_failed_queries: int | None = None
 
@@ -164,12 +155,12 @@ class PlatformCollector:
 
         metrics = PlatformMetrics(start_time=start_time, end_time=end_time)
 
+        client = httpx.Client(timeout=30)
         try:
-            client = httpx.Client(timeout=30)
-
             # A failed query names itself in collection_error and leaves its
             # fields None, so the other family is still reported.
             failed: list[str] = []
+            by_name: dict[str, PodMetrics] = {}
 
             # Collect CPU usage per pod
             cpu_pods = self._query_family(
@@ -194,6 +185,7 @@ class PlatformCollector:
                             cpu_max_cores=max(values),
                         )
                     )
+                    by_name.setdefault(pod_name, metrics.pods[-1])
 
             # Collect memory usage per pod
             mem_pods = self._query_family(
@@ -210,7 +202,7 @@ class PlatformCollector:
                 values = [float(v[1]) for v in mem_data.get("values", [])]
                 if values:
                     # Update existing pod or create new
-                    existing = next((p for p in metrics.pods if p.pod_name == pod_name), None)
+                    existing = by_name.get(pod_name)
                     if existing:
                         existing.memory_avg_bytes = sum(values) / len(values)
                         existing.memory_max_bytes = max(values)
@@ -223,6 +215,7 @@ class PlatformCollector:
                                 memory_max_bytes=max(values),
                             )
                         )
+                        by_name.setdefault(pod_name, metrics.pods[-1])
 
             # Engine-level Tier 2 metrics (best-effort)
             self._collect_engine_metrics(client, metrics, start_time, end_time)
@@ -246,11 +239,11 @@ class PlatformCollector:
             if failed:
                 metrics.collection_error = "; ".join(failed)
 
-            client.close()
-
         except Exception as e:
             metrics.collection_error = str(e)[:200]
             logger.warning("Failed to collect platform metrics: %s", e)
+        finally:
+            client.close()
 
         return metrics
 
@@ -406,8 +399,8 @@ class PlatformCollector:
     ) -> None:
         """Collect Trino engine-level metrics (best-effort) from its JMX
         exporter. Spark engine metrics are not collected: pipeline jobs run
-        with the Spark UI off, which serves Spark's Prometheus endpoint, so
-        the Spark fields stay None. Fields stay None when a series is absent.
+        with the Spark UI off, which serves Spark's Prometheus endpoint.
+        Fields stay None when a series is absent.
         """
         ns = self.namespace
 

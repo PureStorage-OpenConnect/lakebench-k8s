@@ -6,6 +6,7 @@ turns the series into intervals and says what was and was not measured.
 
 from __future__ import annotations
 
+import random
 from datetime import datetime, timedelta, timezone
 
 from lakebench.metrics.io import (
@@ -18,7 +19,7 @@ from lakebench.metrics.io import (
     build_io,
 )
 from lakebench.modules.pipeline_engines.spark import jmx_exporter
-from lakebench.observability.spark_io import build_spark_io, stage_of
+from lakebench.observability.spark_io import _cumulative, _points, build_spark_io, stage_of
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 T1 = T0 + timedelta(seconds=60)
@@ -47,6 +48,45 @@ def test_a_finished_pod_keeps_its_last_value_in_the_sum() -> None:
     assert [v for _, v in series] == [0.0, 120.0, 350.0, 650.0, 950.0]
     assert out["stages"]["bronze"]["pods"] == 2
     assert out["stages"]["bronze"]["read"][-1][1] == 0.0
+
+
+def _cumulative_by_rescan(pods, t0, t1, step):
+    """The direct definition: rescan each pod's points at every grid time."""
+    out = []
+    for k in range(int((t1 - t0) // step) + 1):
+        t = t0 + k * step
+        total = 0.0
+        for pts in pods:
+            last = 0.0
+            for ts, val in pts:
+                if ts > t:
+                    break
+                last = val
+            total += last
+        out.append([round(k * step, 3), total])
+    return out
+
+
+def test_cumulative_matches_the_rescan_on_fixtures_and_a_long_series() -> None:
+    fixtures = [
+        [(0, 0), (15, 100), (30, 300), (45, 600), (60, 900)],
+        [(0, 0), (15, 20), (30, 50)],
+        [(0, 0), (30, 0), (45, 500), (60, 800)],
+        [(0, 0), (45, 700), (60, 1000)],
+    ]
+    pods = [_points(_res(f"p{i}", pts)) for i, pts in enumerate(fixtures)]
+    assert _cumulative(pods, _E, _E + 60, 15) == _cumulative_by_rescan(pods, _E, _E + 60, 15)
+
+    # Irregular scrapes, late starts, early exits and points outside the window.
+    rng = random.Random(7)
+    pods = []
+    for _ in range(6):
+        ts = sorted(rng.uniform(-300, 24_000) for _ in range(rng.randint(0, 600)))
+        vals = [float(v) for v in sorted(rng.randint(0, 10**12) for _ in ts)]
+        pods.append(list(zip(ts, vals, strict=True)))
+    t1 = 22_500.0
+    assert _cumulative(pods, 0.0, t1, 15) == _cumulative_by_rescan(pods, 0.0, t1, 15)
+    assert _cumulative(pods, 0.0, t1, 7.5) == _cumulative_by_rescan(pods, 0.0, t1, 7.5)
 
 
 def test_no_series_means_no_block() -> None:

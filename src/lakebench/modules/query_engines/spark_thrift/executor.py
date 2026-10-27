@@ -11,7 +11,7 @@ import subprocess
 import time
 
 from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
-from lakebench.k8s import pinned_kubectl
+from lakebench.modules.query_engines import PodExecutor, call_args_end
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +46,12 @@ def _drop_terminal_newline(text: str) -> str:
     return text
 
 
-class SparkThriftExecutor:
+class SparkThriftExecutor(PodExecutor):
     """Executes queries via ``kubectl exec`` into beeline on the Spark Thrift Server."""
+
+    pod_component = "spark-thrift-server"
+    pod_label = "Spark Thrift Server"
+    health_timeout = 30
 
     def __init__(
         self,
@@ -62,43 +66,6 @@ class SparkThriftExecutor:
 
     def engine_name(self) -> str:
         return "spark-thrift"
-
-    def _discover_pod(self) -> str:
-        """Find the Spark Thrift Server driver pod."""
-        if self._pod:
-            return self._pod
-        result = pinned_kubectl(
-            self.kube_context,
-            [
-                "get",
-                "pods",
-                "-n",
-                self.namespace,
-                "-l",
-                "app.kubernetes.io/component=spark-thrift-server",
-                "-o",
-                "jsonpath={.items[0].metadata.name}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        pod = result.stdout.strip()
-        if not pod:
-            raise RuntimeError(f"No Spark Thrift Server pod found in namespace {self.namespace}")
-        self._pod = pod
-        return pod
-
-    def _kubectl_prefix(self) -> list[str]:
-        """The ``kubectl`` argv prefix with the configured context pinned.
-
-        With no configured context, the process's active cluster target
-        supplies it (``k8s/target.py``), so a current-context switch
-        mid-run does not move the queries.
-        """
-        from lakebench.k8s.target import cli_args
-
-        return ["kubectl", *cli_args("kubectl", self.kube_context)]
 
     def _beeline_cmd(self, pod: str, sql: str) -> list[str]:
         return [
@@ -164,13 +131,6 @@ class SparkThriftExecutor:
             raw_output=output,
         )
 
-    def health_check(self) -> bool:
-        try:
-            result = self.execute_query("SELECT 1", timeout=30)
-            return result.success
-        except Exception:
-            return False
-
     def query_rows(self, sql: str, timeout: int = 300) -> list[list[str | None]]:
         """Not supported: financial scoring runs on Trino, the validated
         financial query engine (config load refuses financial on spark-thrift).
@@ -201,15 +161,8 @@ class SparkThriftExecutor:
             return sql
         n = m.group(1)
         start = m.end()
-        depth = 1
-        i = start
-        while i < len(sql) and depth > 0:
-            if sql[i] == "(":
-                depth += 1
-            elif sql[i] == ")":
-                depth -= 1
-            i += 1
-        if depth != 0:
+        i = call_args_end(sql, start)
+        if i is None:
             return sql
         expr = sql[start : i - 1]
         replacement = f"add_months({expr}, {n})"

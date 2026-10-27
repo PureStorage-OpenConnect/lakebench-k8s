@@ -1,5 +1,5 @@
 """Observability package for Lakebench.
 
-Provides platform metrics collection, S3 operation metrics, and
-Prometheus/Grafana stack deployment via kube-prometheus-stack.
+Platform metrics collected from Prometheus at the end of a run: per-pod CPU
+and memory, Spark storage bytes and engine counters.
 """

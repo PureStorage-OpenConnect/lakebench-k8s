@@ -31,11 +31,6 @@ def get_templates_dir() -> Path:
     return _package_dir() / "templates"
 
 
-def get_scripts_dir() -> Path:
-    """Return path to Spark pipeline scripts directory."""
-    return _package_dir() / "spark" / "scripts"
-
-
 def get_aml_data_dir() -> Path | None:
     """Return path to packaged AML reference data (JSON sidecars for
     sanctions / PEP / high-risk jurisdictions). None when the tree

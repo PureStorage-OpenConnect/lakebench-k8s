@@ -77,32 +77,10 @@ class LocalDuckDBExecutor(DuckDBExecutor):
         self.image = image
         self.workdir = workdir
         self.duckdb_version = duckdb_version
-        # Filled in from the query payload: what the container actually loaded,
-        # as opposed to what was asked for.
-        self._reported_version = ""
-
-    def engine_name(self) -> str:
-        return "duckdb"
 
     def health_check(self) -> bool:
         result = self.execute_query("SELECT 1")
         return result.success
-
-    def running_version(self) -> str:
-        """The DuckDB version the container actually loaded.
-
-        Asked of the engine rather than read from config: the pin is a request,
-        and only the running process can confirm it was honoured. This is the
-        check that would have caught the engine drifting under an unpinned
-        install.
-
-        Returns an empty string if the query failed, so callers can distinguish
-        "could not ask" from a version mismatch.
-        """
-        result = self.execute_query("SELECT 1")
-        if not result.success:
-            return ""
-        return self._reported_version
 
     def adapt_query(self, sql: str) -> str:
         """Rewrite catalog-qualified names to iceberg_scan over the local paths.
@@ -123,10 +101,9 @@ class LocalDuckDBExecutor(DuckDBExecutor):
 
         sql = self._rewrite_date_add(sql)
         sql = self._rewrite_date_diff(sql)
-        sql = self._rewrite_cardinality(sql)
         return sql
 
-    def _build_local_script(self, sql: str) -> str:
+    def _build_local_script(self) -> str:
         """Build the Python program DuckDB runs inside the container.
 
         The SQL is read from a sibling file rather than embedded. Benchmark
@@ -169,7 +146,7 @@ class LocalDuckDBExecutor(DuckDBExecutor):
         stage = Path(self.workdir)
         stage.mkdir(parents=True, exist_ok=True)
         (stage / "query.sql").write_text(sql)
-        (stage / "run.py").write_text(self._build_local_script(sql))
+        (stage / "run.py").write_text(self._build_local_script())
 
         cmd = [
             self.cli,
@@ -181,7 +158,8 @@ class LocalDuckDBExecutor(DuckDBExecutor):
             "HOME=/tmp",
             # Keep the pip install and DuckDB extensions between queries;
             # reinstalling per query would dominate every measurement.
-            *(["-v", f"{self.workdir}:/duckdb:z"] if self.workdir else []),
+            "-v",
+            f"{self.workdir}:/duckdb:z",
             "-e",
             "PYTHONUSERBASE=/duckdb/py",
             "-e",
@@ -236,9 +214,6 @@ class LocalDuckDBExecutor(DuckDBExecutor):
                 raw_output=output,
                 error="Query produced no result (it did not run)",
             )
-
-        if payload.get("version"):
-            self._reported_version = str(payload["version"]).lstrip("v")
 
         return QueryExecutorResult(
             sql=sql,

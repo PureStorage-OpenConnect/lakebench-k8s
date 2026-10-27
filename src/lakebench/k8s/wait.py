@@ -1,8 +1,4 @@
-"""Wait-for-ready logic for Kubernetes resources.
-
-This module implements the wait-for-ready patterns documented in the
-Lakebench spec addendum Section E.
-"""
+"""Wait-for-ready logic for Kubernetes resources."""
 
 from __future__ import annotations
 
@@ -10,6 +6,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 from .client import K8sClient, K8sError
 
@@ -35,12 +32,6 @@ class WaitResult:
 
 class WaitError(K8sError):
     """Raised when a wait operation fails."""
-
-    pass
-
-
-class WaitTimeout(WaitError):
-    """Raised when a wait operation times out."""
 
     pass
 
@@ -169,11 +160,7 @@ def wait_for_postgres_ready(
     timeout_seconds: int = 120,
     poll_interval: int = 5,
 ) -> WaitResult:
-    """Wait for PostgreSQL to be ready using pg_isready.
-
-    This implements the pattern from Addendum E.1:
-    - First wait for pod to be running
-    - Then verify pg_isready returns success
+    """Wait for the pod to be ready, then for ``pg_isready`` to succeed.
 
     Args:
         client: K8sClient instance
@@ -214,97 +201,6 @@ def wait_for_postgres_ready(
     )
 
 
-def wait_for_tcp_port(
-    client: K8sClient,
-    pod_name: str,
-    namespace: str,
-    port: int,
-    timeout_seconds: int = 180,
-    poll_interval: int = 5,
-) -> WaitResult:
-    """Wait for a TCP port to be accepting connections.
-
-    This implements the pattern from Addendum E.2 for Hive Metastore.
-
-    Args:
-        client: K8sClient instance
-        pod_name: Pod name to check
-        namespace: Namespace
-        port: TCP port number
-        timeout_seconds: Maximum time to wait
-        poll_interval: Seconds between checks
-
-    Returns:
-        WaitResult with outcome
-    """
-    start_time = time.time()
-
-    # First wait for pod (use 2/3 of timeout for pod, 1/3 for port check)
-    pod_timeout = (timeout_seconds * 2) // 3
-    pod_result = wait_for_pod_ready(
-        client,
-        pod_name,
-        namespace,
-        timeout_seconds=pod_timeout,
-        poll_interval=poll_interval,
-    )
-    if pod_result.status != WaitStatus.READY:
-        return pod_result
-
-    # Calculate remaining time for port check
-    elapsed = time.time() - start_time
-    remaining_timeout = max(60, timeout_seconds - int(elapsed))  # At least 60s for port
-
-    # Then check TCP port using nc or bash
-    def check() -> tuple[bool, str]:
-        # Try nc first, fall back to bash /dev/tcp
-        cmd = [
-            "sh",
-            "-c",
-            f"nc -z localhost {port} 2>/dev/null || (echo >/dev/tcp/localhost/{port}) 2>/dev/null",
-        ]
-        exit_code, stdout, stderr = client.exec_in_pod(pod_name, cmd, namespace)
-        if exit_code == 0:
-            return True, f"Port {port} is accepting connections"
-        return False, f"Port {port} not ready"
-
-    return wait_for_condition(
-        check,
-        timeout_seconds=remaining_timeout,
-        poll_interval=poll_interval,
-        description=f"TCP port {port}",
-    )
-
-
-def wait_for_hive_metastore(
-    client: K8sClient,
-    pod_name: str,
-    namespace: str,
-    timeout_seconds: int = 180,
-    poll_interval: int = 10,
-) -> WaitResult:
-    """Wait for Hive Metastore thrift port to be ready.
-
-    Args:
-        client: K8sClient instance
-        pod_name: Hive Metastore pod name
-        namespace: Namespace
-        timeout_seconds: Maximum time to wait
-        poll_interval: Seconds between checks
-
-    Returns:
-        WaitResult with outcome
-    """
-    return wait_for_tcp_port(
-        client,
-        pod_name,
-        namespace,
-        port=9083,
-        timeout_seconds=timeout_seconds,
-        poll_interval=poll_interval,
-    )
-
-
 def wait_for_trino_catalog(
     client: K8sClient,
     pod_name: str,
@@ -313,11 +209,7 @@ def wait_for_trino_catalog(
     timeout_seconds: int = 180,
     poll_interval: int = 10,
 ) -> WaitResult:
-    """Wait for Trino to be ready with catalog registered.
-
-    This implements the pattern from Addendum E.3:
-    - Execute SHOW CATALOGS
-    - Verify catalog is registered
+    """Wait for the pod to be ready, then for ``SHOW CATALOGS`` to list the catalog.
 
     Args:
         client: K8sClient instance
@@ -489,56 +381,52 @@ def _pod_has_terminal_waiting(namespace: str, label_selector: str | None) -> str
     return None
 
 
-def wait_for_deployment_ready(
-    client: K8sClient,
+def _wait_for_workload_ready(
+    kind: str,
+    read: Callable[[str, str], Any],
     name: str,
     namespace: str,
-    timeout_seconds: int = 300,
-    poll_interval: int = 5,
+    timeout_seconds: int,
+    poll_interval: int,
 ) -> WaitResult:
-    """Wait for a Deployment to have all replicas ready.
+    """Wait for a Deployment or StatefulSet (``kind``) to have all replicas ready.
 
     Fails fast when a pod enters a terminal Waiting state (ImagePullBackOff,
-    CrashLoopBackOff, ...), rather than polling `ready_replicas` for the full
-    timeout and returning a bare "not ready" (a Helm crash loop
-    was masked as an SCC rollout timeout for 10 minutes because the only
-    signal was `ready >= desired`). On timeout, the message names each pod's
-    state so the caller can act.
+    CrashLoopBackOff, ...) instead of polling ``ready_replicas`` for the full
+    timeout, where a crash loop would read as a bare "not ready". On timeout,
+    the message names each pod's state so the caller can act.
     """
-    from kubernetes import client as k8s_client
     from kubernetes.client.rest import ApiException
 
-    apps_v1 = k8s_client.AppsV1Api()
+    def selector(obj: Any) -> str | None:
+        return _selector_from_match_labels(
+            obj.spec.selector.match_labels if obj.spec.selector else None
+        )
 
     def check() -> tuple[bool, str]:
         try:
-            dep = apps_v1.read_namespaced_deployment(name, namespace)
-            desired = dep.spec.replicas or 1
-            ready = dep.status.ready_replicas or 0
+            obj = read(name, namespace)
+            desired = obj.spec.replicas or 1
+            ready = obj.status.ready_replicas or 0
 
             if ready >= desired:
-                return True, f"Deployment {name} ready ({ready}/{desired} replicas)"
+                return True, f"{kind} {name} ready ({ready}/{desired} replicas)"
 
-            selector = _selector_from_match_labels(
-                dep.spec.selector.match_labels if dep.spec.selector else None
-            )
-            terminal = _pod_has_terminal_waiting(namespace, selector)
+            terminal = _pod_has_terminal_waiting(namespace, selector(obj))
             if terminal:
-                raise WaitTerminal(
-                    f"Deployment {name} pod entered terminal Waiting state: {terminal}"
-                )
+                raise WaitTerminal(f"{kind} {name} pod entered terminal Waiting state: {terminal}")
 
-            return False, f"Deployment {name} not ready ({ready}/{desired} replicas)"
+            return False, f"{kind} {name} not ready ({ready}/{desired} replicas)"
         except ApiException as e:
             if e.status == 404:
-                return False, f"Deployment {name} not found"
+                return False, f"{kind} {name} not found"
             return False, f"Error: {e.reason}"
 
     result = wait_for_condition(
         check,
         timeout_seconds=timeout_seconds,
         poll_interval=poll_interval,
-        description=f"deployment {name}",
+        description=f"{kind.lower()} {name}",
     )
 
     # FAILED already carries the terminal Waiting reason in its message;
@@ -546,16 +434,28 @@ def wait_for_deployment_ready(
     # "not ready (0/1 replicas)".
     if result.status is WaitStatus.TIMEOUT:
         try:
-            dep = apps_v1.read_namespaced_deployment(name, namespace)
-            selector = _selector_from_match_labels(
-                dep.spec.selector.match_labels if dep.spec.selector else None
-            )
-            diagnostic = _describe_deployment_pods(namespace, selector)
+            diagnostic = _describe_deployment_pods(namespace, selector(read(name, namespace)))
             result.message = f"{result.message}. Pod state: {diagnostic}"
         except Exception:  # noqa: BLE001 - diagnostics only
             pass
 
     return result
+
+
+def wait_for_deployment_ready(
+    client: K8sClient,
+    name: str,
+    namespace: str,
+    timeout_seconds: int = 300,
+    poll_interval: int = 5,
+) -> WaitResult:
+    """Wait for a Deployment to have all replicas ready."""
+    from kubernetes import client as k8s_client
+
+    read = k8s_client.AppsV1Api().read_namespaced_deployment
+    return _wait_for_workload_ready(
+        "Deployment", read, name, namespace, timeout_seconds, poll_interval
+    )
 
 
 def wait_for_statefulset_ready(
@@ -565,59 +465,10 @@ def wait_for_statefulset_ready(
     timeout_seconds: int = 300,
     poll_interval: int = 5,
 ) -> WaitResult:
-    """Wait for a StatefulSet to have all replicas ready.
-
-    Same shape as ``wait_for_deployment_ready`` -- Postgres and
-    Trino workers both run as StatefulSets, and a bad image tag or
-    misconfigured probe used to burn the full timeout with a bare
-    "not ready" message. Terminal-Waiting fast-fail and per-pod
-    diagnostic on timeout apply here too.
-    """
+    """Wait for a StatefulSet to have all replicas ready."""
     from kubernetes import client as k8s_client
-    from kubernetes.client.rest import ApiException
 
-    apps_v1 = k8s_client.AppsV1Api()
-
-    def check() -> tuple[bool, str]:
-        try:
-            sts = apps_v1.read_namespaced_stateful_set(name, namespace)
-            desired = sts.spec.replicas or 1
-            ready = sts.status.ready_replicas or 0
-
-            if ready >= desired:
-                return True, f"StatefulSet {name} ready ({ready}/{desired} replicas)"
-
-            selector = _selector_from_match_labels(
-                sts.spec.selector.match_labels if sts.spec.selector else None
-            )
-            terminal = _pod_has_terminal_waiting(namespace, selector)
-            if terminal:
-                raise WaitTerminal(
-                    f"StatefulSet {name} pod entered terminal Waiting state: {terminal}"
-                )
-
-            return False, f"StatefulSet {name} not ready ({ready}/{desired} replicas)"
-        except ApiException as e:
-            if e.status == 404:
-                return False, f"StatefulSet {name} not found"
-            return False, f"Error: {e.reason}"
-
-    result = wait_for_condition(
-        check,
-        timeout_seconds=timeout_seconds,
-        poll_interval=poll_interval,
-        description=f"statefulset {name}",
+    read = k8s_client.AppsV1Api().read_namespaced_stateful_set
+    return _wait_for_workload_ready(
+        "StatefulSet", read, name, namespace, timeout_seconds, poll_interval
     )
-
-    if result.status is WaitStatus.TIMEOUT:
-        try:
-            sts = apps_v1.read_namespaced_stateful_set(name, namespace)
-            selector = _selector_from_match_labels(
-                sts.spec.selector.match_labels if sts.spec.selector else None
-            )
-            diagnostic = _describe_deployment_pods(namespace, selector)
-            result.message = f"{result.message}. Pod state: {diagnostic}"
-        except Exception:  # noqa: BLE001 - diagnostics only
-            pass
-
-    return result

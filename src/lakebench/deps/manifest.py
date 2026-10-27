@@ -85,9 +85,8 @@ def _mem_mi(q: str) -> int:
 
 # What the scheduler reserves for the lb-deps pod for its whole life: the
 # larger of the largest init container request and the sum of the regular
-# containers' requests. Design s2.5 counted the serving container alone on
-# the premise that the init request is transient; Kubernetes keeps it
-# reserved, so the co-resident sum counts this figure (1 CPU, 2 GiB).
+# containers' requests. Kubernetes keeps the init request reserved, so the
+# co-resident sum counts this figure (1 CPU, 2 GiB).
 POD_REQUEST_CPU_M = max(_cpu_m(RESOLVE_REQUESTS["cpu"]), _cpu_m(SERVE_REQUESTS["cpu"]))
 POD_REQUEST_MEMORY_MI = max(_mem_mi(RESOLVE_REQUESTS["memory"]), _mem_mi(SERVE_REQUESTS["memory"]))
 
@@ -414,7 +413,7 @@ def consumer_context(handle: DepsHandle) -> dict[str, Any]:
 
 
 def provenance_block(handle: DepsHandle) -> dict[str, Any]:
-    """``provenance.deps`` of a run (design s2.8): what set its jobs ran."""
+    """``provenance.deps`` of a run: what set its jobs ran."""
     man = handle.manifest
     return {
         "pinset_sha256": handle.pinset_sha256,
