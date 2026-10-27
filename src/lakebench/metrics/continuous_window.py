@@ -27,6 +27,7 @@ Pure functions only: no Kubernetes, no Spark.
 
 from __future__ import annotations
 
+import bisect
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -73,12 +74,9 @@ def _num(text: str) -> int:
 
 def _ts(text: str) -> datetime | None:
     try:
-        at = datetime.fromisoformat(text)
+        return utc_naive(datetime.fromisoformat(text))
     except ValueError:
         return None
-    if at.tzinfo is not None:
-        at = at.astimezone(timezone.utc).replace(tzinfo=None)
-    return at
 
 
 def utc_naive(at: datetime) -> datetime:
@@ -325,14 +323,20 @@ def window_stats(
         out["window_input_rows"] = sum(n for c, n in agg.items() if agg_at[c] >= start)
         out["pre_window_input_rows"] = sum(n for c, n in agg.items() if agg_at[c] < start)
         cycles = sorted(agg)
+        # The rows the previous cycle read, per cycle, in one pass.
+        prev_rows: dict[int, int] = {}
+        running: int | None = None
+        for c in cycles:
+            if running is not None:
+                prev_rows[c] = running
+            running = agg[c]
 
         def saw_new_data(cycle: int) -> bool:
             # A cycle that read no silver (empty or not ready), read no more
             # rows than the cycle before, or was tagged idle saw no new data.
             if idle.get(cycle) or not agg.get(cycle):
                 return False
-            prev = [agg[c] for c in cycles if c < cycle]
-            return not prev or agg[cycle] > prev[-1]
+            return cycle not in prev_rows or agg[cycle] > prev_rows[cycle]
 
         new_at = [e for e in inside if saw_new_data(e.ident)]
         out["window_new_data_cycles"] = len(new_at)
@@ -517,12 +521,10 @@ _DOWNLOAD = re.compile(
 def classify_submission_failure(message: str | None) -> str:
     """A one-line reason for a SUBMISSION_FAILED status message.
 
-    Before 1.7 the operator's spark-submit resolved ``spark.jars.packages``
-    with Ivy, and a truncated Maven download (0 bytes of a 63 MB jar in the
-    2026-09-27 discovery run) was the common case; it is still named with
-    the artifact and byte counts for applications that set packages. Since
-    1.7 Lakebench's jobs name their jars as lb-deps URLs. Anything else is
-    the message's first line.
+    An application that sets ``spark.jars.packages`` resolves it with Ivy; a
+    truncated Maven download is named with the artifact and byte counts.
+    Lakebench's own jobs name their jars as lb-deps URLs instead. Anything
+    else is the message's first line.
     """
     text = message or ""
     m = _DOWNLOAD.search(text)
@@ -643,26 +645,57 @@ def handoff_lags(events_by_job: dict[str, list[StreamEvent]], at: datetime) -> d
       after the stage's last start is waiting. Times only, so a driver log
       that lost its early lines (a restart) moves nothing.
     """
-    bronze = events_by_job.get("bronze-ingest") or []
-    silver = events_by_job.get("silver-stream") or []
-    gold = events_by_job.get("gold-refresh") or []
+    return handoff_lags_at(_HandoffIndex(events_by_job), at)
+
+
+class _HandoffIndex:
+    """The per-stage times ``handoff_lags`` reads, sorted once so a sample at
+    any *at* is a bisect, not a scan: landing times (datagen->bronze), each
+    upstream stage's commit times, and each consumer's batch-start times."""
+
+    def __init__(self, events_by_job: dict[str, list[StreamEvent]]):
+        bronze = events_by_job.get("bronze-ingest") or []
+        silver = events_by_job.get("silver-stream") or []
+        gold = events_by_job.get("gold-refresh") or []
+        self.landings = sorted(
+            (e.at, e.value) for e in bronze if e.kind == "landing" and e.value is not None
+        )
+        self.commits = {
+            "bronze->silver": sorted(e.at for e in bronze if e.kind == "commit"),
+            "silver->gold": sorted(e.at for e in silver if e.kind == "commit"),
+        }
+        self.starts = {
+            "bronze->silver": sorted(e.at for e in silver if e.kind == "transform"),
+            "silver->gold": sorted(e.at for e in gold if e.kind == "aggregate"),
+        }
+
+
+def handoff_lags_at(index: _HandoffIndex, at: datetime) -> dict[str, Any]:
+    """``handoff_lags`` from a prebuilt ``_HandoffIndex``, for a caller that
+    samples the same events at many times (``balance``, ``_phase_samples``)."""
     out: dict[str, Any] = {name: None for name, _, _ in HANDOFFS}
 
-    landed = [e for e in bronze if e.kind == "landing" and e.at <= at and e.value is not None]
+    landed = [v for t, v in index.landings if t <= at and v is not None]
     if landed:
-        out["datagen->bronze"] = max(0.0, _epoch(at) - max(e.value or 0.0 for e in landed))
+        out["datagen->bronze"] = max(0.0, _epoch(at) - max(landed))
 
-    def waiting(upstream: list[StreamEvent], consumer: list[StreamEvent], start: str) -> Any:
-        commits = sorted(e.at for e in upstream if e.kind == "commit" and e.at <= at)
-        if not commits:
+    def waiting(name: str) -> Any:
+        commits, starts = index.commits[name], index.starts[name]
+        n_commit = bisect.bisect_right(commits, at)
+        if n_commit == 0:
             return None
-        starts = [e.at for e in consumer if e.kind == start and e.at <= at]
-        last = max(starts) if starts else None
-        pending = [c for c in commits if last is None or c > last]
-        return max(0.0, (at - pending[0]).total_seconds()) if pending else 0.0
+        n_start = bisect.bisect_right(starts, at)
+        last = starts[n_start - 1] if n_start else None
+        # The oldest commit at or before *at* that the stage's last start did
+        # not take: the first commit after ``last`` (all of them when the
+        # stage has not started).
+        first_pending = bisect.bisect_right(commits, last) if last is not None else 0
+        if first_pending >= n_commit:
+            return 0.0
+        return max(0.0, (at - commits[first_pending]).total_seconds())
 
-    out["bronze->silver"] = waiting(bronze, silver, "transform")
-    out["silver->gold"] = waiting(silver, gold, "aggregate")
+    out["bronze->silver"] = waiting("bronze->silver")
+    out["silver->gold"] = waiting("silver->gold")
     return out
 
 
@@ -709,8 +742,8 @@ def _median_batch_seconds(
     """Median batch time over the batches that ended inside [since, until],
     or over all of them when none did. A gold cycle that found no new silver
     row is left out: it is a quick pass over nothing, not the stage's
-    cadence, and counted in it gave a back-to-back AML gold whose window
-    opened before data an 11 s cadence against 76-113 s ticks."""
+    cadence, and counting it reads a back-to-back AML gold as a cadence far
+    below its real tick time."""
     idle = {e.ident for e in events if e.kind == "nothing_new"}
     spans = [
         (e.at - timedelta(seconds=e.value or 0.0), e.at)
@@ -746,9 +779,10 @@ def _phase_samples(
         if name == "bronze->silver"
         else ("gold-refresh", "aggregate")
     )
+    index = _HandoffIndex(events_by_job)
     out = []
     for e in _last_by_id(events_by_job.get(stage) or [], kind).values():
-        lag = handoff_lags(events_by_job, e.at - timedelta(milliseconds=1))[name]
+        lag = handoff_lags_at(index, e.at - timedelta(milliseconds=1))[name]
         if lag is not None:
             out.append((e.at, lag))
     return sorted(out)
@@ -823,7 +857,8 @@ def balance(
         offsets.append(t)
         t += step_s
     offsets.append(span)
-    samples = [(o, handoff_lags(events_by_job, start + timedelta(seconds=o))) for o in offsets]
+    index = _HandoffIndex(events_by_job)
+    samples = [(o, handoff_lags_at(index, start + timedelta(seconds=o))) for o in offsets]
     handoffs: dict[str, Any] = {}
     for name, upstream, stage in HANDOFFS:
         if stage not in events_by_job:
@@ -932,9 +967,8 @@ def balance(
             )
         elif (
             stage == "gold-refresh"
-            and _tm_share(events_by_job.get(stage) or [], start, end) >= 0.25
+            and (share := _tm_share(events_by_job.get(stage) or [], start, end)) >= 0.25
         ):
-            share = _tm_share(events_by_job.get(stage) or [], start, end)
             lever = "workload.tm_operations.continuous_interval_seconds"
             advice = (
                 f"the TM operations pass took {share:.0%} of gold's time: raise "
