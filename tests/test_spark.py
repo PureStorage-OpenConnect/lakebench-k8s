@@ -34,6 +34,48 @@ class TestSparkJobManager:
         bronze_wh = bronze_manifest["spec"]["sparkConf"]["spark.sql.catalog.lakehouse.warehouse"]
         assert "test-silver" in bronze_wh
 
+    def test_delete_waits_until_the_application_is_gone(self, monkeypatch):
+        """A submit right after the delete would 409 while the old object lingers."""
+        from unittest.mock import MagicMock, patch
+
+        from kubernetes.client.rest import ApiException
+
+        from lakebench.modules.pipeline_engines.spark import job as job_mod
+
+        api = MagicMock()
+        api.get_namespaced_custom_object.side_effect = [{}, {}, ApiException(status=404)]
+        sleeps: list[float] = []
+        monkeypatch.setattr(job_mod.time, "sleep", sleeps.append)
+        mgr = SparkJobManager(_make_config(), _mock_k8s())
+        with patch("kubernetes.client.CustomObjectsApi", return_value=api):
+            mgr._delete_job("lakebench-silver-build")
+        api.delete_namespaced_custom_object.assert_called_once()
+        assert api.get_namespaced_custom_object.call_count == 3
+        assert sleeps == [1, 1]
+
+    def test_driver_and_executor_get_the_same_env(self):
+        """One env list per manifest, from one silver-state read, even while
+        the ConfigMap changes underneath."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        reads: list[str] = []
+
+        class Core:
+            def read_namespaced_config_map(self, name, namespace):
+                reads.append(name)
+                n = str(len(reads))
+                return SimpleNamespace(
+                    data={"bronze_data_clock": f"2026-01-0{n}", "rebuild_epoch_c360_iceberg": n}
+                )
+
+        mgr = SparkJobManager(_make_config(), _mock_k8s())
+        with patch("kubernetes.client.CoreV1Api", lambda *a, **k: Core()):
+            spec = mgr._build_manifest(JobType.SILVER_BUILD)["spec"]
+        assert spec["driver"]["env"] == spec["executor"]["env"]
+        assert spec["driver"]["env"] is not spec["executor"]["env"]
+        assert reads == ["lakebench-silver-state"]
+
 
 class TestStreamingConcurrentBudget:
     """Tests for streaming concurrent resource budgeting."""

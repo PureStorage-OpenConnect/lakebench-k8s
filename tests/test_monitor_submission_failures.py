@@ -131,6 +131,38 @@ def test_a_raising_callback_does_not_end_the_wait():
     assert r.success is True and len(r.submission_failures) == 1
 
 
+def _wait_running(statuses, timeout_seconds):
+    m = _monitor()
+    m.job_manager.get_job_status.side_effect = statuses
+    clock = _Clock()
+    with (
+        patch("lakebench.modules.pipeline_engines.spark.monitor.time", clock),
+        patch.object(m, "_get_driver_logs", return_value=""),
+    ):
+        r = m.wait_until_running("j", timeout_seconds=timeout_seconds, poll_interval=20)
+    return r, clock.now - 1000.0
+
+
+def test_stream_start_deadline_holds_while_the_operator_retries_submission():
+    from lakebench.spark.job import JobState
+
+    r, waited = _wait_running(
+        lambda _name: _status(JobState.SUBMISSION_FAILED, _MAVEN, 1), timeout_seconds=100
+    )
+    assert r.success is False
+    assert r.message == "j not running after 100s (state: 'SUBMISSION_FAILED')"
+    assert waited <= 120
+
+
+def test_stream_start_polls_through_a_transient_status_error():
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.spark.job import JobState
+
+    r, _ = _wait_running([ApiException(status=503), _status(JobState.RUNNING)], timeout_seconds=100)
+    assert r.success is True
+
+
 def test_metrics_carry_the_failures_through_the_scorecard_and_storage(tmp_path):
     from lakebench.metrics.collector import JobMetrics, PipelineMetrics, build_pipeline_benchmark
     from lakebench.metrics.storage import MetricsStorage

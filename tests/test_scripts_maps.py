@@ -325,7 +325,10 @@ def test_submit_refuses_when_scripts_changed_after_apply():
     assert mgr.deploy_scripts_configmap() is True
     assert mgr.scripts_changed_since_apply(JobType.SILVER_BUILD) is None
     k8s.store["lakebench-scripts-common"]["annotations"][sm.SCRIPTS_SHA256_ANNOTATION] = "f" * 64
+    from kubernetes.client.rest import ApiException
+
     created = MagicMock()
+    created.get_namespaced_custom_object.side_effect = ApiException(status=404)
     with patch("kubernetes.client.CustomObjectsApi", return_value=created):
         status = mgr.submit_job(JobType.SILVER_BUILD)
     assert status.state.name == "FAILED"

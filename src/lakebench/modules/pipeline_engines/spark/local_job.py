@@ -117,10 +117,12 @@ class LocalSparkRunner:
         Explicit config wins over the profile, so a user who asks for a
         specific size gets it.
         """
+        # build_command refuses an unknown job type before _sizing runs, so
+        # every job here has a local profile.
         profile = get_local_job_profile(job_type) or {}
-        memory = self.config.driver_memory or profile.get("driver_memory", "3g")
-        cores = self.config.cores or profile.get("cores", 2)
-        partitions = profile.get("partitions", cores * 2)
+        memory = self.config.driver_memory or profile["driver_memory"]
+        cores = self.config.cores or profile["cores"]
+        partitions = profile["partitions"]
         return memory, cores, partitions
 
     def _spark_conf(self, job_type: str) -> dict[str, str]:
@@ -185,7 +187,7 @@ class LocalSparkRunner:
             f"spark.sql.catalog.{name}.warehouse": f"s3a://{warehouse_bucket}/warehouse",
         }
 
-    def _env(self, job_type: str) -> dict[str, str]:
+    def _env(self) -> dict[str, str]:
         cfg = self.config
         return {
             "HOME": "/work",  # Ivy cache lives under HOME
@@ -229,7 +231,7 @@ class LocalSparkRunner:
             raise ValueError(f"Unknown job type {job_type!r}. Expected one of {sorted(_SCRIPTS)}.")
 
         cmd = [self.cli, "run", "--rm", "--network", "host"]
-        for key, value in self._env(job_type).items():
+        for key, value in self._env().items():
             cmd += ["-e", f"{key}={value}"]
         # Lowercase "z" (shared), never "Z". The workdir tree is also
         # mounted by the Garage container; a private relabel here revokes

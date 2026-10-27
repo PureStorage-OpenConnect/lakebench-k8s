@@ -51,7 +51,6 @@ COMPONENT_LABEL = "spark-scripts"
 SCRIPTS_SHA256_ANNOTATION = "lakebench.io/scripts-sha256"
 ROLE_LABEL = "lakebench.io/scripts-role"
 DEPLOYMENT_LABEL = "lakebench.io/deployment"
-SCRIPTS_MOUNT_PATH = "/opt/spark/scripts"
 SCRIPTS_VOLUME_NAME = "spark-scripts"
 
 
@@ -101,9 +100,8 @@ def _scripts(*names: str) -> tuple[ScriptSource, ...]:
     return tuple(_src(f"spark/scripts/{n}") for n in names)
 
 
-# Role -> files, in apply order. Sizes at integrate 46cc3f4 (UTF-8 bytes):
-# common 108 KB, c360 155 KB, aml-rules 229 KB, aml-jobs 287 KB,
-# aml-gate 178 KB, aml-data 47 KB; the largest is 27% of 1 MiB.
+# Role -> files, in apply order. The largest map is well under the 1 MiB
+# ConfigMap limit (test_each_map_under_budget).
 SCRIPT_MAPS: dict[str, tuple[ScriptSource, ...]] = {
     "common": _scripts("common.py"),
     "c360": _scripts(
@@ -174,9 +172,8 @@ ROLES: tuple[str, ...] = tuple(SCRIPT_MAPS)
 # must be listed in aml-data (test_every_aml_json_listed_or_excluded).
 NOT_SHIPPED: tuple[str, ...] = ()
 
-# Which roles each job type's pods project. Every row is every role today
-# (v1.6 mounted everything everywhere); a restricted row is for a job type
-# that must not see a role (the v1.8 ML loop). A job type with no row fails
+# Which roles each job type's pods project. Every row is every role today; a
+# row may restrict a job type to a subset. A job type with no row fails
 # test_mounts_table_covers_every_job_type, so none can mount nothing.
 MOUNTS_BY_JOB_TYPE: dict[JobType, tuple[str, ...]] = {
     JobType.BRONZE_VERIFY: ROLES,
@@ -361,7 +358,7 @@ def scripts_label_selector(deployment_name: str) -> str:
     It keys on ``app.kubernetes.io/instance``, not ``lakebench.io/deployment``:
     the v1.6 map carries only the ``app.kubernetes.io/*`` labels, and a
     deployment made by 1.6 and destroyed by 1.7 without a 1.7 run must still
-    lose it. The Category-1 registry keeps this selector as is.
+    lose it.
     """
     return (
         f"app.kubernetes.io/component={COMPONENT_LABEL},"
