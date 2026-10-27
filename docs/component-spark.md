@@ -198,7 +198,7 @@ When enabled, each executor gets a dynamically provisioned PVC at `/tmp/spark-lo
 
 - **Batch, per-scale profile:** the stage's `scratch_gib_per_scale` x scale / executors, rounded up, between 50Gi and the profile's `scratch_size` (the ceiling). Examples: Customer 360 silver-build gets 8 x 50Gi at scale 1, 8 x 75Gi at scale 10 and 18 x 300Gi at scale 100; AML bronze-verify gets 4 x 125Gi at scale 10.
 - **No per-scale need** (c360 bronze-verify, 50Gi, and the streaming jobs): `scratch_size`. A widened streaming executor's PVC grows with its cores.
-- **Set in the config:** `platform.compute.spark.<stage>_executor_scratch`, else `executor_scratch`, replaces the size above for every executor of the job. It is exact: not scaled by cores, scale or executor count. `executor_scratch` is the only control for jobs outside the three stages: `time-travel-financial` and the reference scorer `score-financial-reference`.
+- **Set in the config:** `platform.compute.spark.<stage>_executor_scratch`, else `executor_scratch`, replaces the size above for every executor of the job. It is exact: not scaled by cores, scale or executor count. `executor_scratch` is the only control for a job outside the three stages: the reference scorer `score-financial-reference`.
 - `metrics.json` records the size per job as `config_snapshot.scratch.size_per_job`.
 - The StorageClass must use `repl=1`; replication only doubles storage for recomputable shuffle data.
 - `lakebench deploy` only checks that the StorageClass exists. A cluster admin creates it once with `lakebench admin install --component scratch-storage-class`.

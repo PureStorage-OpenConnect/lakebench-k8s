@@ -49,18 +49,20 @@ def _pvc(cfg: LakebenchConfig, job: JobType) -> str:
     return SparkJobManager(cfg, k8s)._build_manifest(job)["spec"]["sparkConf"][_SIZE_KEY]
 
 
-def test_executor_scratch_sizes_the_time_travel_job():
-    """The time-travel job's profile gives 50Gi; executor_scratch is the one
-    key that reaches a job without a stage key of its own."""
-    assert _pvc(_config({}), JobType.TIME_TRAVEL_FINANCIAL) == "50Gi"
-    assert _pvc(_config({"executor_scratch": "200Gi"}), JobType.TIME_TRAVEL_FINANCIAL) == "200Gi"
+def test_executor_scratch_sizes_a_job_without_a_stage_key():
+    """The reference detector's profile gives 300Gi; executor_scratch is the
+    one key that reaches a job without a stage key of its own."""
+    assert _pvc(_config({}), JobType.SCORE_FINANCIAL_REFERENCE) == "300Gi"
+    assert (
+        _pvc(_config({"executor_scratch": "200Gi"}), JobType.SCORE_FINANCIAL_REFERENCE) == "200Gi"
+    )
 
 
 def test_a_stage_key_wins_for_its_stage_only():
     cfg = _config({"executor_scratch": "200Gi", "silver_executor_scratch": "400Gi"})
     assert _pvc(cfg, JobType.SILVER_BUILD) == "400Gi"
     assert _pvc(cfg, JobType.GOLD_FINALIZE) == "200Gi"
-    assert _pvc(cfg, JobType.TIME_TRAVEL_FINANCIAL) == "200Gi"
+    assert _pvc(cfg, JobType.SCORE_FINANCIAL_REFERENCE) == "200Gi"
 
 
 def test_the_size_is_exact_not_scaled_by_cores():

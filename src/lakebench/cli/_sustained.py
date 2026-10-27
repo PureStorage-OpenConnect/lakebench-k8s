@@ -4760,17 +4760,14 @@ def _run_sustained(
                 from lakebench.cli._aml_post import run_time_travel
 
                 _stage = "time-travel"
-                # The namespace is still this run's before a job is submitted
-                # into it (the scorer can take up to the job timeout).
+                # Still this run's namespace; the queries run through the
+                # query engine, with the streams stopped.
                 _ns_watch.check(time.time() - start)
                 run_time_travel(
                     cfg,
                     run_id,
                     collector.current_run.continuous,
-                    job_manager,
-                    monitor,
-                    timeout,
-                    interrupt=_interrupt,
+                    timeout=timeout,
                     run_failed=not pipeline_success,
                 )
 

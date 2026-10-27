@@ -245,7 +245,15 @@ def time_travel_ticks(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # after pinning, or was still running when the log was read, still
         # recorded the snapshot it read).
         out.append(
-            {"start": t["start"], "cycle": t["cycle"], **tt, "completed": bool(t.get("completed"))}
+            {
+                "start": t["start"],
+                "cycle": t["cycle"],
+                **tt,
+                # The gold.alerts snapshot the tick committed, so the
+                # retention point read can bind the alerts table at the tick.
+                "committed_alerts": t.get("committed_alerts"),
+                "completed": bool(t.get("completed")),
+            }
         )
     return out
 

@@ -1,0 +1,8 @@
+-- Which recorded tick snapshots of one table are still present.
+-- Placeholders: {catalog}; {table} is the bare table name under silver
+-- (e.g. transactions). The $snapshots metadata table lists every live
+-- snapshot of the Iceberg table, so a recorded snapshot id absent from it
+-- was expired by maintenance (or, failing an explanation, lost). Metadata
+-- only: no data file is read.
+SELECT CAST(snapshot_id AS VARCHAR) AS snapshot_id
+FROM {catalog}.silver."{table}$snapshots"

@@ -10,8 +10,6 @@ rewritten by a later tick does not reach the score.
 
 from __future__ import annotations
 
-import time
-from collections.abc import Callable
 from typing import Any
 
 from lakebench.cli._helpers import console, print_info, print_success, print_warning
@@ -223,152 +221,62 @@ def continuous_scoring(
     return summary
 
 
-# -- time-travel reads (after the window) -------------------------------------
-
-#: Seconds the job's deadline keeps back from the CLI's wait, for writing
-#: its partial result (``incomplete``) and stopping. The job also starts no
-#: scan the time left could not hold (1.5 times its longest scan so far;
-#: the first scan of each pass always starts).
-_TT_BUDGET_MARGIN_S = 120
-#: How the record labels the time-travel budget (a Lakebench-imposed bound).
-TT_BUDGET_LABEL = "BOUNDED BY the Lakebench time-travel budget (the per-job timeout)"
+# -- time-travel retention check (after the window) ---------------------------
 
 
 def run_time_travel(
     cfg,
     run_id: str,
     continuous: dict | None,
-    job_manager,
-    monitor,
-    timeout,
     *,
-    interrupt=None,
+    timeout: int = 300,
     run_failed: bool = False,
-    wall_clock: Callable[[], float] = time.time,
 ) -> dict[str, Any] | None:
-    """Re-read every transactions snapshot the run's ticks recorded
-    (``TIME_TRAVEL_FINANCIAL``) and record ``continuous.time_travel``.
+    """Check the snapshots the run\'s ticks recorded are still readable, and
+    record ``continuous.time_travel``.
 
-    Runs after the covered scorer, with the streams stopped: nothing it
-    does is inside a measured interval, and it writes only under the gold
-    ``scoring/<run_id>/`` prefix. A run that failed its gates is not read
-    (as it is not scored). The job gets an absolute deadline on the
-    cluster clock: the CLI's wait (*timeout* from submit) less a margin; a
-    wait that ends first deletes the application, so no executor outlives
-    the step. Never raises and never fails the run; a job that cannot run
-    reads ``not_run``. Returns the record, or None when the run has no
-    continuous block."""
+    Replaces the time-travel Spark job: a metadata read of each table\'s
+    ``$snapshots`` says whether the tick snapshot is present, expired (the
+    maintenance round that expired it is named) or missing without one; for a
+    present snapshot one timed point read confirms a case\'s evidence is still
+    there as of the tick. Runs after the covered scorer with the streams
+    stopped, so nothing it does is inside a measured interval, and it reads
+    through the benchmark query engine, not Spark. A run that failed its gates
+    is not read (as it is not scored). Never raises and never fails the run; a
+    step that cannot run reads ``not_run``. Returns the record, or None when
+    the run has no continuous block.
+    """
+    from lakebench.aml import time_travel_queries as ttq
     from lakebench.metrics import time_travel as tt_mod
 
     if continuous is None:
         return None
-    submitted = False
-    app_name = ""
-    policy = tt_mod.policy(
+    pol = tt_mod.policy(
         continuous.get("retention"), cfg.architecture.pipeline.sustained.retention_threshold
     )
     try:
         if run_failed:
-            return tt_mod.not_run(continuous, "the run failed its gates", policy)
+            return tt_mod.not_run(continuous, "the run failed its gates", pol)
         records = list((continuous.get("time_travel") or {}).get("ticks") or [])
         if not records:
-            return tt_mod.not_run(continuous, "zero recorded snapshots", policy, verdict="fail")
-        import json as _json
-        import uuid
+            return tt_mod.not_run(continuous, "zero recorded snapshots", pol, verdict="fail")
 
-        from lakebench.spark.job import JobState, JobType
+        from lakebench.benchmark.executor import get_executor
 
-        gold = cfg.platform.storage.s3.buckets.gold
-        prefix = f"scoring/{run_id}"
-        nonce = uuid.uuid4().hex
-        client = _s3_client(cfg)
-        fields = (
-            "start",
-            "cycle",
-            "table",
-            "snapshot",
-            "committed_at",
-            "total_records",
-            "pos_deletes",
-            "eq_deletes",
-            "count_source",
-        )
-        client.raw_client.put_object(
-            Bucket=gold,
-            Key=f"{prefix}/tt_input.json",
-            Body=_json.dumps(
-                {
-                    "run_id": run_id,
-                    "nonce": nonce,
-                    "exclude_columns": sorted(tt_mod.SENTINEL_COLUMNS),
-                    "records": [{k: r.get(k) for k in fields} for r in records],
-                }
-            ).encode("utf-8"),
-        )
-        app_name = f"lakebench-{JobType.TIME_TRAVEL_FINANCIAL.value}"
-        budget_s = max(60, int(timeout) - _TT_BUDGET_MARGIN_S)
-        # The driver reads the deadline on the cluster clock (cluster minus
-        # host offset, when measured).
-        offset = (continuous.get("window") or {}).get("cluster_clock_offset_seconds") or 0.0
-        deadline = wall_clock() + budget_s + float(offset)
-        budget = {"budget_s": budget_s, "label": TT_BUDGET_LABEL}
+        executor = get_executor(cfg)
         console.print()
         console.print("[bold]Stage: time-travel reads[/bold]")
         print_info(
             f"Re-reading {len(records)} recorded transactions snapshot(s) after the window..."
         )
-        if interrupt is not None:
-            interrupt.creating("SparkApplication", app_name)
-        status = job_manager.submit_job(
-            JobType.TIME_TRAVEL_FINANCIAL,
-            arguments=[
-                "--input",
-                f"s3a://{gold}/{prefix}/tt_input.json",
-                "--hashes",
-                f"s3a://{gold}/{prefix}/tt_hashes.json",
-                "--output",
-                f"s3a://{gold}/{prefix}/time_travel.json",
-                "--deadline-epoch",
-                f"{deadline:.3f}",
-            ],
-            cycle_env={"LB_RUN_ID": run_id},
+        tt = ttq.retention_record(
+            continuous, executor.query_rows, executor.catalog_name, pol, timeout=timeout
         )
-        if interrupt is not None:
-            interrupt.submitted(status)
-        if status.state == JobState.FAILED:
-            return tt_mod.not_run(
-                continuous, f"the job was not submitted: {status.message}", policy
-            )
-        submitted = True
-        result = monitor.wait_for_completion(app_name, timeout_seconds=timeout, poll_interval=15)
-        if interrupt is not None and result.success:
-            interrupt.finished("SparkApplication", app_name)
-        if not result.success:
-            _delete_tt_job(job_manager, app_name)
-            submitted = False
-            return tt_mod.not_run(continuous, f"the job did not complete: {result.message}", policy)
-        submitted = False
-        body = client.raw_client.get_object(Bucket=gold, Key=f"{prefix}/time_travel.json")
-        out = _json.loads(body["Body"].read())
-        if not isinstance(out, dict) or out.get("nonce") != nonce:
-            return tt_mod.not_run(continuous, "time_travel.json is not this submission's", policy)
-        tt = tt_mod.merge(continuous, out, policy, budget)
         (print_success if tt["verdict"] == "pass" else print_warning)(tt_mod.line(tt))
         return tt
     except Exception as e:  # noqa: BLE001 -- a measurement; never fails the run
-        if submitted:
-            # The wait raised: the job may still run; it must not outlive the step.
-            _delete_tt_job(job_manager, app_name)
         print_warning(f"Time-travel reads failed ({e}); recorded as not run.")
-        return tt_mod.not_run(continuous, f"the time-travel step failed: {e}", policy)
-
-
-def _delete_tt_job(job_manager, app_name: str) -> None:
-    """Delete the time-travel application (best effort, said when it fails)."""
-    try:
-        job_manager._delete_job(app_name)
-    except Exception as e:  # noqa: BLE001 -- said; the record stands
-        print_warning(f"Could not delete {app_name}: {e}")
+        return tt_mod.not_run(continuous, f"the time-travel step failed: {e}", pol)
 
 
 def settle_time_travel(cfg, run: Any, reason: str, pipeline_success: bool = True) -> None:

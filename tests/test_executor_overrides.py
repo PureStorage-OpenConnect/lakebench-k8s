@@ -101,7 +101,7 @@ def test_one_override_rule():
     cfg = make_config(platform={"compute": {"spark": {"gold_executors": 6}}})
     assert executor_override("gold-finalize", cfg) == 6
     assert executor_override("silver-build", cfg) is None
-    assert executor_override("time-travel-financial", cfg) is None
+    assert executor_override("score-financial-reference", cfg) is None
     spark = cfg.platform.compute.spark
     for job_type, (field, _) in EXECUTOR_OVERRIDE_FIELDS.items():
         setattr(spark, field, 3)
@@ -117,11 +117,11 @@ def test_missing_profile_raises(monkeypatch):
     from tests.fixtures.spark_helpers import _mock_k8s
 
     profiles = dict(job_mod._JOB_PROFILES)
-    del profiles["time-travel-financial"]
+    del profiles["gold-finalize"]
     monkeypatch.setattr(job_mod, "_JOB_PROFILES", profiles)
     mgr = SparkJobManager(make_config(), _mock_k8s())
-    with pytest.raises(MissingSizingProfile, match="time-travel-financial"):
-        mgr._build_manifest(JobType.TIME_TRAVEL_FINANCIAL)
+    with pytest.raises(MissingSizingProfile, match="gold-finalize"):
+        mgr._build_manifest(JobType.GOLD_FINALIZE)
 
 
 # -- 4. labelled when it binds -------------------------------------------------------

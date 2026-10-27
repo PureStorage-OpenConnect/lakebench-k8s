@@ -1,0 +1,25 @@
+-- One case read as of the tick snapshot: pick one alert the tick committed
+-- (a non-empty, deterministic choice) and re-read its payments from
+-- silver.transactions as of the tick's pinned transactions snapshot.
+-- Placeholders: {catalog}; {alerts_pin} and {txns_pin} render
+-- "FOR VERSION AS OF <id>". No user text is interpolated. One row:
+--   found      the alert's related_txn_ids present at the tick snapshot
+--   evidence   the alert's number of related_txn_ids
+WITH a AS (
+  SELECT related_txn_ids
+  FROM {catalog}.gold.alerts {alerts_pin}
+  WHERE CARDINALITY(related_txn_ids) > 0
+  ORDER BY alert_id
+  LIMIT 1
+),
+uetrs AS (
+  SELECT u.uetr FROM a CROSS JOIN UNNEST(a.related_txn_ids) AS u(uetr)
+),
+as_of AS (
+  SELECT COUNT(*) AS found
+  FROM {catalog}.silver.transactions {txns_pin} t
+  JOIN uetrs ON t.uetr = uetrs.uetr
+)
+SELECT
+  (SELECT found FROM as_of) AS found,
+  (SELECT CARDINALITY(related_txn_ids) FROM a) AS evidence

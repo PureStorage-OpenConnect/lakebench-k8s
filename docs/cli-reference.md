@@ -1096,7 +1096,7 @@ Components:
 - `datagen`: the datagen Job pods.
 - Each pipeline stage's Spark driver: `bronze-verify`, `silver-build`,
   `gold-finalize`, `bronze-ingest`, `silver-stream`, `gold-refresh`,
-  `score-financial-reference`, `time-travel-financial`.
+  `score-financial-reference`.
 - `spark-driver`: every Spark driver.
 - `trino` (coordinator), `trino-worker`, `thrift`, `duckdb`, `hive`,
   `polaris` and `postgres`.

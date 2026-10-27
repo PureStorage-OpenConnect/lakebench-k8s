@@ -185,10 +185,10 @@ in bronze.
    - If the run passed every gate, the scorer runs in covered mode over
      exactly the snapshots the last completed tick inside the window read
      ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)).
-   - On the same condition `time-travel-financial` then re-reads every
-     `silver.transactions` snapshot the ticks recorded
-     ([8.2](continuous-metrics.md#82-continuous)). It runs with the streams
-     stopped, outside every measured interval, and never fails the run.
+   - On the same condition the time-travel check reads back every
+     `silver.transactions` snapshot the ticks recorded, through the query
+     engine ([8.2](continuous-metrics.md#82-continuous)). It runs with the
+     streams stopped, outside every measured interval, and never fails the run.
 8. **Gates**: the continuous window gate, the AML continuous gate, the TM
    verdict and the record gates ([5](correctness.md#5-correctness-contract)).
    The continuous balance check is advisory: an unbalanced stage is recorded

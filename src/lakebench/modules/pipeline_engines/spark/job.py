@@ -176,22 +176,6 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "max_executors": 10,
         "base_partitions": 32,
     },
-    # Time-travel reads after a continuous AML window: two full scans
-    # of each recorded transactions snapshot that is still live and one of
-    # the current one, each a single fingerprint aggregate. Deliberately
-    # small: it runs on the stopped deployment after the window.
-    "time-travel-financial": {
-        "driver_cores": 2,
-        "driver_memory": "8g",
-        "executor_cores": 4,
-        "executor_memory": "16g",
-        "executor_memory_overhead": "4g",
-        "scratch_size": "50Gi",
-        "base_executors": 2,
-        "executors_per_100_scale": 4,
-        "max_executors": 10,
-        "base_partitions": 32,
-    },
 }
 # The reference detector runs on silver-build's profile with a fixed
 # scratch size.
@@ -1847,8 +1831,6 @@ class JobType(Enum):
     SILVER_STREAM = "silver-stream"
     GOLD_REFRESH = "gold-refresh"
 
-    # Post-window re-read of the snapshots continuous AML ticks read.
-    TIME_TRAVEL_FINANCIAL = "time-travel-financial"
     # Reference detector + leakage gate: the "distribution checks do not
     # prove semantics" gate that a relative-threshold rule rewrite (e.g. the
     # W4/W8 precision work) must be validated against before it ships.
@@ -2455,7 +2437,6 @@ class SparkJobManager:
         # Financial workloads. Registered unconditionally so `run` and
         # `lakebench financial reference-score` work regardless of the elif
         # branch above.
-        script_map.setdefault(JobType.TIME_TRAVEL_FINANCIAL, "time_travel_financial.py")
         script_map.setdefault(JobType.SCORE_FINANCIAL_REFERENCE, "score_financial_reference.py")
         # Use local:// to reference scripts already in the container filesystem
         # (projected from the lakebench-scripts-<role> ConfigMaps)
@@ -2992,13 +2973,9 @@ class SparkJobManager:
         # computed AP would look again. Submission retries stay for every job:
         # they run before the driver starts, and the shared operator fails a
         # submission now and then.
-        no_driver_retry = (
-            job_type in _STREAMING_JOB_TYPES
-            or job_type is JobType.TIME_TRAVEL_FINANCIAL
-            or (
-                job_type == JobType.SCORE_FINANCIAL_REFERENCE
-                and cfg.architecture.workload.datagen.corpus_role in ("evaluation", "robustness")
-            )
+        no_driver_retry = job_type in _STREAMING_JOB_TYPES or (
+            job_type == JobType.SCORE_FINANCIAL_REFERENCE
+            and cfg.architecture.workload.datagen.corpus_role in ("evaluation", "robustness")
         )
         _restart_policy: dict[str, Any] = (
             {"type": "OnFailure", "onFailureRetries": 0}
