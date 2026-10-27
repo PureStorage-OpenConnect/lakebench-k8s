@@ -87,7 +87,7 @@ def _parse_cpu_millicores(cpu: str | int | float) -> int:
     return to_millicores(cpu)
 
 
-# Datagen memory model (re-fit 2026-09-29). Fitted to the cgroup
+# Datagen memory model. Fitted to the cgroup
 # memory high-watermark (memory.peak) of the busiest pod of datagen-only
 # cluster Jobs: generator with mimalloc and owned-file typology pruning, the
 # fixed 64 MB file size, 8 threads (request = limit = 8 CPU), 8 pods (4 for
@@ -143,6 +143,10 @@ def datagen_memory_gib(schema: str, scale: float, threads: int) -> float:
     return datagen_peak_gib(schema, scale, threads) * DATAGEN_HEADROOM
 
 
+def _schema_name(config: LakebenchConfig) -> str:
+    return getattr(config.architecture.workload.schema_type, "value", "customer360")
+
+
 def _datagen_memory_default(config: LakebenchConfig, cpu: str) -> str:
     """Per-pod datagen memory: the modelled request, never above the 16 GiB
     pod cap. A pod whose threads would not fit the cap gets the cap, and the
@@ -152,7 +156,7 @@ def _datagen_memory_default(config: LakebenchConfig, cpu: str) -> str:
     from lakebench.config.support import DATAGEN_POD_MEMORY_CAP_GIB
 
     datagen = config.architecture.workload.datagen
-    schema = getattr(config.architecture.workload.schema_type, "value", "customer360")
+    schema = _schema_name(config)
     threads = max(1, _parse_cpu_millicores(cpu) // 1000)
     gib = datagen_memory_gib(schema, float(datagen.scale or 1), threads)
     return f"{min(DATAGEN_POD_MEMORY_CAP_GIB, max(4, math.ceil(gib)))}Gi"
@@ -166,13 +170,15 @@ def _datagen_clamp_note(config: LakebenchConfig, cpu: str) -> str:
     from lakebench.config.support import DATAGEN_POD_MEMORY_CAP_GIB
 
     datagen = config.architecture.workload.datagen
-    schema = getattr(config.architecture.workload.schema_type, "value", "customer360")
+    schema = _schema_name(config)
     threads = max(1, _parse_cpu_millicores(cpu) // 1000)
     scale = float(datagen.scale or 1)
     need = math.ceil(datagen_memory_gib(schema, scale, threads))
     if need <= DATAGEN_POD_MEMORY_CAP_GIB:
         return ""
-    spare = DATAGEN_POD_MEMORY_CAP_GIB / DATAGEN_HEADROOM - datagen_peak_gib(schema, scale, 8)
+    spare = DATAGEN_POD_MEMORY_CAP_GIB / DATAGEN_HEADROOM - datagen_peak_gib(
+        schema, scale, DATAGEN_BASE_THREADS
+    )
     extra = DATAGEN_GIB_PER_EXTRA_THREAD.get(schema, DATAGEN_GIB_PER_EXTRA_THREAD["financial"])
     fit = max(1, DATAGEN_BASE_THREADS + int(spare // extra)) if spare >= 0 else 1
     return (
@@ -189,9 +195,9 @@ def _datagen_clamp_note(config: LakebenchConfig, cpu: str) -> str:
 DATAGEN_MIN_PODS = 8
 
 
-#: Continuous load, a published workload definition (owner,
-#: 2026-10-07): the MB/s of datagen files a continuous run offers per
-#: scale unit. The same scale offers the same load on every system.
+#: Continuous load, a published workload definition: the MB/s of datagen
+#: files a continuous run offers per scale unit. The same scale offers the
+#: same load on every system.
 CONTINUOUS_LOAD_MB_S_PER_SCALE: dict[str, float] = {"financial": 4.0, "customer360": 10.0}
 #: MB/s per core (bytes of datagen's files) of datagen and of each streaming
 #: stage while busy: defaults the balance formula sizes with. Bronze and
@@ -222,7 +228,7 @@ def is_continuous(config: LakebenchConfig) -> bool:
 
 
 def _schema_of(config: LakebenchConfig) -> str:
-    schema = getattr(config.architecture.workload.schema_type, "value", "customer360")
+    schema = _schema_name(config)
     return schema if schema in CONTINUOUS_LOAD_MB_S_PER_SCALE else "customer360"
 
 
@@ -270,7 +276,7 @@ def datagen_offered_mb_s(config: LakebenchConfig) -> float:
 
 def _apply_datagen_pod_floor(config: LakebenchConfig, changes: list[str]) -> None:
     datagen = config.architecture.workload.datagen
-    schema = getattr(config.architecture.workload.schema_type, "value", "customer360")
+    schema = _schema_name(config)
     if (
         schema == "financial"
         and float(datagen.get_effective_scale()) > 100
@@ -302,18 +308,11 @@ def _apply_datagen_pod_floor(config: LakebenchConfig, changes: list[str]) -> Non
 
 
 def _resolve_datagen_mode(config: LakebenchConfig) -> str:
-    """Resolve the effective datagen delivery mode from config.
+    """The effective datagen delivery mode, ``batch`` or ``continuous``.
 
-    DatagenMode is a delivery pattern since 2026-09-28 (Wave 2 D1). AUTO
-    resolves to CONTINUOUS at every scale: the choice affects per-worker
-    write pipeline (streaming MPU vs buffered PUT), not correctness. Owner
-    D18 (PipelineMode.CONTINUOUS canonical) also names continuous as the
-    default. Pre-2026-09-28 semantics resolved AUTO by scale for the
-    resource-profile tier; that split has moved into scale-based sizing
-    elsewhere in this file and is independent of delivery mode.
-
-    Returns:
-        DatagenMode.BATCH.value or DatagenMode.CONTINUOUS.value
+    AUTO resolves to continuous at every scale: the mode changes how each
+    worker writes (streaming multipart upload or one buffered PUT), not what
+    it writes. Resources are sized by scale, independently of the mode.
     """
     from lakebench.config.schema import DatagenMode
 
@@ -385,18 +384,12 @@ def resolve_auto_sizing(
         changes.append(f"trino.worker.memory={guidance.trino.worker_memory}")
 
     # -- Datagen --
-    # Per-pod sizing for the Rust generator (both schemas, both modes; the
-    # corpus is always pre-written, so continuous is a pipeline mode, not a
-    # datagen mode). Measured 2026-09-18..21: 8-core pods reached 338-600
-    # MB/s; per-node memory bandwidth, not the array, limits aggregate
-    # throughput past about 24 active generator cores per node, so 8 cores
-    # per pod packs well on 40-core workers.
-    #
-    # Earlier code hard-locked 4 CPU / 4Gi in batch and forced generators=1,
-    # which the entrypoint turned into a single rayon thread per pod (product
-    # path measured 36 MB/s/pod). Now: user-set cpu/memory are honoured, and
-    # generators stays 0 ("auto"), so the entrypoint sizes threads from the
-    # pod's CPU request.
+    # Per-pod sizing for the Rust generator (both schemas, both modes). 8-core
+    # pods reached 338-600 MB/s; per-node memory bandwidth, not the array,
+    # limits aggregate throughput past about 24 active generator cores per
+    # node, so 8 cores per pod packs well on 40-core workers. User-set
+    # cpu/memory are honoured, and generators stays 0 ("auto"), so the
+    # entrypoint sizes threads from the pod's CPU request.
     #
     # Memory: derived from measured peak RSS (see datagen_memory_gib), for
     # the CPU (thread count) actually used.
@@ -423,23 +416,12 @@ def resolve_auto_sizing(
     if _set_if_default(datagen, "parallelism", dg_pods):
         changes.append(f"datagen.parallelism={dg_pods}")
 
-    # -- Schema-specific overrides --
-    # Workload schemas that differ from Customer360 on baseline resource shape
-    # override defaults here. Financial raises the Spark Thrift memory.
-    # Per-executor scratch PVCs are job.py:executor_scratch_size: the size the
-    # config sets, else the stage's scratch_gib_per_scale x scale over its
-    # executors, up to the profile's scratch_size, with
-    # _SCHEMA_PROFILE_OVERRIDES on top, applied at manifest-build time in
-    # modules/pipeline_engines/spark/job.py.
+    # Per-executor scratch PVCs are job.py:executor_scratch_size, applied at
+    # manifest-build time, not here.
     # -- Spark Thrift on Delta --
-    # Runs before the schema overrides so the financial 24g heap still wins.
     delta_change = _apply_delta_thrift_default(config, cluster_capacity)
     if delta_change:
         changes.append(delta_change)
-
-    schema_change = _apply_schema_overrides(config, cluster_capacity)
-    if schema_change:
-        changes.append(schema_change)
 
     scratch_change = _apply_scratch_autoenable(config)
     if scratch_change:
@@ -450,7 +432,7 @@ def resolve_auto_sizing(
     # continuous-mode streaming budget) always has the last word.
     _apply_datagen_pod_floor(config, changes)
     if cluster_capacity is not None:
-        _apply_cluster_scaling(config, cluster_capacity, effective_mode, guidance, changes)
+        _apply_cluster_scaling(config, cluster_capacity, changes)
 
     if is_continuous(config):
         from lakebench.config.sizing import derive_silver_max_rows_per_trigger
@@ -492,7 +474,7 @@ def resolve_auto_sizing(
 
     if changes:
         log.info(
-            "Auto-sized for scale=%d (tier=%s, mode=%s): %s",
+            "Auto-sized for scale=%g (tier=%s, mode=%s): %s",
             scale,
             guidance.spark.tier_name,
             effective_mode,
@@ -527,8 +509,7 @@ def resolve_auto_sizing(
 # 2-core run on the clustered layout shows it can go.
 DELTA_THRIFT_CORES = 8
 DELTA_THRIFT_MEMORY_GI = 16
-# Headroom kept below the largest node for kubelet and co-scheduled pods,
-# matching the financial thrift cap below.
+# Headroom kept below the largest node for kubelet and co-scheduled pods.
 _THRIFT_NODE_MARGIN_GI = 8.0
 _THRIFT_NODE_MARGIN_CORES = 2
 
@@ -556,11 +537,10 @@ def _apply_delta_thrift_default(
     cores = DELTA_THRIFT_CORES
     memory_gi = DELTA_THRIFT_MEMORY_GI
     if cluster_capacity is not None:
-        node_gi = _largest_node_memory_gi(cluster_capacity)
-        if node_gi is not None:
-            memory_gi = int(max(4.0, min(memory_gi, node_gi - _THRIFT_NODE_MARGIN_GI)))
-        node_cpu_m = getattr(cluster_capacity, "largest_node_cpu_millicores", None)
-        if isinstance(node_cpu_m, int) and node_cpu_m > 0:
+        node_gi = cluster_capacity.largest_node_memory_bytes / (1024**3)
+        memory_gi = int(max(4.0, min(memory_gi, node_gi - _THRIFT_NODE_MARGIN_GI)))
+        node_cpu_m = cluster_capacity.largest_node_cpu_millicores
+        if node_cpu_m > 0:
             cores = max(2, min(cores, node_cpu_m // 1000 - _THRIFT_NODE_MARGIN_CORES))
 
     thrift = arch.query_engine.spark_thrift
@@ -638,90 +618,6 @@ def _apply_scratch_autoenable(config: LakebenchConfig) -> str | None:
     )
 
 
-def _apply_schema_overrides(
-    config: LakebenchConfig,
-    cluster_capacity: ClusterCapacity | None = None,
-) -> str | None:
-    """Apply per-workload-schema default overrides.
-
-    Baseline (Customer360) leaves everything at scale-tier guidance.
-    Financial (FinServ-Crime, AML) lifts the Spark Thrift default from 4g
-    toward 16g -- the first live S1 run OOM'd every AML benchmark query at
-    4g because the silver aggregation and rule-target joins are heavier
-    than C360's silver.
-    Only fields the user did not explicitly set are touched.
-
-    Cluster-cap on the thrift bump: on a small cluster whose largest
-    node cannot fit 24g + Spark overhead (~2.4g) + a safety margin for
-    kubelet / co-scheduled pods, requesting 24g causes the thrift pod
-    to sit Pending forever or drives the node into memory pressure.
-    ``largest_node_memory_bytes`` is *allocatable* (post-reservation);
-    Spark still needs its own overhead on top and the node still needs
-    room to run other pods. Rule of thumb: leave ~8 GiB headroom below
-    allocatable. When ``cluster_capacity`` is available and the largest
-    allocatable node has less than 36 GiB, fall back to
-    ``min(20g, largest_node_gi - 8g)`` (with a floor of 4g so we never
-    silently regress below the original 4g default). When capacity is
-    not available (offline autosizing), stay at 24g -- users on a small
-    cluster can override explicitly.
-    """
-    from lakebench.config.schema import WorkloadSchema
-
-    schema = config.architecture.workload.schema_type
-    if schema != WorkloadSchema.FINANCIAL:
-        return None
-
-    changes: list[str] = []
-    if config.architecture.query_engine.type.value == "spark-thrift":
-        thrift = config.architecture.query_engine.spark_thrift
-        # 16g was on the edge for AML analytical queries -- three
-        # S1 iters saw QpH 6.6 / 0.0 / 8.2 with the 0.0 being a thrift-pod
-        # OOM mid-benchmark on aggregate_typology_coverage.sql. 24g clears
-        # it with headroom. Cluster-cap threshold is 36 GiB *allocatable*:
-        # 24g heap + ~2.4g Spark overhead + ~8 GiB safety margin for the
-        # driver, kubelet and any co-scheduled pod. Below the threshold,
-        # target = min(20g, allocatable - 8g) with a 4g floor.
-        target_memory = "24g"
-        if cluster_capacity is not None:
-            largest_node_gi = _largest_node_memory_gi(cluster_capacity)
-            if largest_node_gi is not None and largest_node_gi < 36.0:
-                fitted = max(4.0, min(20.0, largest_node_gi - 8.0))
-                target_memory = f"{int(fitted)}g"
-        if _set_if_default(thrift, "memory", target_memory):
-            changes.append(f"query_engine.spark_thrift.memory={target_memory}")
-    elif config.architecture.query_engine.type.value == "duckdb":
-        duck = config.architecture.query_engine.duckdb
-        # 4g OOMKilled the DuckDB pod (exit 137) in an AML continuous
-        # benchmark round at scale 1 (polaris-iceberg-spark-duckdb,
-        # 2026-10-07): the AML query set joins gold.alerts to the silver
-        # tables. 16g, capped on a small node as for Thrift (8 GiB headroom).
-        target_memory = "16g"
-        if cluster_capacity is not None:
-            largest_node_gi = _largest_node_memory_gi(cluster_capacity)
-            if largest_node_gi is not None and largest_node_gi < 24.0:
-                target_memory = f"{int(max(4.0, largest_node_gi - 8.0))}g"
-        if _set_if_default(duck, "memory", target_memory):
-            changes.append(f"query_engine.duckdb.memory={target_memory}")
-
-    if not changes:
-        return None
-    return ", ".join(changes) + " (schema=financial)"
-
-
-def _largest_node_memory_gi(cluster_capacity: ClusterCapacity) -> float | None:
-    """Largest allocatable node memory in GiB, or None if the field
-    is missing / unreadable. Best-effort guard for the 16g thrift bump
-    on tiny clusters -- a miss falls through to 16g rather than to a
-    fabricated cap."""
-    val = getattr(cluster_capacity, "largest_node_memory_bytes", None)
-    if val is None:
-        return None
-    try:
-        return float(val) / (1024**3)
-    except (TypeError, ValueError):
-        return None
-
-
 def _round_down_even(n: int) -> int:
     """Round *n* down to the nearest even number (minimum 2)."""
     return max(2, n - (n % 2))
@@ -730,6 +626,8 @@ def _round_down_even(n: int) -> int:
 # The lb-deps pod's reservation: the scheduler keeps the resolve
 # init container's request for the pod's whole life.
 _LB_DEPS_CPU_M = _deps_manifest.POD_REQUEST_CPU_M
+# Always-on infrastructure: Hive Metastore and Postgres (about 1 CPU) plus lb-deps.
+_INFRA_CPU_M = 1000 + _LB_DEPS_CPU_M
 
 
 def _co_resident_label(config: LakebenchConfig) -> str:
@@ -764,8 +662,7 @@ def _co_resident_cpu_m(config: LakebenchConfig) -> int:
     (the resolve init container's request stays reserved).
     """
     engine_type = config.architecture.query_engine.type.value
-    # Hive + Postgres are small but add up (~1 CPU total)
-    infra_m = 1000 + _LB_DEPS_CPU_M
+    infra_m = _INFRA_CPU_M
 
     if engine_type == "trino":
         coord = config.architecture.query_engine.trino.coordinator
@@ -789,8 +686,6 @@ def _co_resident_cpu_m(config: LakebenchConfig) -> int:
 def _apply_cluster_scaling(
     config: LakebenchConfig,
     cap: ClusterCapacity,
-    effective_mode: str,
-    guidance: object,
     changes: list[str],
 ) -> None:
     """Fit workload to the cluster, scaling up large workloads.
@@ -828,9 +723,7 @@ def _apply_cluster_scaling(
         # Trino is always running.  Subtract coordinator + infra overhead
         # from the cluster, then compute how many workers fit.
         coord = config.architecture.query_engine.trino.coordinator
-        coord_and_infra_m = (
-            _parse_cpu_millicores(coord.cpu) + 1000 + _LB_DEPS_CPU_M
-        )  # coordinator + Hive/Postgres + lb-deps
+        coord_and_infra_m = _parse_cpu_millicores(coord.cpu) + _INFRA_CPU_M
         trino_worker_budget_m = max(0, cap.total_cpu_millicores - coord_and_infra_m)
         worker_cpu_m = _parse_cpu_millicores(worker.cpu)
         cluster_max_workers = max(1, trino_worker_budget_m // worker_cpu_m)
