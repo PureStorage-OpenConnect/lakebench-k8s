@@ -1,23 +1,15 @@
-"""Per-domain scorecard extension points for the report generator.
+"""Per-schema scorecard blocks for the report generator.
 
-ENG-2C.5. A ScorecardBlock owns the domain-specific parts of an HTML
-scorecard: the display label that appears in the run-context banner
-plus (in later revisions) any workload-specific detail rows. The block
-for the run's workload schema is looked up via
-:func:`get_scorecard_block`, which the report generator calls once per
-render.
-
-Only ``domain_label`` is consumed today (the ENG-2C.5 rescope found the
-generator already domain-neutral apart from one header). The ``render_detail_html``
-hook exists so Financial can slot in Investigator-panel rows and
-Customer 360 can move its existing panels off the hardcoded generator
-path without another interface change.
+A scorecard block carries a workload's ``domain_label`` for the run-context
+banner and its ``render_detail_html`` for the workload-specific detail rows
+below the shared stage table. :func:`get_scorecard_block` returns the block
+for a run's workload schema, which the generator renders once per report.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from lakebench.metrics import PipelineMetrics
@@ -25,25 +17,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-@runtime_checkable
 class ScorecardBlock(Protocol):
-    """Per-schema scorecard extension point.
-
-    Implementations declare a stable ``schema_name`` slug (matching
-    :class:`~lakebench.config.schema.WorkloadSchema` values) so the
-    registry can be looked up by string, e.g. from a metrics.json
-    ``config_snapshot`` field written by an older run.
-    """
+    """Per-schema scorecard block: a ``schema_name`` slug (a
+    :class:`~lakebench.config.schema.WorkloadSchema` value), a
+    ``domain_label`` and ``render_detail_html``."""
 
     schema_name: str
     domain_label: str
 
     def render_detail_html(self, metrics: PipelineMetrics) -> str:
-        """Return workload-specific detail HTML for the scorecard.
-
-        Empty string means "no extra rows"; the generator inserts it
-        verbatim after the shared stage table.
-        """
+        """The workload-specific detail HTML, inserted after the shared
+        stage table; "" for no extra rows."""
         ...
 
 
@@ -190,8 +174,7 @@ class Customer360ScorecardBlock:
                 + "</tbody></table>"
             )
         known = {k for _n, kinds in self.FAMILIES for k in kinds}
-        groups = [(name, kinds) for name, kinds in self.FAMILIES]
-        for name, kinds in groups + [("other", ())]:
+        for name, kinds in [*self.FAMILIES, ("other", ())]:
             group = [
                 c
                 for c in checks
@@ -551,6 +534,8 @@ class FinancialScorecardBlock:
             if continuous_alerts
             else '<th title="Alerts emitted by this rule">Alerts</th>'
         )
+        from lakebench.reports.front_matter import registered_look_role
+
         look_role = registered_look_role(getattr(metrics, "run_id", None))
         sc: dict = scoring if isinstance(scoring, dict) else {}
         covered_mode = sc.get("mode") == "covered"
@@ -635,7 +620,7 @@ def _rule_caps(metrics, rules_skipped: dict | None = None) -> list[tuple[str, st
     return sorted(found.items())
 
 
-def _tm_cap_line(metrics, ops: dict) -> list[str]:
+def _tm_cap_line(ops: dict) -> list[str]:
     """The TM per-customer cap as a bound line, when it held alerts back."""
     over = ops.get("alerts_over_capacity")
     if not isinstance(over, (int, float)) or isinstance(over, bool) or over <= 0:
@@ -848,7 +833,7 @@ def _funnel_html(metrics, scoring, gold_jobs: list, rules_skipped: dict) -> str:
         rows.append((f"disposition: {escape(str(k))}", num(disp[k]), p("alerts_by_disposition", k)))
     # The per-customer cap held alerts back from the analysts: everything
     # worked after it is bounded by it.
-    tm_cap = _tm_cap_line(metrics, ops_d)
+    tm_cap = _tm_cap_line(ops_d)
     if "escalated" in funnel:
         rows.append(
             ("escalated", bounded(funnel.get("escalated"), tm_cap), p("funnel", "escalated"))
@@ -926,14 +911,6 @@ def _funnel_html(metrics, scoring, gold_jobs: list, rules_skipped: dict) -> str:
         + (f"<h4>Reconciliation</h4><ul>{recon}</ul>" if recon else "")
         + "</section>"
     )
-
-
-def registered_look_role(run_id: str | None) -> str | None:
-    """The role of the completed registered look whose run_ids names this
-    run (reports/front_matter.py reads the look record)."""
-    from lakebench.reports.front_matter import registered_look_role as _role
-
-    return _role(run_id)
 
 
 def _subject_check_html(scoring) -> str:
@@ -1075,21 +1052,22 @@ def _safe_tm_section(metrics, gold_jobs: list) -> str:
 
 
 def _render_tm_operations(
-    gold_jobs: list, verdict: dict | None = None, *, job_paths: list[str] | None = None
+    gold_jobs: list, tm_record: dict | None = None, *, job_paths: list[str] | None = None
 ) -> str:
-    """TM operations pack (GOALS P10.3, core sections) from the last
-    gold-finalize job's ``tm_ops`` summary, plus every cycle's invariants.
+    """TM operations pack from the last gold-finalize job's ``tm_ops``
+    summary, plus every cycle's invariants, as held in *tm_record*
+    (``metrics.tm_operations``).
 
-    Operations vocabulary (P10.4): "productive rate" (escalated or SAR), not
+    Operations vocabulary: "productive rate" (escalated or SAR), not
     precision. Every number here is conditional on the simulated analyst,
     which the section states with the accuracies used.
     """
     from html import escape
 
-    verdict = verdict if isinstance(verdict, dict) else {}
-    ops = verdict.get("ops") if isinstance(verdict.get("ops"), dict) else None
+    tm_record = tm_record if isinstance(tm_record, dict) else {}
+    ops = tm_record.get("ops") if isinstance(tm_record.get("ops"), dict) else None
     ops_path: str | None = "tm_operations.ops" if ops else None
-    cycles: list[tuple[str, str, dict, str | None]] = []
+    cycles: list[tuple[str, dict, str | None]] = []
     if not ops:
         paths = job_paths or []
         for k in range(len(gold_jobs or []) - 1, -1, -1):
@@ -1098,30 +1076,30 @@ def _render_tm_operations(
                 ops = j.tm_ops
                 ops_path = f"{paths[k]}.tm_ops" if k < len(paths) else None
                 break
-    if verdict.get("invariants"):
+    if tm_record.get("invariants"):
         # Run-level record: batch (merged over cycles) or continuous (one
         # entry per operations pass).
-        for c, inv in sorted(verdict["invariants"].items(), key=lambda kv: int(kv[0])):
-            cycles.append(("", str(c), inv, _p("tm_operations", "invariants", str(c))))
+        for c, inv in sorted(tm_record["invariants"].items(), key=lambda kv: int(kv[0])):
+            cycles.append((str(c), inv, _p("tm_operations", "invariants", str(c))))
     else:
         paths = job_paths or []
         for idx, j in enumerate(gold_jobs or [], start=1):
             base = f"{paths[idx - 1]}.tm_invariants" if idx - 1 < len(paths) else None
             for c, inv in sorted((getattr(j, "tm_invariants", None) or {}).items()):
-                cycles.append((str(idx), c, inv, _p(base, str(c))))
-    if not ops and not cycles and not verdict:
+                cycles.append((c, inv, _p(base, str(c))))
+    if not ops and not cycles and not tm_record:
         return ""
     ops = ops or {}
     parts = ["<section><h3>Transaction Monitoring Operations</h3>"]
-    if verdict.get("status"):
-        mode = verdict.get("mode") or ""
+    if tm_record.get("status"):
+        mode = tm_record.get("mode") or ""
         unit = "operations pass" if mode == "continuous" else "cycle"
-        colour = {"pass": "success", "fail": "danger"}.get(verdict["status"], "warning")
+        colour = {"pass": "success", "fail": "danger"}.get(tm_record["status"], "warning")
         parts.append(
             f"<p>P10 gate ({escape(mode)}, per {unit}): "
             f'<strong style="color: var(--{colour});">'
-            f"{escape(str(verdict['status']).replace('_', ' '))}</strong>"
-            + (f" -- {escape(str(verdict.get('reason')))}" if verdict.get("reason") else "")
+            f"{escape(str(tm_record['status']).replace('_', ' '))}</strong>"
+            + (f" -- {escape(str(tm_record.get('reason')))}" if tm_record.get("reason") else "")
             + "</p>"
         )
     sim = ops.get("simulation") or {}
@@ -1139,7 +1117,7 @@ def _render_tm_operations(
     inv_rows = []
     from lakebench.reports import derived as dv
 
-    for _job, c, inv, inv_path in cycles:
+    for c, inv, inv_path in cycles:
         bad = {n: r for n, r in inv.items() if r.get("status") != "pass"}
         if bad:
             for n, r in sorted(bad.items()):
@@ -1259,11 +1237,6 @@ _REGISTRY: dict[str, ScorecardBlock] = {
     Customer360ScorecardBlock.schema_name: Customer360ScorecardBlock(),
     FinancialScorecardBlock.schema_name: FinancialScorecardBlock(),
 }
-
-
-def register_scorecard_block(block: ScorecardBlock) -> None:
-    """Register a ScorecardBlock, overwriting any existing entry for its schema."""
-    _REGISTRY[block.schema_name] = block
 
 
 def get_scorecard_block(schema_name: str | None) -> ScorecardBlock:
