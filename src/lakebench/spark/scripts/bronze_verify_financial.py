@@ -3,9 +3,9 @@
 Companion to ``bronze_verify.py``. Instead of the Customer 360 schema
 this script asserts the flat pacs.008 fields the Financial silver_build
 depends on: msg_id, uetr, txn_id, party chain, settlement date/amount.
-It reads the datagen Parquet under ``LB_BRONZE_URI`` and can optionally
-register (create-if-not-exists) the Iceberg table under
-``LB_FINANCIAL_BRONZE_TABLE`` when ``LB_REGISTER_TABLE=1``.
+It reads the datagen Parquet under ``LB_BRONZE_URI`` and, when
+``LB_REGISTER_TABLE=1``, drops and re-registers the Iceberg table under
+``LB_FINANCIAL_BRONZE_TABLE``.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ from common import (
     ICEBERG_METADATA_PROPS_SQL,
     METADATA_DELETE_AFTER_COMMIT,
     METADATA_PREVIOUS_VERSIONS_MAX,
+    _describe_table,
+    _hadoop_fs,
     _norm_uri,
     ensure_namespaces,
     env,
@@ -31,20 +33,16 @@ from common import (
 # does), so this module can be imported for unit tests without pyspark present.
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
-# datagen_rs is the only shipping datagen after the Python generator was
-# removed. It writes into a nested layout under the ROOT prefix it was
+# datagen_rs writes into a nested layout under the ROOT prefix it was
 # invoked with (--prefix, mirrored to LB_FINANCIAL_BRONZE_PREFIX by
 # lakebench/modules/pipeline_engines/spark/job.py from path_template):
 #     {root}/bronze/pacs008/part-*.parquet   (pacs.008 transactions)
 #     {root}/bronze/party.parquet            (reference table)
 #     {root}/bronze/account.parquet          (reference table)
 #     {root}/manifest/manifest*.parquet      (typology ground truth; one file per cycle)
-# Prior to PR-F this script assumed the flat datagen_py layout
-# where the ROOT prefix directly held the pacs.008 files, and Spark
-# listing the ROOT hit the three subdirs and failed with
-# UNABLE_TO_INFER_SCHEMA. PACS_PATH is derived from the root plus the
-# datagen_rs sub-path; LB_FINANCIAL_PACS_PATH lets an operator override
-# for a bespoke layout without leaking that concern into every reader.
+# Listing the root itself would hit the three subdirectories and fail to
+# infer a schema, so PACS_PREFIX names the pacs.008 sub-path;
+# LB_FINANCIAL_PACS_PATH overrides it for a bespoke layout.
 BRONZE_ROOT_PREFIX = env("LB_FINANCIAL_BRONZE_PREFIX", "pacs008/")
 PACS_PREFIX = env(
     "LB_FINANCIAL_PACS_PATH",
@@ -182,10 +180,8 @@ BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 # a loud warning (doubles S3 usage; caller can raise the thresholds or
 # bump the bronze-verify executor sizing to keep zero-copy).
 # Default 1.5 TiB / 800k files. Scale 100 pacs008/ is ~730 GB, well
-# under the cap so scale-100 keeps the zero-copy register path -- the
-# previous 500 GB default would have force-CTAS'd scale 100 and doubled
-# S3 usage silently at every UAT run. Heuristic, not a validated safe
-# cap: 4Gi bronze-verify has been proven OK at scale 100 (~700 GB /
+# under the cap, so scale 100 keeps the zero-copy register path.
+# Heuristic, not a validated safe cap: 4Gi bronze-verify has been proven OK at scale 100 (~700 GB /
 # ~200k files), and untested above that. Callers going past scale 200
 # should either raise `bronze-verify` executor memory OR set these
 # env vars lower to force CTAS and know they're doubling S3 by choice.
@@ -213,29 +209,19 @@ REQUIRED_FLAT_COLS = (
 def _table_location(spark, fq_table):
     """The table's storage location, or None if it does not exist."""
     try:
-        for row in spark.sql(f"DESCRIBE TABLE EXTENDED {fq_table}").collect():
-            if (row["col_name"] or "").strip() == "Location":
-                return (row["data_type"] or "").strip() or None
+        return _describe_table(spark, fq_table)[0]
     except Exception as e:  # noqa: BLE001
         log(f"Continuous reset: no location for {fq_table} ({e})")
     return None
 
 
-def _norm(uri):
-    return uri.replace("s3a://", "s3://").rstrip("/") + "/"
-
-
 def _delete_dir_if_disjoint(spark, location, raw_uri):
     """Recursively delete ``location`` unless it overlaps ``raw_uri``."""
-    loc, raw = _norm(location), _norm(raw_uri)
+    loc, raw = _norm_uri(location), _norm_uri(raw_uri)
     if raw.startswith(loc) or loc.startswith(raw):
         log(f"Continuous reset: kept {location} (overlaps the raw datagen path)")
         return
-    jvm = spark._jvm  # type: ignore[attr-defined]
-    hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
-    target = location.replace("s3://", "s3a://", 1)
-    fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(target), hconf)
-    path = jvm.org.apache.hadoop.fs.Path(target)
+    fs, path = _hadoop_fs(spark, location)
     if fs.exists(path):
         fs.delete(path, True)
         log(f"Continuous reset: deleted {location}")
@@ -395,10 +381,9 @@ def _drop_owned_table(spark, table):
     to keep PURGE off the raw corpus and off a shared namespace root. It does
     NOT prove the location is under a deployment-owned bucket root the way c360's
     common.owned_table_dir does, because this script does not know the catalog
-    warehouse root (Hive vs Polaris differ) and the tables are catalog-managed;
-    a bucket-root check keyed on the warehouse is tracked for when it can be
-    verified live. Not a live hazard today: with no LOCATION
-    and no add_files these tables cannot resolve to a foreign bucket.
+    warehouse root (Hive vs Polaris differ) and the tables are catalog-managed.
+    With no LOCATION and no add_files these tables cannot resolve to a
+    foreign bucket.
 
     Polaris refuses PURGE (403) unless DROP_WITH_PURGE_ENABLED is set, which the
     bootstrap does not do; there we fall back to a plain DROP and delete the
@@ -577,30 +562,22 @@ def main() -> None:
     partition_days = int(summary["days"])
     log(f"Partition days present: {partition_days}")
 
-    # C2 (silver-plan): compute the bronze-side data clock (newest settlement
-    # date) and write it to the ``lakebench-silver-state`` ConfigMap so
-    # job.py._build_env_vars can resolve LB_DATA_CLOCK for downstream silver
-    # jobs. ``intr_bk_sttlm_dt`` is the partition column and by definition
+    # The bronze-side data clock (newest settlement date), written to the
+    # ``lakebench-silver-state`` ConfigMap so job.py._build_env_vars can
+    # resolve LB_DATA_CLOCK for the silver jobs. ``intr_bk_sttlm_dt`` is the partition column and by definition
     # the newest event date, from the summary pass above.
     _ts_max = summary["newest"]
     write_bronze_data_clock(env("LAKEBENCH_NAMESPACE", ""), _ts_max)
 
     source_bytes = None
-    if CONTINUOUS_RESET:
-        _continuous_reset(spark, df)
-    elif REGISTER:
+    if REGISTER:
         # Register the Iceberg table over the datagen Parquet files. Two
         # implementations are attempted in order:
         #
         # 1. add_files (preferred, no data copy): create the Iceberg table
-        #    with the FULL parquet schema first (via spark.read.parquet
-        #    inferred schema), then attach existing files. The previous
-        #    revision created the target table with only 5 hard-coded
-        #    columns before add_files; add_files resolves by column NAME
-        #    against the target schema, so the other 30+ pacs.008
-        #    fields (dbtr.*, cdtr.*, xchg_rate, rgltry_rptg, etc)
-        #    silently dropped and silver_build immediately blew up on
-        #    the missing struct columns.
+        #    with the full inferred parquet schema first, then attach the
+        #    existing files. add_files resolves columns by name against the
+        #    target schema, so a column missing there would be dropped.
         #
         # 2. CTAS fallback: if add_files isn't supported by the catalog
         #    (e.g. Nessie REST prior to a certain version) OR the source
@@ -659,71 +636,59 @@ def main() -> None:
                 AS SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}`
             """)
             log(f"Registered via CTAS (preflight): {CATALOG}.{BRONZE_TABLE}")
-            elapsed = time.time() - start_time
-            log("=" * 60)
-            log(
-                f"Bronze verification complete in {elapsed:.1f}s: rows={row_count:,} "
-                f"cols={col_count} days={partition_days}"
-            )
-            log("=" * 60)
-            _log_bronze_metrics(spark, source_bytes, row_count, elapsed)
-            spark.stop()
-            return
-
-        try:
-            # Full inferred schema for the CREATE, so add_files finds
-            # every column of the parquet source under its real name.
-            spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{BRONZE_TABLE}")
-            src = spark.read.parquet(BRONZE_URI + PACS_PREFIX)
-            # Every register path (add_files, and both CTAS fallbacks below)
-            # produces the same unpartitioned layout, so benchmark numbers do
-            # not change with the path taken.
-            #
-            # OWNERSHIP HAZARD: add_files makes Iceberg treat the datagen files
-            # as its own. A DELETE / rewrite_data_files / compaction on this
-            # table followed by expire_snapshots, or DROP TABLE ... PURGE,
-            # physically deletes the raw datagen corpus. Keep bronze out of
-            # compaction; destroy is the only place allowed to do this.
-            #
-            # The target is UNPARTITIONED on purpose. add_files can only map
-            # source files onto identity partitions read from Hive-style
-            # directories; against a days(intr_bk_sttlm_dt) spec it fails
-            # with "Invalid partition transformation", and the old code then
-            # fell back to CTAS on every run, doubling bronze storage and
-            # spending most of bronze-verify rewriting it (measured scale 1:
-            # 8.4 GB source became 13.9 GB, 245 of 273 s). Datagen writes a
-            # flat, date-clustered file layout, so Iceberg's per-file min/max
-            # on intr_bk_sttlm_dt still prunes date filters at file level,
-            # and silver-build scans the whole table regardless.
-            _with_location(
-                src.limit(0)
-                .writeTo(f"{CATALOG}.{BRONZE_TABLE}")
-                .using("iceberg")
-                .tableProperty("format-version", "2")
-                .tableProperty("write.parquet.compression-codec", "snappy")
-                .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
-                .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
-            ).create()
-            spark.sql(
-                f"CALL {CATALOG}.system.add_files("
-                f"  table => '{BRONZE_TABLE}', "
-                f"  source_table => 'parquet.`{BRONZE_URI}{PACS_PREFIX}`'"
-                f")"
-            )
-            log(f"Registered Iceberg table by reference: {CATALOG}.{BRONZE_TABLE}")
-        except Exception as e:  # noqa: BLE001
-            log(
-                f"add_files failed ({e}); falling back to CTAS. "
-                "This doubles S3 usage; investigate catalog support for add_files."
-            )
-            spark.sql(f"""
-                CREATE OR REPLACE TABLE {CATALOG}.{BRONZE_TABLE}
-                USING iceberg
-                {_location_clause()}
-                TBLPROPERTIES ('format-version' = '2', {ICEBERG_METADATA_PROPS_SQL})
-                AS SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}`
-            """)
-            log(f"Registered via CTAS fallback: {CATALOG}.{BRONZE_TABLE}")
+        else:
+            try:
+                # Full inferred schema for the CREATE, so add_files finds
+                # every column of the parquet source under its real name.
+                spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{BRONZE_TABLE}")
+                # Every register path (add_files, and both CTAS fallbacks below)
+                # produces the same unpartitioned layout, so benchmark numbers do
+                # not change with the path taken.
+                #
+                # OWNERSHIP HAZARD: add_files makes Iceberg treat the datagen files
+                # as its own. A DELETE / rewrite_data_files / compaction on this
+                # table followed by expire_snapshots, or DROP TABLE ... PURGE,
+                # physically deletes the raw datagen corpus. Keep bronze out of
+                # compaction; destroy is the only place allowed to do this.
+                #
+                # The target is UNPARTITIONED on purpose. add_files can only map
+                # source files onto identity partitions read from Hive-style
+                # directories; against a days(intr_bk_sttlm_dt) spec it fails
+                # with "Invalid partition transformation", and a CTAS on every run
+                # would double bronze storage and spend most of bronze-verify
+                # rewriting it. Datagen writes a
+                # flat, date-clustered file layout, so Iceberg's per-file min/max
+                # on intr_bk_sttlm_dt still prunes date filters at file level,
+                # and silver-build scans the whole table regardless.
+                _with_location(
+                    df.limit(0)
+                    .writeTo(f"{CATALOG}.{BRONZE_TABLE}")
+                    .using("iceberg")
+                    .tableProperty("format-version", "2")
+                    .tableProperty("write.parquet.compression-codec", "snappy")
+                    .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+                    .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
+                ).create()
+                spark.sql(
+                    f"CALL {CATALOG}.system.add_files("
+                    f"  table => '{BRONZE_TABLE}', "
+                    f"  source_table => 'parquet.`{BRONZE_URI}{PACS_PREFIX}`'"
+                    f")"
+                )
+                log(f"Registered Iceberg table by reference: {CATALOG}.{BRONZE_TABLE}")
+            except Exception as e:  # noqa: BLE001
+                log(
+                    f"add_files failed ({e}); falling back to CTAS. "
+                    "This doubles S3 usage; investigate catalog support for add_files."
+                )
+                spark.sql(f"""
+                    CREATE OR REPLACE TABLE {CATALOG}.{BRONZE_TABLE}
+                    USING iceberg
+                    {_location_clause()}
+                    TBLPROPERTIES ('format-version' = '2', {ICEBERG_METADATA_PROPS_SQL})
+                    AS SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}`
+                """)
+                log(f"Registered via CTAS fallback: {CATALOG}.{BRONZE_TABLE}")
 
         # Manifest registration. One file, small; CTAS
         # unconditionally. Failure of the pacs.008 registration above

@@ -369,6 +369,19 @@ def _check(spark):
             raise AssertionError("second consecutive baseline failure did not raise")
         except RuntimeError as e:
             assert "consecutive" in str(e), e
+        # Also on a tick whose operations pass found nothing to monitor yet.
+        real_tm = (g.TM_PARAMS, g.tm_pass_due, g.run_tm_operations, g.tm_pass_not_ready)
+        g.TM_PARAMS = {**g.TM_PARAMS, "enabled": True}
+        g.tm_pass_due = lambda *_a, **_k: True
+        g.run_tm_operations = lambda *_a, **_k: []
+        g.tm_pass_not_ready = lambda _r: True
+        try:
+            g.run_tick(spark, state, 5)
+            raise AssertionError("a baseline failure on a not-ready tick did not raise")
+        except RuntimeError as e:
+            assert "consecutive" in str(e), e
+        finally:
+            g.TM_PARAMS, g.tm_pass_due, g.run_tm_operations, g.tm_pass_not_ready = real_tm
     finally:
         g.build_baseline_dashboards, g.MAX_CONSECUTIVE_FAILURES = real_baseline, real_max
 

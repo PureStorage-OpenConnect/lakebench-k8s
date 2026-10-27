@@ -11,11 +11,6 @@ The normalisation is deliberately deterministic in ``(originator/beneficiary
 name-hash, seed=0)`` so re-runs on the same bronze snapshot produce the same
 entity_id assignments -- important for W1 (connected components) and W5
 (Splink) reproducibility.
-
-Strategy note: v1 uses a single SIMPLE pass. The
-``spark.lb.silver.strategy`` conf is honoured for parity with Customer 360's
-silver_build; STREAMING / SALTED variants are future work when live UAT
-surfaces skew.
 """
 
 from __future__ import annotations
@@ -49,7 +44,6 @@ from pyspark.sql.functions import (
     col,
     concat_ws,
     create_map,
-    date_format,
     datediff,
     greatest,
     least,
@@ -97,7 +91,6 @@ SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver
 # silver_stream_financial counts a batch's new counterparties without
 # re-reading the whole history.
 SILVER_PAIRS = env("LB_FINANCIAL_SILVER_PAIRS", "silver.counterparty_pairs")
-STRATEGY = env("spark.lb.silver.strategy", "simple")
 
 # Reference zones the datagen writes next to pacs.008 (party = the reporting
 # FI's party master with KYC, account = account master). Same root the bronze
@@ -199,12 +192,11 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_TRANSACTIONS} (
 ) USING iceberg PARTITIONED BY (months(txn_timestamp))
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
-# `_batch_id` supports the silver_stream two-phase batchId idempotency
-# protocol. Batch-mode writes leave it NULL; streaming writes
-# tag each row with the Structured Streaming batchId so that on retry the
-# handler can DELETE WHERE _batch_id = X + reinsert without double-count.
-# Nullable so batch-mode `_replace_data(build_transactions(...))` works
-# unchanged.
+# `_batch_id` makes stream writes idempotent: each row carries its
+# Structured Streaming batchId, so a retried batch can DELETE WHERE
+# _batch_id = X and reinsert without double-counting. The batch build stamps
+# the cycle number instead (main). Nullable because build_transactions
+# projects it NULL before main stamps it.
 
 DDL_ENTITIES = f"""
 CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_ENTITIES} (
@@ -276,8 +268,8 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_STATEMENTS} (
 ) USING iceberg PARTITIONED BY (months(book_ts))
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
-# D-full-simple: _batch_id + _stream_id key silver_stream_financial's per-batch
-# statements MERGE. Batch mode writes NULL / 'batch' so streams never DELETE
+# _batch_id + _stream_id key silver_stream_financial's per-batch statements
+# write. Batch mode writes NULL / 'batch' so streams never DELETE
 # batch-written rows. Keep in lock-step with financial_ddl.SILVER_ACCOUNT_STATEMENTS_DDL.
 
 DDL_EDGES = f"""
@@ -294,7 +286,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_EDGES} (
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
-# C-PROFILES: per-entity behavioural baseline. Kept in lock-step with
+# Per-entity behavioural baseline. Kept in lock-step with
 # SILVER_ENTITY_PROFILES_DDL in deploy/financial_ddl.py.
 DDL_PROFILES = f"""
 CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_PROFILES} (
@@ -322,7 +314,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_PROFILES} (
 ) USING iceberg PARTITIONED BY (bucket(64, entity_id))
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
-# D-full-profiles (silver-plan): the streaming update maintains this table
+# The streaming update maintains this table
 # incrementally. Aggregate strategies per column:
 #   - Additive (txn_count_out/in, total_*_usd): MERGE ... SET t = t + delta.
 #   - LEAST/GREATEST (first/last_seen_ts, _first_out_ts, _last_out_ts):
@@ -344,7 +336,7 @@ TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 # preserve _batch_id across MERGE updates unless the SET clause writes it,
 # which the streaming update does). Batch silver_build writes NULL.
 
-# I10 sidecar: keep in lock-step with deploy/financial_ddl.py:SILVER_BATCH_VERSIONS_DDL.
+# Sealed-batch sidecar; keep in lock-step with financial_ddl.SILVER_BATCH_VERSIONS_DDL.
 # A single-row insert after every successful micro-batch (stream) or cycle
 # (batch) makes (stream_id, batch_id) the "sealed" key downstream consumers
 # semi-join against. Missing row => partial batch, must be hidden.
@@ -376,38 +368,26 @@ TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 def _entity_id_from(name_col, country_col, city_col=None, lei_col=None):
     """Deterministic BIGINT entity_id, LEI-first with name-hash fallback.
 
-    Bronze carries a role-independent LEI on both dbtr and
-    cdtr sides (``dbtr.id.lei``, ``cdtr.id.lei``); the Rust datagen
-    stamps ``lei_for(entity_id)`` for both roles, so the same real
-    entity appears with the same LEI on either side of a wire. Keying
-    entity_id on LEI collapses the bipartite split at its root: the
-    same real entity gets one silver entity_id regardless of whether
-    the row is a debit or credit.
+    Bronze carries a role-independent LEI on both sides (``dbtr.id.lei``,
+    ``cdtr.id.lei``); the datagen stamps ``lei_for(entity_id)`` for both
+    roles, so keying on the LEI gives one real entity one silver entity_id
+    whether the row is a debit or a credit.
 
-    Name-hash fallback preserves compatibility with historical bronze
-    or upstream sources that do not populate LEI. When ``lei_col`` is
-    None or the value is NULL / empty for a row, the fallback hashes
-    ``(upper(trim(name)), country, upper(trim(city)))`` -- Even so,
-    two real distinct entities with identical name+country+city will
-    still merge; for a real system, BIC/DOB would be additional keys.
-    Splink (W5) is the intended resolution layer for name-only rows.
+    The name-hash fallback covers sources that do not populate the LEI: when
+    ``lei_col`` is None or the value is NULL or empty, it hashes
+    ``(upper(trim(name)), country, upper(trim(city)))``. Two distinct
+    entities with the same name, country and city still merge; Splink (W5)
+    is the resolution layer for name-only rows.
 
-    Mixed-LEI risk (real-world only): if the same real entity appears
-    with LEI populated on some rows and NULL on others (a real-world
-    data-quality pattern that does NOT occur in the current Rust
-    datagen, which stamps LEI unconditionally at
-    ``datagen_rs/src/emit.rs:242-243``), silver produces two entity_ids
-    for that entity -- one LEI-hash, one name-hash. Not a defect of
-    this fix; a downstream Splink pass or an ingest-time LEI-backfill
-    handles it. Documented as a known constraint on non-synthetic
-    bronze rather than papered over here.
+    An entity with the LEI on some rows and not on others (a real-world
+    data-quality pattern the datagen never produces: it always stamps the
+    LEI) gets two entity_ids, one per hash; an ingest-time LEI backfill or
+    a Splink pass would resolve it.
 
-    Each fallback column is coalesced to "" BEFORE concat_ws because
-    concat_ws silently skips NULL columns rather than emitting a
-    delimiter -- so without the coalesce, a NULL city collides with a
-    missing city segment and NULL country collides with a missing
-    country segment, letting anonymous entities collapse across
-    otherwise-distinct rows.
+    Each fallback column is coalesced to "" before concat_ws, which skips
+    NULL columns rather than emitting a delimiter: without the coalesce a
+    NULL city collides with a missing city segment and a NULL country with
+    a missing country segment, collapsing otherwise-distinct rows.
     """
     if city_col is None:
         city_col = lit("")
@@ -428,6 +408,16 @@ def _entity_id_from(name_col, country_col, city_col=None, lei_col=None):
     ).otherwise(fallback)
 
 
+def _side_entity_id(side):
+    """``_entity_id_from`` over one pacs.008 party (``dbtr`` or ``cdtr``)."""
+    return _entity_id_from(
+        col(f"{side}.nm"),
+        col(f"{side}.ctry_of_res"),
+        col(f"{side}.pstl_adr.twn_nm"),
+        col(f"{side}.id.lei"),
+    )
+
+
 def build_transactions(bronze):
     """Flatten pacs.008 -> silver.transactions shape.
 
@@ -438,8 +428,8 @@ def build_transactions(bronze):
       used here. Fixed rates are fine for a benchmark; a bank would use a
       dated FX table.
     - `cross_border` is NULL when either party's country is NULL: the answer
-      is genuinely unknown and coalescing to False silently claimed "same
-      country" for missing-country corpora (I2). The DDL column is nullable.
+      is genuinely unknown, and False would claim "same country" for a
+      missing-country corpus. The DDL column is nullable.
     - `regulatory_reported` uses `size(rgltry_rptg) > 0`, not `isNotNull`,
       because an empty array is still a non-null value under pyspark
       semantics and would flip this to True for every row.
@@ -449,18 +439,8 @@ def build_transactions(bronze):
     return bronze.select(
         col("txn_id"),
         col("uetr"),
-        _entity_id_from(
-            col("dbtr.nm"),
-            col("dbtr.ctry_of_res"),
-            col("dbtr.pstl_adr.twn_nm"),
-            col("dbtr.id.lei"),
-        ).alias("originator_id"),
-        _entity_id_from(
-            col("cdtr.nm"),
-            col("cdtr.ctry_of_res"),
-            col("cdtr.pstl_adr.twn_nm"),
-            col("cdtr.id.lei"),
-        ).alias("beneficiary_id"),
+        _side_entity_id("dbtr").alias("originator_id"),
+        _side_entity_id("cdtr").alias("beneficiary_id"),
         col("dbtr_agt.bicfi").alias("originator_bank_bic"),
         col("cdtr_agt.bicfi").alias("beneficiary_bank_bic"),
         col("intr_bk_sttlm_amt").cast("decimal(18,2)").alias("txn_amount"),
@@ -481,12 +461,9 @@ def build_transactions(bronze):
                 None,
             )
         ).alias("correspondent_chain"),
-        # I2: preserve NULL when either party's country is unknown. Coalescing
-        # a NULL != NULL to False silently wrote "same country" for corpora
-        # where one side's country was missing, hiding the DQ signal for any
-        # reader that would want to `WHERE cross_border IS NULL`. Existing
-        # readers (`cross_border = TRUE` / `SUM(CASE WHEN cross_border ...)`)
-        # keep their behaviour: NULL is treated as False by those forms.
+        # NULL when either party's country is unknown, so a reader can find
+        # those rows (`WHERE cross_border IS NULL`); `cross_border = TRUE` and
+        # `SUM(CASE WHEN cross_border ...)` treat NULL as False.
         when(
             col("dbtr.ctry_of_res").isNull() | col("cdtr.ctry_of_res").isNull(),
             lit(None).cast("boolean"),
@@ -499,11 +476,11 @@ def build_transactions(bronze):
         col("cdtr.nm").alias("rptd_beneficiary_name"),
         col("cdtr.pstl_adr.strt_nm").alias("rptd_beneficiary_address"),
         col("msg_id").alias("source_message_ref"),
-        # _batch_id populated by silver_stream, NULL for batch mode.
-        # Present in every DataFrame that writes silver.transactions so the
+        # silver_stream stamps the micro-batch and main the cycle. Present in
+        # every frame that writes silver.transactions so the
         # DataFrameWriterV2.overwrite() column set matches the target schema.
         lit(None).cast("bigint").alias("_batch_id"),
-        # B2: _stream_id scopes _batch_id to one streaming query so a fresh
+        # _stream_id scopes _batch_id to one streaming query so a fresh
         # checkpoint's batch 0 does not collide with the previous stream's.
         # Batch-mode writes stamp the sentinel 'batch' so a batch overwrite
         # followed by a stream never DELETEs batch-mode rows (streams key on
@@ -524,19 +501,14 @@ def _party_account_long(bronze):
     This is the shared source ``_entity_countries`` and ``build_accounts`` can
     read instead of each scanning bronze (see ``silver_reuse_bronze_projection``
     / ``append_new_dimensions``). Every column is the exact expression those
-    two functions select today, so reading from this frame produces the same
+    two functions select, so reading from this frame produces the same
     rows as scanning bronze directly. No filter is applied here (the two
     consumers group or filter differently); the projection is theirs to use.
     """
 
     def _side(side):
         return bronze.select(
-            _entity_id_from(
-                col(f"{side}.nm"),
-                col(f"{side}.ctry_of_res"),
-                col(f"{side}.pstl_adr.twn_nm"),
-                col(f"{side}.id.lei"),
-            ).alias("entity_id"),
+            _side_entity_id(side).alias("entity_id"),
             col(f"{side}.ctry_of_res").alias("country"),
             col(f"{side}_acct.iban").alias("iban"),
             col(f"{side}_agt.bicfi").alias("bank_bic"),
@@ -562,21 +534,15 @@ def _entity_countries(bronze, with_iban=False, long=None):
 
     ``long`` is an optional pre-built :func:`_party_account_long` projection to
     group instead of scanning *bronze* again; ``None`` builds the per-side
-    projection here, as before. The grouped result is identical either way
-    (the columns are the same expressions).
+    projection here, over the party columns only (no account columns, which
+    a bronze without them would not resolve). The grouped result is
+    identical either way.
     """
-    from pyspark.sql.functions import min as _min
-
     if long is None:
         sides = []
         for side in ("dbtr", "cdtr"):
             cols = [
-                _entity_id_from(
-                    col(f"{side}.nm"),
-                    col(f"{side}.ctry_of_res"),
-                    col(f"{side}.pstl_adr.twn_nm"),
-                    col(f"{side}.id.lei"),
-                ).alias("entity_id"),
+                _side_entity_id(side).alias("entity_id"),
                 col(f"{side}.ctry_of_res").alias("country"),
             ]
             if with_iban:
@@ -586,9 +552,9 @@ def _entity_countries(bronze, with_iban=False, long=None):
     else:
         keep = ["entity_id", "country"] + (["iban"] if with_iban else [])
         src = long.select(*keep)
-    aggs = [_min("country").alias("country")]
+    aggs = [min_("country").alias("country")]
     if with_iban:
-        aggs.append(_min("iban").alias("iban"))
+        aggs.append(min_("iban").alias("iban"))
     # min() skips NULLs, so an entity with no country (or IBAN) on any row
     # gets NULL, the same as a missing row on the left join below.
     return src.groupBy("entity_id").agg(*aggs)
@@ -628,15 +594,13 @@ def build_kyc(party, account):
 def build_entities(txns_df, bronze=None, kyc=None, long=None):
     """Distinct entity dimension from originator+beneficiary sides.
 
-    Determinism note: `dropDuplicates(["entity_id"])` picks arbitrarily on
-    collision, which breaks the docstring's "same bronze -> same silver"
-    contract when two txns for the same entity_id have different reported
-    names (spelling drift, casing). Fix: group by entity_id and take the
-    lexically-smallest name / country deterministically.
+    Grouped by entity_id taking the lexically smallest name and country, so
+    the same bronze gives the same silver when an entity's reported name
+    varies (spelling drift, casing); dropDuplicates would pick arbitrarily.
 
     ``long`` is an optional pre-built :func:`_party_account_long` projection
     forwarded to :func:`_entity_countries` so the country/iban lookup reads it
-    instead of scanning *bronze* again; ``None`` scans bronze, as before.
+    instead of scanning *bronze* again; ``None`` scans bronze.
     """
     orig = txns_df.select(
         col("originator_id").alias("entity_id"),
@@ -646,18 +610,15 @@ def build_entities(txns_df, bronze=None, kyc=None, long=None):
         col("beneficiary_id").alias("entity_id"),
         col("rptd_beneficiary_name").alias("name"),
     )
-    from pyspark.sql.functions import min as _min
-
-    picked = orig.unionByName(bene).groupBy("entity_id").agg(_min("name").alias("_min_name"))
+    picked = orig.unionByName(bene).groupBy("entity_id").agg(min_("name").alias("_min_name"))
     # Coalesce to an explicit "UNKNOWN" so an entity whose reported name is
     # NULL for every occurrence (plausible when a party name field is
     # missing) doesn't violate silver.entities.name NOT NULL. Emitting
     # "UNKNOWN" here is loud in a downstream dashboard; a NULL would
     # crash the write with a delayed error.
     picked = picked.withColumn("name", coalesce(col("_min_name"), lit("UNKNOWN"))).drop("_min_name")
-    # Country was a NULL literal, so W7 (high-risk corridor), which inner-joins
-    # on a non-NULL beneficiary country, could never fire and reported
-    # "ran, 0 alerts" (2026-09-24 audit).
+    # The country comes from bronze: W7 (high-risk corridor) inner-joins on a
+    # non-NULL beneficiary country and cannot fire without it.
     use_kyc = kyc is not None and bronze is not None
     if bronze is not None:
         picked = picked.join(
@@ -675,11 +636,8 @@ def build_entities(txns_df, bronze=None, kyc=None, long=None):
         picked = picked.join(k, "iban", "left")
     return picked.select(
         col("entity_id"),
-        # E1: derived via the shared helper in common.py so the batch
-        # picker and the stream MERGE's UPDATE clause use one regex. See
-        # ``common._ENTITY_TYPE_COMPANY_SUFFIX_REGEX`` for the heuristic
-        # (upper-cased name ends with a corporate suffix -> Company,
-        # else Person) and its rationale.
+        # The shared helper, so the batch picker and the stream MERGE use
+        # one rule (``common._ENTITY_TYPE_COMPANY_SUFFIX_REGEX``).
         derive_entity_type(col("name")),
         col("name"),
         col("name").alias("legal_name"),
@@ -708,72 +666,35 @@ def build_entities(txns_df, bronze=None, kyc=None, long=None):
 def build_accounts(bronze, kyc=None, long=None):
     """Distinct IBAN -> holder_entity from the pacs.008 payload.
 
-    Fixes holder-assignment non-determinism and the follow-up cross-side blending
-    hazard (I3). An IBAN that appears both as a debtor account (with dbtr's
-    entity as holder) and as a creditor account (with cdtr's entity as holder)
-    previously had holder_entity_id chosen coin-flip by dropDuplicates, and
-    then per-column min mixed the debtor's holder_entity_id with the
-    creditor's bank_bic on the same iban. Now: a row_number over
+    An IBAN can appear as a debtor account (dbtr's entity as holder) and as a
+    creditor account (cdtr's entity as holder). A row_number over
     (holder_entity_id, bank_bic, opened_date) picks one deterministic winning
-    row per iban, so every field on the row belongs to the same observation.
-    This still doesn't tell us WHICH entity really holds the account --
-    pacs.008 does not carry that -- but at least the assignment is stable
-    and internally consistent.
+    row per iban, so the assignment is stable and every field on the row
+    comes from the same observation. pacs.008 does not say which entity
+    really holds the account.
 
     ``long`` is an optional pre-built :func:`_party_account_long` projection to
     read instead of scanning *bronze* again; ``None`` builds the per-side
-    projection here, as before. The frames are the same rows: the long form's
+    projection here. The frames are the same rows: the long form's
     ``entity_id`` is this function's ``holder_entity_id`` (same expression),
     and it carries the same iban/bic/currency/opened_date columns.
     """
-    if long is not None:
-        all_sides = long.select(
-            col("iban"),
-            col("entity_id").alias("holder_entity_id"),
-            col("bank_bic"),
-            col("currency"),
-            col("opened_date"),
-        )
-    dbtr = bronze.select(
-        col("dbtr_acct.iban").alias("iban"),
-        _entity_id_from(
-            col("dbtr.nm"),
-            col("dbtr.ctry_of_res"),
-            col("dbtr.pstl_adr.twn_nm"),
-            col("dbtr.id.lei"),
-        ).alias("holder_entity_id"),
-        col("dbtr_agt.bicfi").alias("bank_bic"),
-        col("dbtr_acct.ccy").alias("currency"),
-        to_date(col("cre_dt_tm")).alias("opened_date"),
+    sides = (long if long is not None else _party_account_long(bronze)).select(
+        col("iban"),
+        col("entity_id").alias("holder_entity_id"),
+        col("bank_bic"),
+        col("currency"),
+        col("opened_date"),
     )
-    cdtr = bronze.select(
-        col("cdtr_acct.iban").alias("iban"),
-        _entity_id_from(
-            col("cdtr.nm"),
-            col("cdtr.ctry_of_res"),
-            col("cdtr.pstl_adr.twn_nm"),
-            col("cdtr.id.lei"),
-        ).alias("holder_entity_id"),
-        col("cdtr_agt.bicfi").alias("bank_bic"),
-        col("cdtr_acct.ccy").alias("currency"),
-        to_date(col("cre_dt_tm")).alias("opened_date"),
-    )
-    # I3: pick one deterministic winning row per iban. The prior per-column
-    # min mixed field values across the debtor and creditor sides for the same
-    # iban (e.g. holder_entity_id from the debtor row, bank_bic from the
-    # creditor row), which produced a synthetic row no side actually observed.
-    # row_number over (holder_entity_id, bank_bic, opened_date) gives a
-    # single, reproducible winning row without cross-side blending.
-    # NULLS LAST on bank_bic and opened_date preserves the prior _min behaviour
-    # of preferring rows whose non-key fields are all populated: silver.accounts
-    # declares those columns NOT NULL, so a NULL row winning rn=1 would abort
-    # the write.
+    # One whole winning row per iban: a per-column min would mix the debtor
+    # and creditor sides into a row neither observed. NULLS LAST prefers rows
+    # whose fields are populated: silver.accounts declares bank_bic and
+    # opened_date NOT NULL, so a NULL row winning rn=1 would abort the write.
     _winner_window = Window.partitionBy("iban").orderBy(
         col("holder_entity_id").asc_nulls_last(),
         col("bank_bic").asc_nulls_last(),
         col("opened_date").asc_nulls_last(),
     )
-    sides = all_sides if long is not None else dbtr.unionByName(cdtr)
     all_accts = (
         sides.filter(col("iban").isNotNull())
         .withColumn("_rn", row_number().over(_winner_window))
@@ -816,7 +737,7 @@ def build_statements(bronze, accounts_df):
     on the debtor's account, one CRDT on the creditor's account), then compute
     a running balance per account with a window function.
 
-    This is the heaviest new Spark workload in the pipeline: it doubles the
+    This is the heaviest Spark workload in the pipeline: it doubles the
     transaction row count, joins to `accounts` on IBAN to recover account_id,
     and runs SUM/ROW_NUMBER OVER (PARTITION BY account_id ORDER BY book_ts)
     over ~5B rows at scale 100. That is the point -- the statements table
@@ -850,9 +771,8 @@ def build_statements(bronze, accounts_df):
     acc = accounts_df.select(
         col("account_id"),
         col("iban").alias("_ac_iban"),
-        # D-full-simple: shared with silver_stream_financial via
-        # common.aml_opening_balance so the two write paths cannot silently
-        # drift on the formula.
+        # Shared with silver_stream_financial (common.aml_opening_balance)
+        # so the two write paths cannot drift on the formula.
         aml_opening_balance(col("account_id")).alias("opening_balance"),
     )
     entries = entries.join(acc, entries["iban"] == acc["_ac_iban"], "inner").drop("_ac_iban")
@@ -895,7 +815,7 @@ def build_statements(bronze, accounts_df):
     )
 
     # Drop the internal ordering helper before writing to Iceberg.
-    # D-full-simple: batch mode writes _batch_id=NULL and _stream_id='batch'
+    # Batch mode writes _batch_id=NULL and _stream_id='batch'
     # so a stream that starts later never DELETEs these rows (streams key on
     # (_stream_id, _batch_id) where _stream_id is the streaming query id,
     # never the 'batch' sentinel).
@@ -935,15 +855,13 @@ def update_accounts_balance(accounts_df, statements_df):
     from pyspark.sql.functions import expr
 
     latest = statements_df.groupBy("account_id").agg(
-        # max_by returns the bal_after row that has the max entry_seq. Spark
-        # 3.5+ builtin; falls back to the struct-max trick otherwise.
+        # max_by returns the bal_after row that has the max entry_seq.
         expr("max_by(bal_after, entry_seq) as _cb")
     )
     return (
         accounts_df.drop("current_balance")
         .join(latest, on="account_id", how="left")
-        # coalesce with a decimal(38,2) NULL cast to preserve nullability of
-        # the target column; do NOT default to 0.
+        # An account with no statement keeps a NULL balance, never 0.
         .withColumn("current_balance", col("_cb").cast("decimal(38,2)"))
         .drop("_cb")
         # Back to the DDL column order (the drop/join moved current_balance).
@@ -973,11 +891,10 @@ def build_edges(txns_df):
             col("last_seen_ts"),
             col("cumulative_amount_usd"),
             col("txn_count"),
-            # NULL in batch mode; silver_stream overrides in its
-            # per-batch build_edges wrapper. Present so overwrite() writes
-            # match the target schema.
+            # main stamps the cycle and silver_stream the micro-batch.
+            # Present so overwrite() writes match the target schema.
             lit(None).cast("bigint").alias("_batch_id"),
-            # B2: batch-mode edges carry the same 'batch' sentinel as
+            # Batch-mode edges carry the same 'batch' sentinel as
             # transactions so a subsequent stream never DELETEs batch rows.
             lit("batch").alias("_stream_id"),
         )
@@ -985,9 +902,9 @@ def build_edges(txns_df):
 
 
 def build_entity_profiles(txns_df, data_clock):
-    """Per-entity behavioural baseline (C-PROFILES).
+    """Per-entity behavioural baseline.
 
-    ``data_clock`` (I1, silver-plan): the resolved data clock anchor
+    ``data_clock``: the resolved data clock anchor
     (``datetime.date``) that stamps ``profile_updated_ts``. Passing a
     fixed anchor rather than reading wall-clock inside the transform
     keeps rebuilds byte-identical for the same bronze -- a rebuild that
@@ -1014,11 +931,10 @@ def build_entity_profiles(txns_df, data_clock):
       not a pass-through.
     - amount stats are over the originator side (money the entity sends), which
       is what the velocity/structuring rules reason about.
-    - _batch_id is NULL in batch mode (mirrors the other silver tables); the
-      continuous MERGE path sets it.
+    - _batch_id is NULL in batch mode; the continuous MERGE path sets it.
 
-    D-full-profiles parity columns projected here so batch and stream write
-    the same schema:
+    Columns the stream's incremental update needs, projected here so batch
+    and stream write the same schema:
 
     - ``_m2 = variance * (txn_count_out - 1)`` on the originator-side
       amounts, coalesced to 0.0 when txn_count_out <= 1 (variance undefined
@@ -1103,14 +1019,11 @@ def build_entity_profiles(txns_df, data_clock):
         )
         .otherwise(lit(None).cast("double"))
         .alias("passthrough_ratio"),
-        # I1 (silver-plan): the anchor is the resolved data clock, not
-        # ``current_timestamp()``. A wall-clock stamp makes every rebuild
-        # of a fixed bronze write a different value into this per-entity
-        # column, so diffing rebuilds for regression detection is
-        # impossible. Cast the date to TIMESTAMP so the column type stays
-        # unchanged (the DDL declares it as TIMESTAMP).
+        # The resolved data clock, not ``current_timestamp()``: a wall-clock
+        # stamp would make every rebuild of a fixed bronze differ here. Cast
+        # to TIMESTAMP, the DDL type.
         lit(data_clock.isoformat()).cast("timestamp").alias("profile_updated_ts"),
-        # D-full-profiles parity columns.
+        # The stream's incremental-update columns.
         coalesce(col("_m2"), lit(0.0)).alias("_m2"),
         col("first_seen_ts").alias("_first_out_ts"),
         col("last_seen_ts").alias("_last_out_ts"),
@@ -1224,13 +1137,13 @@ def _replace_data(spark, df, table):
     Downstream Trino/Spark scans then degraded from partition pruning to
     full scans (per-run silent regression, invisible to unit tests).
 
-    G4: re-assert TBLPROPERTIES before the overwrite so a table whose
+    TBLPROPERTIES are re-asserted before the overwrite so a table whose
     properties drifted (in-place ALTER, older CREATE) writes with the
-    DDL's declared retention and codec every cycle (invariant 5). The
+    DDL's declared retention and codec every cycle. The
     property set matches ICEBERG_V2_SNAPPY_PROPS_SQL, which every silver
     DDL sets at CREATE.
 
-    Module-scope (not a main() closure) so the A1-atomic + F2 tests can
+    Module-scope (not a main() closure) so the pre-flight tests can
     monkeypatch the helper to observe when a write would have happened
     without needing a live Iceberg backend.
     """
@@ -1243,11 +1156,9 @@ def main() -> None:
     spark = SparkSession.builder.appName("lb-silver-build-financial").getOrCreate()
     start = time.time()
 
-    # H4 fat-finger guard: refuse to run while an AML stream is active on
-    # this deployment. silver_build_financial.main() overwrites every
-    # silver table via .overwrite(lit(True)); doing that while
-    # silver_stream_financial is writing wipes every streamed row (see the
-    # docstring at silver_stream_financial.py:46-53). The stream writes a
+    # Refuse to run while an AML stream is active on this deployment: main()
+    # overwrites every silver table, which would wipe every streamed row
+    # (see silver_stream_financial's module docstring). The stream writes a
     # ``_STARTED`` marker file at its checkpoint on start-up and removes
     # it on clean shutdown; the guard reads it here. LB_FORCE_REBUILD=1
     # bypasses the check for the deliberate rebuild path (job.py already
@@ -1267,27 +1178,12 @@ def main() -> None:
     # produce different partition layouts (reproducibility failure).
     spark.conf.set("spark.sql.session.timeZone", "UTC")
 
-    # Multi-cycle mode contract. The orchestrator sets
-    # LB_SILVER_INCREMENTAL=true for cycles 2+ of a multi-cycle batch run.
-    # Customer 360's silver_build honours that by APPENDING the cycle's
-    # bronze read. AML must NOT: its bronze is CUMULATIVE across cycles
-    # (the datagen writes every cycle to the same pacs008 prefix, and
-    # bronze_verify_financial DROPs and re-registers the whole prefix each
-    # cycle), so silver_build already reads the full corpus 1..N. Appending
-    # that full read every cycle would duplicate the entire prior corpus,
-    # and the derived-state tables (account_statements running balance,
-    # entity/account dimensions) cannot be correctly maintained by a naive
-    # append anyway. The correct and only-correct behaviour here is a full
-    # rebuild from cumulative bronze every cycle -- expensive but exact,
-    # and cycle-progression is measured as the rebuild cost growing with
-    # the corpus. Do NOT "optimise" this to an append without implementing
-    # slice-scoped reads + MERGE on the dimensions + running-balance
-    # carry-forward, and validating it on a live multi-cycle run.
+    # LB_SILVER_INCREMENTAL is set for cycles 2+ of a multi-cycle run. AML
+    # bronze is cumulative, so appending would double-count: rebuild in full.
     incremental_flag = env("LB_SILVER_INCREMENTAL", "false").lower() == "true"
 
     log("=" * 60)
     log("Silver Build (Financial)")
-    log(f"Strategy: {STRATEGY}")
     if incremental_flag:
         log(
             "Multi-cycle: LB_SILVER_INCREMENTAL=true -- AML does a FULL "
@@ -1327,21 +1223,20 @@ def main() -> None:
     # below (which carry them) would fail on a schema mismatch.
     for table in (SILVER_TRANSACTIONS, SILVER_EDGES):
         ensure_column(spark, f"{CATALOG}.{table}", "_batch_id", "BIGINT")
-        # B2: _stream_id scopes _batch_id per streaming query. Batch build
+        # _stream_id scopes _batch_id per streaming query. Batch build
         # writes 'batch'; streams write streaming_query_id. Old catalogs
         # predate the column, so add it before the first write below.
         ensure_column(spark, f"{CATALOG}.{table}", "_stream_id", "STRING")
-    # D-full-simple: silver.account_statements gains the same idempotency-key
-    # columns as transactions and edges; silver_stream_financial writes them
-    # every micro-batch, batch mode writes NULL/'batch' sentinel values.
+    # silver.account_statements has the same idempotency-key columns as
+    # transactions and edges; silver_stream_financial writes them every
+    # micro-batch, batch mode writes NULL/'batch' sentinel values.
     ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_stream_id", "STRING")
     ensure_column(spark, f"{CATALOG}.{SILVER_TRANSACTIONS}", "ingest_ts", "TIMESTAMP")
-    # 1.7.10: silver.accounts gained per-account balance state so the stream
-    # reads prior balances without re-aggregating all of account_statements.
-    # Batch writes NULL placeholders (build_accounts), but a catalog created
-    # before 1.7.10 predates the columns, so CREATE TABLE IF NOT EXISTS is a
-    # no-op and the accounts overwrite below would fail on a schema mismatch.
+    # silver.accounts holds per-account balance state so the stream reads
+    # prior balances without re-aggregating all of account_statements. Batch
+    # writes NULL placeholders (build_accounts); an older catalog predates the
+    # columns, and the accounts overwrite below would fail on the mismatch.
     ensure_column(spark, f"{CATALOG}.{SILVER_ACCOUNTS}", "last_entry_seq", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_ACCOUNTS}", "last_book_ts", "TIMESTAMP")
     ensure_partition_transform(
@@ -1361,21 +1256,17 @@ def main() -> None:
     bronze_rows = bronze.count()
     log(f"Read bronze: {CATALOG}.{BRONZE_TABLE} ({bronze_rows:,} rows)")
 
-    # I1 (silver-plan): resolve the data clock once for the run and pass it
-    # to build_entity_profiles so ``profile_updated_ts`` is deterministic
-    # across rebuilds of the same bronze. AML mains use strict=False (this
-    # module does not compute customer_recency_score, so a missing anchor
-    # is not a correctness hazard here; C2's env fallback still supplies
-    # one for silver jobs). A None fallback would leave ``data_clock`` as
-    # None and the .isoformat() call below would crash; use the bronze
-    # frame's max(txn_timestamp) day as the safety net.
+    # Resolve the data clock once for the run and pass it to
+    # build_entity_profiles so ``profile_updated_ts`` is deterministic across
+    # rebuilds of the same bronze. A missing anchor is not a correctness
+    # hazard here (this module computes no recency score), so it falls back
+    # to today rather than failing.
     from datetime import date as _date
 
     _resolved = resolve_data_clock(df_fallback=None)
     if _resolved is None:
-        # Datagen may not have written a timestamp end, bronze may be a
-        # legacy corpus without one -- fall back to today at 00:00 UTC so
-        # the timestamp cast succeeds.
+        # No anchor from datagen: fall back to today (UTC) so the timestamp
+        # cast succeeds.
         from datetime import datetime as _dt
         from datetime import timezone as _tz
 
@@ -1384,7 +1275,7 @@ def main() -> None:
     assert isinstance(_resolved, _date), _resolved
     data_clock = _resolved
 
-    # I10: stamp batch-mode rows with (_stream_id='batch', _batch_id=cycle) so
+    # Stamp batch-mode rows with (_stream_id='batch', _batch_id=cycle) so
     # the same versions-table semi-join that guards the stream's mid-batch
     # crash window also guards a batch run that crashes between the
     # transactions overwrite and the versions-row insert below. Downstream
@@ -1393,13 +1284,13 @@ def main() -> None:
     _cycle = int(os.environ.get("LB_BRONZE_CYCLE", "0"))
     _batch_stamp = lit(int(_cycle)).cast("bigint")
 
-    # ---- A1-atomic + F2: pre-flight validation pass. ---------------------
+    # ---- Pre-flight validation pass. --------------------------------------
     # Build EVERY bronze-derived silver frame first, run row-count assertions
     # on each, and only then start the writes. A frame that fails the >= 1
     # rows check raises ``SilverAbort`` here -- no ``_replace_data`` runs,
     # so a run that would produce empty silver.entities (or any other
     # bronze-derived table) refuses to write a partial silver set. Downstream
-    # readers filtered by the I10 sealed_txns semi-join therefore never see
+    # readers filtered by the sealed_txns semi-join therefore never see
     # a mid-set inconsistency: the sealed marker is only written after the
     # writes below all succeed.
     #
@@ -1435,7 +1326,7 @@ def main() -> None:
         f"accounts={_n_accounts_pre:,} edges={_n_edges:,} profiles={_n_profiles:,}"
     )
 
-    # ---- Writes in the original order (all frames validated above). ------
+    # ---- Writes (all frames validated above). -----------------------------
     _replace_data(spark, txns, SILVER_TRANSACTIONS)
     log("Wrote silver.transactions")
 
@@ -1494,7 +1385,7 @@ def main() -> None:
         )
         raise
 
-    # I3: enforce one row per iban post-write. build_accounts uses a
+    # Enforce one row per iban post-write. build_accounts uses a
     # row_number filter to pick a single winning row per iban; this
     # assertion catches any regression that reintroduces duplicates
     # (e.g. an overlooked dropDuplicates or a per-column min).
@@ -1507,23 +1398,22 @@ def main() -> None:
             f"{distinct_ibans} distinct iban values"
         )
 
-    # I10: mirror the batch-mode stamp on counterparty_edges so the same
+    # Edges carry the batch-mode stamp too so the same
     # semi-join guards edges as well as transactions. edges was staged and
     # row-counted in the pre-flight pass above.
     _replace_data(spark, edges, SILVER_EDGES)
     log("Wrote silver.counterparty_edges")
 
-    # C-PROFILES: per-entity behavioural baseline for relative-anomaly
-    # detection (W4/W8 over-firing). Full rebuild from the transaction frame.
-    # I1: ``data_clock`` fixes ``profile_updated_ts`` so rebuilds are
-    # byte-identical for the same bronze.
+    # Per-entity behavioural baseline for relative-anomaly detection (W4/W8).
+    # Full rebuild from the transaction frame; ``data_clock`` fixes
+    # ``profile_updated_ts`` so rebuilds are byte-identical for the same bronze.
     _replace_data(spark, profiles, SILVER_PROFILES)
     log("Wrote silver.entity_profiles")
 
-    # I10 sealed marker: after every silver table for this cycle is written,
+    # Sealed marker: after every silver table for this cycle is written,
     # seal the ('batch', cycle) row so downstream consumers' semi-join on
     # (_stream_id, _batch_id) sees the cycle. A crash before this row lands
-    # -- or an A1-atomic pre-flight abort above -- leaves the cycle's
+    # -- or a pre-flight abort above -- leaves the cycle's
     # transactions hidden from gold + score. _cycle was resolved once above
     # and stamped on every batch-written silver row.
     #
@@ -1551,18 +1441,14 @@ def main() -> None:
         except Exception:
             pass
 
-    # Guard against ruff unused-import warnings for symbols kept for clarity.
-    _ = (date_format,)
-
     elapsed = time.time() - start
     log("=" * 60)
     log(f"Silver build complete in {elapsed:.1f}s")
     log("=" * 60)
     _, bronze_gb = iceberg_table_stats(spark, f"{CATALOG}.{BRONZE_TABLE}")
-    # A2: per-table row counts so `metrics.json` records what silver-build
-    # actually wrote across the six tables, not just silver.transactions.
-    # An unmaintained continuous-mode table (D-safe) returns 0 here; the
-    # A1 gate reads silver_transactions_rows, not the sum.
+    # Per-table row counts so `metrics.json` records what silver-build wrote
+    # across the six tables. A table this run did not write returns 0; the
+    # progress gate reads silver_transactions_rows, not the sum.
     silver_rows, _ = iceberg_table_stats(spark, f"{CATALOG}.{SILVER_TRANSACTIONS}")
     per_table = {
         "silver_transactions_rows": silver_rows,
@@ -1572,7 +1458,7 @@ def main() -> None:
         "silver_edges_rows": iceberg_table_stats(spark, f"{CATALOG}.{SILVER_EDGES}")[0],
         "silver_profiles_rows": iceberg_table_stats(spark, f"{CATALOG}.{SILVER_PROFILES}")[0],
     }
-    # C2 (silver-plan): record which rung of the resolution ladder produced
+    # Record which rung of the resolution ladder produced
     # LB_DATA_CLOCK so metrics.json labels the run.
     _clock_source = env("LB_DATA_CLOCK_SOURCE", "unknown")
     log_job_metrics(
@@ -1584,7 +1470,7 @@ def main() -> None:
         data_clock_source=_clock_source,
         **per_table,
     )
-    # A1: progress gate; refuse exit-0 if the primary output table is empty.
+    # Progress gate: refuse exit-0 if the primary output table is empty.
     # Emitted after metrics so a failed run still leaves the block on stdout.
     assert_progress(silver_rows, "silver-build")
     spark.stop()

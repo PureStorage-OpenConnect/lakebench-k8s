@@ -144,6 +144,41 @@ def silver_ref(spark, tmp_path, monkeypatch):
     return build
 
 
+def test_leakage_bands_count_each_currency_band(spark, tmp_path, monkeypatch):
+    """One grouped job gives every currency's in-band baseline and typology
+    counts, inclusive at both edges, and zeros for a currency with none."""
+    import score_financial_reference as ref
+
+    rows = [
+        ("a", "USD", 9_500.0),  # lower edge, typology
+        ("b", "USD", 9_999.0),  # upper edge
+        ("c", "USD", 9_999.5),  # above the band
+        ("d", "EUR", 14_800.0),
+        ("e", "EUR", 9_600.0),  # USD's band, not EUR's
+        ("f", "KRW", 9_950_000.0),  # typology
+        ("g", None, 9_600.0),
+        ("h", "XXX", 9_600.0),
+    ]
+    spark.sql("CREATE DATABASE IF NOT EXISTS refbands")
+    spark.sql("DROP TABLE IF EXISTS refbands.transactions")
+    spark.createDataFrame(rows, "uetr string, txn_currency string, txn_amount double").write.option(
+        "path", str(tmp_path / "bands")
+    ).saveAsTable("refbands.transactions")
+    manifest = spark.createDataFrame(
+        [(["a", "f"],), (["a", "zz"],)], "participant_uetrs array<string>"
+    )
+    monkeypatch.setattr(ref, "CATALOG", "spark_catalog")
+    got = ref._compute_leakage_bands(spark, "refbands.transactions", manifest)
+    assert [r["currency"] for r in got] == list(ref._STRUCTURING_BANDS)
+    counts = {r["currency"]: (r["baseline_count"], r["typology_count"]) for r in got}
+    assert counts.pop("USD") == (1, 1)
+    assert counts.pop("EUR") == (1, 0)
+    assert counts.pop("KRW") == (0, 1)
+    assert set(counts.values()) == {(0, 0)}
+    usd = got[0]
+    assert (usd["band_lo"], usd["band_hi"]) == ref._STRUCTURING_BANDS["USD"]
+
+
 @pytest.mark.slow  # 430 to 450 s; the "AML statistics (slow)" CI job
 def test_fidelity_gate_over_silver(spark, tmp_path, silver_ref):
     from threadpoolctl import threadpool_limits

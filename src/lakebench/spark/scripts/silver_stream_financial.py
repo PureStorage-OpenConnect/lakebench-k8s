@@ -6,18 +6,14 @@ Structured-Streaming variant of silver_build_financial. For each micro-batch:
    to produce silver.transactions rows.
 3. Idempotently append per-batch txns AND per-batch counterparty edges,
    tagging every row with the Structured Streaming batchId.
-4. Cache the per-batch txns DataFrame so build_transactions + edges don't
-   recompute; the previous design paid ~2x per-batch by re-running the
-   flatten from bronze inside the edges MERGE.
+4. Cache the per-batch txns DataFrame so the edges build does not re-run
+   the flatten from bronze.
 
 Retry idempotency:
 Structured Streaming retries the entire `foreachBatch` handler on failure,
-re-running with the same batchId. The prior design did an `append()` to
-silver.transactions plus a MERGE into silver.counterparty_edges as two
-separate Iceberg commits; a failure between them replayed both, silently
-duplicating txn rows and double-counting cumulative_amount_usd.
-
-The two-phase batchId protocol used here removes that risk:
+re-running with the same batchId. The writes are separate Iceberg commits,
+so a plain append would duplicate the rows a failed attempt already
+committed. The two-phase batchId protocol prevents that:
   * Both target tables carry a nullable `_batch_id BIGINT` column
     (added to the CREATE TABLE in silver_build_financial and expected
     to be present in existing deployments; ALTER-add is idempotent).
@@ -29,8 +25,7 @@ The two-phase batchId protocol used here removes that risk:
     the batch's rows for that _batch_id, regardless of where the previous
     attempt failed.
 
-Cumulative aggregates (previously computed by the MERGE) are now derived
-on read via SUM(cumulative_amount_usd), SUM(txn_count) GROUP BY
+Cumulative edge aggregates are derived on read via SUM(cumulative_amount_usd), SUM(txn_count) GROUP BY
 source_entity_id, target_entity_id -- benchmark query FQ3 already reads
 this way, and detection rules do not consume counterparty_edges directly.
 
@@ -48,28 +43,25 @@ in batch mode overwrites silver.counterparty_edges (and silver.transactions)
 via `.writeTo(...).overwrite(lit(True))`. Running silver_build after
 silver_stream has been running WILL WIPE every streamed row. Batch and
 sustained modes are mutually exclusive per deployment; do not mix them
-against the same table. Batch-mode silver_build writes with _batch_id
-= NULL (one row per pair, unchanged from before), so a fresh batch
-deployment sees no change.
+against the same table. Batch-mode silver_build writes one row per pair,
+stamped with the cycle number.
 
 Dimensions (entities, accounts): continuous mode never runs the batch
 silver_build, so each micro-batch merges the entities and accounts it
 introduces into the silver dimensions, carrying country and the
 monitored-population / KYC columns from the party and account masters.
-The MERGE (E1) preserves the LEAST() of the target row and the batch row
+The MERGE keeps the LEAST() of the target row and the batch row
 on the dimension columns batch mode collapses with min() (entities:
 name, entity_type re-derived from the merged name, legal_name, country;
-accounts: holder_entity_id, bank_bic, currency, opened_date). This
-closes the pre-E1 first-batch-wins parity gap between stream and batch
-against identical bronze. The masters are read once, when they appear:
+accounts: holder_entity_id, bank_bic, currency, opened_date), so stream
+and batch agree on identical bronze whatever the arrival order. The masters are read once, when they appear:
 the datagen writes them before its first bronze file, and a batch that
 arrives first waits for them (LB_FINANCIAL_KYC_WAIT_S), so no entity is
 written with NULL KYC that a moment later would have had it; if they
 never appear, the stream fails unless the manifest proves a pre-KYC
 corpus. KYC columns are set at first insert and left alone on later
-batches (they are the same across a stream's lifetime); a KYC refresh
-that changes a value picks up on the NEXT run, matching pre-E1
-behaviour.
+batches (they are the same across a stream's lifetime); a KYC change to
+an existing row is picked up on the next run.
 """
 
 from __future__ import annotations
@@ -158,8 +150,8 @@ TRIGGER_S = int(env("LB_FINANCIAL_SILVER_TRIGGER_S", "0"))
 # streaming-max-rows-per-micro-batch); 0 lifts it.
 SILVER_MAX_ROWS = int(env("LB_FINANCIAL_SILVER_MAX_ROWS", "0"))
 # Iceberg write mode for the update-heavy silver tables (copy_on_write |
-# merge_on_read). Applied at bootstrap by apply_silver_write_mode; the DDL
-# default is copy-on-write, so an unset value leaves tables as created.
+# merge_on_read, the default). Applied at bootstrap by
+# apply_silver_write_mode.
 SILVER_WRITE_MODE = env("LB_FINANCIAL_SILVER_WRITE_MODE", "merge_on_read")
 # Off by default: when set, a micro-batch reads the party/account/country
 # columns the entity and account dimensions need from one shared bronze
@@ -170,16 +162,15 @@ SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
 SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
-# D-full-profiles: silver.entity_profiles is now maintained by the stream via
-# an Iceberg MERGE with Welford + additive updates (see _merge_profiles). The
+# silver.entity_profiles is maintained by the stream via an Iceberg MERGE with Welford + additive updates (see _merge_profiles). The
 # MERGE is self-idempotent on (t._stream_id, t._batch_id) so a retry after a
 # post-MERGE crash does not double-apply the additive deltas; the versions
-# sidecar is I10's (silver.silver_batch_versions), owned there and consumed
-# here for the sealed-txns filter in the distinct-counterparty recompute.
+# sidecar (silver.silver_batch_versions) is consumed here for the
+# sealed-txns filter in the distinct-counterparty recompute.
 SILVER_PROFILES = env("LB_FINANCIAL_SILVER_PROFILES", "silver.entity_profiles")
 SILVER_PAIRS = env("LB_FINANCIAL_SILVER_PAIRS", "silver.counterparty_pairs")
 KYC_WAIT_S = int(env("LB_FINANCIAL_KYC_WAIT_S", "900"))
-# I7: the KYC frame is reloaded on the first micro-batch after this many
+# The KYC frame is reloaded on the first micro-batch after this many
 # seconds have passed since the previous successful load. Default 1 hour;
 # 0 disables the refresh (the frame is loaded once per process).
 KYC_REFRESH_S = int(env("LB_STREAM_KYC_REFRESH_SECONDS", "3600"))
@@ -193,10 +184,10 @@ _KYC = None
 _KYC_LOADED = False
 _KYC_LOADED_AT = 0.0
 
-# E1 (dimension parity): temp view names the per-batch MERGE reuses.
+# Temp view names the per-batch dimension MERGE reuses.
 # foreachBatch runs sequentially per streaming query on the driver, so
 # fixed names are safe within a single query. Two concurrent stream
-# queries in the same JVM (not a supported deployment mode today) would
+# queries in the same JVM (not a supported deployment mode) would
 # need per-query naming.
 _ENTITIES_MERGE_VIEW = "_silver_stream_dim_merge_entities"
 _ACCOUNTS_MERGE_VIEW = "_silver_stream_dim_merge_accounts"
@@ -247,7 +238,7 @@ def _kyc(spark):
         return _KYC
     is_refresh = _KYC_LOADED
     if is_refresh:
-        # I7 refresh: read once, keep the current cache on any failure
+        # Refresh: read once, keep the current cache on any failure
         # so the micro-batch is not blocked on a transient reference-file
         # read. _KYC_LOADED_AT is left unchanged so the next batch retries.
         try:
@@ -290,21 +281,14 @@ def _kyc(spark):
     action = "reloaded" if is_refresh else "loaded"
     log(f"[kyc] masters {action if _KYC is not None else 'absent (pre-KYC corpus): KYC NULL'}")
     # Publish a per-refresh timestamp so operators see when the stream
-    # last picked up KYC updates. Emitted twice: (i) as a plain labelled
-    # `[lb] ... - kyc_refreshed_at: <unix>` line so a follow-on collector
-    # regex extension in parse_streaming_logs can lift the value into
-    # metrics.json without any wire-not-connected step; (ii) as a
-    # `=== JOB METRICS: silver-stream-kyc-refresh ===` block for symmetry
-    # with the plan's stated emit path and the extra_metrics allowlist in
-    # parse_driver_logs. silver_stream_financial does not emit any other
-    # JOB METRICS block today, so no shadowing risk on the current
-    # streaming path; a future author adding a final-metrics block must
-    # place it before the first refresh or key it under a distinct job
-    # name (parse_driver_logs' regex is first-match).
-    # One label per log() call so the collector's per-line regex does not
-    # swallow the second key into the first key's value. Reviewer-caught
-    # silent-drop shape (2026-09-28): `<k1>: <v1> <k2>: <v2>` matched only
-    # k1 because the value pattern was greedy; k2's rows were lost.
+    # last picked up KYC updates. Emitted twice: as a plain labelled
+    # `kyc_refreshed_at: <unix>` line for parse_streaming_logs, and as a
+    # `=== JOB METRICS: silver-stream-kyc-refresh ===` block for
+    # parse_driver_logs' extra_metrics allowlist. parse_driver_logs' regex is
+    # first-match per job name, so every JOB METRICS block this script emits
+    # has its own job name.
+    # One label per log() call: the collector's per-line value pattern is
+    # greedy, so `<k1>: <v1> <k2>: <v2>` on one line would lose k2.
     log(f"kyc_refreshed_at: {int(now)}")
     log(f"kyc_refresh_kind: {'refresh' if is_refresh else 'initial'}")
     log_job_metrics(
@@ -328,7 +312,7 @@ def _maintain_statements(
     sid: str,
     check_replay: bool,
 ) -> tuple[int, int]:
-    """D-full-simple: idempotently maintain silver.account_statements +
+    """Idempotently maintain silver.account_statements +
     roll up silver.accounts.current_balance for this micro-batch.
 
     Reads the batch's touched iban set from bronze, looks up each iban's
@@ -354,7 +338,7 @@ def _maintain_statements(
 
     Late arrivals are detected per batch (min this-batch book_ts per iban
     vs silver.account_statements' max prior book_ts per iban) and reported
-    as invariant-6 labels through the caller-returned tuple:
+    as parity labels through the caller-returned tuple:
     ``(entries_written, late_iban_count)``. The caller emits the labels
     per micro-batch. When ``LB_SILVER_STATEMENTS_STRICT_PARITY=1`` AND any
     late iban is seen, ``SilverAbort`` fires so a live gate that WANTS
@@ -413,19 +397,17 @@ def _maintain_statements(
         #    and prior max book_ts (used for the late-arrival label). Also
         #    compute this batch's min book_ts per iban for the same reason.
         touched = entries.select("account_id", "iban").distinct().cache()
+        out = None
         this_batch_min_ts = entries.groupBy("account_id").agg(
             min_(col("book_ts")).alias("_this_min_book_ts")
         )
         try:
             # Prior per-account state is read from silver.accounts (one row
-            # per account, bounded by account count), NOT by aggregating the
-            # whole silver.account_statements history (which grows ~170M rows
-            # per batch, so the old full-history groupBy made every batch's
-            # cost scale with the run length). The three columns
-            # current_balance / last_entry_seq / last_book_ts are maintained
-            # at the end of this function (step 5) every batch, so they are
-            # exactly the prior state the old aggregate recomputed. On the
-            # first batch after a restart the full-history aggregate is used
+            # per account), not by aggregating the whole
+            # silver.account_statements history, whose cost would grow with
+            # the run. current_balance / last_entry_seq / last_book_ts are
+            # maintained at the end of this function (step 5) every batch, so
+            # they equal that aggregate. On the first batch after a restart the full-history aggregate is used
             # instead (see the `check_replay` branch below): a crash could
             # have advanced silver.accounts past the sealed statements, so the
             # authoritative prior comes from the committed statements, not the
@@ -485,8 +467,8 @@ def _maintain_statements(
 
             # STRICT parity opt-in: refuse to publish an arrival-order
             # running_balance when the operator has asserted the pipeline
-            # was configured for strict-monotone bronze arrival. This is
-            # the invariant-2 gate: a batch/stream comparison is invalid
+            # was configured for strict-monotone bronze arrival: a
+            # batch/stream comparison is invalid
             # under multi-pod (non-monotone) datagen, so a run that means
             # to be compared MUST fail loud rather than emit divergent
             # numbers.
@@ -589,9 +571,8 @@ def _maintain_statements(
             # row_number over this batch), so this batch's max entry_seq always
             # exceeds the prior one, and max_by(..., entry_seq) over `out`
             # alone gives the correct latest balance. That matches batch mode's
-            # update_accounts_balance (max_by(bal_after, entry_seq)); the old
-            # step-5 ordered by book_ts DESC, which diverged under late
-            # arrivals. last_book_ts takes greatest(prior, this batch) so a
+            # update_accounts_balance (max_by(bal_after, entry_seq)), also
+            # under late arrivals. last_book_ts takes greatest(prior, this batch) so a
             # wholly-late batch cannot move it backwards and under-count the
             # next batch's late arrivals.
             batch_state = out.groupBy("account_id", "iban").agg(
@@ -599,9 +580,10 @@ def _maintain_statements(
                 expr("cast(max(entry_seq) as bigint) as _new_max_seq"),
                 expr("max(book_ts) as _new_max_book_ts"),
             )
-            safe_sid = _sanitize_for_view(sid)
             with materialised_source(
-                spark, batch_state, f"{_BALANCES_MERGE_VIEW}_{safe_sid}_{int(batch_id)}"
+                spark,
+                batch_state,
+                f"{_BALANCES_MERGE_VIEW}{_sanitize_view_suffix(sid)}_{int(batch_id)}",
             ) as src_view:
                 spark.sql(
                     f"""
@@ -619,26 +601,21 @@ WHEN MATCHED THEN UPDATE SET
 
             return int(n_entries), late_iban_count
         finally:
-            try:
-                out.unpersist(blocking=False)
-            except Exception:  # noqa: BLE001
-                pass
+            if out is not None:
+                try:
+                    out.unpersist(blocking=False)
+                except Exception:  # noqa: BLE001
+                    pass
             touched.unpersist(blocking=False)
     finally:
         entries.unpersist(blocking=False)
 
 
-def _sanitize_for_view(text: str) -> str:
-    """Streaming query ids include hyphens (UUID form); Spark temp view names
-    disallow them, so map to identifier-safe underscores. Idempotent."""
-    return "".join(c if c.isalnum() else "_" for c in text)
-
-
 def _sanitize_view_suffix(stream_id):
     """Turn a streaming query id (UUID with hyphens) into a temp-view suffix.
 
-    Non-blocker defense: two concurrent stream queries in the same JVM
-    (not a supported deployment mode today) share a session, so a fixed
+    Two concurrent stream queries in the same JVM (not a supported
+    deployment mode) would share a session, so a fixed
     temp-view name would collide across their MERGEs. Suffixing with a
     per-query id keeps them isolated. Non-alphanumerics collapse to
     underscore; the empty case (unit-test path with stream_id=None)
@@ -653,13 +630,12 @@ def _sanitize_view_suffix(stream_id):
 def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None, n_txns=0) -> tuple[int, int]:
     """Merge this batch's entities and accounts into the silver dimensions.
 
-    E1: replaces the previous first-seen-wins append with per-table MERGE
-    INTOs that end each batch with the same silver.entities and
+    Per-table MERGE INTOs end each batch with the same silver.entities and
     silver.accounts row shape a single-pass batch build would.
 
     ``silver.entities`` -- per-column LEAST is safe on the entity
     dimension columns because each column collapses independently under
-    batch's ``build_entities`` (``_min("name")`` on the reported name,
+    batch's ``build_entities`` (``min("name")`` on the reported name,
     then a left join to ``_entity_countries`` for country; there is no
     cross-column tiebreak). Semantics per column (matches batch's
     ``min()`` skip-NULL behaviour via ``coalesce(least(t, s), t, s)``):
@@ -678,13 +654,11 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None, n_txns=0) 
     - KYC and screening columns are set at first insert and left alone
       on later batches (they are the same across a stream's lifetime).
 
-    ``silver.accounts`` -- per-column LEAST WOULD MIX FIELDS across
-    debtor and creditor sides on the same iban: batch's ``build_accounts``
-    already fixed this exact class of hazard (I3 at
-    silver_build_financial.py:632-644 -- ``row_number() over (iban)
-    order by (holder_entity_id, bank_bic, opened_date) asc_nulls_last``,
-    filter rn=1) so the four dimension columns come from ONE OBSERVED
-    ROW. Reopening per-column LEAST here would synthesise a row that
+    ``silver.accounts`` -- per-column LEAST would mix fields across
+    debtor and creditor sides on the same iban. Batch's ``build_accounts``
+    takes ``row_number() over (iban) order by (holder_entity_id, bank_bic,
+    opened_date) asc_nulls_last``, rn=1, so the four dimension columns come
+    from one observed row. Per-column LEAST here would synthesise a row that
     appears on neither side (debtor's holder + creditor's bank_bic + a
     third row's opened_date). Instead the stream computes the same
     row_number winner across (target existing row + this batch's
@@ -702,16 +676,14 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None, n_txns=0) 
     silver.entities (source shape is DDL-shaped, INSERT * safe).
 
     Returns ``(entities_inserted, accounts_inserted)``, the count of
-    genuinely new rows (WHEN NOT MATCHED path). The A1 driver-side
+    genuinely new rows (WHEN NOT MATCHED path). The driver-side
     progress gate treats a batch that inserted zero new dimensions as
     non-progress on the dimensions themselves; ``_merge_batch``'s
     return value (silver.transactions row count) is the progress gate.
 
     Instrumentation: publishes ``dim_merge_elapsed_ms`` for entities and
-    accounts separately via ``log_job_metrics`` so the E1/E2 live gate
-    can measure whether the MERGE cost at scale 10 stays within one
-    trigger interval. If not, the block-E fallback (E2: label + defer,
-    v1.7) is triggered.
+    accounts separately via ``log_job_metrics``, so a run shows whether the
+    MERGE cost stays within one trigger interval.
 
     ``stream_id`` scopes the per-batch temp views used by the MERGE
     sources so two concurrent stream queries in the same JVM never
@@ -752,9 +724,8 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None, n_txns=0) 
         n_ents_total = ents.count()
         n_accts_total = accts.count()
         # Anti-join gives the count of rows that WILL insert (WHEN NOT
-        # MATCHED). We compute it before the MERGE so the return value
-        # matches the "new entities/accounts introduced" contract the
-        # previous append-based API published.
+        # MATCHED), computed before the MERGE so the return value is the
+        # number of new entities/accounts this batch introduced.
         have_e = spark.table(f"{CATALOG}.{SILVER_ENTITIES}").select(col("entity_id").alias("_have"))
         n_new_ents = (
             ents.join(have_e, ents["entity_id"] == have_e["_have"], "left_anti").count()
@@ -769,13 +740,12 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None, n_txns=0) 
             else 0
         )
 
-        # BLOCKER 3 fix: batch enforces ``legal_name = col("name")``. Use
-        # the SAME expression for both so the invariant survives the
+        # Batch enforces ``legal_name = col("name")``. Use the same expression for both so the invariant survives the
         # UPDATE. entity_type re-derivation reads the same expression.
         merged_name_sql = "coalesce(least(t.name, s.name), t.name, s.name)"
         entity_type_expr = entity_type_from_name_sql(merged_name_sql)
 
-        # Non-blocker: sid-scope the temp views so two concurrent stream
+        # Scope the temp views by stream id so two concurrent stream
         # queries in the same JVM cannot clobber each other's MERGE
         # source. Falls back to the fixed name when stream_id is None
         # (unit-test path).
@@ -819,12 +789,11 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None, n_txns=0) 
 
         acct_elapsed_ms = 0
         if n_accts_total:
-            # BLOCKER 1 fix: pick ONE coherent winning row per iban
+            # Pick one coherent winning row per iban
             # across (target existing row + this batch's candidates)
             # using the same row_number tiebreak as batch's
             # build_accounts. Per-column LEAST would mix the debtor's
-            # holder with the creditor's bank_bic on the same iban --
-            # exactly the I3 hazard build_accounts already fixed.
+            # holder with the creditor's bank_bic on the same iban.
             tiebreak_window = Window.partitionBy("iban").orderBy(
                 col("holder_entity_id").asc_nulls_last(),
                 col("bank_bic").asc_nulls_last(),
@@ -902,10 +871,10 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None, n_txns=0) 
 
             acct_elapsed_ms = int((time.time() - t0) * 1000)
 
-        # E1 instrumentation: per-batch merge cost, split entities vs
+        # Per-batch merge cost, split entities vs
         # accounts. Emitted through ``log_job_metrics`` so the collector's
-        # existing regex lifts the JOB METRICS block into metrics.json,
-        # and also as a plain labelled line for a follow-on parser.
+        # regex lifts the JOB METRICS block into metrics.json, and also as
+        # plain labelled lines.
         log(
             f"[dim-merge] entities: total={n_ents_total} inserted={n_new_ents} "
             f"updated={n_ents_total - n_new_ents} elapsed_ms={ent_elapsed_ms}"
@@ -969,16 +938,15 @@ def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int, check_replay: b
       Unsealed rows are hidden by common.sealed_txns_filter and the batch's
       own rows are left out, so a replay counts the same new pairs.
 
-    Self-idempotent MERGE (blocker fix): the WHEN MATCHED branch is
+    Self-idempotent MERGE: the WHEN MATCHED branch is
     guarded by ``(t._stream_id, t._batch_id) = (s.batch_stream_id,
     s.batch_batch_id)`` -- a re-apply on the same (sid, batch_id) is a
     no-op (UPDATE SET entity_id = entity_id). This keeps the MERGE
     self-contained: a driver crash between the profiles commit and
-    PHASE 5's sealed-marker commit does NOT double-apply the additive
-    deltas when the batch is retried on restart. The prior version
-    guarded only via a cross-table probe of silver_batch_versions,
-    which loses to the crash window between phase 4 (this MERGE) and
-    phase 5 (I10 marker); the self-idempotent branch closes that gap.
+    phase 6's sealed-marker commit does not double-apply the additive
+    deltas when the batch is retried on restart. A probe of
+    silver_batch_versions alone would miss that crash window between
+    phase 5 (this MERGE) and phase 6 (the sealed marker).
     """
     amt_d = col("txn_amount_usd").cast("double")
 
@@ -1248,21 +1216,21 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
 
     Caches the flattened txns so build_transactions and build_edges don't
     scan the bronze rows twice. Casts the per-batch aggregate to
-    decimal(38,2) matching the DDL (SUM of decimal columns widens; the
-    old (18,2) would silently NULL on overflow under ANSI-off).
+    decimal(38,2) matching the DDL (SUM of decimal columns widens; (18,2)
+    would silently NULL on overflow under ANSI-off).
 
     Returns ``(silver.transactions row count, late_iban_count)`` for this
-    batch. The A1 driver-side accumulator in main() sums the transactions
+    batch. The driver-side accumulator in main() sums the transactions
     count across batches for ``assert_progress``, and accumulates the late
-    count for the run-total invariant-6 label.
+    count for the run-total parity label.
     """
     spark = batch_df.sparkSession
-    # B2: compose the DELETE key with the streaming query id so a fresh
+    # Compose the DELETE key with the streaming query id so a fresh
     # checkpoint's batch 0 does not stomp the previous stream's batch 0.
     # streaming_query_id() must be read inside foreachBatch: Spark sets
     # it as a local property on the micro-batch thread.
     sid = streaming_query_id(spark)
-    # I5: only the first micro-batch of a query run can be a replay of a
+    # Only the first micro-batch of a query run can be a replay of a
     # batch a previous run committed (a failed batch stops its query and
     # the driver exits), so the DELETE that cleans a partial replay runs
     # only then. Post-first batches skip it and the Iceberg snapshot log
@@ -1297,7 +1265,7 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
         # ghost rows behind; INSERT then re-materializes the batch. On a
         # first attempt DELETE is a no-op (nothing matches). Iceberg V2
         # supports row-level DELETE; both COW and MoR configurations work.
-        # B2 + I5: predicate is (stream, batch), never bare batch id; the
+        # The predicate is (stream, batch), never bare batch id; the
         # DELETE only runs on the first micro-batch after a restart so the
         # Iceberg snapshot log stays at one delete per restart.
         if check_replay:
@@ -1316,7 +1284,7 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
             .withColumn("_batch_id", lit(int(batch_id)).cast("bigint"))
             .withColumn("_stream_id", lit(sid))
         )
-        # B2 + I5: same shape as the transactions DELETE above.
+        # Same shape as the transactions DELETE above.
         if check_replay:
             spark.sql(
                 f"DELETE FROM {CATALOG}.{SILVER_EDGES} "
@@ -1332,12 +1300,12 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
         )
         log(f"[batch {batch_id}] appended {n_e} new entities, {n_a} new accounts")
 
-        # PHASE 4 (D-full-simple): silver.account_statements per-batch MERGE and
-        # silver.accounts.current_balance roll-up for this batch's touched IBANs.
+        # PHASE 4: silver.account_statements per-batch delete + append, and
+        # the silver.accounts balance roll-up for this batch's touched IBANs.
         n_stmts, late_ibans = _maintain_statements(batch_df, int(batch_id), sid, check_replay)
         log(f"[batch {batch_id}] wrote {n_stmts} statement entries and updated current_balance")
 
-        # D-full-simple invariant-6 label: publish per-batch so downstream
+        # Statements parity label, published per batch so downstream
         # reports and the collector can lift the value into metrics.json
         # via parse_streaming_logs' key: value regex. `strict_monotone` is
         # the parity-with-batch mode; any late iban downgrades this batch
@@ -1349,8 +1317,7 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
         log(f"silver_statements_parity_mode: {parity_mode}")
         log(f"silver_statements_late_arrivals_this_batch: {late_ibans}")
         # A JOB METRICS block per batch so the collector's driver-log parser
-        # ingests these into metrics.json without a wire-not-connected step
-        # (same mechanism KYC refresh uses in _kyc above).
+        # ingests these into metrics.json (as the KYC refresh does in _kyc).
         log_job_metrics(
             "silver-stream-statements",
             input_size_gb=0.0,
@@ -1362,28 +1329,25 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
             silver_statements_batch_id=int(batch_id),
         )
 
-        # PHASE 5 (D-full-profiles): incremental MERGE into
-        # silver.entity_profiles. The MERGE is self-idempotent via a
-        # WHEN MATCHED AND (t._stream_id = s.batch_stream_id AND
-        # t._batch_id = s.batch_batch_id) THEN no-op branch, so a retry
-        # after a post-MERGE crash does not double-apply the additive
-        # deltas. The distinct-counterparty recompute inside _merge_profiles
-        # reads silver.transactions through common.sealed_txns_filter
-        # (I10), UNIONed with the current batch's tagged_txns so the
-        # current batch's contribution is included (its versions row is
-        # not written until PHASE 6 below).
+        # PHASE 5: incremental MERGE into silver.entity_profiles. The MERGE
+        # is self-idempotent via a WHEN MATCHED AND (t._stream_id =
+        # s.batch_stream_id AND t._batch_id = s.batch_batch_id) THEN no-op
+        # branch, so a retry after a post-MERGE crash does not double-apply
+        # the additive deltas. New counterparties are the batch's pairs
+        # missing from silver.counterparty_pairs (sealed batches only, this
+        # batch excluded; its versions row is not written until PHASE 6).
         _merge_profiles(spark, tagged_txns, sid, batch_id, check_replay)
         log(f"[batch {batch_id}] merged entity_profiles")
 
-        # PHASE 6 (I10 sealed marker): must be LAST. Only after
+        # PHASE 6, the sealed marker: must be LAST. Only after
         # transactions, edges, dimensions, statements AND profiles have
         # committed do we write the (stream_id, batch_id) row that
         # gold-side consumers semi-join against. A driver crash between
         # any earlier phase and this phase leaves partial silver rows
         # visible but no matching versions row, so consumers hide the
         # partial batch. On retry, the phase-1 DELETE (guarded by
-        # replay_possible) cleans ghost txns/edges rows; phase-4 MERGE
-        # on statements is idempotent by (_stream_id, _batch_id) key;
+        # replay_possible) cleans ghost txns/edges rows; the phase-4
+        # statements write is idempotent by (_stream_id, _batch_id) key;
         # phase-5 profiles MERGE is self-idempotent via the same key;
         # this MERGE seals the retry idempotently.
         #
@@ -1435,11 +1399,6 @@ def refuse_reused_silver(spark, checkpoint_uri) -> None:
 
 
 def main() -> None:
-    # D-full complete: silver.transactions, silver.counterparty_edges,
-    # silver.entities, silver.accounts, silver.account_statements,
-    # silver.accounts.current_balance and silver.entity_profiles are all
-    # maintained by the continuous pipeline. The previous D-safe
-    # residual refusal (LB_ALLOW_PARTIAL_SILVER=1 opt-in) is removed.
     spark = SparkSession.builder.appName("lb-silver-stream-financial").getOrCreate()
     spark.conf.set("spark.sql.session.timeZone", "UTC")
 
@@ -1451,25 +1410,17 @@ def main() -> None:
     log(f"triggerSeconds={TRIGGER_S}")
     log(f"maxRowsPerTrigger={SILVER_MAX_ROWS or 'unbounded'}")
     log("=" * 60)
-    # G5: label the imposed scale envelope so downstream reports never
-    # present a Lakebench-bounded number as infrastructure performance
-    # (invariant 6). v1.6 profile: measured up to scale 10; larger scales
-    # run but the cap is labelled, not hidden.
+    # Label the imposed scale envelope so downstream reports never present
+    # a Lakebench-bounded number as infrastructure performance: measured up
+    # to scale 10; larger scales run, but the cap is labelled, not hidden.
     emit_stream_scale_admission(measured_envelope_scale=10)
 
     # Create the silver tables if absent. In CONTINUOUS mode
     # silver_build never runs, so nothing else creates silver.transactions /
     # silver.counterparty_edges (and the dimensions) -- the per-batch
-    # writeTo(...).append() below requires them to exist, and without this
-    # every micro-batch failed, leaving silver empty and the gold detection
-    # stage with nothing to scan. Mirrors silver_build_financial.main()'s
+    # writeTo(...).append() below requires them to exist. Mirrors silver_build_financial.main()'s
     # bootstrap loop (same DDL constants) so both modes converge on one
     # schema. All CREATE TABLE IF NOT EXISTS -- idempotent on restart.
-    # H3: bootstrap entity_profiles too, even though D-safe stream does not
-    # write to it. A mixed batch+stream deployment (or a continuous-only
-    # deployment on a fresh catalog) that never runs silver_build_financial
-    # would otherwise leave silver.entity_profiles absent, and any gold-side
-    # consumer that reads it fails with "table not found".
     ensure_namespaces_for_ddl(
         spark,
         CATALOG,
@@ -1491,10 +1442,8 @@ def main() -> None:
         ("account_statements", DDL_STATEMENTS),
         ("edges", DDL_EDGES),
         ("entity_profiles", DDL_PROFILES),
-        # I10: sidecar seals every (stream_id, batch_id) after phases 1+2+3+4
-        # commit; every gold/score reader semi-joins against it. D-full-profiles
-        # consumes it read-only for the sealed-txns filter in the
-        # distinct-counterparty recompute.
+        # The sidecar seals every (stream_id, batch_id) after phases 1-5
+        # commit; every gold/score reader semi-joins against it.
         ("silver_batch_versions", DDL_BATCH_VERSIONS),
         ("counterparty_pairs", DDL_PAIRS),
     ):
@@ -1505,43 +1454,42 @@ def main() -> None:
     # tables before the first micro-batch fires. Idempotent on re-runs.
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_EDGES}", "_batch_id", "BIGINT")
-    # B2: _stream_id scopes _batch_id per streaming query so a fresh
+    # _stream_id scopes _batch_id per streaming query so a fresh
     # checkpoint's batch 0 does not collide with the previous stream's.
     # Idempotent on re-runs; adds the column on a reused catalog.
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "_stream_id", "STRING")
     ensure_column(spark, f"{CATALOG}.{SILVER_EDGES}", "_stream_id", "STRING")
-    # D-full-simple: silver.account_statements gains the same idempotency-key
-    # columns. Batch and stream both write them; a reused catalog whose
+    # silver.account_statements has the same idempotency-key columns. Batch and stream both write them; a reused catalog whose
     # statements table predates the columns receives them here.
     ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_stream_id", "STRING")
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "ingest_ts", "TIMESTAMP")
-    # 1.7.10: _maintain_statements reads prior per-account balance state from
+    # _maintain_statements reads prior per-account balance state from
     # silver.accounts (current_balance, last_entry_seq, last_book_ts) instead
     # of re-aggregating all of account_statements. A catalog whose accounts
     # table predates these columns would fail that select with
     # column-not-found on the first micro-batch. Idempotent on re-runs.
     ensure_column(spark, f"{CATALOG}.{SILVER_ACCOUNTS}", "last_entry_seq", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_ACCOUNTS}", "last_book_ts", "TIMESTAMP")
-    # D-full-profiles: bring silver.entity_profiles forward on a reused
+    # Bring silver.entity_profiles forward on a reused
     # catalog whose DDL predates the internal Welford / originator-side
     # accumulators. Idempotent on re-runs.
     ensure_column(spark, f"{CATALOG}.{SILVER_PROFILES}", "_m2", "DOUBLE")
     ensure_column(spark, f"{CATALOG}.{SILVER_PROFILES}", "_first_out_ts", "TIMESTAMP")
     ensure_column(spark, f"{CATALOG}.{SILVER_PROFILES}", "_last_out_ts", "TIMESTAMP")
     ensure_column(spark, f"{CATALOG}.{SILVER_PROFILES}", "_stream_id", "STRING")
-    # BLOCKER 6: the MERGE writes t._batch_id = s.batch_batch_id; a
-    # legacy catalog whose entity_profiles DDL predates the _batch_id
+    # The profiles MERGE writes t._batch_id = s.batch_batch_id; an older
+    # catalog whose entity_profiles DDL predates the _batch_id
     # column would fail the MERGE with column-not-found. Idempotent on
     # re-runs; matches the ensure_column pattern used above for
     # silver.transactions and silver.counterparty_edges.
     ensure_column(spark, f"{CATALOG}.{SILVER_PROFILES}", "_batch_id", "BIGINT")
 
-    # B3: refuse a fresh checkpoint over populated silver -- the source
+    # Refuse a fresh checkpoint over populated silver -- the source
     # would start from the beginning and every existing row would be
     # duplicated. Uniform SilverAbort exit contract (see common.py).
     refuse_reused_silver(spark, CHECKPOINT_URI)
-    # H2: match silver_build_financial's partition evolution so a
+    # Match silver_build_financial's partition evolution so a
     # continuous-only deployment on a reused catalog does not drift on the
     # old days() spec. Iceberg partition evolution is metadata-only (~1s)
     # and idempotent; safe to run at every startup.
@@ -1554,7 +1502,7 @@ def main() -> None:
         "days(book_ts)",
         "months(book_ts)",
     )
-    # P10 stage 0/2 columns on a reused catalog (same list as silver_build).
+    # KYC columns on a reused catalog (same list as silver_build).
     for table, columns in (
         (SILVER_ENTITIES, KYC_ENTITY_COLUMNS),
         (SILVER_ACCOUNTS, KYC_ACCOUNT_COLUMNS),
@@ -1590,14 +1538,14 @@ def main() -> None:
     if SILVER_MAX_ROWS > 0:
         reader = reader.option("streaming-max-rows-per-micro-batch", str(SILVER_MAX_ROWS))
     stream = reader.load(f"{CATALOG}.{BRONZE_TABLE}")
-    # A1: driver-side accumulator. _merge_batch returns the silver.transactions
+    # Driver-side accumulator. _merge_batch returns the silver.transactions
     # rows committed for the batch; the wrapper folds each into a
     # lock-protected counter so a stream that saw only empty batches raises
     # SilverAbort after await. Spark's async ListenerBus swallows Python
     # listener exceptions, so the check runs on the main thread that blocks
     # on `query.isActive`, not inside a StreamingQueryListener.
     #
-    # D-full-simple: also accumulate the run-total late-arrival iban count
+    # Also accumulate the run-total late-arrival iban count
     # so the summary line emits `silver_statements_total_late_arrivals` for
     # the collector to lift into metrics.json (per-batch labels above give
     # the incremental value; this one is the cumulative that a live gate
@@ -1620,7 +1568,7 @@ def main() -> None:
         .start()
     )
 
-    # H4: write the stream-started marker after the query has actually
+    # Write the stream-started marker after the query has actually
     # started so silver_build_financial refuses to run against this
     # deployment. The marker is cleared on clean shutdown below; a crash
     # or kill -9 leaves it in place, which is what we want (batch must
@@ -1633,7 +1581,7 @@ def main() -> None:
             query.stop()
         except Exception as e:  # noqa: BLE001
             log(f"query.stop failed: {e}")
-        # H4: clean shutdown removes the marker so a subsequent batch
+        # Clean shutdown removes the marker so a subsequent batch
         # run against a decommissioned continuous deployment is not
         # blocked. A crash bypasses this handler entirely.
         clear_stream_started_marker(spark, CHECKPOINT_URI)
@@ -1663,8 +1611,7 @@ def main() -> None:
         total = rows_written_total
         total_late = late_ibans_total
     log(f"Silver stream total rows written across all batches: {total}")
-    # D-full-simple: publish the run-total late-arrival count as an
-    # invariant-6 label. A run with zero late arrivals produced silver
+    # Publish the run-total late-arrival count as a parity label. A run with zero late arrivals produced silver
     # statements byte-identical to batch mode; a non-zero count means
     # the arrival-order fallback fired on that many iban * batch touches.
     run_parity_mode = "strict_monotone" if total_late == 0 else "arrival_order_running_balance"
@@ -1672,7 +1619,7 @@ def main() -> None:
     # swallow the second key into the first key's value.
     log(f"silver_statements_total_late_arrivals: {total_late}")
     log(f"silver_statements_parity_mode_run: {run_parity_mode}")
-    # H4: clean shutdown removes the marker. The signal handler above
+    # Clean shutdown removes the marker. The signal handler above
     # also calls this; the double-call is idempotent (delete-if-exists).
     # Both paths matter: process exits via SIGTERM in K8s Job termination,
     # but the query can also drain naturally at end of run_duration.

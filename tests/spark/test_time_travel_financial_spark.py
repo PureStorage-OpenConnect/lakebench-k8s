@@ -8,8 +8,7 @@ metadata only. ``expire_snapshots`` then expires snapshots older than the
 second commit, and ``time_travel_financial.time_travel`` runs both passes
 over real files: the first snapshot reads ``expired``, the others
 ``verified`` (scan rows equal the recorded count, scan fingerprint equals
-the hash pass). An altered hashes file gives ``mismatch``, and a Delta
-table reads ``not_supported``.
+the hash pass). An altered hashes file gives ``mismatch``.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ import pytest
 
 pytest.importorskip("pyspark")
 
-pytestmark = pytest.mark.requires_jars("iceberg", "delta")
+pytestmark = pytest.mark.requires_jars("iceberg")
 _N = itertools.count()
 
 
@@ -164,20 +163,3 @@ def test_a_recorded_count_one_off_is_a_mismatch(spark, mod, three_commits, tmp_p
         spark, _inputs(records), f"file://{tmp_path}/tt_hashes.json", mod.Budget(None)
     )
     assert out["ticks"][1]["state"] == "mismatch" and out["ticks"][1]["count_match"] is False
-
-
-def test_a_delta_table_is_not_supported(spark, mod, tmp_path, monkeypatch):
-    path = tmp_path / "delta_txns"
-    spark.sql(f"CREATE TABLE default.tt_delta (txn_id STRING) USING delta LOCATION '{path}'")
-    try:
-        spark.sql("INSERT INTO default.tt_delta VALUES ('a')")
-        monkeypatch.setattr(mod, "CATALOG", "spark_catalog")
-        rec = {"start": 0, "cycle": 1, "table": "default.tt_delta", "snapshot": 0}
-        out = mod.time_travel(
-            spark, _inputs([rec]), f"file://{tmp_path}/tt_hashes.json", mod.Budget(None)
-        )
-        assert out["status"] == "not_supported"
-        assert [t["state"] for t in out["ticks"]] == ["not_supported"]
-        assert not (tmp_path / "tt_hashes.json").exists()
-    finally:
-        spark.sql("DROP TABLE IF EXISTS default.tt_delta")
