@@ -48,16 +48,13 @@ def test_cap_newest_spans_keeps_budget_and_carries_middle(load_script_module):
     assert set(newest) <= set(kept)
 
 
-def test_adjacent_days_coalesce_so_cap_only_bites_on_scatter(load_script_module):
+def test_cap_does_not_bite_without_scatter(load_script_module):
     inc = load_script_module("incremental_detection")
     # A contiguous run of many days is ONE span: the cap does not bite, no carry.
     kept, carry = inc.cap_newest_spans(_spans(*range(inc.MAX_SPANS + 50)))
     assert len(kept) == 1
     assert carry == ()
-
-
-def test_under_cap_is_unchanged_no_carry(load_script_module):
-    inc = load_script_module("incremental_detection")
+    # Disjoint runs under the cap are unchanged, no carry.
     cut = _spans(0, 2, 4)
     kept, carry = inc.cap_newest_spans(cut)
     assert kept == cut
