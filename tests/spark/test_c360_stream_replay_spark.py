@@ -45,21 +45,16 @@ def test_harness_really_replays(result):
 
 
 def test_iceberg_silver_replay_leaves_one_copy(result):
+    # One copy of the replayed batch; one delete snapshot (the replay's), not
+    # one per micro-batch.
     assert result["ice_silver_batches"] == _REPLAYED
     assert result["ice_silver_same_query"] is True
     assert result["ice_silver_rows"] == result["silver_rows"]
     assert result["ice_silver_distinct_ids"] == result["silver_rows"]
-
-
-def test_iceberg_silver_deletes_only_on_a_real_replay(result):
-    """One delete snapshot, the replay's; no empty delete per micro-batch."""
     assert result["ice_silver_delete_snapshots"] == 1
     assert result["ice_silver_delete_snapshots_after_fresh"] == 1
-
-
-def test_iceberg_silver_fresh_checkpoint_keeps_earlier_stream(result):
-    """A new query's batch 0 must not delete the previous query's batch 0
-    (the key was the bare batch id: 45 rows plus 3 ended at 39)."""
+    # A new query's batch 0 must not delete the previous query's batch 0 (the
+    # key was the bare batch id: 45 rows plus 3 ended at 39).
     assert result["ice_silver_old_batch0_rows"] == 9
     assert result["ice_silver_new_stream_rows"] == 3
     assert result["ice_silver_rows_after_fresh"] == result["silver_rows"] + 3
@@ -76,27 +71,18 @@ def test_iceberg_bronze_replay_is_skipped(result):
     assert result["ice_bronze_log"] == [[0, 10], [1, 10], [1, 0], [2, 10]]
     assert result["ice_bronze_same_query_id"] is True
     assert result["ice_bronze_rows"] == result["bronze_rows"]
-
-
-def test_iceberg_bronze_fresh_checkpoint_is_not_skipped(result):
-    """A new query's batch 0 is not mistaken for the old query's batch 0."""
+    # A new query's batch 0 is not mistaken for the old query's batch 0.
     assert result["ice_bronze_rows_after_fresh"] == result["bronze_rows"] + 10
 
 
-def test_delta_silver_replay_is_skipped_and_reported(result):
-    """Delta skips the replay; the writer sees it and reports 0 rows."""
+def test_delta_replay_is_skipped_and_reported(result):
+    # Silver: Delta skips the replay; the writer sees it and reports 0 rows.
+    # txnAppId carries the query id, so a fresh checkpoint still writes.
     _section_ran(result, "delta_silver")
     assert result["delta_silver_log"] == [[0, 9], [1, 9], [1, 0], [2, 9]]
     assert result["delta_silver_rows"] == result["silver_rows"]
-
-
-def test_delta_silver_fresh_checkpoint_is_not_skipped(result):
-    """txnAppId carries the query id, so a fresh checkpoint still writes."""
-    _section_ran(result, "delta_silver")
     assert result["delta_silver_rows_after_fresh"] == result["silver_rows"] + 9
-
-
-def test_delta_bronze_replay_is_skipped_and_reported(result):
+    # Bronze: the same skip-and-report.
     _section_ran(result, "delta_bronze")
     assert result["delta_bronze_log"] == [[0, 10], [1, 10], [1, 0], [2, 10]]
     assert result["delta_bronze_rows"] == result["bronze_rows"]
