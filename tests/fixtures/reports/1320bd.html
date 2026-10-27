@@ -217,17 +217,17 @@
         <nav class="lb-tabs" role="tablist"><button type="button" role="tab" data-view="replay">Workload replay</button><button type="button" role="tab" data-view="scorecard">Scorecard</button></nav><style>.lb-tabs{display:flex;gap:3px;margin:0 0 1.25rem;border-bottom:1px solid var(--border)}.lb-tabs button{font:inherit;font-weight:650;font-size:13px;padding:.7rem 1rem;border:0;border-bottom:3px solid transparent;background:transparent;cursor:pointer;color:#66776c}.lb-tabs button.on{color:#1f6449;border-bottom-color:#25835d;background:#f6faf7}</style>
 
         <div id="lb-view-replay"><style>
-#lb-replay .headline{display:flex;align-items:end;justify-content:space-between;gap:12px;min-height:40px}
+#lb-replay .headline{display:flex;align-items:end;justify-content:space-between;gap:12px;min-height:40px;margin-bottom:8px}
 #lb-replay .eyebrow{font-size:12px;letter-spacing:.2px;color:#5f8b73;font-weight:700}
 #lb-replay .headline h1{font-size:25px;margin:1px 0 0;letter-spacing:-1.1px}
 #lb-replay .headline-right{display:flex;gap:26px}
 #lb-replay .headline-right .mini{display:grid;gap:2px}
 #lb-replay .headline-right strong{font-size:22px;letter-spacing:-.5px}
 #lb-replay .headline-right span{font-size:11px;color:#7e8b80}
-#lb-replay .canvas{background:#fff;border:1px solid #dce6dd;border-radius:12px;display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+#lb-replay .canvas{background:#fff;border:1px solid #dce6dd;border-radius:12px;display:block;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 #lb-replay .layer-head{flex-shrink:0;min-height:34px;padding:7px 13px;display:flex;align-items:center;justify-content:space-between;gap:8px;border-bottom:1px solid #e4ebe5;font-size:14px;font-weight:750}
 #lb-replay .layer-head small{font-size:12px;color:#75897a;font-weight:450}
-#lb-replay .runsteps{display:flex;gap:10px;padding:14px 16px 10px;flex:1;min-height:260px;align-items:stretch}
+#lb-replay .runsteps{display:flex;gap:10px;padding:14px 16px 10px;flex:1;min-height:300px;align-items:stretch}
 #lb-replay .step{flex:1;min-width:0;padding:16px;background:#fbfcfa;border:1px solid #dce5de;border-radius:12px;display:flex;flex-direction:column;gap:8px;opacity:.8;transition:flex .4s,border .3s,background .3s,opacity .3s;cursor:pointer}
 #lb-replay .step.current{flex:1.9;background:#fff;border:2px solid #6ba886;opacity:1;box-shadow:0 6px 22px #3164461a}
 #lb-replay .step.done{opacity:.9}
@@ -261,12 +261,12 @@
 #lb-replay .xbox.bottleneck .fill{background:#d98a86}
 #lb-replay .platform-head{display:flex;align-items:center;justify-content:space-between;padding:4px 14px 2px;font-weight:750;font-size:14px}
 #lb-replay .platform-head small{font-size:11px;font-weight:450;color:#859187}
-#lb-replay .platform{margin:0 12px 6px;border:1px solid #dce6dd;background:#fafdfa;border-radius:8px;padding:10px 14px;flex:0 0 232px;min-height:0}
+#lb-replay .platform{margin:0 12px 6px;border:1px solid #dce6dd;background:#fafdfa;border-radius:8px;padding:10px 14px;flex:none;min-height:0;height:auto}
 #lb-replay .platformnav{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
 #lb-replay .platformnav button{border:1px solid #d7e5dc;border-radius:6px;background:#fff;color:#57715e;padding:5px 11px;font-size:12px}
 #lb-replay .platformnav button.on{background:#e3f3e9;border-color:#82b89b;color:#1d6548;font-weight:800}
 #lb-replay .platformnav button:last-of-type{margin-right:auto}
-#lb-replay .traces{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:7px;height:160px}
+#lb-replay .traces{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:7px;height:140px}
 #lb-replay .graph{border:1px solid #e0ebe2;border-radius:7px;padding:8px;display:flex;flex-direction:column;min-width:0}
 #lb-replay .graph .charttitle{display:flex;align-items:center;justify-content:space-between}
 #lb-replay .graph .charttitle b{font-size:13px}
@@ -278,8 +278,8 @@
 #lb-replay .controls .time{font:12px ui-monospace,monospace;color:#e9f4ec;min-width:104px;text-align:right}
 #lb-replay .controls .mark{font-size:11px;color:#d6e5d8;white-space:nowrap}
 /* Short viewports: keep everything inside one frame without scroll. */
-@media(max-height:820px){#lb-replay .runsteps{min-height:170px;padding:9px 12px 6px}#lb-replay .step{padding:11px;gap:5px}#lb-replay .step h2{font-size:21px}#lb-replay .art{min-height:46px}#lb-replay .value strong{font-size:24px}#lb-replay .step.current .value strong{font-size:27px}#lb-replay .traces{height:108px}#lb-replay .platform{flex-basis:168px}}
-@media(max-width:900px){#lb-replay .runsteps{overflow-x:auto;min-height:310px}#lb-replay .step{flex:0 0 175px}#lb-replay .step.current{flex:0 0 245px}#lb-replay .execstrip{grid-template-columns:repeat(2,1fr)}#lb-replay .execmark{display:none}#lb-replay .platform{flex:auto}#lb-replay .traces{height:170px}#lb-replay .controls{position:sticky;bottom:0}}
+@media(max-height:820px){#lb-replay .runsteps{min-height:170px;padding:9px 12px 6px}#lb-replay .step{padding:11px;gap:5px}#lb-replay .step h2{font-size:21px}#lb-replay .art{min-height:46px}#lb-replay .value strong{font-size:24px}#lb-replay .step.current .value strong{font-size:27px}#lb-replay .traces{height:108px}}
+@media(max-width:900px){#lb-replay .runsteps{overflow-x:auto;min-height:310px}#lb-replay .step{flex:0 0 175px}#lb-replay .step.current{flex:0 0 245px}#lb-replay .execstrip{grid-template-columns:repeat(2,1fr)}#lb-replay .platform{flex:auto}#lb-replay .traces{height:170px}#lb-replay .controls{position:sticky;bottom:0}}
 
 #lb-replay{font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#1c332c;margin-bottom:1.5rem}
 #lb-replay *{box-sizing:border-box}
@@ -287,16 +287,8 @@
 #lb-replay button,#lb-replay input{font:inherit}
 #lb-replay button{cursor:pointer}
 #lb-replay button:disabled{cursor:default;opacity:.55}
-#lb-replay .headline{margin-bottom:8px}
 #lb-replay .headline-right strong span{font-size:inherit;color:inherit}
-#lb-replay .canvas{display:block;background:#fff;border:1px solid #dce6dd;border-radius:12px;overflow:hidden}
-#lb-replay .runsteps{min-height:300px}
-#lb-replay .platform{flex:none;height:auto}
-#lb-replay .traces{height:140px}
 #lb-replay .platformnav button:disabled{text-decoration:line-through}
-#lb-replay .job span.fail{color:#b3261e}
-#lb-replay .controls .lb-unit button{background:transparent;color:#fff;border:1px solid #6fbb89;padding:6px 12px;font-size:14px}
-#lb-replay .controls .lb-unit button.on{background:#d4f4dd;border-color:#d4f4dd;color:#1d5439}
 #lb-replay .legend{display:flex;gap:12px;font-size:12px;color:#57715e;min-height:0}
 #lb-replay .legend:empty{display:none}
 #lb-replay .legend i{display:inline-block;width:10px;height:3px;margin-right:5px;vertical-align:middle;border-radius:2px}
@@ -306,7 +298,7 @@
 .lb-unit{display:inline-flex;gap:4px;align-items:center}
 .lb-unit button{border:1px solid #6fbb89;background:transparent;color:#fff;border-radius:6px;padding:6px 12px;font:inherit;font-size:14px;font-weight:650;cursor:pointer}
 .lb-unit button.on{background:#d4f4dd;border-color:#d4f4dd;color:#1d5439}
-</style><div id="lb-replay"><div class="headline"><div><div class="eyebrow">Financial · Transaction monitoring</div><h1>AML / Batch</h1></div><div class="headline-right"><div class="mini"><strong data-unit="count"><span data-lb-derived="ratio" data-lb-inputs="pipeline_benchmark.stages[3].input_rows;pipeline_benchmark.scores.time_to_value_seconds" data-lb-fmt=",.0f" data-lb-suffix=" payments/s">30,817 payments/s</span></strong><strong data-unit="bytes" hidden><span data-lb-derived="ratio" data-lb-inputs="pipeline_benchmark.stages[3].input_size_gb;pipeline_benchmark.scores.time_to_value_seconds" data-lb-fmt="auto-gib" data-lb-suffix="/s">3.91 MiB/s</span></strong><span>payments screened per second</span></div><div class="mini"><strong>40:25</strong><span>run length</span></div></div></div><div class="canvas"><div class="layer-head">Workload</div><div class="runsteps"><article class="step" data-step="0" tabindex="0" role="button"><small>Generate</small><h2>Payments</h2><div class="implementation">Datagen → S3</div><div class="art"></div><div class="value"><strong>-</strong><label>Rows generated</label></div></article><article class="step" data-step="1" tabindex="0" role="button"><small>Ingest</small><h2>Ingest</h2><div class="implementation">Spark · Bronze</div><div class="art"></div><div class="value"><strong>-</strong><label>Rows ingested</label></div></article><article class="step" data-step="2" tabindex="0" role="button"><small>Prepare</small><h2>Process</h2><div class="implementation">Spark · Silver</div><div class="art"></div><div class="value"><strong>-</strong><label>Rows prepared</label></div></article><article class="step" data-step="3" tabindex="0" role="button"><small>Monitor</small><h2>AML rules</h2><div class="implementation">Spark · Gold</div><div class="art"></div><div class="value"><strong>-</strong><label>Payments screened</label></div></article><article class="step" data-step="4" tabindex="0" role="button"><small>Output</small><h2>Alert queries</h2><div class="implementation">Gold → Trino</div><div class="art"></div><div class="value"><strong>-</strong><label>Queries completed</label></div></article></div></div><div class="canvas"><div class="layer-head">Pipeline</div><div class="execstrip" style="--xn:4"><div class="xbox" data-x="0" data-lagh="-1"><b>Generate → Ingest</b><div class="track"><div class="fill" data-xf="0"></div></div><strong data-xv="0">not running</strong><span data-xs="0">no lag recorded yet</span></div><div class="xbox" data-x="1" data-lagh="-1"><b>Ingest → Prepare</b><div class="track"><div class="fill" data-xf="1"></div></div><strong data-xv="1">not running</strong><span data-xs="1">no lag recorded yet</span></div><div class="xbox" data-x="2" data-lagh="-1"><b>Prepare → Monitor</b><div class="track"><div class="fill" data-xf="2"></div></div><strong data-xv="2">not running</strong><span data-xs="2">no lag recorded yet</span></div><div class="xbox" data-x="3" data-lagh="-1"><b>Monitor → Output</b><div class="track"><div class="fill" data-xf="3"></div></div><strong data-xv="3">not running</strong><span data-xs="3">no lag recorded yet</span></div></div></div><div class="platform-head">Platform</div><div class="platform"><div class="platformnav"><button type="button" disabled title="not in the run record">Storage</button><button type="button" disabled title="not in the run record">Compute</button><button type="button" disabled title="not in the run record">Network</button><button type="button" disabled title="not in the run record">Kubernetes</button></div><div class="traces"><div class="graph"><div class="charttitle"><b id="rp-lname">Storage / S3</b><strong id="rp-lval">-</strong></div><svg id="rp-lplot" viewBox="0 0 600 80" preserveAspectRatio="none"></svg><div class="legend" id="rp-legend"></div></div><div class="graph"><div class="charttitle"><b>Rows per second</b><strong id="rp-evalue">-</strong></div><svg id="rp-eplot" viewBox="0 0 600 80" preserveAspectRatio="none"></svg></div></div></div><div class="note">Storage read bytes omit bronze and gold and silver (Iceberg table reads expose no client byte counter). Not in the record: Storage, Compute, Network, Kubernetes.</div><div class="controls"><button type="button" data-act="play">▶ Play</button><button type="button" data-act="speed">1×</button><button type="button" data-act="restart">↺ Restart</button><span class="lb-unit" role="group" aria-label="Pace unit"><button type="button" data-set="count" class="on">Payments</button><button type="button" data-set="bytes">Bytes</button></span><input type="range" min="0" max="0" value="0" step="1" data-act="seek" aria-label="Run timeline"><span class="time" data-act="clock"></span></div></div></div><script type="application/json" id="lb-replay-data">{"version":1,"title":"AML / Batch","subtitle":"Financial \u00b7 Transaction monitoring","mode":"batch","kind":"batch","window":null,"handoffs":[],"lag":null,"run_id":"20260928-224247-1320bd","duration":2425.1966500282288,"stages":[{"key":"datagen","exec":{"tput":null,"elapsed":18.1,"bottleneck":false},"phase":"Generate","name":"Payments","impl":"Datagen \u2192 S3","label":"Rows generated","start":null,"end":null,"value":26671878,"path":"pipeline_benchmark.stages[datagen].output_rows","window":null,"ends":null},{"key":"bronze","exec":{"tput":0.218,"elapsed":79.4,"bottleneck":false},"phase":"Ingest","name":"Ingest","impl":"Spark \u00b7 Bronze","label":"Rows ingested","start":2.490962028503418,"end":81.96621894836426,"value":26671878,"path":"pipeline_benchmark.stages[bronze].output_rows","window":"recorded","ends":null},{"key":"silver","exec":{"tput":0.061,"elapsed":178.8,"bottleneck":false},"phase":"Prepare","name":"Process","impl":"Spark \u00b7 Silver","label":"Rows prepared","start":88.06148791313171,"end":266.96621894836426,"value":26671878,"path":"pipeline_benchmark.stages[silver].output_rows","window":"recorded","ends":null},{"key":"gold","exec":{"tput":0.006,"elapsed":593.7,"bottleneck":false},"phase":"Monitor","name":"AML rules","impl":"Spark \u00b7 Gold","label":"Payments screened","start":274.1600708961487,"end":867.9662189483643,"value":26671878,"path":"pipeline_benchmark.stages[gold].input_rows","window":"recorded","ends":null},{"key":"query","exec":{"tput":null,"elapsed":102.5,"bottleneck":false},"phase":"Output","name":"Alert queries","impl":"Gold \u2192 Trino","label":"Queries completed","start":null,"end":null,"value":12,"path":"benchmark.queries[*].success","window":null,"ends":[]}],"jobs":[{"name":"lakebench-bronze-verify","type":"bronze-verify","start":2.490962028503418,"end":81.96621894836426,"elapsed":79.423761,"success":true},{"name":"lakebench-silver-build","type":"silver-build","start":88.06148791313171,"end":266.96621894836426,"elapsed":178.840254,"success":true},{"name":"lakebench-gold-finalize","type":"gold-finalize","start":274.1600708961487,"end":867.9662189483643,"elapsed":593.741594,"success":true}],"pair":null,"storage":null,"storage_read_gap":["bronze","gold","silver"],"storage_problems":[],"lanes":{},"not_measured":["Compute","Network","Kubernetes"]}</script><script>
+</style><div id="lb-replay"><div class="headline"><div><div class="eyebrow">Financial · Transaction monitoring</div><h1>AML / Batch</h1></div><div class="headline-right"><div class="mini"><strong data-unit="count"><span data-lb-derived="ratio" data-lb-inputs="pipeline_benchmark.stages[3].input_rows;pipeline_benchmark.scores.time_to_value_seconds" data-lb-fmt=",.0f" data-lb-suffix=" payments/s">30,817 payments/s</span></strong><strong data-unit="bytes" hidden><span data-lb-derived="ratio" data-lb-inputs="pipeline_benchmark.stages[3].input_size_gb;pipeline_benchmark.scores.time_to_value_seconds" data-lb-fmt="auto-gib" data-lb-suffix="/s">3.91 MiB/s</span></strong><span>payments screened per second</span></div><div class="mini"><strong>40:25</strong><span>run length</span></div></div></div><div class="canvas"><div class="layer-head">Workload</div><div class="runsteps"><article class="step" data-step="0" tabindex="0" role="button"><small>Generate</small><h2>Payments</h2><div class="implementation">Datagen → S3</div><div class="art"></div><div class="value"><strong>-</strong><label>Rows generated</label></div></article><article class="step" data-step="1" tabindex="0" role="button"><small>Ingest</small><h2>Ingest</h2><div class="implementation">Spark · Bronze</div><div class="art"></div><div class="value"><strong>-</strong><label>Rows ingested</label></div></article><article class="step" data-step="2" tabindex="0" role="button"><small>Prepare</small><h2>Process</h2><div class="implementation">Spark · Silver</div><div class="art"></div><div class="value"><strong>-</strong><label>Rows prepared</label></div></article><article class="step" data-step="3" tabindex="0" role="button"><small>Monitor</small><h2>AML rules</h2><div class="implementation">Spark · Gold</div><div class="art"></div><div class="value"><strong>-</strong><label>Payments screened</label></div></article><article class="step" data-step="4" tabindex="0" role="button"><small>Output</small><h2>Alert queries</h2><div class="implementation">Gold → Trino</div><div class="art"></div><div class="value"><strong>-</strong><label>Queries completed</label></div></article></div></div><div class="canvas"><div class="layer-head">Pipeline</div><div class="execstrip" style="--xn:4"><div class="xbox" data-x="0"><b>Generate → Ingest</b><div class="track"><div class="fill" data-xf="0"></div></div><strong data-xv="0">not running</strong><span data-xs="0">no lag recorded yet</span></div><div class="xbox" data-x="1"><b>Ingest → Prepare</b><div class="track"><div class="fill" data-xf="1"></div></div><strong data-xv="1">not running</strong><span data-xs="1">no lag recorded yet</span></div><div class="xbox" data-x="2"><b>Prepare → Monitor</b><div class="track"><div class="fill" data-xf="2"></div></div><strong data-xv="2">not running</strong><span data-xs="2">no lag recorded yet</span></div><div class="xbox" data-x="3"><b>Monitor → Output</b><div class="track"><div class="fill" data-xf="3"></div></div><strong data-xv="3">not running</strong><span data-xs="3">no lag recorded yet</span></div></div></div><div class="platform-head">Platform</div><div class="platform"><div class="platformnav"><button type="button" disabled title="not in the run record">Storage</button><button type="button" disabled title="not in the run record">Compute</button><button type="button" disabled title="not in the run record">Network</button><button type="button" disabled title="not in the run record">Kubernetes</button></div><div class="traces"><div class="graph"><div class="charttitle"><b id="rp-lname">Storage / S3</b><strong id="rp-lval">-</strong></div><svg id="rp-lplot" viewBox="0 0 600 80" preserveAspectRatio="none"></svg><div class="legend" id="rp-legend"></div></div><div class="graph"><div class="charttitle"><b>Rows per second</b><strong id="rp-evalue">-</strong></div><svg id="rp-eplot" viewBox="0 0 600 80" preserveAspectRatio="none"></svg></div></div></div><div class="note">Storage read bytes omit bronze and gold and silver (Iceberg table reads expose no client byte counter). Not in the record: Storage, Compute, Network, Kubernetes.</div><div class="controls"><button type="button" data-act="play">▶ Play</button><button type="button" data-act="speed">1× real time</button><button type="button" data-act="restart">↺ Restart</button><span class="lb-unit" role="group" aria-label="Pace unit"><button type="button" data-set="count" class="on">Payments</button><button type="button" data-set="bytes">Bytes</button></span><input type="range" min="0" max="0" value="0" step="1" data-act="seek" aria-label="Run timeline"><span class="time" data-act="clock"></span></div></div></div><script type="application/json" id="lb-replay-data">{"version":1,"title":"AML / Batch","subtitle":"Financial \u00b7 Transaction monitoring","mode":"batch","kind":"batch","window":null,"handoffs":[],"lag":null,"run_id":"20260928-224247-1320bd","duration":2425.1966500282288,"stages":[{"key":"datagen","exec":{"tput":null,"elapsed":18.1,"bottleneck":false},"phase":"Generate","name":"Payments","impl":"Datagen \u2192 S3","label":"Rows generated","start":null,"end":null,"value":26671878,"path":"pipeline_benchmark.stages[datagen].output_rows","window":null,"ends":null},{"key":"bronze","exec":{"tput":0.218,"elapsed":79.4,"bottleneck":false},"phase":"Ingest","name":"Ingest","impl":"Spark \u00b7 Bronze","label":"Rows ingested","start":2.490962028503418,"end":81.96621894836426,"value":26671878,"path":"pipeline_benchmark.stages[bronze].output_rows","window":"recorded","ends":null},{"key":"silver","exec":{"tput":0.061,"elapsed":178.8,"bottleneck":false},"phase":"Prepare","name":"Process","impl":"Spark \u00b7 Silver","label":"Rows prepared","start":88.06148791313171,"end":266.96621894836426,"value":26671878,"path":"pipeline_benchmark.stages[silver].output_rows","window":"recorded","ends":null},{"key":"gold","exec":{"tput":0.006,"elapsed":593.7,"bottleneck":false},"phase":"Monitor","name":"AML rules","impl":"Spark \u00b7 Gold","label":"Payments screened","start":274.1600708961487,"end":867.9662189483643,"value":26671878,"path":"pipeline_benchmark.stages[gold].input_rows","window":"recorded","ends":null},{"key":"query","exec":{"tput":null,"elapsed":102.5,"bottleneck":false},"phase":"Output","name":"Alert queries","impl":"Gold \u2192 Trino","label":"Queries completed","start":null,"end":null,"value":12,"path":"benchmark.queries[*].success","window":null,"ends":[]}],"jobs":[{"name":"lakebench-bronze-verify","type":"bronze-verify","start":2.490962028503418,"end":81.96621894836426,"elapsed":79.423761,"success":true},{"name":"lakebench-silver-build","type":"silver-build","start":88.06148791313171,"end":266.96621894836426,"elapsed":178.840254,"success":true},{"name":"lakebench-gold-finalize","type":"gold-finalize","start":274.1600708961487,"end":867.9662189483643,"elapsed":593.741594,"success":true}],"pair":null,"storage":null,"storage_read_gap":["bronze","gold","silver"],"storage_problems":[],"lanes":{},"not_measured":["Compute","Network","Kubernetes"]}</script><script>
 (function(){
 var el=document.getElementById('lb-replay-data');if(!el)return;
 var D=JSON.parse(el.textContent),root=document.getElementById('lb-replay');
@@ -322,6 +314,13 @@ var ART=[
 root.querySelectorAll('.art').forEach(function(a,i){a.innerHTML=ART[i]});
 function fmtT(x){x=Math.max(0,Math.round(x));var m=Math.floor(x/60),s=x%60;return (m<10?'0':'')+m+':'+(s<10?'0':'')+s}
 function num(n){return Math.round(n).toLocaleString('en-US')}
+function compact(n){n=Math.round(n);
+ var u=[[1e9,'B'],[1e6,'M'],[1e3,'K']];
+ for(var i=0;i<u.length;i++){if(n>=u[i][0]){var x=n/u[i][0];
+  // 999.95K rounds up to 1000.0K: step to the next unit instead.
+  if(x.toFixed(1)==='1000.0'&&i>0)return '1.0'+u[i-1][1];
+  return x.toFixed(1)+u[i][1]}}
+ return String(n)}
 function frac(s){if(s.start==null||s.end==null)return null;if(t<=s.start)return 0;if(t>=s.end)return 1;return (t-s.start)/Math.max(1e-9,s.end-s.start)}
 function stageValue(s){
  if(s.value==null)return null;
@@ -345,10 +344,6 @@ function plot(id,series,mx){
 function lagAt(h){var v=null;for(var i=0;i<h.samples.length;i++){if(D.lag.shift+h.samples[i][0]<=t)v=h.samples[i][1]}return v}
 var LMAX=1;if(D.lag)D.lag.series.forEach(function(sr){sr.samples.forEach(function(p){if(p[1]>LMAX)LMAX=p[1]})});
 function fmtLag(x){return x<120?Math.round(x)+' s':Math.round(x/60)+' min'}
-function lagBars(){D.handoffs.forEach(function(h,i){var v=lagAt(h);
- $('[data-f="'+i+'"]').style.width=(v===null?0:Math.min(100,v/LMAX*100))+'%';
- $('[data-h="'+i+'"]').textContent=v===null?'Waiting':fmtLag(v)+' behind';
- $('[data-s="'+i+'"]').textContent=h.keeps_up===false?'falls behind the arrival rate':h.keeps_up?'keeps up':''})}
 var LCOL=['#4b9d78','#be904a','#538da9'];
 function plotLag(){var o='<rect width="600" height="80" fill="#f4f8f4"/>'+shade(),cols=LCOL;
  D.lag.series.forEach(function(sr,k){var d='';sr.samples.forEach(function(p){if(D.lag.shift+p[0]>t)return;var x=5+590*(D.lag.shift+p[0])/T,y=73-p[1]/LMAX*61;d+=(d?'L':'M')+x.toFixed(1)+','+y.toFixed(1)});if(!d)return;
@@ -373,7 +368,9 @@ function draw(){
   (s.events||[]).forEach(function(e){if(e<=t&&e>=evAt){evAt=e;lastEv=i}});
   var c=root.querySelector('[data-step="'+i+'"]'),v=stageValue(s),stt=state(s);
   if(stt==='running')cur=i;
-  c.querySelector('.value strong').textContent=v==null?'NR':num(v);
+  var big=c.querySelector('.value strong');
+  big.textContent=v==null?'NR':compact(v);
+  big.title=v==null?'':num(v);
   c.classList.toggle('done',stt==='done')});
  var auto=D.kind==='sustained'?(lastEv>=0?lastEv:0):(lastStarted!==null?lastStarted:0);
  var focus=sel!==null?sel:auto;
@@ -435,13 +432,19 @@ function draw(){
  plot('#rp-eplot',[{v:RATE,c:'#4b9d78'}],RMAX);
  $('[data-act=clock]').textContent=fmtT(t)+' / '+fmtT(T);
  $('[data-act=seek]').value=t}
-function tick(now){if(playing){t=Math.max(0,Math.min(T,t+Math.max(0,now-last)/1000*speed*Math.max(1,T/60)));if(t>=T){playing=false;$('[data-act=play]').textContent='▶ Play'}draw()}last=now;requestAnimationFrame(tick)}
+function tick(now){if(playing){t=Math.max(0,Math.min(T,t+Math.max(0,now-last)/1000*speed));if(t>=T){playing=false;$('[data-act=play]').textContent='▶ Play'}draw()}last=now;requestAnimationFrame(tick)}
 root.querySelectorAll('.step').forEach(function(c){c.onclick=function(){sel=+c.dataset.step;draw()};c.onkeydown=function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();sel=+c.dataset.step;draw()}}});
 root.querySelectorAll('[data-lane]').forEach(function(b){b.onclick=function(){lane=b.dataset.lane;root.querySelectorAll('[data-lane]').forEach(function(x){x.classList.toggle('on',x===b)});draw()}});
 $('[data-act=play]').onclick=function(e){if(t>=T)t=0;playing=!playing;last=performance.now();e.currentTarget.textContent=playing?'Ⅱ Pause':'▶ Play'};
-$('[data-act=speed]').onclick=function(e){speed=speed===1?2:speed===2?4:1;e.currentTarget.textContent=speed+'×'};
+// Speed is a multiple of real time. The run opens at the step nearest
+// the one that plays the whole run in about a minute.
+var STEPS=[1,5,30,60],si=0,want=Math.max(1,T/60);
+STEPS.forEach(function(v,i){if(Math.abs(Math.log(v/want))<Math.abs(Math.log(STEPS[si]/want)))si=i});
+function setSpeed(){speed=STEPS[si];$('[data-act=speed]').textContent=speed+'× real time'}
+setSpeed();
+$('[data-act=speed]').onclick=function(){si=(si+1)%STEPS.length;setSpeed()};
 $('[data-act=restart]').onclick=function(){t=0;sel=null;playing=false;$('[data-act=play]').textContent='▶ Play';draw()};
-var sk=$('[data-act=seek]');sk.max=T;sk.oninput=function(e){t=+e.target.value;draw()};
+var sk=$('[data-act=seek]');sk.max=T;sk.title='The charts hold one point per '+Math.max(1,Math.ceil(T/N))+' s of the run';sk.oninput=function(e){t=+e.target.value;draw()};
 draw();requestAnimationFrame(tick);
 })();
 </script></div>
