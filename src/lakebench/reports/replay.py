@@ -526,17 +526,17 @@ def build_replay(record: Mapping[str, Any]) -> dict[str, Any] | None:
 
 
 _CSS = """
-#lb-replay .headline{display:flex;align-items:end;justify-content:space-between;gap:12px;min-height:40px}
+#lb-replay .headline{display:flex;align-items:end;justify-content:space-between;gap:12px;min-height:40px;margin-bottom:8px}
 #lb-replay .eyebrow{font-size:12px;letter-spacing:.2px;color:#5f8b73;font-weight:700}
 #lb-replay .headline h1{font-size:25px;margin:1px 0 0;letter-spacing:-1.1px}
 #lb-replay .headline-right{display:flex;gap:26px}
 #lb-replay .headline-right .mini{display:grid;gap:2px}
 #lb-replay .headline-right strong{font-size:22px;letter-spacing:-.5px}
 #lb-replay .headline-right span{font-size:11px;color:#7e8b80}
-#lb-replay .canvas{background:#fff;border:1px solid #dce6dd;border-radius:12px;display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+#lb-replay .canvas{background:#fff;border:1px solid #dce6dd;border-radius:12px;display:block;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 #lb-replay .layer-head{flex-shrink:0;min-height:34px;padding:7px 13px;display:flex;align-items:center;justify-content:space-between;gap:8px;border-bottom:1px solid #e4ebe5;font-size:14px;font-weight:750}
 #lb-replay .layer-head small{font-size:12px;color:#75897a;font-weight:450}
-#lb-replay .runsteps{display:flex;gap:10px;padding:14px 16px 10px;flex:1;min-height:260px;align-items:stretch}
+#lb-replay .runsteps{display:flex;gap:10px;padding:14px 16px 10px;flex:1;min-height:300px;align-items:stretch}
 #lb-replay .step{flex:1;min-width:0;padding:16px;background:#fbfcfa;border:1px solid #dce5de;border-radius:12px;display:flex;flex-direction:column;gap:8px;opacity:.8;transition:flex .4s,border .3s,background .3s,opacity .3s;cursor:pointer}
 #lb-replay .step.current{flex:1.9;background:#fff;border:2px solid #6ba886;opacity:1;box-shadow:0 6px 22px #3164461a}
 #lb-replay .step.done{opacity:.9}
@@ -570,12 +570,12 @@ _CSS = """
 #lb-replay .xbox.bottleneck .fill{background:#d98a86}
 #lb-replay .platform-head{display:flex;align-items:center;justify-content:space-between;padding:4px 14px 2px;font-weight:750;font-size:14px}
 #lb-replay .platform-head small{font-size:11px;font-weight:450;color:#859187}
-#lb-replay .platform{margin:0 12px 6px;border:1px solid #dce6dd;background:#fafdfa;border-radius:8px;padding:10px 14px;flex:0 0 232px;min-height:0}
+#lb-replay .platform{margin:0 12px 6px;border:1px solid #dce6dd;background:#fafdfa;border-radius:8px;padding:10px 14px;flex:none;min-height:0;height:auto}
 #lb-replay .platformnav{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
 #lb-replay .platformnav button{border:1px solid #d7e5dc;border-radius:6px;background:#fff;color:#57715e;padding:5px 11px;font-size:12px}
 #lb-replay .platformnav button.on{background:#e3f3e9;border-color:#82b89b;color:#1d6548;font-weight:800}
 #lb-replay .platformnav button:last-of-type{margin-right:auto}
-#lb-replay .traces{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:7px;height:160px}
+#lb-replay .traces{display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:7px;height:140px}
 #lb-replay .graph{border:1px solid #e0ebe2;border-radius:7px;padding:8px;display:flex;flex-direction:column;min-width:0}
 #lb-replay .graph .charttitle{display:flex;align-items:center;justify-content:space-between}
 #lb-replay .graph .charttitle b{font-size:13px}
@@ -587,8 +587,8 @@ _CSS = """
 #lb-replay .controls .time{font:12px ui-monospace,monospace;color:#e9f4ec;min-width:104px;text-align:right}
 #lb-replay .controls .mark{font-size:11px;color:#d6e5d8;white-space:nowrap}
 /* Short viewports: keep everything inside one frame without scroll. */
-@media(max-height:820px){#lb-replay .runsteps{min-height:170px;padding:9px 12px 6px}#lb-replay .step{padding:11px;gap:5px}#lb-replay .step h2{font-size:21px}#lb-replay .art{min-height:46px}#lb-replay .value strong{font-size:24px}#lb-replay .step.current .value strong{font-size:27px}#lb-replay .traces{height:108px}#lb-replay .platform{flex-basis:168px}}
-@media(max-width:900px){#lb-replay .runsteps{overflow-x:auto;min-height:310px}#lb-replay .step{flex:0 0 175px}#lb-replay .step.current{flex:0 0 245px}#lb-replay .execstrip{grid-template-columns:repeat(2,1fr)}#lb-replay .execmark{display:none}#lb-replay .platform{flex:auto}#lb-replay .traces{height:170px}#lb-replay .controls{position:sticky;bottom:0}}
+@media(max-height:820px){#lb-replay .runsteps{min-height:170px;padding:9px 12px 6px}#lb-replay .step{padding:11px;gap:5px}#lb-replay .step h2{font-size:21px}#lb-replay .art{min-height:46px}#lb-replay .value strong{font-size:24px}#lb-replay .step.current .value strong{font-size:27px}#lb-replay .traces{height:108px}}
+@media(max-width:900px){#lb-replay .runsteps{overflow-x:auto;min-height:310px}#lb-replay .step{flex:0 0 175px}#lb-replay .step.current{flex:0 0 245px}#lb-replay .execstrip{grid-template-columns:repeat(2,1fr)}#lb-replay .platform{flex:auto}#lb-replay .traces{height:170px}#lb-replay .controls{position:sticky;bottom:0}}
 
 #lb-replay{font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#1c332c;margin-bottom:1.5rem}
 #lb-replay *{box-sizing:border-box}
@@ -596,16 +596,8 @@ _CSS = """
 #lb-replay button,#lb-replay input{font:inherit}
 #lb-replay button{cursor:pointer}
 #lb-replay button:disabled{cursor:default;opacity:.55}
-#lb-replay .headline{margin-bottom:8px}
 #lb-replay .headline-right strong span{font-size:inherit;color:inherit}
-#lb-replay .canvas{display:block;background:#fff;border:1px solid #dce6dd;border-radius:12px;overflow:hidden}
-#lb-replay .runsteps{min-height:300px}
-#lb-replay .platform{flex:none;height:auto}
-#lb-replay .traces{height:140px}
 #lb-replay .platformnav button:disabled{text-decoration:line-through}
-#lb-replay .job span.fail{color:#b3261e}
-#lb-replay .controls .lb-unit button{background:transparent;color:#fff;border:1px solid #6fbb89;padding:6px 12px;font-size:14px}
-#lb-replay .controls .lb-unit button.on{background:#d4f4dd;border-color:#d4f4dd;color:#1d5439}
 #lb-replay .legend{display:flex;gap:12px;font-size:12px;color:#57715e;min-height:0}
 #lb-replay .legend:empty{display:none}
 #lb-replay .legend i{display:inline-block;width:10px;height:3px;margin-right:5px;vertical-align:middle;border-radius:2px}
@@ -659,10 +651,6 @@ function plot(id,series,mx){
 function lagAt(h){var v=null;for(var i=0;i<h.samples.length;i++){if(D.lag.shift+h.samples[i][0]<=t)v=h.samples[i][1]}return v}
 var LMAX=1;if(D.lag)D.lag.series.forEach(function(sr){sr.samples.forEach(function(p){if(p[1]>LMAX)LMAX=p[1]})});
 function fmtLag(x){return x<120?Math.round(x)+' s':Math.round(x/60)+' min'}
-function lagBars(){D.handoffs.forEach(function(h,i){var v=lagAt(h);
- $('[data-f="'+i+'"]').style.width=(v===null?0:Math.min(100,v/LMAX*100))+'%';
- $('[data-h="'+i+'"]').textContent=v===null?'Waiting':fmtLag(v)+' behind';
- $('[data-s="'+i+'"]').textContent=h.keeps_up===false?'falls behind the arrival rate':h.keeps_up?'keeps up':''})}
 var LCOL=['#4b9d78','#be904a','#538da9'];
 function plotLag(){var o='<rect width="600" height="80" fill="#f4f8f4"/>'+shade(),cols=LCOL;
  D.lag.series.forEach(function(sr,k){var d='';sr.samples.forEach(function(p){if(D.lag.shift+p[0]>t)return;var x=5+590*(D.lag.shift+p[0])/T,y=73-p[1]/LMAX*61;d+=(d?'L':'M')+x.toFixed(1)+','+y.toFixed(1)});if(!d)return;
@@ -793,7 +781,7 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
     # stage, each filling over its own recorded window.
     if data.get("kind") == "sustained":
         execboxes = "".join(
-            f'<div class="xbox" data-x="{i}" data-lagh="{i}">'
+            f'<div class="xbox" data-x="{i}">'
             f"<b>{e(h['label'])}</b>"
             f'<div class="track"><div class="fill" data-xf="{i}"></div></div>'
             f'<strong data-xv="{i}">not running</strong><span data-xs="{i}">no lag recorded yet</span></div>'
@@ -801,7 +789,7 @@ def render_replay(data: Mapping[str, Any], pace: Any = None) -> str:
         )
     else:
         execboxes = "".join(
-            f'<div class="xbox" data-x="{i}" data-lagh="-1">'
+            f'<div class="xbox" data-x="{i}">'
             f"<b>{e(stages[i]['phase'])} → {e(stages[i + 1]['phase'])}</b>"
             f'<div class="track"><div class="fill" data-xf="{i}"></div></div>'
             f'<strong data-xv="{i}">not running</strong><span data-xs="{i}">no lag recorded yet</span></div>'
