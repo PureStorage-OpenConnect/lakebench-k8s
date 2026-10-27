@@ -25,13 +25,27 @@ class _RecordingSpark:
 
 
 def test_ensure_namespaces_creates_each_namespace_once():
-    from common import ensure_namespaces
+    from common import ensure_namespaces, ensure_namespaces_for_ddl
 
+    # From an explicit table list: one CREATE NAMESPACE per distinct namespace.
     spark = _RecordingSpark()
     ensure_namespaces(spark, "lakehouse", ("silver.transactions", "silver.edges", "gold.alerts"))
     assert spark.sql_calls == [
         "CREATE NAMESPACE IF NOT EXISTS lakehouse.gold",
         "CREATE NAMESPACE IF NOT EXISTS lakehouse.silver",
+    ]
+
+    # From DDL text: the namespaces come from the CREATE TABLE statements only.
+    spark = _RecordingSpark()
+    ddls = (
+        "CREATE TABLE IF NOT EXISTS lakehouse.gold.alerts (a INT)",
+        "\nCREATE TABLE IF NOT EXISTS lakehouse.ops.risk_scores (a INT)",
+        "not a create statement",
+    )
+    ensure_namespaces_for_ddl(spark, "lakehouse", ddls)
+    assert spark.sql_calls == [
+        "CREATE NAMESPACE IF NOT EXISTS lakehouse.gold",
+        "CREATE NAMESPACE IF NOT EXISTS lakehouse.ops",
     ]
 
 
@@ -62,19 +76,3 @@ def test_polaris_bronze_table_keeps_the_catalog_default(monkeypatch):
     mod = _bvf(monkeypatch, "polaris")
     assert mod._bronze_location() is None
     assert mod._location_clause() == ""
-
-
-def test_namespaces_come_from_the_ddl_itself():
-    from common import ensure_namespaces_for_ddl
-
-    spark = _RecordingSpark()
-    ddls = (
-        "CREATE TABLE IF NOT EXISTS lakehouse.gold.alerts (a INT)",
-        "\nCREATE TABLE IF NOT EXISTS lakehouse.ops.risk_scores (a INT)",
-        "not a create statement",
-    )
-    ensure_namespaces_for_ddl(spark, "lakehouse", ddls)
-    assert spark.sql_calls == [
-        "CREATE NAMESPACE IF NOT EXISTS lakehouse.gold",
-        "CREATE NAMESPACE IF NOT EXISTS lakehouse.ops",
-    ]
