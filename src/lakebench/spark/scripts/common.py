@@ -53,22 +53,20 @@ def assert_progress(rows_written, job_type):
 
 
 def assert_preflight_rows(df, name, minimum=1):
-    """A1-atomic + F2: assert a silver DataFrame has at least ``minimum`` rows
-    BEFORE any silver table has been written for the cycle.
+    """Assert a silver DataFrame has at least ``minimum`` rows BEFORE any
+    silver table has been written for the cycle.
 
     ``df`` is a lazily-built Spark DataFrame; ``name`` is the target silver
-    table (used verbatim in the abort message). ``minimum`` defaults to 1 so
-    the assertion enforces the F2 ">= 1 rows per silver frame" contract; a
-    caller with a known lower bound (e.g. entities >= unique parties count
-    from bronze) may pass a tighter minimum.
+    table (used verbatim in the abort message). ``minimum`` defaults to 1
+    (every silver frame has rows); a caller with a known lower bound (e.g.
+    entities >= unique parties count from bronze) may pass a tighter minimum.
 
     Raises ``SilverAbort`` if the row count is below ``minimum``. The caller
     is expected to run this against every bronze-derived silver frame in a
     pre-flight pass so that any failure aborts the run before the first
-    ``_replace_data`` write -- the whole point of A1-atomic is that a run
-    that would produce an empty silver table for any frame refuses to
-    write ANY silver table, so downstream consumers never see a partial
-    silver set.
+    ``_replace_data`` write: a run that would produce an empty silver table
+    for any frame writes no silver table at all, so downstream consumers
+    never see a partial silver set.
 
     Returns the observed row count so the caller can log a per-table
     "staged N rows" line before the writes begin.
@@ -83,20 +81,19 @@ def assert_preflight_rows(df, name, minimum=1):
 
 
 def emit_stream_scale_admission(measured_envelope_scale=10):
-    """Emit the G5 scale cap and admission labels (invariant 6).
+    """Emit the stream scale cap and admission labels.
 
     ``silver_stream_scale_cap`` names the measured envelope this profile
-    was tuned against (v1.6: scale 10 for all three silver streams, see
-    the ``_JOB_PROFILES["silver-stream"]`` docstring in
+    was tuned against (scale 10 for all three silver streams, see the
+    ``_JOB_PROFILES["silver-stream"]`` docstring in
     ``modules/pipeline_engines/spark/job.py``). ``silver_stream_scale_admission``
     is a decision, not a static string:
 
     - ``ok`` when the deployment scale (LB_SCALE, threaded from
       job.py._build_env_vars) is <= the measured envelope;
     - ``labelled_beyond_measured_envelope`` when it exceeds it. The stream
-      still runs -- refusal is the responsibility of D-safe (AML) or a
-      future config gate -- but downstream reports MUST NOT read the
-      numbers as infrastructure performance without the label.
+      still runs, but downstream reports must not read the numbers as
+      infrastructure performance without the label.
 
     A parse error on LB_SCALE (unset, non-numeric) falls to ``labelled``
     on the safe side: an unknown scale should not silently look like an
@@ -117,7 +114,7 @@ def emit_stream_scale_admission(measured_envelope_scale=10):
 
 
 # ---------------------------------------------------------------------------
-# E1: shared entity_type derivation used by both batch and stream silver.
+# Shared entity_type derivation used by both batch and stream silver.
 # ---------------------------------------------------------------------------
 #
 # The regex is a corporate-suffix heuristic applied to the END of the upper-
@@ -130,8 +127,8 @@ def emit_stream_scale_admission(measured_envelope_scale=10):
 # One constant, two call sites: ``derive_entity_type`` returns a pyspark
 # Column expression (batch ``build_entities``); ``entity_type_from_name_sql``
 # returns a SQL fragment (the stream MERGE that re-derives entity_type from
-# ``LEAST(target.name, source.name)``). Sharing the constant is what E1's
-# unit test asserts, so batch and stream cannot drift.
+# ``LEAST(target.name, source.name)``). Sharing the constant keeps batch and
+# stream from drifting.
 _ENTITY_TYPE_COMPANY_SUFFIX_REGEX = (
     r"(LTD|LIMITED|INC|CORP|LLC|GMBH|AG|PLC|SA|SARL|BV|BANK|CAPITAL|"
     r"HOLDINGS|GROUP|INTERNATIONAL|COMPANY|CO)$"
@@ -167,8 +164,7 @@ def entity_type_from_name_sql(name_sql_expr):
     ``name_sql_expr`` is any SQL expression that evaluates to the entity's
     name (e.g. ``LEAST(t.name, s.name)`` inside a MERGE UPDATE). The
     returned string is a CASE expression that reduces to 'Company' or
-    'Person' using the same regex ``derive_entity_type`` applies. E1's
-    unit test asserts both helpers reference ``_ENTITY_TYPE_COMPANY_SUFFIX_REGEX``.
+    'Person' using the same regex ``derive_entity_type`` applies.
     """
     regex = _ENTITY_TYPE_COMPANY_SUFFIX_REGEX
     return f"CASE WHEN upper({name_sql_expr}) RLIKE '{regex}' THEN 'Company' ELSE 'Person' END"
@@ -278,26 +274,26 @@ def _is_concurrent_modification(exc):
     )
 
 
-def ensure_column_with_retry(
-    spark, fq_table, name, sql_type, *, max_attempts=3, backoff_seconds=0.5
-):
-    """I9: ``ensure_column`` with bounded retry across concurrent writers.
+def ensure_column(spark, fq_table, name, sql_type, *, max_attempts=3, backoff_seconds=0.5):
+    """Add a nullable column to an existing table when it is missing.
 
-    Multiple silver drivers (batch + stream, or several stream instances on a
+    Reads the live schema first: Spark has no ``ADD COLUMN IF NOT EXISTS``
+    for columns (that clause is for partitions). For a reused catalog whose
+    table predates the column, the next write would otherwise fail on a
+    schema mismatch. Returns True when the column was added.
+
+    Several silver drivers (batch + stream, or several stream instances on a
     reused catalog) race on ``ALTER TABLE ... ADD COLUMNS`` at startup. The
     loser's commit fails with a Java ``ConcurrentModificationException``
     (Iceberg) or a Delta metadata-conflict exception, and the whole silver run
     then crashes before it processes a batch.
 
     Retries up to ``max_attempts`` times on that error surface only, with
-    ``backoff_seconds`` (linear) between attempts. Between attempts we re-read
-    the schema: if the concurrent writer already added the column, we return
-    ``False`` (column-already-present branch) rather than re-issuing the
-    ``ALTER``. Any other exception surfaces immediately -- a wrong-type ALTER
-    is a code bug, not a race.
+    ``backoff_seconds`` between attempts. Between attempts the schema is
+    re-read: if the concurrent writer already added the column, returns
+    False rather than re-issuing the ``ALTER``. Any other exception
+    surfaces immediately -- a wrong-type ALTER is a code bug, not a race.
     """
-    import time as _time
-
     if name in spark.table(fq_table).columns:
         return False
     last_exc = None
@@ -327,57 +323,37 @@ def ensure_column_with_retry(
                     f"(attempt {attempt}/{max_attempts}); retrying"
                 )
                 if backoff_seconds > 0:
-                    _time.sleep(backoff_seconds)
+                    time.sleep(backoff_seconds)
     # Bounded retries exhausted; propagate the last conflict so the caller
     # sees a real failure instead of a silent no-op.
     assert last_exc is not None
     raise last_exc
 
 
-def ensure_column(spark, fq_table, name, sql_type):
-    """Add a nullable column to an existing table when it is missing.
-
-    Reads the live schema first: Spark has no ``ADD COLUMN IF NOT EXISTS``
-    for columns (that clause is for partitions), so the unconditional form
-    failed with a parse error on every run and was silently swallowed. For a
-    reused catalog whose table predates the column, that left the next write
-    to fail on a schema mismatch. Returns True when the column was added.
-
-    Delegates to ``ensure_column_with_retry`` so every runtime caller inherits
-    the I9 race guard: two silver drivers starting against the same catalog
-    (batch + stream, or two streams post-restart) can both call this and only
-    one issues the ``ALTER``. The retry is bounded (3 attempts, 0.5s backoff),
-    then propagates.
-    """
-    return ensure_column_with_retry(spark, fq_table, name, sql_type)
-
-
 # ---------------------------------------------------------------------------
-# B5: bronze-checkpoint-reset guard (C360 silver streams)
+# Bronze-reset guard (C360 silver streams)
 # ---------------------------------------------------------------------------
 #
 # A Structured Streaming checkpoint stores the source-side snapshot id of every
 # committed micro-batch. When an operator wipes bronze and re-populates it
-# (DROP + re-ingest, or truncate-and-re-ingest), a brand-new snapshot lineage
-# appears under the same table name, and the OLD checkpoint's saved snapshot
-# id is no longer on the current ancestor chain. Iceberg then either fails
-# with "Cannot find snapshot" or, worse in the Delta case, silently starts
-# from version 0 and re-writes every row silver already wrote. Upstream
-# Iceberg PR #17599 tracks the same class of bug; no native helper today.
+# (DROP + re-ingest), a new lineage appears under the same table name and the
+# old checkpoint's offsets point into a lineage that no longer exists. Iceberg
+# then fails with "Cannot find snapshot" or, worse in the Delta case, silently
+# starts from version 0 and re-writes every row silver already wrote.
 #
-# The guard writes a small JSON sidecar next to the checkpoint on first start
-# with the current bronze snapshot fingerprint (Iceberg snapshot_id or Delta
-# commit version); on every subsequent start it re-reads the fingerprint and
-# compares:
+# The guard keeps a small JSON sidecar next to the checkpoint holding the
+# bronze position seen at the last start: the Iceberg snapshot id, or the
+# Delta commit version and table id. On each start it compares that with
+# bronze now:
 #
-# * MATCH -> continue silently. The stream is resuming from the same lineage.
-# * MISMATCH -> raise SilverAbort telling the operator to also reset silver.
-#   A checkpoint whose bronze source snapshot no longer exists cannot resume
-#   safely, and continuing would double-write or crash.
-# * SIDECAR MISSING -> fail-open (write it, log a warning, continue). This is
-#   the upgrade path from an older release. Refusing here would break every
-#   running deployment on first restart; the operator can rely on the guard
-#   from the next start onward.
+# * SAME LINEAGE -> resume and save the current position. Bronze commits on
+#   every ingest batch, so a position that moved forward is the normal case.
+# * RESET -> raise SilverAbort telling the operator to also reset silver.
+#   Iceberg: the saved snapshot is no longer an ancestor of the current one.
+#   Delta: the table id changed, or the saved version is ahead of the current.
+# * CANNOT TELL -> fail open with a log line: sidecar missing (written now),
+#   bronze unreadable, or an Iceberg saved snapshot that snapshot expiry has
+#   removed from the history.
 #
 # The helper is shared across silver_stream.py (Iceberg) and
 # silver_stream_delta.py (Delta) so one bug fix covers both formats.
@@ -388,36 +364,37 @@ def _bronze_fingerprint_sidecar_path(checkpoint_location):
     return checkpoint_location.rstrip("/") + "/bronze_fingerprint.json"
 
 
-def _read_bronze_snapshot_fingerprint(spark, bronze_tbl, source_format):
-    """Current bronze snapshot fingerprint as a string, or None if unavailable.
+def _read_bronze_lineage(spark, bronze_tbl, source_format):
+    """Bronze's current lineage as a dict, or None if unavailable.
 
-    * Iceberg: current-ancestor snapshot id from ``<table>.history``.
-    * Delta: latest commit version from ``DESCRIBE HISTORY``.
-    Any catalog error returns None -- the caller falls back to the fail-open
-    policy (no sidecar written, warning logged) so a transient catalog failure
-    never crashes a running stream.
+    ``fingerprint`` is the position the sidecar saves, as a string: the
+    current Iceberg snapshot id or the latest Delta commit version.
+
+    * Iceberg: ``ancestors`` holds the retained snapshot ids on the current
+      ancestor chain; ``truncated`` is true when snapshot expiry removed the
+      start of that chain (its oldest retained snapshot still has a parent).
+    * Delta: ``table_id`` is the id from ``DESCRIBE DETAIL``, which a DROP and
+      re-create changes.
+
+    Any catalog error returns None: the caller fails open so a transient
+    catalog failure never crashes a running stream.
     """
     try:
         if source_format == "delta":
-            rows = spark.sql(f"DESCRIBE HISTORY {bronze_tbl} LIMIT 1").collect()
-            if not rows:
-                return None
-            r = rows[0]
-            # Delta history row exposes ``version``; support both index and key.
-            try:
-                v = r["version"]
-            except Exception:  # noqa: BLE001
-                v = r[0]
-            return None if v is None else str(v)
-        # Default: Iceberg.
+            version = delta_table_version(spark, bronze_tbl)
+            table_id = spark.sql(f"DESCRIBE DETAIL {bronze_tbl}").collect()[0]["id"]
+            return {"fingerprint": str(version), "table_id": table_id}
         rows = spark.sql(
-            f"SELECT snapshot_id FROM {bronze_tbl}.history "
-            "WHERE is_current_ancestor ORDER BY made_current_at DESC LIMIT 1"
+            f"SELECT snapshot_id, parent_id FROM {bronze_tbl}.history "
+            "WHERE is_current_ancestor ORDER BY made_current_at"
         ).collect()
         if not rows:
             return None
-        v = rows[0][0]
-        return None if v is None else str(v)
+        return {
+            "fingerprint": str(rows[-1][0]),
+            "ancestors": {str(r[0]) for r in rows},
+            "truncated": rows[0][1] is not None,
+        }
     except Exception as e:  # noqa: BLE001
         log(f"[b5] bronze snapshot lookup failed on {bronze_tbl}: {one_line(e)}")
         return None
@@ -470,22 +447,33 @@ def check_bronze_fingerprint(
     source_format="iceberg",
     fs=None,
 ):
-    """B5 guard: refuse to resume a silver stream when bronze was reset.
+    """Refuse to resume a silver stream when bronze was reset.
 
     ``source_format`` is ``"iceberg"`` or ``"delta"`` -- the format of the
     bronze streaming source, not silver's own format. ``fs`` is a sidecar
     filesystem stub (used by tests); the default writes the JSON next to the
     Spark checkpoint through the same Hadoop-FS the checkpoint uses. Raises
-    ``SilverAbort`` on a real fingerprint mismatch; every other failure mode
-    is fail-open with a warning so a transient catalog error never crashes
-    a running stream.
+    ``SilverAbort`` when bronze's lineage no longer contains the saved
+    position; every other failure mode is fail-open with a warning so a
+    transient catalog error never crashes a running stream.
     """
     import json as _json
 
     sidecar_path = _bronze_fingerprint_sidecar_path(checkpoint_location)
     sidecar_fs = fs if fs is not None else _HadoopSidecarFS(spark)
 
-    current = _read_bronze_snapshot_fingerprint(spark, bronze_tbl, source_format)
+    lineage = _read_bronze_lineage(spark, bronze_tbl, source_format)
+    current = None if lineage is None else lineage["fingerprint"]
+
+    def save():
+        payload = {
+            "bronze_table": bronze_tbl,
+            "source_format": source_format,
+            "bronze_snapshot_fingerprint": current,
+            "bronze_table_id": lineage.get("table_id"),
+            "written_by": "check_bronze_fingerprint",
+        }
+        sidecar_fs.write(sidecar_path, _json.dumps(payload).encode("utf-8"))
 
     exists = False
     try:
@@ -510,7 +498,22 @@ def check_bronze_fingerprint(
                 "keeping sidecar untouched"
             )
             return
-        if saved_s != current:
+        saved_id = payload.get("bronze_table_id")
+        if source_format == "delta":
+            reset = (
+                (saved_id is not None and saved_id != lineage["table_id"])
+                or not (saved_s or "").isdigit()
+                or int(saved_s) > int(current)
+            )
+        else:
+            reset = saved_s not in lineage["ancestors"]
+            if reset and lineage["truncated"]:
+                log(
+                    f"[b5] saved snapshot {saved_s} is no longer in the history of "
+                    f"{bronze_tbl} (expired); cannot check the lineage, resuming stream"
+                )
+                reset = False
+        if reset:
             raise SilverAbort(
                 "B5: bronze snapshot fingerprint mismatch at "
                 f"{sidecar_path}: sidecar={saved_s!r} vs current={current!r} "
@@ -519,9 +522,14 @@ def check_bronze_fingerprint(
                 "silver (drop the silver table and this checkpoint) before restarting."
             )
         log(
-            f"[b5] bronze fingerprint match on {bronze_tbl} "
-            f"(fingerprint={current}); resuming stream"
+            f"[b5] bronze lineage unchanged on {bronze_tbl} "
+            f"(saved={saved_s}, current={current}); resuming stream"
         )
+        if saved_s != current or saved_id != lineage.get("table_id"):
+            try:
+                save()
+            except Exception as e:  # noqa: BLE001
+                log(f"[b5] sidecar write failed at {sidecar_path}: {one_line(e)}; fail-open")
         return
 
     # Sidecar missing: fail-open. Only write it when we have a real
@@ -533,13 +541,7 @@ def check_bronze_fingerprint(
         )
         return
     try:
-        payload = {
-            "bronze_table": bronze_tbl,
-            "source_format": source_format,
-            "bronze_snapshot_fingerprint": current,
-            "written_by": "check_bronze_fingerprint",
-        }
-        sidecar_fs.write(sidecar_path, _json.dumps(payload).encode("utf-8"))
+        save()
         log(
             f"[b5] WARNING: sidecar {sidecar_path} was missing; wrote current "
             f"fingerprint ({current}). Guard is active from next start onward."
@@ -548,44 +550,17 @@ def check_bronze_fingerprint(
         log(f"[b5] sidecar write failed at {sidecar_path}: {one_line(e)}; fail-open")
 
 
-# H4: silver-batch fat-finger guard.
+# Silver-batch guard against overwriting a live stream.
 #
 # silver_build_financial's batch overwrite of silver.transactions et al. wipes
-# every row silver_stream_financial has written so far (docstring warning at
-# ``silver_stream_financial.py:46-53``). H4 converts that warning into a
-# runtime refusal: the stream writes a ``_STARTED`` marker into its
-# checkpoint directory on start-up and removes it on clean shutdown; the
-# batch main checks for the marker at start-up and raises ``SilverAbort``
-# when it is present, unless ``--force-rebuild`` (LB_FORCE_REBUILD=1) is
-# passed.
-#
-# Design choice: a plain marker file, not an extension of the B5 sidecar
-# with a ``last_batch_at`` heartbeat. Reasoning:
-#
-# * A heartbeat needs a threshold, per-micro-batch writes into a JSON
-#   sidecar shared with B5's fingerprint contract, and separate reader
-#   logic that reasons about "still running vs. crashed a while ago".
-#   Three moving parts (writer + threshold + reader) instead of one.
-# * The marker file is a single existence probe. Stream writes on
-#   startup, removes on clean shutdown; anything else (crash, kill -9,
-#   pod eviction) leaves it in place, which is the desired semantics --
-#   the batch operator should not silently overwrite tables the stream
-#   was in the middle of writing. ``--force-rebuild`` is the escape
-#   hatch after the operator has cleaned up.
-# * Independent of B5's semantics: extending the sidecar would couple
-#   the fingerprint check (whether bronze was reset) with the fat-finger
-#   check (whether a stream is live) in one file, and every change to
-#   either would touch the other.
-#
-# Fail-open policy (mirrors B5):
-#
-# * marker present -> ``SilverAbort`` naming the checkpoint path.
-# * marker absent, or checkpoint directory absent -> proceed. Fresh
-#   deployment, or the stream shut down cleanly.
-# * probe raises (transient FS failure) -> log a warning and proceed.
-#   H4 is defense-in-depth, not the only guard; a broken S3 listing
-#   during startup MUST NOT convert a batch outage into a chain of
-#   batch outages.
+# every row silver_stream_financial has written so far. The stream writes a
+# ``_STARTED`` marker into its checkpoint directory on start-up and removes it
+# on clean shutdown; a crash, kill -9 or eviction leaves it in place. The
+# batch main refuses to run while the marker is present unless
+# ``--force-rebuild`` (LB_FORCE_REBUILD=1) is passed. A plain marker, not a
+# heartbeat in the bronze-reset sidecar: one existence probe, no staleness
+# threshold. A failed probe logs and lets the batch proceed, so a broken S3
+# listing at start-up does not block every later batch.
 
 
 def _stream_started_marker_path(checkpoint_location):
@@ -593,7 +568,7 @@ def _stream_started_marker_path(checkpoint_location):
     return checkpoint_location.rstrip("/") + "/_STARTED"
 
 
-def mark_stream_started(spark, checkpoint_location, *, fs=None, payload=None):
+def mark_stream_started(spark, checkpoint_location):
     """Write the ``_STARTED`` marker on stream start-up. Fail-open on error.
 
     Called from the stream main after the Structured Streaming query has
@@ -604,17 +579,15 @@ def mark_stream_started(spark, checkpoint_location, *, fs=None, payload=None):
     """
     if not checkpoint_location:
         return
-    sidecar_fs = fs if fs is not None else _HadoopSidecarFS(spark)
     marker_path = _stream_started_marker_path(checkpoint_location)
-    body = payload if payload is not None else b"lakebench-silver-stream-financial"
     try:
-        sidecar_fs.write(marker_path, body)
+        _HadoopSidecarFS(spark).write(marker_path, b"lakebench-silver-stream-financial")
         log(f"[h4] wrote stream-started marker at {marker_path}")
     except Exception as e:  # noqa: BLE001
         log(f"[h4] marker write failed at {marker_path}: {one_line(e)}; continuing")
 
 
-def clear_stream_started_marker(spark, checkpoint_location, *, fs=None):
+def clear_stream_started_marker(spark, checkpoint_location):
     """Remove the ``_STARTED`` marker on clean shutdown. Fail-open on error.
 
     Called from the stream main's shutdown path (SIGTERM / SIGINT handler
@@ -625,10 +598,9 @@ def clear_stream_started_marker(spark, checkpoint_location, *, fs=None):
     """
     if not checkpoint_location:
         return
-    sidecar_fs = fs if fs is not None else _HadoopSidecarFS(spark)
     marker_path = _stream_started_marker_path(checkpoint_location)
     try:
-        removed = sidecar_fs.delete(marker_path)
+        removed = _HadoopSidecarFS(spark).delete(marker_path)
         if removed:
             log(f"[h4] cleared stream-started marker at {marker_path}")
     except Exception as e:  # noqa: BLE001
@@ -642,7 +614,7 @@ def refuse_batch_while_stream_active(
     force_rebuild,
     fs=None,
 ):
-    """H4 fat-finger guard called from ``silver_build_financial.main()``.
+    """Live-stream guard called from ``silver_build_financial.main()``.
 
     Raises ``SilverAbort`` when the AML stream's ``_STARTED`` marker is
     present at ``checkpoint_location`` and ``force_rebuild`` is False.
@@ -767,13 +739,14 @@ def apply_silver_write_mode(spark, fq_table, mode):
     return True
 
 
-def _path_size_gb_impl(spark, uri):
+def path_size_gb_strict(spark, uri):
     """Total bytes under a Hadoop-FS path or glob, in GiB.
 
     The file system comes from ``Path.getFileSystem``: ``java.net.URI(uri)``
     rejects glob characters such as ``[0-9]`` (common.c360_bronze_path).
-    Raises the underlying Hadoop exception on listing failure; wrappers decide
-    whether to swallow it (path_size_gb) or propagate it (path_size_gb_strict).
+    Raises the underlying Hadoop exception on listing failure, so silver
+    mains surface an S3 outage as a retryable driver error rather than as
+    an "empty bronze" exit; ``path_size_gb`` swallows it and returns 0.0.
     """
     jvm = spark._jvm
     hconf = spark._jsc.hadoopConfiguration()
@@ -797,22 +770,10 @@ def path_size_gb(spark, uri):
     ``path_size_gb_strict`` instead.
     """
     try:
-        return _path_size_gb_impl(spark, uri)
+        return path_size_gb_strict(spark, uri)
     except Exception as e:  # noqa: BLE001
         log(f"[metrics] size of {uri} unavailable: {one_line(e)}")
         return 0.0
-
-
-def path_size_gb_strict(spark, uri):
-    """Total bytes under a Hadoop-FS path or glob, in GiB.
-
-    A6 (silver-plan): silver mains call this variant so an S3 outage surfaces
-    as a retryable driver error rather than as an "empty bronze" exit-1. The
-    non-strict ``path_size_gb`` returns 0.0 on any exception, which made a
-    transient listing failure indistinguishable from a truly empty bronze
-    path and led to a silent no-op silver run.
-    """
-    return _path_size_gb_impl(spark, uri)
 
 
 def _describe_table(spark, fq_table):
@@ -841,8 +802,6 @@ def _describe_table(spark, fq_table):
 def _norm_uri(uri):
     """One spelling per location: s3a:// and s3:// compare equal, and so do
     file:/x and file:///x (Hadoop reports either)."""
-    import re
-
     m = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*):/*(.*)$", uri.strip())
     if not m:
         return uri.rstrip("/") + "/"
@@ -883,6 +842,16 @@ def _hadoop_fs(spark, uri):
     target = uri.replace("s3://", "s3a://", 1)
     fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(target), hconf)
     return fs, jvm.org.apache.hadoop.fs.Path(target)
+
+
+def _delete_uri(spark, path: str, who: str) -> None:
+    """Recursively delete ``path`` through the Hadoop FileSystem. Best effort."""
+    try:
+        fs, p = _hadoop_fs(spark, path)
+        if fs.exists(p):
+            fs.delete(p, True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[{who}] cleanup of {path} failed: {e}")
 
 
 def _delete_children(spark, location, keep=()):
@@ -1035,21 +1004,28 @@ def iceberg_table_stats(spark, fq_table):
         return 0, 0.0
 
 
-def log_job_metrics(job, *, input_size_gb, input_rows, output_rows, elapsed_seconds, **extra):
+def log_job_metrics(
+    job, *, input_size_gb, input_rows, output_rows, elapsed_seconds, output_bytes=True, **extra
+):
     """Emit the ``=== JOB METRICS ===`` block the metrics collector parses.
 
-    ``extra`` carries per-table row counts (A2) and other numeric metrics
+    ``extra`` carries per-table row counts and other numeric metrics
     silver writes alongside the standard four. Keys land in JobMetrics
     via `_apply_metric`'s `silver_*_rows` allowlist; other keys are stored
     on JobMetrics.extra_metrics. Integer values are emitted as integers,
     floats as three-decimal, strings are passed verbatim.
+
+    ``output_bytes=False`` leaves out the ``output_bytes_*`` lines. Reading
+    them walks every job the driver's status store retains, so a caller
+    that emits a block per micro-batch passes False.
     """
     log(f"=== JOB METRICS: {job} ===")
     log(f"input_size_gb: {input_size_gb:.3f}")
     log(f"input_rows: {int(input_rows)}")
     log(f"output_rows: {int(output_rows)}")
     log(f"elapsed_seconds: {elapsed_seconds:.1f}")
-    log_driver_output_bytes()
+    if output_bytes:
+        log_driver_output_bytes()
     for key, value in extra.items():
         if isinstance(value, bool):
             log(f"{key}: {'true' if value else 'false'}")
@@ -1079,8 +1055,6 @@ def _push_stage_metrics(job, input_size_gb, input_rows, output_rows, elapsed_sec
     slow or unresolvable gateway can never stall the streaming trigger. All
     errors are swallowed.
     """
-    import os
-
     url = os.environ.get("LB_PUSHGATEWAY_URL", "").strip()
     if not url:
         return
@@ -1225,11 +1199,6 @@ class TtdBaseline:
         self._carry = None
         self._carries = 0
         self._last_good = None if after_snapshot == TTD_SNAPSHOT_UNKNOWN else after_snapshot
-
-
-def parse_size_gb(s):
-    """Parse size string to GB."""
-    return float(s)
 
 
 # ============================================================
@@ -1448,14 +1417,14 @@ def data_clock_date(df, ts_col="event_timestamp"):
 
 
 SILVER_STATE_CONFIGMAP_NAME = "lakebench-silver-state"
-"""C2 (silver-plan): per-deployment ConfigMap that carries the bronze-side
+"""Per-deployment ConfigMap that carries the bronze-side
 data clock (``bronze_data_clock``) that bronze-verify writes and job.py
 reads to build the silver env bundle. The deployer creates it on greenfield
 deploy so bronze-verify's write is a plain update, not a first create."""
 
 
 def write_bronze_data_clock(namespace, bronze_max_ts):
-    """C2 (silver-plan): record bronze's newest observed event date to the
+    """Record bronze's newest observed event date to the
     ``lakebench-silver-state`` ConfigMap so job.py can resolve LB_DATA_CLOCK
     for silver jobs without a Spark session in the submit path.
 
@@ -1463,8 +1432,8 @@ def write_bronze_data_clock(namespace, bronze_max_ts):
     holds (``datetime.datetime`` or ``datetime.date``); this function
     computes the ISO date and stores it under the ``bronze_data_clock`` key.
 
-    A failure to write is logged and swallowed. Silver's C2 resolver falls
-    back through ``datagen.timestamp_start`` and today at 00:00 UTC when the
+    A failure to write is logged and swallowed. job.py's data-clock
+    resolution falls back through ``datagen.timestamp_start`` and today at 00:00 UTC when the
     key is missing, so a transient K8s error at bronze-verify time never
     blocks a silver run.
     """
@@ -1523,7 +1492,7 @@ def write_bronze_data_clock(namespace, bronze_max_ts):
                 log(f"[silver-state] patch failed ({e.status}): {e.reason}; skipping")
                 return
         # Not found: create it. The deployer normally seeds this on greenfield;
-        # a create here is a safety net for pre-C2 deployments.
+        # a create here covers a deployment made before the deployer did.
         from kubernetes.client.models import V1ConfigMap, V1ObjectMeta
 
         body = V1ConfigMap(
@@ -1564,9 +1533,9 @@ def resolve_data_clock(df_fallback=None, strict=False):
     rerun reproduces the same scores (GOALS P4.2). Only when it is unset is
     it measured as max(event date) of ``df_fallback``. Logs which was used.
 
-    ``strict=True`` (C1, silver-plan): C360 silver mains use this. C2 sets
-    LB_DATA_CLOCK unconditionally in the silver env bundle (with a today
-    fallback), so seeing it unset here means the env plumbing broke -- a
+    ``strict=True``: C360 silver mains use this. job.py sets LB_DATA_CLOCK
+    unconditionally in the silver env bundle (with a today fallback), so
+    seeing it unset here means the env plumbing broke -- a
     silent fallback would ship a NULL or measured-per-batch anchor,
     invalidating cross-cycle recency scoring. Raise ``SilverAbort`` instead.
     AML mains keep ``strict=False``: they do not use customer_recency_score,
@@ -1699,46 +1668,6 @@ def delta_idempotent_options(spark, app, batch_id):
     }
 
 
-def welford_merge(n_a, mean_a, M2_a, n_b, mean_b, M2_b):
-    """Parallel Welford merge of two (n, mean, M2) blocks.
-
-    D-full-profiles: ``silver.entity_profiles.avg_amount_usd`` and
-    ``stddev_amount_usd`` are maintained incrementally in continuous mode.
-    Each micro-batch computes its own (n_b, mean_b, M2_b) over the
-    originator-side amounts for the entities it touches; this helper folds
-    that batch block into the profile row's target block using the parallel
-    recurrence (Chan et al., 1979; the Wikipedia
-    "Algorithms for calculating variance -- Parallel algorithm").
-
-    Given target block ``a`` and batch block ``b``::
-
-        n   = n_a + n_b
-        d   = mean_b - mean_a
-        mean = mean_a + d * n_b / n
-        M2  = M2_a + M2_b + d * d * n_a * n_b / n
-
-    Sample stddev is then ``sqrt(M2 / (n - 1))`` -- pyspark's ``stddev`` is
-    ``stddev_samp``, so the batch main writes M2 as ``variance * (n - 1)``
-    for parity.
-
-    Returns ``(n, mean, M2)`` with the empty-block identity: merging with
-    ``(0, 0.0, 0.0)`` on either side returns the other block unchanged.
-    Callers must feed 0.0 (not None) for M2 when n <= 1 (variance is
-    undefined for a single point; M2 is 0 by definition).
-    """
-    n_a = int(n_a or 0)
-    n_b = int(n_b or 0)
-    if n_a == 0:
-        return n_b, float(mean_b or 0.0), float(M2_b or 0.0)
-    if n_b == 0:
-        return n_a, float(mean_a or 0.0), float(M2_a or 0.0)
-    n = n_a + n_b
-    delta = float(mean_b) - float(mean_a)
-    mean = float(mean_a) + delta * n_b / n
-    M2 = float(M2_a) + float(M2_b) + delta * delta * n_a * n_b / n
-    return n, mean, M2
-
-
 def delta_batch_txn_options(app, rebuild_epoch, cycle):
     """Delta writer options that make a batch cycle-append exactly-once (B1).
 
@@ -1807,107 +1736,6 @@ def checkpoint_is_fresh(spark, checkpoint_location):
     return not fs.exists(offsets) or len(fs.listStatus(offsets)) == 0
 
 
-def committed_source_snapshot_id(spark, checkpoint_location):
-    """The Iceberg snapshot id the newest committed offset of the streaming
-    checkpoint at ``checkpoint_location`` is positioned on, or None when the
-    checkpoint is fresh, absent or its offset is not an Iceberg source offset.
-
-    A structured-streaming checkpoint writes one file per planned batch under
-    ``offsets/`` named by batch id; the highest-numbered one is the latest
-    planned offset. Spark's offset file is a metadata line, an optional empty
-    line, then one source offset per line. The Iceberg streaming source writes
-    its offset as JSON carrying ``snapshot_id`` (the snapshot it has read
-    through). Maintenance uses this to hold ``expire_snapshots`` back from a
-    snapshot a live stream still needs: expiring it kills the stream.
-    """
-    import json as _json
-
-    jvm = spark._jvm
-    hconf = spark._jsc.hadoopConfiguration()
-    offsets = jvm.org.apache.hadoop.fs.Path(checkpoint_location.rstrip("/") + "/offsets")
-    fs = offsets.getFileSystem(hconf)
-    if not fs.exists(offsets):
-        return None
-    batch = -1
-    newest = None
-    for st in fs.listStatus(offsets):
-        name = st.getPath().getName()
-        if not name.isdigit():
-            continue
-        if int(name) > batch:
-            batch, newest = int(name), st.getPath()
-    if newest is None:
-        return None
-    stream = fs.open(newest)
-    try:
-        reader = jvm.java.io.BufferedReader(jvm.java.io.InputStreamReader(stream, "UTF-8"))
-        lines = []
-        line = reader.readLine()
-        while line is not None:
-            lines.append(str(line))
-            line = reader.readLine()
-    finally:
-        stream.close()
-    # Line 0 is the metadata (a version marker or JSON); the source offsets
-    # follow, after an optional blank line. The last non-empty line that
-    # parses as JSON with a snapshot_id is the Iceberg source's offset.
-    for text in reversed(lines):
-        text = text.strip()
-        if not text or not text.startswith("{"):
-            continue
-        try:
-            payload = _json.loads(text)
-        except ValueError:
-            continue
-        sid = payload.get("snapshot_id")
-        if sid is not None:
-            try:
-                return int(sid)
-            except (TypeError, ValueError):
-                return None
-    return None
-
-
-def snapshot_committed_at(spark, fq_table, snapshot_id):
-    """The ``committed_at`` of ``snapshot_id`` in ``fq_table`` as a UTC-aware
-    datetime, or None when the snapshot is not in the table's snapshots (it
-    may already be expired) or cannot be read. Read from the snapshots
-    metadata table, no data scan."""
-    if snapshot_id is None:
-        return None
-    from datetime import timezone as _tz
-
-    try:
-        rows = spark.sql(
-            "SELECT unix_micros(committed_at) AS us "
-            f"FROM {fq_table}.snapshots WHERE snapshot_id = {int(snapshot_id)}"
-        ).collect()
-    except Exception as e:  # noqa: BLE001
-        log(f"[maintenance] committed_at of {fq_table}@{snapshot_id} unavailable: {one_line(e)}")
-        return None
-    if not rows or rows[0]["us"] is None:
-        return None
-    return datetime.fromtimestamp(int(rows[0]["us"]) / 1e6, _tz.utc)
-
-
-def streaming_source_protect_from(spark, checkpoint_location, fq_source_table):
-    """The commit time to hold ``expire_snapshots`` back from on
-    ``fq_source_table``, so a live stream reading it from
-    ``checkpoint_location`` keeps the snapshot its offset points at. The
-    ``committed_at`` of the snapshot the newest committed offset references,
-    or None when there is no committed offset, the snapshot is already gone,
-    or anything cannot be read (expiry then falls back to its configured
-    retention). Never raises."""
-    try:
-        sid = committed_source_snapshot_id(spark, checkpoint_location)
-    except Exception as e:  # noqa: BLE001
-        log(f"[maintenance] stream offset at {checkpoint_location} unreadable: {one_line(e)}")
-        return None
-    if sid is None:
-        return None
-    return snapshot_committed_at(spark, fq_source_table, sid)
-
-
 def refuse_fresh_checkpoint_over_data(spark, checkpoint_location, fq_table):
     """Exit when a fresh checkpoint would re-read the source into a full table.
 
@@ -1916,11 +1744,9 @@ def refuse_fresh_checkpoint_over_data(spark, checkpoint_location, fq_table):
     checkpoints are deleted but tables are not. Clear both, or neither.
 
     ``fq_table`` accepts a single fully-qualified table name (str) or a list
-    of them; any populated table on the list triggers the refusal. B3
-    uniform silver exit contract: the refusal raises ``SilverAbort`` so the
-    driver terminates with the same exception class every other silver
-    invariant does (A1, F1). Existing callers already let unhandled
-    exceptions terminate main().
+    of them; any populated table on the list triggers the refusal. The
+    refusal raises ``SilverAbort``, like every other silver invariant, and
+    callers let it terminate main().
     """
     if not checkpoint_is_fresh(spark, checkpoint_location):
         return
@@ -1953,7 +1779,6 @@ def await_stream(spark, query):
     Kubernetes job reports the real outcome instead of a pass with no data.
     """
     import signal
-    import time
 
     stop = {"signal": None}
 
@@ -2023,10 +1848,7 @@ def pinned_read(spark, table, table_format):
     silver state. A table with no commit yet reads as it is (None)."""
     refresh_table(spark, table)
     if table_format == "delta":
-        rows = spark.sql(f"DESCRIBE HISTORY {table} LIMIT 1").collect()
-        if not rows:
-            return spark.table(table), None
-        version = int(rows[0]["version"])
+        version = delta_table_version(spark, table)
         return spark.sql(f"SELECT * FROM {table} VERSION AS OF {version}"), version
     rows = spark.sql(
         f"SELECT snapshot_id FROM {table}.history WHERE is_current_ancestor "
@@ -2246,7 +2068,7 @@ def get_daily_kpi_aggregations():
 
 
 # ---------------------------------------------------------------------------
-# c360 correctness facts (reported after gold-finalize, D6: reporting only)
+# c360 correctness facts (reported after gold-finalize, reporting only)
 # ---------------------------------------------------------------------------
 
 C360_CHECK_TAG = "[c360-check]"
@@ -2517,7 +2339,7 @@ def gold_date_coverage_problem(gold_rows: int, distinct_silver_dates: int) -> st
 def log_c360_check(spark, silver_tbl, gold_tbl):
     """Log the ``[c360-check] {json}`` line after gold is written.
 
-    Reporting only (owner decision D6): an error here is logged in the line
+    Reporting only: an error here is logged in the line
     and never fails the stage. It runs inside the gold-finalize pod, so the
     pod's wall clock includes it; the line records ``check_seconds`` and the
     CLI takes that off the stage's elapsed time and end time
@@ -2525,7 +2347,6 @@ def log_c360_check(spark, silver_tbl, gold_tbl):
     lakebench's own check. ``LB_C360_CHECK=false`` skips it.
     """
     import json
-    import time
 
     if os.environ.get("LB_C360_CHECK", "true").lower() == "false":
         log(C360_CHECK_TAG + " " + json.dumps({"version": 1, "skipped": "LB_C360_CHECK=false"}))
@@ -2583,7 +2404,7 @@ def aml_opening_balance(account_id_col):
 
     ``abs(account_id) % 200_000 + 10_000`` in the (10000, 210000] range, cast
     to decimal(18, 2). Shared between ``silver_build_financial.build_statements``
-    (batch) and ``silver_stream_financial._maintain_statements`` (D-full) so a
+    (batch) and ``silver_stream_financial._maintain_statements`` (stream) so a
     future formula change cannot drift between the two write paths silently.
     Batch mode's ``xxhash64`` returns a signed BIGINT and Spark's ``%``
     preserves sign, so ``abs()`` is required to keep the result in the
@@ -2614,10 +2435,10 @@ def create_namespace(spark, catalog, namespace, location):
     A Hive catalog takes the location and puts the layer's tables in its own
     bucket. Polaris does not allow a namespace location by default ("Namespace
     silver has a custom location, which is not enabled") and derives one from
-    the catalog's base location. The streaming scripts used to log that refusal
-    and go on, so the first table create then failed with NoSuchNamespace and
-    stopped the stream. Returns the location in effect, None when the namespace
-    was created without one. Raises when the namespace cannot be created at all.
+    the catalog's base location; the namespace is then created without one,
+    so the first table create does not fail with NoSuchNamespace. Returns the
+    location in effect, None when the namespace was created without one.
+    Raises when the namespace cannot be created at all.
     """
     try:
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.{namespace} LOCATION '{location}'")
@@ -2645,9 +2466,25 @@ def ensure_namespaces_for_ddl(spark, catalog, ddls):
     ensure_namespaces(spark, catalog, tables)
 
 
+def _semi_join_sealed(txns_df, versions):
+    """``txns_df`` rows whose ``(_stream_id, _batch_id)`` has a versions row."""
+    from pyspark.sql.functions import col as _col
+
+    versions = versions.select(
+        _col("stream_id").alias("_sv_stream_id"),
+        _col("batch_id").alias("_sv_batch_id"),
+    )
+    return txns_df.join(
+        versions,
+        (txns_df["_stream_id"] == versions["_sv_stream_id"])
+        & (txns_df["_batch_id"] == versions["_sv_batch_id"]),
+        "left_semi",
+    )
+
+
 def sealed_txns_filter(spark, txns_df, catalog, versions_table):
     """Semi-join ``txns_df`` against ``silver_batch_versions`` on
-    ``(_stream_id, _batch_id)`` (I10).
+    ``(_stream_id, _batch_id)``.
 
     A driver crash between the AML stream's transactions/edges commits and
     the sealed-marker commit leaves rows visible in silver.transactions
@@ -2667,31 +2504,20 @@ def sealed_txns_filter(spark, txns_df, catalog, versions_table):
     this call correctly becomes visible on a later reader; a batch not yet
     sealed anywhere in the versions table stays hidden.
 
-    Fail-open on a missing versions table: the helper logs and returns
-    ``txns_df`` unchanged so a legacy catalog that predates I10 still
-    reads (the next silver run bootstraps the sidecar). Callers do not
-    have to catch this: the filter degrades to the pre-I10 behaviour.
+    Fails open only when the versions table does not exist: the helper
+    logs and returns ``txns_df`` unchanged so a catalog created before the
+    versions table still reads (the next silver run creates it). Any other
+    error reading it raises, so a transient catalog failure fails the
+    caller instead of letting it read partial batches.
     """
-    from pyspark.sql.functions import col as _col
-
     versions_fq = f"{catalog}.{versions_table}"
-    try:
-        versions = spark.table(versions_fq).select(
-            _col("stream_id").alias("_sv_stream_id"),
-            _col("batch_id").alias("_sv_batch_id"),
-        )
-    except Exception as e:  # noqa: BLE001
+    if not table_exists(spark, versions_fq):
         log(
-            f"[i10] {versions_fq} not readable ({e}); "
+            f"[i10] {versions_fq} does not exist; "
             "falling back to unfiltered read. A silver run bootstraps the sidecar."
         )
         return txns_df
-    return txns_df.join(
-        versions,
-        (txns_df["_stream_id"] == versions["_sv_stream_id"])
-        & (txns_df["_batch_id"] == versions["_sv_batch_id"]),
-        "left_semi",
-    )
+    return _semi_join_sealed(txns_df, spark.table(versions_fq))
 
 
 class materialised_source:  # noqa: N801 -- used like a function: with materialised_source(...)
@@ -2785,15 +2611,10 @@ def sealed_txns_filter_at(spark, txns_df, catalog, versions_table, versions_snap
             "sealed_txns_filter_at needs an int versions snapshot id, got "
             f"{type(versions_snapshot).__name__} {versions_snapshot!r}"
         )
-    from pyspark.sql.functions import col as _col
-
     versions_fq = f"{catalog}.{versions_table}"
     try:
         versions = spark.sql(
             f"SELECT stream_id, batch_id FROM {versions_fq} VERSION AS OF {versions_snapshot}"
-        ).select(
-            _col("stream_id").alias("_sv_stream_id"),
-            _col("batch_id").alias("_sv_batch_id"),
         )
         # Classic pyspark analyses spark.sql eagerly; reading the schema
         # forces analysis on a lazy client too, so the snapshot and the
@@ -2803,12 +2624,7 @@ def sealed_txns_filter_at(spark, txns_df, catalog, versions_table, versions_snap
         raise SealedFilterError(
             f"{versions_fq} not readable at snapshot {versions_snapshot}: {e}"
         ) from e
-    return txns_df.join(
-        versions,
-        (txns_df["_stream_id"] == versions["_sv_stream_id"])
-        & (txns_df["_batch_id"] == versions["_sv_batch_id"]),
-        "left_semi",
-    )
+    return _semi_join_sealed(txns_df, versions)
 
 
 # Bumped when the fingerprint definition changes, so fingerprints made by two
@@ -3213,6 +3029,42 @@ def _jobs_evicted_since(jobs, mark_ms):
     )
 
 
+def _listener_drained(jsc, wait_s):
+    """Wait up to ``wait_s`` for the listener bus to drain; False if it did not."""
+    try:
+        jsc.listenerBus().waitUntilEmpty(int(wait_s * 1000))
+        return True
+    except Exception:  # noqa: BLE001 -- TimeoutException, or no such call
+        return False
+
+
+def _stage_attempts(store, tracker, job_ids):
+    """``(attempts, missing)``: ``(stage id, last attempt, status)`` for every
+    stage of ``job_ids`` that ran (skipped and pending stages left out), in
+    stage-id order, and whether the store had dropped any of the jobs or
+    stages."""
+    stage_ids, missing = set(), False
+    for job_id in job_ids:
+        info = tracker.getJobInfo(job_id)
+        if info is None:
+            missing = True
+            continue
+        stage_ids.update(int(s) for s in info.stageIds)
+    attempts = []
+    for sid in sorted(stage_ids):
+        try:
+            sd = store.lastStageAttempt(sid)
+        except Exception as e:  # noqa: BLE001
+            if "NoSuchElementException" not in str(e):
+                raise
+            missing = True  # dropped from the store
+            continue
+        status = sd.status().toString()
+        if status not in ("SKIPPED", "PENDING"):
+            attempts.append((sid, sd, status))
+    return attempts, missing
+
+
 def driver_output_bytes(spark=None, *, wait_s=1.0):
     """``(bytes, complete)``: the bytes the application's tasks wrote, summed
     from the driver's status store, or None when it cannot be read.
@@ -3238,11 +3090,7 @@ def driver_output_bytes(spark=None, *, wait_s=1.0):
             return None
         sc = spark.sparkContext
         jsc = sc._jsc.sc()
-        complete = True
-        try:
-            jsc.listenerBus().waitUntilEmpty(int(wait_s * 1000))
-        except Exception:  # noqa: BLE001 -- TimeoutException, or no such call
-            complete = False
+        complete = _listener_drained(jsc, wait_s)
         if _status_events_dropped(jsc) > 0:
             complete = False
         store = jsc.statusStore()
@@ -3250,26 +3098,9 @@ def driver_output_bytes(spark=None, *, wait_s=1.0):
         jobs = list(_store_jobs(store))
         if len(jobs) < int(jsc.dagScheduler().numTotalJobs()):
             complete = False  # the store dropped completed jobs
-        stage_ids = set()
-        for job_id, _status, _comp, _group in jobs:
-            info = tracker.getJobInfo(job_id)
-            if info is None:
-                complete = False
-                continue
-            stage_ids.update(int(x) for x in info.stageIds)
-        total = 0
-        for sid in sorted(stage_ids):
-            try:
-                sd = store.lastStageAttempt(sid)
-            except Exception as e:  # noqa: BLE001
-                if "NoSuchElementException" not in str(e):
-                    raise
-                complete = False  # dropped from the store
-                continue
-            if sd.status().toString() in ("SKIPPED", "PENDING"):
-                continue
-            total += int(sd.outputBytes())
-        return total, complete
+        attempts, missing = _stage_attempts(store, tracker, [j[0] for j in jobs])
+        total = sum(int(sd.outputBytes()) for _sid, sd, _status in attempts)
+        return total, complete and not missing
     except Exception as e:  # noqa: BLE001 -- a measurement, never the job's result
         log(f"[output-bytes] unavailable reason={one_line(f'{type(e).__name__}: {e}')}")
         return None
@@ -3344,17 +3175,11 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
     raises, so detection cannot fail because of it. Returns the logged
     stage rows.
     """
-    import time
-
     started = time.time()
     try:
         sc = spark.sparkContext
         jsc = sc._jsc.sc()
-        complete = True
-        try:
-            jsc.listenerBus().waitUntilEmpty(int(wait_s * 1000))
-        except Exception:  # noqa: BLE001 -- TimeoutException, or no such call
-            complete = False
+        complete = _listener_drained(jsc, wait_s)
         tracker = sc.statusTracker()
         store = jsc.statusStore()
         job_ids = list(tracker.getJobIdsForGroup(group))
@@ -3377,25 +3202,10 @@ def rule_stage_profile(spark, group, rule_id, *, mark=None, top=3, wait_s=5.0):
                     f"groups={sorted({str(g) for _, g in foreign})[:5]}"
                 )
             lossy = _status_events_dropped(jsc) > mark["dropped"]
-        stage_ids = set()
-        for job_id in job_ids:
-            info = tracker.getJobInfo(job_id)
-            if info is None:
-                truncated = True
-                continue
-            stage_ids.update(int(s) for s in info.stageIds)
+        attempts, missing = _stage_attempts(store, tracker, job_ids)
+        truncated = truncated or missing
         stages = []
-        for sid in sorted(stage_ids):
-            try:
-                sd = store.lastStageAttempt(sid)
-            except Exception as e:  # noqa: BLE001
-                if "NoSuchElementException" not in str(e):
-                    raise
-                truncated = True  # dropped from the store
-                continue
-            status = sd.status().toString()
-            if status in ("SKIPPED", "PENDING"):
-                continue
+        for sid, sd, status in attempts:
             sub, comp = sd.submissionTime(), sd.completionTime()
             wall = (
                 round((comp.get().getTime() - sub.get().getTime()) / 1000.0, 1)
@@ -3458,7 +3268,7 @@ def ensure_alert_columns(spark, fq_table, columns):
     """Bring alerts table *fq_table* up to *columns* ((name, type, ...) in
     table order, detection_rules.ALERT_COLUMNS): when the table's columns
     are a leading part of *columns*, append the missing trailing ones in
-    order through ensure_column_with_retry. Then the table must hold exactly
+    order through ensure_column. Then the table must hold exactly
     those (name, type) pairs in that order.
 
     A reused catalog's table from an older release lacks only trailing
@@ -3487,7 +3297,7 @@ def ensure_alert_columns(spark, fq_table, columns):
         raise _refuse(got)
     added = []
     for name, sql_type, *_ in columns[len(got) :]:
-        if ensure_column_with_retry(spark, fq_table, name, sql_type):
+        if ensure_column(spark, fq_table, name, sql_type):
             added.append(name)
     got = _got()
     if got != want:

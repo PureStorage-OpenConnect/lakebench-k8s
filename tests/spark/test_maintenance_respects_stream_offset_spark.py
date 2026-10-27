@@ -7,9 +7,11 @@ that snapshot kills the stream with "Cannot load current offset at snapshot
 ... the snapshot was expired or removed". This reproduces the race: a
 streaming reader commits an offset, newer snapshots then age the referenced
 one past the retention horizon, and expiry at that horizon would remove it.
-With the stream's committed snapshot read back (``streaming_source_protect_from``)
-and passed as the expiry floor (``build_maintenance_sql(protect_from=...)``),
-the referenced snapshot survives.
+With the stream's committed snapshot read back from its checkpoint
+(``_silver_stream_offset_snapshot_id``, over a local stand-in for the silver
+bucket) and that snapshot's commit time passed as the expiry floor
+(``build_maintenance_sql(protect_from=...)``), the referenced snapshot
+survives.
 
 Runs in a Spark child (``spark_subprocess``) with the Iceberg jar on the
 driver classpath at JVM launch.
@@ -17,13 +19,43 @@ driver classpath at JVM launch.
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import sys
 import tempfile
+from types import SimpleNamespace
 
 import pytest
 
 pytest.importorskip("pyspark")
+
+
+class _LocalS3:
+    """``list_objects_v2`` and ``get_object`` over a local directory, one
+    subdirectory per bucket."""
+
+    def __init__(self, root):
+        self.root = root
+
+    def list_objects_v2(self, Bucket, Prefix):  # noqa: N803 -- boto3 names
+        base = os.path.join(self.root, Bucket)
+        keys = [os.path.relpath(os.path.join(d, f), base) for d, _, fs in os.walk(base) for f in fs]
+        return {"Contents": [{"Key": k} for k in sorted(keys) if k.startswith(Prefix)]}
+
+    def get_object(self, Bucket, Key):  # noqa: N803 -- boto3 names
+        with open(os.path.join(self.root, Bucket, Key), "rb") as f:
+            return {"Body": io.BytesIO(f.read())}
+
+
+def _cfg(checkpoint_base):
+    sustained = SimpleNamespace(checkpoint_base=checkpoint_base)
+    return SimpleNamespace(
+        architecture=SimpleNamespace(pipeline=SimpleNamespace(sustained=sustained)),
+        platform=SimpleNamespace(
+            storage=SimpleNamespace(s3=SimpleNamespace(buckets=SimpleNamespace(silver="silver")))
+        ),
+    )
 
 
 @pytest.mark.requires_jars("iceberg")
@@ -66,10 +98,20 @@ def _run(jars):
             .getOrCreate()
         )
 
-        import common
-
+        from lakebench.cli import _sustained
+        from lakebench.deploy import datagen
         from lakebench.modules.table_formats.iceberg import maintenance
         from lakebench.modules.table_formats.iceberg.maintenance import build_maintenance_sql
+
+        datagen._s3_client_for = lambda cfg: SimpleNamespace(raw_client=_LocalS3(work))
+
+        def _protect_from(sid):
+            """The snapshot's commit time, the floor the CLI passes to expiry."""
+            us = spark.sql(
+                "SELECT unix_micros(committed_at) AS us "
+                f"FROM lh.db.src.snapshots WHERE snapshot_id = {int(sid)}"
+            ).first()["us"]
+            return datetime.fromtimestamp(us / 1e6, timezone.utc)
 
         # The production floor sits STREAM_OFFSET_PROTECT_MARGIN_SECONDS (600 s,
         # pinned in tests/test_maintenance_stream_offset.py) before the
@@ -88,7 +130,7 @@ def _run(jars):
         _append(10, 20)
         _append(20, 30)
 
-        checkpoint = f"file://{work}/ckpt"
+        checkpoint = f"file://{work}/silver/ckpt/silver-stream"
         sink = f"file://{work}/sink"
         q = (
             spark.readStream.format("iceberg")
@@ -101,12 +143,11 @@ def _run(jars):
         )
         q.awaitTermination()
 
-        committed_sid = common.committed_source_snapshot_id(spark, checkpoint)
+        committed_sid = _sustained._silver_stream_offset_snapshot_id(_cfg("ckpt"))
         all_source_sids = [
             int(r["snapshot_id"])
             for r in spark.sql("SELECT snapshot_id FROM lh.db.src.snapshots").collect()
         ]
-        protect_from = common.streaming_source_protect_from(spark, checkpoint, "lh.db.src")
 
         # Newer snapshots land after the stream's committed offset: the
         # referenced snapshot is now behind the newest and would be expired by
@@ -154,7 +195,7 @@ def _run(jars):
         # The snapshots the stream reads through land after the gap.
         _append(10, 20)
         _append(20, 30)
-        checkpoint2 = f"file://{work}/ckpt2"
+        checkpoint2 = f"file://{work}/silver/ckpt2/silver-stream"
         sink2 = f"file://{work}/sink2"
         q2 = (
             spark.readStream.format("iceberg")
@@ -166,8 +207,8 @@ def _run(jars):
             .start()
         )
         q2.awaitTermination()
-        committed_sid2 = common.committed_source_snapshot_id(spark, checkpoint2)
-        protect_from2 = common.streaming_source_protect_from(spark, checkpoint2, "lh.db.src")
+        committed_sid2 = _sustained._silver_stream_offset_snapshot_id(_cfg("ckpt2"))
+        protect_from2 = _protect_from(committed_sid2)
         # More snapshots land after the offset, so the referenced one is behind
         # the newest and a cutoff at "now" would reach it without protection.
         _append(30, 40)
@@ -197,7 +238,6 @@ def _run(jars):
         out = {
             "committed_sid": committed_sid,
             "all_source_sids": all_source_sids,
-            "protect_from": protect_from.isoformat() if protect_from else None,
             "unprotected_removed_referenced": bool(unprotected_removed_referenced),
             "protected_kept_referenced": bool(protected_kept_referenced),
             "protected_expired_older": bool(protected_expired_older),

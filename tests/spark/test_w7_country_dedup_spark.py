@@ -59,3 +59,15 @@ def test_w7_picks_the_same_country_in_either_row_order(spark, order):
     alerts = w7_cross_border_high_risk(_txns(spark), silver_entities=_entities(spark, order))
     got = [(r["entity_id"], r["evidence"]["country"]) for r in alerts.collect()]
     assert got == [(CUSTOMER, "AE")], (order, got)
+
+
+def test_w7_without_the_jurisdiction_list_is_skipped(spark, monkeypatch):
+    """A missing reference list is a skip, not a run with zero alerts."""
+    import detection_rules
+
+    monkeypatch.setattr(detection_rules, "_load_reference", lambda *a, **k: None)
+    with pytest.raises(detection_rules.RuleSkipped) as excinfo:
+        detection_rules.w7_cross_border_high_risk(
+            _txns(spark), silver_entities=_entities(spark, ["AE"])
+        )
+    assert excinfo.value.reason == "no-reference"

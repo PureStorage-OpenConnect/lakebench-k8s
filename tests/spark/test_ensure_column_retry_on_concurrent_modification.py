@@ -67,7 +67,7 @@ class _FakeSpark:
 
 
 def test_ensure_column_retry_eats_first_conflict_and_succeeds_second():
-    from common import ensure_column_with_retry
+    from common import ensure_column
 
     def side_effect(call_num):
         if call_num == 1:
@@ -80,9 +80,7 @@ def test_ensure_column_retry_eats_first_conflict_and_succeeds_second():
         return None
 
     fake = _FakeSpark(initial_columns=["a", "b"], alter_side_effect=side_effect)
-    added = ensure_column_with_retry(
-        fake, "cat.silver.t", "c", "BIGINT", max_attempts=3, backoff_seconds=0
-    )
+    added = ensure_column(fake, "cat.silver.t", "c", "BIGINT", max_attempts=3, backoff_seconds=0)
     # The column was in fact added on the second attempt.
     assert added is True
     assert fake.alter_calls == 2, f"expected exactly 2 ALTER attempts, saw {fake.alter_calls}"
@@ -93,7 +91,7 @@ def test_ensure_column_retry_clean_when_concurrent_writer_added_it():
     """If the losing writer's ALTER fails and by then the other writer has
     already added the column, we must recognise the column-already-present
     branch and return False without a second ALTER."""
-    from common import ensure_column_with_retry
+    from common import ensure_column
 
     fake = _FakeSpark(initial_columns=["a", "b"], alter_side_effect=lambda n: None)
 
@@ -106,9 +104,7 @@ def test_ensure_column_retry_clean_when_concurrent_writer_added_it():
         return None
 
     fake._alter_side_effect = side_effect
-    added = ensure_column_with_retry(
-        fake, "cat.silver.t", "c", "BIGINT", max_attempts=3, backoff_seconds=0
-    )
+    added = ensure_column(fake, "cat.silver.t", "c", "BIGINT", max_attempts=3, backoff_seconds=0)
     # ALTER ran once, saw the conflict, and the re-check saw the column
     # already present -> the wrapper returns cleanly without a second ALTER.
     assert added is False
@@ -118,30 +114,26 @@ def test_ensure_column_retry_clean_when_concurrent_writer_added_it():
 def test_ensure_column_retry_propagates_after_bounded_attempts():
     """After ``max_attempts`` conflicts, the last exception is re-raised so
     the caller does not spin silently."""
-    from common import ensure_column_with_retry
+    from common import ensure_column
 
     def side_effect(_call_num):
         return RuntimeError("Iceberg ConcurrentModificationException: still racing")
 
     fake = _FakeSpark(initial_columns=["a", "b"], alter_side_effect=side_effect)
     with pytest.raises(RuntimeError, match="ConcurrentModificationException"):
-        ensure_column_with_retry(
-            fake, "cat.silver.t", "c", "BIGINT", max_attempts=3, backoff_seconds=0
-        )
+        ensure_column(fake, "cat.silver.t", "c", "BIGINT", max_attempts=3, backoff_seconds=0)
     assert fake.alter_calls == 3
 
 
 def test_ensure_column_retry_does_not_swallow_unrelated_errors():
     """A non-conflict error must propagate on the first attempt: a wrong-type
     ALTER should not be retried into oblivion."""
-    from common import ensure_column_with_retry
+    from common import ensure_column
 
     def side_effect(_call_num):
         return RuntimeError("AnalysisException: cannot ALTER TABLE, syntax error at 'FOO'")
 
     fake = _FakeSpark(initial_columns=["a", "b"], alter_side_effect=side_effect)
     with pytest.raises(RuntimeError, match="AnalysisException"):
-        ensure_column_with_retry(
-            fake, "cat.silver.t", "c", "BIGINT", max_attempts=3, backoff_seconds=0
-        )
+        ensure_column(fake, "cat.silver.t", "c", "BIGINT", max_attempts=3, backoff_seconds=0)
     assert fake.alter_calls == 1
