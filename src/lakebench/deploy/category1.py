@@ -20,7 +20,6 @@ needs them.
 ``KEPT_ON_DESTROY`` names objects that must outlive a destroy of a
 surviving namespace, each with its reason.
 
-Every WI that makes a namespaced object adds its entry in the same change;
 ``tests/test_teardown_paths.py`` runs deploy and the run-time creators
 under the recording fake and fails on an object nothing deletes. Objects
 Spark creates at run time (driver Services, ``spark-drv-*`` ConfigMaps,
@@ -58,16 +57,13 @@ class Cat1Entry:
     of ``name`` and ``label_selector`` is set; a selector may use ``{name}``
     for the deployment name. In a component step's entry ``name`` may be a
     pattern that step matches (``data-lakebench-postgres-<n>``, ``*`` for
-    every object of the kind). ``owner_wi`` is the work item that creates
-    the object (``pre-1.7`` for objects older than the registry), ``step``
-    the destroy step that deletes it.
+    every object of the kind). ``step`` is the destroy step that deletes it.
     """
 
     api: str
     kind: str
     name: str | None = None
     label_selector: str | None = None
-    owner_wi: str = ""
     step: str = ""
     # Custom objects only (``api="custom"``).
     group: str = ""
@@ -108,29 +104,25 @@ class KeptObject:
 
     kind: str
     name: str
-    owner_wi: str
     reason: str
 
 
-_PRE = "pre-1.7"
-# The work item that adds the in-namespace dependency server (v1.7).
-_DEPS = "deps-server"
+_OBS = "observability"
 
 
-def _named(api: str, kind: str, step: str, *names: str, owner: str = _PRE) -> list[Cat1Entry]:
-    return [Cat1Entry(api, kind, name=n, owner_wi=owner, step=step) for n in names]
+def _named(api: str, kind: str, step: str, *names: str, when: str = "") -> list[Cat1Entry]:
+    return [Cat1Entry(api, kind, name=n, step=step, when=when) for n in names]
 
 
 CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
     # spark-jobs: every SparkApplication in the namespace (Spark's runtime
     # objects are garbage collected after it).
-    Cat1Entry("custom", "sparkapplications", name="*", owner_wi=_PRE, step="spark-jobs"),
+    Cat1Entry("custom", "sparkapplications", name="*", step="spark-jobs"),
     # datagen-jobs: Lakebench's Jobs by label.
     Cat1Entry(
         "batch_v1",
         "jobs",
         label_selector="app.kubernetes.io/managed-by=lakebench",
-        owner_wi=_PRE,
         step="datagen-jobs",
     ),
     # Query engines.
@@ -144,7 +136,6 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         "core_v1",
         "persistentvolumeclaims",
         label_selector="app.kubernetes.io/component=trino-worker",
-        owner_wi=_PRE,
         step="trino",
     ),
     *_named("apps_v1", "deployments", "spark-thrift", "lakebench-spark-thrift"),
@@ -156,7 +147,6 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         "custom",
         "hiveclusters",
         name="lakebench-hive",
-        owner_wi=_PRE,
         step="hive",
         group="hive.stackable.tech",
         version="v1alpha1",
@@ -179,7 +169,6 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         "persistentvolumeclaims",
         "postgres",
         "data-lakebench-postgres-<n>",
-        owner="SD-14",
     ),
     # Scripts ConfigMaps: the per-role maps and the v1.6 single map, by
     # scripts_maps.scripts_label_selector, which keys on
@@ -193,7 +182,6 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
             "app.kubernetes.io/managed-by=lakebench,"
             "app.kubernetes.io/instance={name}"
         ),
-        owner_wi="SD-8",
         step="spark-scripts",
     ),
     # RBAC and Secrets.
@@ -217,9 +205,7 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
     # by the pvc-protection finalizer until the pod is gone.
     *_named("core_v1", "serviceaccounts", CATEGORY1_STEP, "lakebench-postgres"),
     # The held-out hash ConfigMap a financial generate applies for its pods.
-    *_named(
-        "core_v1", "configmaps", CATEGORY1_STEP, "lakebench-heldout-hashes", owner="heldout-hashes"
-    ),
+    *_named("core_v1", "configmaps", CATEGORY1_STEP, "lakebench-heldout-hashes"),
     # The registered-corpus seed Secrets (deploy/datagen.py ensure_seed_secret,
     # one per seed, named lakebench-datagen-seed-<seed_ref prefix>), written by
     # generate for an evaluation or robustness corpus only.
@@ -229,141 +215,45 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
         label_selector=(
             "app.kubernetes.io/component=datagen-seed,app.kubernetes.io/instance={name}"
         ),
-        owner_wi="registered-seed-secret",
         step=CATEGORY1_STEP,
     ),
     # Pushgateway: Deployment, Service, PVC.
-    *(
-        Cat1Entry(
-            api,
-            kind,
-            name="lakebench-pushgateway",
-            owner_wi=_PRE,
-            step=CATEGORY1_STEP,
-            when="observability",
-        )
-        for api, kind in (
-            ("apps_v1", "deployments"),
-            ("core_v1", "services"),
-            ("core_v1", "persistentvolumeclaims"),
-        )
+    *_named("apps_v1", "deployments", CATEGORY1_STEP, "lakebench-pushgateway", when=_OBS),
+    *_named("core_v1", "services", CATEGORY1_STEP, "lakebench-pushgateway", when=_OBS),
+    *_named(
+        "core_v1", "persistentvolumeclaims", CATEGORY1_STEP, "lakebench-pushgateway", when=_OBS
     ),
-    # Per-deployment Prometheus: SA + Role + RoleBinding, Deployment, Service,
-    # PVC, scrape ConfigMap.
-    Cat1Entry(
-        "apps_v1",
-        "deployments",
-        name="lakebench-prometheus",
-        owner_wi="per-ns-observability",
-        step=CATEGORY1_STEP,
-        when="observability",
-    ),
-    Cat1Entry(
-        "core_v1",
-        "services",
-        name="lakebench-prometheus",
-        owner_wi="per-ns-observability",
-        step=CATEGORY1_STEP,
-        when="observability",
-    ),
-    Cat1Entry(
-        "core_v1",
-        "persistentvolumeclaims",
-        name="lakebench-prometheus",
-        owner_wi="per-ns-observability",
-        step=CATEGORY1_STEP,
-        when="observability",
-    ),
-    Cat1Entry(
-        "core_v1",
-        "configmaps",
-        name="lakebench-prometheus-config",
-        owner_wi=_PRE,
-        step=CATEGORY1_STEP,
-        when="observability",
-    ),
-    Cat1Entry(
-        "core_v1",
-        "serviceaccounts",
-        name="lakebench-prometheus",
-        owner_wi="per-ns-observability",
-        step=CATEGORY1_STEP,
-        when="observability",
-    ),
-    Cat1Entry(
-        "rbac_v1",
-        "roles",
-        name="lakebench-prometheus",
-        owner_wi="per-ns-observability",
-        step=CATEGORY1_STEP,
-        when="observability",
-    ),
-    Cat1Entry(
-        "rbac_v1",
-        "rolebindings",
-        name="lakebench-prometheus",
-        owner_wi="per-ns-observability",
-        step=CATEGORY1_STEP,
-        when="observability",
-    ),
-    # Per-deployment Grafana: Secret, provisioning ConfigMap, dashboard
-    # ConfigMap, Deployment, Service.
-    Cat1Entry(
-        "apps_v1",
-        "deployments",
-        name="lakebench-grafana",
-        owner_wi="per-ns-observability",
-        step=CATEGORY1_STEP,
-        when="observability",
-    ),
-    Cat1Entry(
-        "core_v1",
-        "services",
-        name="lakebench-grafana",
-        owner_wi="per-ns-observability",
-        step=CATEGORY1_STEP,
-        when="observability",
-    ),
-    Cat1Entry(
-        "core_v1",
-        "secrets",
-        name="lakebench-grafana",
-        owner_wi="per-ns-observability",
-        step=CATEGORY1_STEP,
-        when="observability",
-    ),
+    # Per-deployment Prometheus: Deployment, Service, PVC, scrape ConfigMap,
+    # SA + Role + RoleBinding.
+    *_named("apps_v1", "deployments", CATEGORY1_STEP, "lakebench-prometheus", when=_OBS),
+    *_named("core_v1", "services", CATEGORY1_STEP, "lakebench-prometheus", when=_OBS),
+    *_named("core_v1", "persistentvolumeclaims", CATEGORY1_STEP, "lakebench-prometheus", when=_OBS),
+    *_named("core_v1", "configmaps", CATEGORY1_STEP, "lakebench-prometheus-config", when=_OBS),
+    *_named("core_v1", "serviceaccounts", CATEGORY1_STEP, "lakebench-prometheus", when=_OBS),
+    *_named("rbac_v1", "roles", CATEGORY1_STEP, "lakebench-prometheus", when=_OBS),
+    *_named("rbac_v1", "rolebindings", CATEGORY1_STEP, "lakebench-prometheus", when=_OBS),
+    # Per-deployment Grafana: Deployment, Service, Secret, Route, provisioning
+    # ConfigMap, dashboard ConfigMap.
+    *_named("apps_v1", "deployments", CATEGORY1_STEP, "lakebench-grafana", when=_OBS),
+    *_named("core_v1", "services", CATEGORY1_STEP, "lakebench-grafana", when=_OBS),
+    *_named("core_v1", "secrets", CATEGORY1_STEP, "lakebench-grafana", when=_OBS),
     Cat1Entry(
         "custom",
         "routes",
         name="lakebench-grafana",
-        owner_wi="per-ns-observability",
         step=CATEGORY1_STEP,
         group="route.openshift.io",
         version="v1",
-        when="observability",
+        when=_OBS,
     ),
-    Cat1Entry(
-        "core_v1",
-        "configmaps",
-        name="lakebench-grafana-provisioning",
-        owner_wi="per-ns-observability",
-        step=CATEGORY1_STEP,
-        when="observability",
-    ),
-    Cat1Entry(
-        "core_v1",
-        "configmaps",
-        name="lakebench-grafana-dashboard",
-        owner_wi="per-ns-observability",
-        step=CATEGORY1_STEP,
-        when="observability",
-    ),
+    *_named("core_v1", "configmaps", CATEGORY1_STEP, "lakebench-grafana-provisioning", when=_OBS),
+    *_named("core_v1", "configmaps", CATEGORY1_STEP, "lakebench-grafana-dashboard", when=_OBS),
     # The dependency server's objects: last in the category1 step, and the
     # Deployment before its claim so pvc-protection lets the claim go once
     # the pod is gone.
-    *_named("apps_v1", "deployments", CATEGORY1_STEP, "lb-deps", owner=_DEPS),
-    *_named("core_v1", "services", CATEGORY1_STEP, "lb-deps", owner=_DEPS),
-    *_named("core_v1", "configmaps", CATEGORY1_STEP, "lb-deps-manifest", owner=_DEPS),
+    *_named("apps_v1", "deployments", CATEGORY1_STEP, "lb-deps"),
+    *_named("core_v1", "services", CATEGORY1_STEP, "lb-deps"),
+    *_named("core_v1", "configmaps", CATEGORY1_STEP, "lb-deps-manifest"),
     # The tools maps are named by their request (lb-deps-tools-<16 hex>).
     Cat1Entry(
         "core_v1",
@@ -372,10 +262,9 @@ CATEGORY1_OBJECTS: tuple[Cat1Entry, ...] = (
             "app.kubernetes.io/component=deps,lakebench.io/deps-role=tools,"
             "app.kubernetes.io/instance={name}"
         ),
-        owner_wi=_DEPS,
         step=CATEGORY1_STEP,
     ),
-    *_named("core_v1", "persistentvolumeclaims", CATEGORY1_STEP, "lb-deps-data", owner=_DEPS),
+    *_named("core_v1", "persistentvolumeclaims", CATEGORY1_STEP, "lb-deps-data"),
 )
 
 # Namespace annotations the category1 step removes from a surviving
@@ -390,7 +279,6 @@ KEPT_ON_DESTROY: tuple[KeptObject, ...] = (
     KeptObject(
         "configmaps",
         "lakebench-silver-state",
-        _PRE,
         "holds the silver rebuild-epoch counters, which must never go back while "
         "table data written under them can outlive destroy (bucket cleanup off, or "
         "buckets this deployment does not own); a reset counter makes Delta skip "
