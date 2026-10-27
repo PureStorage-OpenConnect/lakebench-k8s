@@ -12,10 +12,6 @@ through :func:`format_measurement`. It attaches, next to the number:
   repeated (invariant 7).
 - A support-state pill (``supported`` / ``unverified`` / ``unsupported``)
   when set, so a figure from an unsupported combination reads as such.
-
-The lint at ``scripts/lint_capped_bare_numbers.py`` scans the report
-generator for bare ``rows_per_s`` / ``qph`` prints that would bypass this
-formatter and paint a capped or single-run figure as headline evidence.
 """
 
 from __future__ import annotations

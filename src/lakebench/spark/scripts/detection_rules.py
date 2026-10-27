@@ -129,9 +129,8 @@ ALERT_COLUMNS = (
 # HIGH_PRIORITY_CUTOFFS (the count or size at which an alert is HIGH) and the
 # rule -> planted-typology map are pure metadata the CLI-side scorer also
 # needs without pyspark, so they live in aml.rule_meta and ship flat to the
-# driver. RULE_TARGET_TYPOLOGY stays in lock-step with RULE_TARGETS in
-# benchmark/aml_queries.py (a consistency test asserts they match). Both are
-# re-exported: aml_reason_codes.py and tm_operations.py import them from here.
+# driver. They are imported here and re-exported for aml_reason_codes.py and
+# tm_operations.py, which import them from this module.
 try:
     from lakebench.aml.rule_meta import (  # noqa: F401
         HIGH_PRIORITY_CUTOFFS,

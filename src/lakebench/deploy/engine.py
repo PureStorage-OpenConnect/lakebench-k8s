@@ -599,10 +599,6 @@ class DeploymentEngine:
             "trino_worker_storage": cfg.architecture.query_engine.trino.worker.storage,
             "trino_worker_storage_class": cfg.architecture.query_engine.trino.worker.storage_class
             or None,
-            # Scratch StorageClass
-            "scratch_storage_class": cfg.platform.storage.scratch.storage_class,
-            "scratch_provisioner": cfg.platform.storage.scratch.provisioner,
-            "scratch_parameters": cfg.platform.storage.scratch.parameters,
             # Spark Thrift Server
             "spark_thrift_cores": cfg.architecture.query_engine.spark_thrift.cores,
             "spark_thrift_memory": cfg.architecture.query_engine.spark_thrift.memory,

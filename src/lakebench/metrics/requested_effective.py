@@ -81,21 +81,10 @@ KNOWN_SITES: dict[tuple[str, str], str] = {
     ("spark/scripts/gold_finalize_delta.py", "select_gold_strategy"): (
         "returns into: determine_gold_strategy"
     ),
-    ("spark/scripts/silver_build.py", "determine_silver_strategy"): (
+    ("spark/scripts/common.py", "determine_silver_strategy"): (
         "exempt: every silver strategy runs the same transforms over the same "
         "bronze and differs only in how it writes; the choice is logged on the "
         "Strategy line"
-    ),
-    ("spark/scripts/silver_build.py", "select_silver_strategy"): (
-        "returns into: determine_silver_strategy"
-    ),
-    ("spark/scripts/silver_build_delta.py", "determine_silver_strategy"): (
-        "exempt: every silver strategy runs the same transforms over the same "
-        "bronze and differs only in how it writes; the choice is logged on the "
-        "Strategy line"
-    ),
-    ("spark/scripts/silver_build_delta.py", "select_silver_strategy"): (
-        "returns into: determine_silver_strategy"
     ),
 }
 
