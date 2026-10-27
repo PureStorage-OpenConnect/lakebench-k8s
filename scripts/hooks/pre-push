@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lakebench pre-push hook (QR-38). Shared by every worktree of this repository.
+# Lakebench pre-push hook. Shared by every worktree of this repository.
 #
 # 1. Refuses any pushed ref that reaches a pre-rewrite commit carrying the
 #    leaked FlashBlade keys, or the pre-rewrite integrate tip.

@@ -1,8 +1,8 @@
 name: CI
 
 on:
-  # Every branch push runs CI: an unchecked feature branch is how a credential
-  # once reached a pushed branch.
+  # Every branch push runs CI, so an unchecked feature branch cannot slip
+  # past the secret scan.
   push:
     branches: ['**']
   pull_request:
