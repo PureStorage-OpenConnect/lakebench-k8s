@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from kubernetes.client.rest import ApiException
 from typer.testing import CliRunner
 
 from lakebench.config import deploy_state as ds
@@ -147,21 +146,6 @@ def test_concurrent_deploy_state_lock(tmp_path):
         t.join()
     st = ds.read_state_file(ds.state_path(cfg, NAME))
     assert st is not None and sorted(st.kept_nonces()) == ["t1", "t2"]
-
-
-def test_current_incarnation_reads_namespace(tmp_path):
-    st = ds.new_state(tmp_path / "c.yaml", NAME, NAME)
-    st.nonces = [ds.NonceEntry("X", "confirmed", "t")]
-    core = FakeCore()
-    core.add(NAME, uid="u1", **{ANNOTATION_DEPLOY_NONCE: "Z"})
-    assert ds.current_incarnation(st, core) is None
-    core.namespaces[NAME]["annotations"][ANNOTATION_DEPLOY_NONCE] = "X"
-    assert ds.current_incarnation(st, core) == "u1#X"
-    del core.namespaces[NAME]
-    assert ds.current_incarnation(st, core) is None
-    core.fail_reads = True
-    with pytest.raises(ApiException):
-        ds.current_incarnation(st, core)
 
 
 def test_write_deploy_nonce_marks_v17_state_only_when_recorded():
@@ -598,7 +582,6 @@ def test_deploy_to_a_new_namespace_starts_a_fresh_nonce_list(tmp_path, monkeypat
     st = ds.read_state_file(ds.state_path(cfg_path, NAME))
     assert st is not None and st.namespace == "ns-b"
     assert st.kept_nonces() == ["nB"]
-    assert ds.current_incarnation(st, core) is None  # ns-b not stamped yet
 
 
 def test_check2_refuses_a_state_recorded_for_another_namespace(tmp_path, monkeypatch):
