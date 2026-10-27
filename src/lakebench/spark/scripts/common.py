@@ -3806,3 +3806,278 @@ def finish_silver_build(
         )
     assert_progress(silver_count, "silver-build")
     spark.stop()
+
+
+# ---------------------------------------------------------------------------
+# Customer 360 batch gold finalize (gold_finalize.py, gold_finalize_delta.py)
+# ---------------------------------------------------------------------------
+
+#: Strategies a user may name in ``spark.lb.gold.strategy``; ``incremental``
+#: is lakebench's choice for multi-cycle cycles 2+ only.
+GOLD_OVERRIDABLE_STRATEGIES = ("simple_agg", "two_phase_agg")
+
+
+class GoldStrategyRefused(Exception):
+    """A ``spark.lb.gold.strategy`` value the gold finalize will not run."""
+
+
+def gold_strategy_override(spark):
+    """The strategy named in ``spark.lb.gold.strategy``, or None for auto.
+
+    Raises ``GoldStrategyRefused`` for ``incremental`` (lakebench chooses it
+    for multi-cycle cycles 2+ only) and for a value that names no strategy.
+    """
+    override = spark.conf.get("spark.lb.gold.strategy", None)
+    if override is None or override.strip().lower() in ("", "auto"):
+        return None
+    value = override.strip().lower()
+    if value == "incremental":
+        raise GoldStrategyRefused(
+            "spark.lb.gold.strategy=incremental is refused: incremental gold is chosen "
+            "by lakebench for multi-cycle cycles 2+ only"
+        )
+    if value in GOLD_OVERRIDABLE_STRATEGIES:
+        return value
+    raise GoldStrategyRefused(
+        f"spark.lb.gold.strategy={override!r} names no strategy: use auto, "
+        + " or ".join(GOLD_OVERRIDABLE_STRATEGIES)
+    )
+
+
+def select_gold_strategy(silver_size_gb):
+    """The automatic strategy, from silver's size alone: ``simple_agg`` below
+    500 GB, else ``two_phase_agg``. Both rebuild gold from all of silver."""
+    return "simple_agg" if silver_size_gb < 500 else "two_phase_agg"
+
+
+def determine_gold_strategy(spark, silver_tbl, size_fn):
+    """``(strategy, source)``, source being ``cycle``, ``override`` or
+    ``auto``.
+
+    ``cycle``: LB_GOLD_INCREMENTAL=true, which the CLI sets for cycles 2+ of
+    a multi-cycle run only. ``override``: ``spark.lb.gold.strategy``.
+    ``auto``: ``select_gold_strategy`` on silver's size from *size_fn*. A
+    refused override raises ``GoldStrategyRefused`` here too, though
+    ``run_c360_gold_finalize`` checks it first, before any write.
+    """
+    override = gold_strategy_override(spark)
+    if os.environ.get("LB_GOLD_INCREMENTAL", "false").lower() == "true":
+        log("INCREMENTAL MODE: multi-cycle cycle 2+ (LB_GOLD_INCREMENTAL)")
+        return "incremental", "cycle"
+    if override is not None:
+        log(f"Using override strategy: {override}")
+        return override, "override"
+    silver_size_gb = size_fn(spark, silver_tbl)
+    log(f"Silver size: {silver_size_gb:.1f} GB")
+    strategy = select_gold_strategy(silver_size_gb)
+    log(f"Auto-selected strategy: {strategy}")
+    return strategy, "auto"
+
+
+def merge_gold(existing_gold, new_kpis, last_date):
+    """Gold rows before ``last_date`` plus the recomputed rows, materialized.
+
+    Materialized (gold is a few hundred rows) so the overwrite does not read
+    the table it is replacing.
+    """
+    from pyspark.sql.functions import col, lit
+
+    kept = existing_gold
+    if last_date is not None:  # an empty gold table has no watermark
+        kept = existing_gold.filter(col("interaction_date") < lit(last_date))
+    return kept.unionByName(new_kpis).coalesce(1).localCheckpoint(eager=True)
+
+
+def _gold_simple_agg(spark, silver_tbl, gold_tbl, write):
+    """SIMPLE_AGG: one aggregation of all of silver. For < 500GB."""
+    log("Executing SIMPLE_AGG strategy...")
+    df = spark.table(silver_tbl)
+    silver_count = df.count()
+    log(f"Silver records: {silver_count:,}")
+    daily_kpis = (
+        df.groupBy("interaction_date")
+        .agg(*get_daily_kpi_aggregations())
+        .orderBy("interaction_date")
+    )
+    # No count of the KPIs: it would recompute the aggregate before the
+    # write. Gold is small, so one file.
+    log(f"Writing to: {gold_tbl}")
+    write(spark, daily_kpis.coalesce(1), gold_tbl, "replace")
+
+
+def _gold_two_phase_agg(spark, silver_tbl, gold_tbl, write, size_fn):
+    """TWO_PHASE_AGG: silver repartitioned by day (about 2 GB per partition,
+    at least 200), then aggregated. For 500GB - 10TB."""
+    log("Executing TWO_PHASE_AGG strategy...")
+    df = spark.table(silver_tbl)
+    agg_partitions = max(200, int(size_fn(spark, silver_tbl) / 2))
+    log(f"Using {agg_partitions} aggregation partitions")
+    log("Phase 1: Partial aggregation...")
+    daily_kpis = (
+        df.repartition(agg_partitions, "interaction_date")
+        .groupBy("interaction_date")
+        .agg(*get_daily_kpi_aggregations())
+        .orderBy("interaction_date")
+    )
+    log(f"Phase 2: Writing to {gold_tbl}")
+    write(spark, daily_kpis.coalesce(1), gold_tbl, "replace")
+
+
+def _gold_incremental(spark, silver_tbl, gold_tbl, write):
+    """INCREMENTAL: recompute gold from the last gold date on. Multi-cycle
+    cycles 2+ only (LB_GOLD_INCREMENTAL). Returns gold's row count."""
+    from pyspark.sql.functions import col
+    from pyspark.sql.functions import max as max_
+
+    log("Executing INCREMENTAL strategy...")
+    try:
+        existing_gold = spark.table(gold_tbl)
+        last_date = existing_gold.agg(max_("interaction_date")).collect()[0][0]
+        log(f"Last processed date: {last_date}")
+    except Exception:
+        log("No existing Gold table, will process all data")
+        last_date = None
+        existing_gold = None
+
+    # From the watermark date inclusive: a strict > dropped the silver rows
+    # that landed on the last processed date (a cycle boundary day).
+    silver_df = spark.table(silver_tbl)
+    if last_date:
+        silver_df = silver_df.filter(col("interaction_date") >= last_date)
+
+    new_count = silver_df.count()
+    if new_count == 0:
+        log("No new records to process")
+        return existing_gold.count() if existing_gold is not None else 0
+    log(f"Processing {new_count:,} new records")
+
+    # The columns of the other strategies: an extra column made the cycle 2
+    # write fail against the gold table they created.
+    new_kpis = silver_df.groupBy("interaction_date").agg(*get_daily_kpi_aggregations())
+    log(f"Generated {new_kpis.count():,} new KPI records")
+    new_kpis = new_kpis.coalesce(1)
+
+    if existing_gold is None:
+        log("Creating new Gold table...")
+        write(spark, new_kpis, gold_tbl, "create")
+    else:
+        # One commit: gold is one small file of daily rows, so it is
+        # rewritten whole (rows before the watermark plus the recomputed
+        # ones). DELETE-then-append was two commits, and a failure between
+        # them left gold missing days.
+        log(f"Replacing gold rows from {last_date} on...")
+        write(spark, merge_gold(existing_gold, new_kpis, last_date), gold_tbl, "overwrite")
+    return spark.table(gold_tbl).count()
+
+
+def run_c360_gold_finalize(*, title, app_name, namespace, size_fn, write):
+    """The c360 gold finalize job, for either table format.
+
+    ``namespace`` is (format label, ``namespace`` or ``schema``) for the
+    namespace create and its log lines. ``size_fn(spark, table)`` is a
+    table's size in GB. ``write(spark, df, gold_tbl, how)`` writes gold:
+    ``replace`` (full rebuild), ``create`` (first incremental cycle) or
+    ``overwrite`` (an existing table, rewritten whole).
+    """
+    import sys
+
+    from pyspark.sql import SparkSession
+
+    catalog = env("LB_ICEBERG_CATALOG", "ice")
+    log("=" * 60)
+    log(f"{title} - Adaptive Aggregation Pipeline")
+    log("=" * 60)
+
+    spark = SparkSession.builder.appName(app_name).getOrCreate()
+    set_utc_session(spark)
+
+    start_time = time.time()
+
+    # A refused spark.lb.gold.strategy stops the job before it writes anything.
+    try:
+        gold_strategy_override(spark)
+    except GoldStrategyRefused as e:
+        log(f"ERROR: {e}")
+        spark.stop()
+        sys.exit(1)
+
+    fmt, word = namespace
+    log(f"Creating {fmt} {word}...")
+    try:
+        spark.sql(f"CREATE {word.upper()} IF NOT EXISTS {catalog}.gold")
+        log(f"Created {word} {catalog}.gold")
+    except Exception as e:
+        log(f"{word.capitalize()} creation note: {str(e)}")
+
+    silver_tbl = f"{catalog}.{env('LB_SILVER_TABLE', 'silver.customer_interactions_enriched')}"
+    gold_tbl = f"{catalog}.{env('LB_GOLD_TABLE', 'gold.customer_executive_dashboard')}"
+
+    log(f"Checking Silver table: {silver_tbl}")
+    try:
+        silver_count = spark.table(silver_tbl).count()
+        log(f"Silver table contains {silver_count:,} records")
+    except Exception as e:
+        log(f"ERROR: Cannot read Silver table - {str(e)}")
+        log("Make sure Silver job completed successfully first")
+        spark.stop()
+        sys.exit(1)
+
+    if silver_count == 0:
+        log("ERROR: Silver table is empty - run Silver job first")
+        spark.stop()
+        sys.exit(1)
+
+    strategy, strategy_source = determine_gold_strategy(spark, silver_tbl, size_fn)
+    if strategy == "simple_agg":
+        kpi_count = _gold_simple_agg(spark, silver_tbl, gold_tbl, write)
+    elif strategy == "two_phase_agg":
+        kpi_count = _gold_two_phase_agg(spark, silver_tbl, gold_tbl, write, size_fn)
+    else:
+        kpi_count = _gold_incremental(spark, silver_tbl, gold_tbl, write)
+
+    # Non-degeneracy gate: gold must hold one KPI row per distinct silver
+    # interaction_date, else the run did not produce a valid gold.
+    gold_rows = spark.table(gold_tbl).count()
+    distinct_dates = spark.table(silver_tbl).select("interaction_date").distinct().count()
+    if kpi_count is None:  # a full rebuild: gold holds exactly the KPIs written
+        kpi_count = gold_rows
+    problem = gold_date_coverage_problem(gold_rows, distinct_dates)
+    if problem:
+        log(f"ERROR: gold non-degeneracy gate FAILED ({strategy}): {problem}")
+        spark.stop()
+        sys.exit(1)
+    log(f"Gold non-degeneracy gate PASSED: {gold_rows} gold rows == {distinct_dates} silver dates")
+
+    total_time = time.time() - start_time
+
+    log("Sample Gold KPIs:")
+    spark.table(gold_tbl).select(
+        "interaction_date",
+        "daily_active_customers",
+        "total_daily_revenue",
+        "conversions",
+        "avg_engagement_score",
+    ).orderBy("interaction_date").show(5, truncate=False)
+
+    silver_size_gb = size_fn(spark, silver_tbl)
+
+    log("=" * 60)
+    log(f"{title} COMPLETED")
+    log("=" * 60)
+    log(f"Strategy: {strategy}")
+    log(f"KPI records: {kpi_count:,}")
+    log(f"Table: {gold_tbl}")
+    log(f"Duration: {total_time:.1f}s ({total_time / 60:.1f} min)")
+    # The JOB METRICS block, and the stage gauges on the Pushgateway.
+    log_job_metrics(
+        "gold-finalize",
+        input_size_gb=silver_size_gb,
+        input_rows=silver_count,
+        output_rows=kpi_count,
+        elapsed_seconds=total_time,
+        gold_strategy=strategy,
+        gold_strategy_source=strategy_source,
+    )
+    # Expected-result facts (metrics/c360_correctness.py), after the timing above.
+    log_c360_check(spark, silver_tbl, gold_tbl)
+    spark.stop()
