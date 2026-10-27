@@ -631,17 +631,31 @@ def _find_prometheus_svc(namespace: str, context: str | None = None) -> str | No
     a port-forward target do not try one that is not there.
     """
     from kubernetes import client as k8s_client
+    from kubernetes.client.exceptions import ApiException
 
     from lakebench.k8s.target import ClusterTarget, ContextConflictError
 
     try:
         ClusterTarget.resolve(context=context or "").activate()
-        k8s_client.CoreV1Api().read_namespaced_service(PROMETHEUS_SERVICE_NAME, namespace)
-        return PROMETHEUS_SERVICE_NAME
     except ContextConflictError:
         raise
-    except Exception:  # noqa: BLE001 -- absent or unreadable: no Prometheus to query
+    except Exception:  # noqa: BLE001 -- unreachable cluster: no Prometheus to query
         return None
+
+    # The read can fail transiently (a reset connection, a 5xx or a 429); a
+    # 404 (no Service) or 403 (no access) is final. Retry once after a short
+    # wait so a blip does not record platform metrics as uncollected.
+    for attempt in range(2):
+        try:
+            k8s_client.CoreV1Api().read_namespaced_service(PROMETHEUS_SERVICE_NAME, namespace)
+            return PROMETHEUS_SERVICE_NAME
+        except ApiException as e:
+            if e.status in (403, 404) or attempt == 1:
+                return None
+            time.sleep(2)
+        except Exception:  # noqa: BLE001 -- not a read error: no Prometheus to query
+            return None
+    return None
 
 
 def _collect_platform_metrics(cfg, run_metrics) -> None:
@@ -2981,7 +2995,8 @@ def resolve_maintenance_schedule(sustained, run_duration: int, *, skip_maintenan
 
     Unset intervals are derived from the window (retention: run_duration / 3,
     within 300..7200; compaction: 2 x retention), so a default run's
-    maintenance fires inside its window. An explicit interval that cannot fire inside the window is refused
+    maintenance fires inside its window. An explicit interval that cannot
+    fire inside the window is refused
     (``problem``) unless maintenance is disabled: --skip-maintenance for both,
     compaction_enabled false for compaction. A derived one that cannot fire
     (a window under about six minutes) is a warning; the effective
@@ -3810,7 +3825,8 @@ def _run_sustained(
             _driver_log_capturer = None
 
         # Confirm each driver is running before the window opens, so a failed
-        # submission shows now rather than as zero rows at the gates; dependency-download races on the shared operator are retried.
+        # submission shows now rather than as zero rows at the gates;
+        # dependency-download races on the shared operator are retried.
         # One shared deadline: the streams start concurrently, so waiting
         # for each in turn with its own budget could take N times as long.
         # Each stream's submission failures are printed, journaled and

@@ -448,6 +448,26 @@ def test_sustained_prometheus_lookup_reuses_the_active_target(kubeconfig, hosts)
     assert hosts == [SERVER_A]
 
 
+def test_sustained_prometheus_lookup_retries_a_transient_error(
+    kubeconfig, hosts, monkeypatch
+) -> None:
+    from lakebench.cli import _sustained
+    from lakebench.cli._sustained import PROMETHEUS_SERVICE_NAME, _find_prometheus_svc
+
+    ClusterTarget.resolve(context="A").activate()
+    reads = iter([ApiException(status=503, reason="Service Unavailable"), MagicMock()])
+
+    def read(self, name, namespace):
+        outcome = next(reads)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr("kubernetes.client.CoreV1Api.read_namespaced_service", read)
+    monkeypatch.setattr(_sustained.time, "sleep", lambda s: None)
+    assert _find_prometheus_svc("obs", context=None) == PROMETHEUS_SERVICE_NAME
+
+
 def test_sustained_prometheus_lookup_refuses_a_second_context(kubeconfig, hosts) -> None:
     from lakebench.cli._sustained import _find_prometheus_svc
 
