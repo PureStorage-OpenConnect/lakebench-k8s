@@ -96,7 +96,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
     },
     "silver-build": {
         "driver_cores": 4,
-        "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
+        "driver_memory": "32g",  # 24g OOMs on Spark 4: the 558MB SDK v2 bundle plus K8s API polling
         "executor_cores": 4,
         "executor_memory": "48g",
         "executor_memory_overhead": "12g",
@@ -119,7 +119,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
     },
     "gold-finalize": {
         "driver_cores": 4,
-        "driver_memory": "32g",  # BUG-007: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
+        "driver_memory": "32g",  # 24g OOMs on Spark 4: the 558MB SDK v2 bundle plus K8s API polling
         "executor_cores": 4,
         "executor_memory": "32g",
         "executor_memory_overhead": "8g",
@@ -265,8 +265,8 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
             "executor_memory": "8g",
             "executor_memory_overhead": "12g",
         },
-        # AML continuous bronze-ingest. Measured on run-20260925-104452-21bf3a
-        # (scale 10, 1800 s window) with the base 2 executors x 2 cores: every
+        # AML continuous bronze-ingest, measured at scale 10 over an 1800 s
+        # window with the base 2 executors x 2 cores: every
         # micro-batch took the full 50 files (maxFilesPerTrigger) and ran
         # 109.7 s against a 30 s trigger, so bronze was busy 97.5% of the
         # window and moved 0.456 files/s. The scale-10 corpus is 1,371 files:
@@ -292,8 +292,8 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
             "executors_per_100_scale": 4,
             "max_executors": 20,
         },
-        # AML continuous silver-stream. Measured on run-20260925-135005-4b7a97
-        # (scale 10, 1800 s, bronze-ingest at the override above) with the base
+        # AML continuous silver-stream, measured at scale 10 over an 1800 s
+        # window (bronze-ingest at the override above) with the base
         # 4 executors x 4 cores: 4 micro-batches of 66.7M rows at 299 s each
         # against a 60 s trigger, 13.9K rows/s per core with the per-batch
         # overhead folded in. The silver source has no per-trigger file or row
@@ -315,14 +315,14 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
             "max_executors": _MAX_EXECUTORS_SAFE,
             "base_partitions": 80,
         },
-        # AML continuous gold-refresh. Same run: 4 ticks at 349.5 s mean on
-        # the base 2 x 4 = 8 cores, over the 300 s refresh interval, so ticks
-        # ran back to back. Every tick recomputes all of silver (windowing
+        # AML continuous gold-refresh, same scale-10 window: 4 ticks at 349.5 s
+        # mean on the base 2 x 4 = 8 cores, over the 300 s refresh interval, so
+        # ticks ran back to back. Every tick recomputes all of silver (windowing
         # loses recall), so tick cost follows silver's size, and those
         # ticks read a lagging silver: 58.4M rows on average. Once silver keeps
         # up it holds the whole scale-10 corpus, 266.7M rows, by the time
-        # bronze drains. Lane U's local ticks (84 s at 3.4M rows, 122 s at
-        # 6.7M) put the fixed per-tick cost near 45 s, which leaves 5.2 s of
+        # bronze drains. Local ticks (84 s at 3.4M rows, 122 s at 6.7M) put the
+        # fixed per-tick cost near 45 s, which leaves 5.2 s of
         # row work per million rows at 8 cores, taken as scaling with cores
         # (path searches, ~80% of a tick, are shuffle joins). A full-silver
         # tick is then 1,389 s of row work at 8 cores: 12 x 4 = 48 cores run
@@ -906,19 +906,17 @@ def aml_bronze_verify_timeout_budget(scale: float) -> int:
     AML bronze-verify is NOT the thin add_files register c360 uses. It trips
     the CTAS fallback in bronze_verify_financial.py that rewrites the full
     pacs.008 corpus through Iceberg and spills ~2x the input per executor.
-    Measured live at 4278s at scale 10 (run-20260923-120258-b71af2, 7
-    executors, ~100 GB raw pacs008 present at job start). Executor count scales
+    Measured live at 4278s at scale 10 (7 executors, ~100 GB raw pacs008
+    present at job start). Executor count scales
     with data (executors_per_100_scale=8, capped at max_executors=28), so cost
     grows sublinearly with scale rather than 1:1.
 
     The 5400s floor covers the scale-10 measurement plus headroom for a cold
     Ivy jar fetch (~135s) or a transient OOM-retry, and the gentle scale*120
-    slope adds growth once executor scaling saturates at high scale. Both the
-    batch per-job timeout (cli/_run.py) and the sustained bronze-verify
-    preflight (cli/_sustained.py) size against this single helper so they
-    cannot diverge for the same job -- the batch path had only 222s (5%)
-    headroom over the measured cost before this was shared, a false-failure
-    risk on the primary UAT path under a cold classpath or OOM retry.
+    slope adds growth once executor scaling saturates at high scale. The batch
+    per-job timeout (cli/_run.py) and the sustained bronze-verify preflight
+    (cli/_sustained.py) both size against this one helper so they cannot
+    diverge for the same job.
     """
     return max(5400, int(scale * 120))
 
@@ -1378,14 +1376,11 @@ _SUPPORTED_SPARK_VERSIONS: dict[tuple[int, int], str] = {
     (4, 0): "4.0.x (Scala 2.13, Hadoop AWS 3.4.1)",
     (4, 1): "4.1.x (Scala 2.13, Hadoop AWS 3.4.2)",
 }
-# Spark 4.2 is deliberately NOT in this dict. Live-verified 2026-07-26: the
+# Spark 4.2 is deliberately not in this dict: it changed
+# org.apache.spark.sql.connector.catalog.View from an interface, so the
 # borrowed Iceberg 4.1 runtime jar (Iceberg has no native 4.2 runtime) throws
-# java.lang.IncompatibleClassChangeError loading org.apache.iceberg.spark.
-# source.SparkView -- Spark 4.2 changed org.apache.spark.sql.connector.
-# catalog.View from an interface to something else, breaking every Iceberg
-# release that implements it. This is a real binary incompatibility, not a
-# lakebench config gap, and blocks table writes entirely (silver-build fails
-# on the first createOrReplace).
+# IncompatibleClassChangeError loading SparkView and silver-build fails on the
+# first createOrReplace. A binary incompatibility, not a config gap.
 
 # ---------------------------------------------------------------------------
 # Table format version compatibility matrix
@@ -1419,7 +1414,7 @@ _FORMAT_VERSION_DEFAULTS: dict[tuple[int, int], dict[str, str]] = {
 # bytecode major 61, where 1.10.x carried 55 (Java 11).  Spark images that ship
 # a Java 11 runtime therefore fail with UnsupportedClassVersionError at class
 # load, not at submit, so the error surfaces inside the driver rather than in
-# lakebench.  Verified by reading the class headers out of both jars.
+# lakebench.
 _ICEBERG_MIN_JAVA17_VERSION = (1, 11)
 
 # Iceberg runtime artifact suffix per (Spark version, Iceberg version).
@@ -1437,22 +1432,20 @@ _ICEBERG_RUNTIME_SUFFIX: dict[tuple[int, int], str] = {
 # No (4, 2) entry: Spark 4.2 is not in _SUPPORTED_SPARK_VERSIONS. Borrowing
 # the 4.1 jar there throws IncompatibleClassChangeError.
 
-# Additional Maven repository for ``spark.jars.repositories`` /
-# ``--repositories`` on every job. Google mirrors Maven Central at
-# ``maven-central.storage-download.googleapis.com`` and rate-limits
-# independently, so when Central returns HTTP 429 to the cluster's egress
-# IP (which happens after a burst of UAT deploys) Ivy falls to the mirror
-# and the driver still resolves cleanly. Spark's default Ivy chain tries
-# Central and repos.spark-packages.org first and this entry last; a Central
-# 429 registers as "not found", which moves Ivy on down the chain.
+# A fallback Maven repository the dependency-set request resolves against
+# (deps/request.py builds the --repositories list). Google mirrors Maven
+# Central at ``maven-central.storage-download.googleapis.com`` and rate-limits
+# independently, so when Central returns HTTP 429 to the cluster's egress IP
+# (after a burst of deploys) Ivy falls to the mirror and resolves cleanly: a
+# Central 429 registers as "not found" and Ivy moves on down the chain.
 _MAVEN_MIRROR_REPOS = "https://maven-central.storage-download.googleapis.com/maven2/"
 
-# Python packages the AML reference detector (D9) needs on the driver. The
+# Python packages the AML reference detector needs on the driver. The
 # apache/spark images ship Python 3.10 with pip but no numpy, so these are
 # installed per job into an emptyDir by an init container. Exact pins keep the
-# GBT reproducible (P4.2); they are the newest releases with cp310 wheels, so
-# they trail the local harness (Python 3.11) by a minor version or two, which
-# A6 absorbs (cluster AP must match the harness within its bootstrap CI).
+# GBT reproducible; they are the newest releases with cp310 wheels, so they
+# trail the local harness (Python 3.11) by a minor version or two, which the
+# cluster-vs-harness AP bootstrap CI absorbs.
 REFERENCE_PY_DEPS = (
     "numpy==2.2.6",
     "scipy==1.15.3",
@@ -1515,9 +1508,8 @@ def _rebuild_epoch_key(cfg) -> str | None:
 
     Delta and Iceberg silver builds each carry their own rebuild-epoch
     counter so a --force-rebuild on one deployment cannot silently disturb
-    the other. AML is Iceberg-only per the plan; a financial+delta config
-    returns None (Delta AML is out of v1.6 scope) and no LB_REBUILD_EPOCH
-    is exported for it.
+    the other. AML is Iceberg-only, so a financial+delta config returns None
+    and no LB_REBUILD_EPOCH is exported for it.
     """
     try:
         schema_type = cfg.architecture.workload.schema_type.value
@@ -2438,10 +2430,7 @@ class SparkJobManager:
             JobType.GOLD_REFRESH: "gold_refresh.py",
         }
         if workload_schema == "financial":
-            # Financial pipeline is authored end-to-end; each sub-PR of
-            # ENG-2C.3 fills in the corresponding entry. Scripts that have
-            # not shipped yet fall back to the Customer 360 file above so
-            # a partial-landing branch still boots.
+            # The financial workload has its own script per role.
             _financial_scripts = {
                 JobType.BRONZE_VERIFY: "bronze_verify_financial.py",
                 JobType.SILVER_BUILD: "silver_build_financial.py",
@@ -2721,12 +2710,11 @@ class SparkJobManager:
                 }
             )
 
-        # Parquet tuning
-        # BUG-006: Fixed 256MB partitions caused 26k tasks at scale 500,
-        # overwhelming driver with Iceberg commit metadata. Scale-aware sizing.
-        # 5000 tasks overwhelms AppStatusListener at scale 100+ with
-        # Spark 4.0.2 (O(liveTasks) flush per heartbeat). Target 2000 tasks
-        # and allow up to 2GB partitions to keep the driver responsive.
+        # Parquet tuning. Fixed 256MB partitions made 26k tasks at scale 500,
+        # whose Iceberg commit metadata overwhelmed the driver, and 5000 tasks
+        # overwhelm the Spark 4.0.2 AppStatusListener (O(liveTasks) flush per
+        # heartbeat) at scale 100+. Size partitions to the scale, targeting
+        # 2000 tasks and allowing up to 2GB partitions, to keep it responsive.
         # At scale 100 (1TB): 1024MB partitions = ~1000 tasks.
         # At scale 10 (100GB): 256MB partitions = ~400 tasks (floor applies).
         target_tasks = 2000
@@ -3041,12 +3029,11 @@ class SparkJobManager:
                 "image": cfg.images.spark,
                 "imagePullPolicy": cfg.images.pull_policy.value,
                 "mainApplicationFile": main_file,
-                # Args for scripts that take CLI options (score, reference score).
+                # Args for scripts that take CLI options (the reference score).
                 # SparkOperator maps this to the driver's Python argv after the
-                # script path. Omit when unused so we don't break the older
-                # config's assumption that omitting the field is safe.
+                # script path; the field is omitted when there are none.
                 **({"arguments": arguments} if arguments else {}),
-                # No deps.pyFiles needed - PYTHONPATH includes /opt/spark/scripts for common.py imports
+                # common.py is imported from PYTHONPATH (/opt/spark/scripts), not deps.pyFiles.
                 "sparkVersion": spark_image_tag,  # From config: images.spark
                 "restartPolicy": _restart_policy,
                 "driver": {
@@ -3098,7 +3085,7 @@ class SparkJobManager:
         cfg: LakebenchConfig,
         silver_state: Callable[[], dict[str, str] | Exception],
     ) -> tuple[str, str]:
-        """C2 (silver-plan): resolve LB_DATA_CLOCK for a silver job.
+        """Resolve LB_DATA_CLOCK for a silver job.
 
         Returns ``(iso_date, source_label)`` where ``source_label`` is one of
         ``datagen_timestamp_end``, ``bronze_data_clock``,
@@ -3231,7 +3218,7 @@ class SparkJobManager:
             )
             env.append({"name": "LB_RUN_ID", "value": os.environ.get("LB_RUN_ID", "")})
 
-        # C2 (silver-plan): silver jobs always carry LB_DATA_CLOCK so a rerun
+        # Silver jobs always carry LB_DATA_CLOCK so a rerun
         # scores recency reproducibly, and a greenfield deployment never
         # silently writes NULL customer_recency_score. Resolution order:
         #
@@ -3256,7 +3243,7 @@ class SparkJobManager:
         elif _ts_end:
             env.append({"name": "LB_DATA_CLOCK", "value": str(_ts_end)})
 
-        # G3: reproducibility seed for silver-build profile sampling
+        # Reproducibility seed for silver-build profile sampling
         # (silver_build.py, silver_build_delta.py). Exported so re-runs at
         # the same seed produce the same profile numbers. Uses the resolved
         # datagen seed (config/datagen_seed.py) so the sampler sees the same
@@ -3281,14 +3268,14 @@ class SparkJobManager:
             )
             _lb_seed = 0
         # A registered (held-out) corpus's seed is never in a SparkApplication
-        # spec (owner, 10-03); LB_SEED feeds only the Customer 360 silver
-        # sampler, so it is left out there.
+        # spec; LB_SEED feeds only the Customer 360 silver sampler, so it is
+        # left out there.
         from lakebench.config.seed_secret import uses_seed_secret
 
         if not uses_seed_secret(cfg):
             env.append({"name": "LB_SEED", "value": str(_lb_seed)})
 
-        # B1 rebuild-epoch: the per-deployment lakebench-silver-state ConfigMap
+        # Rebuild-epoch: the per-deployment lakebench-silver-state ConfigMap
         # stores one counter per (workload x format). The counter bumps on a
         # user-triggered --force-rebuild via the CLI so Delta's (txnAppId,
         # txnVersion) commits from earlier epochs do not short-circuit the
@@ -3304,8 +3291,8 @@ class SparkJobManager:
             _epoch = _silver_state_epoch(silver_state(), _rebuild_key)
             env.append({"name": "LB_REBUILD_EPOCH", "value": str(_epoch)})
 
-        # G5: silver streams label their admission decision against the
-        # measured scale envelope (invariant 6). The stream mains compute
+        # Silver streams label their admission decision against the
+        # measured scale envelope. The stream mains compute
         # `admission = "ok"` when scale <= measured envelope, else
         # `labelled_beyond_measured_envelope`. Export the deployment scale
         # so a running stream can decide, not just recite a hardcoded string.
@@ -3347,12 +3334,12 @@ class SparkJobManager:
                     "value": str(cfg.architecture.workload.w1_max_vertices),
                 }
             )
-            # P10 operations layer parameters (tm_operations.py).
+            # Operations-layer parameters (tm_operations.py).
             env.extend(
                 {"name": k, "value": v}
                 for k, v in cfg.architecture.workload.tm_operations.env().items()
             )
-            # H4 fat-finger guard: AML batch silver refuses to overwrite while
+            # AML batch silver refuses to overwrite while
             # continuous silver is active. silver_build_financial.main() probes
             # for ``_STARTED`` under this deployment's known silver-stream
             # checkpoint path -- the same URI job.py builds for the SILVER_STREAM
@@ -3417,7 +3404,7 @@ class SparkJobManager:
                     {"name": "TARGET_FILE_SIZE_BYTES", "value": target_file_size_bytes},
                 ]
             )
-            # A3 (silver-plan): silver-stream reads this cap so its bronze
+            # Silver-stream reads this cap so its bronze
             # wait loop cannot spend the whole window before the empty-rows gate
             # fires. See SustainedConfig.effective_silver_bronze_wait_seconds.
             if job_type == JobType.SILVER_STREAM:
@@ -3508,7 +3495,7 @@ class SparkJobManager:
                         }
                     )
                     # The TM layer reads the bronze stream's source log to
-                    # know which raw files bronze should hold (P10 stage 1).
+                    # know which raw files bronze should hold.
                     env.append(
                         {
                             "name": "LB_FINANCIAL_BRONZE_CHECKPOINT",
@@ -3516,15 +3503,15 @@ class SparkJobManager:
                         }
                     )
 
-        # AML fidelity gate provenance (AML-GOALS R6, R3): which corpus seed
-        # the report scored and which lakebench revision produced it.
+        # AML fidelity gate provenance: which corpus seed the report scored
+        # and which lakebench revision produced it.
         if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
             from lakebench.config.datagen_seed import config_seed
             from lakebench.config.seed_secret import seed_secret_env, uses_seed_secret
 
             if uses_seed_secret(cfg):
                 # A registered corpus's seed: from the Secret generate wrote,
-                # never in the SparkApplication spec (owner, 10-03).
+                # never in the SparkApplication spec.
                 env.append(seed_secret_env(cfg))
             else:
                 env.append({"name": "LB_DATAGEN_SEED", "value": str(config_seed(cfg))})
