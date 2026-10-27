@@ -1,4 +1,4 @@
-"""Run command implementation -- extracted from cli/__init__.py."""
+"""The ``run`` command: a batch or continuous pipeline run and its record."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -14,8 +14,8 @@ import typer
 from rich.panel import Panel
 
 from lakebench._clock import utc_now
+from lakebench.cli._aml_post import _not_scored_record
 from lakebench.cli._aml_post import score_financial_via_queries as _score_financial_via_queries
-from lakebench.cli._aml_post import scoring_count_line  # noqa: F401 -- re-exported
 from lakebench.cli._cluster_ops import DATAGEN_JOB
 from lakebench.cli._helpers import (
     _journal_safe,
@@ -36,7 +36,6 @@ from lakebench.cli._helpers import (
     write_run_report,
 )
 from lakebench.cli._interrupt import restores_handlers
-from lakebench.cli._run_args import BATCH_STAGES
 from lakebench.config import (
     LoadPurpose,
     parse_spark_memory,
@@ -50,10 +49,9 @@ from lakebench.metrics.verdict import apply_save_gate
 
 logger = logging.getLogger(__name__)
 
-# Per-statement kubectl-exec timeout for pre-benchmark compaction (seconds).
-PRE_BENCHMARK_COMPACTION_TIMEOUT = 1800
-# Same bound for pre-benchmark expire_snapshots / remove_orphan_files.
-PRE_BENCHMARK_MAINTENANCE_TIMEOUT = 1800
+# Per-statement kubectl-exec timeout for pre-benchmark maintenance and
+# compaction (seconds).
+PRE_BENCHMARK_STATEMENT_TIMEOUT = 1800
 # Overall cap for pre-benchmark maintenance and compaction together (seconds).
 PRE_BENCHMARK_MAINTENANCE_CAP = 1800
 
@@ -70,7 +68,7 @@ def apply_run_mode(cfg, run_mode: str) -> None:
 
 
 def _bump_silver_rebuild_epoch(cfg) -> None:
-    """Atomically increment this deployment's silver rebuild-epoch counter (B1).
+    """Atomically increment this deployment's silver rebuild-epoch counter.
 
     Called by --force-rebuild before submitting the silver job so Delta's
     (txnAppId, txnVersion) commits from the previous epoch cannot short-
@@ -78,15 +76,15 @@ def _bump_silver_rebuild_epoch(cfg) -> None:
     on ``lakebench-silver-state``; job.py reads the same key back into
     ``LB_REBUILD_EPOCH`` for the silver pod.
 
-    Raises RuntimeError on any error the caller cannot recover from; the CLI
-    downgrades to a warning and passes LB_FORCE_REBUILD=1 anyway, because
-    the Iceberg cycle-0 guard is orthogonal to Delta idempotency.
+    Raises RuntimeError on any error; the caller then refuses to submit
+    silver (exit 1).
     """
     from kubernetes import client as _kclient
     from kubernetes.client.exceptions import ApiException
 
     from lakebench.deploy.engine import DeploymentEngine
     from lakebench.k8s import get_k8s_client as _get_k8s
+    from lakebench.modules.pipeline_engines.spark.job import _rebuild_epoch_key
 
     _get_k8s(
         context=cfg.platform.kubernetes.context or "",
@@ -95,18 +93,12 @@ def _bump_silver_rebuild_epoch(cfg) -> None:
     core_v1 = _kclient.CoreV1Api()
     namespace = cfg.get_namespace()
 
-    # Same key resolution as job.py._rebuild_epoch_key.
-    schema_type = cfg.architecture.workload.schema_type.value
-    table_format = cfg.architecture.table_format.type.value
-    if schema_type == "financial":
-        key = "rebuild_epoch_aml_iceberg" if table_format == "iceberg" else None
-    else:
-        key = {
-            "delta": "rebuild_epoch_c360_delta",
-            "iceberg": "rebuild_epoch_c360_iceberg",
-        }.get(table_format)
+    key = _rebuild_epoch_key(cfg)
     if key is None:
-        raise RuntimeError(f"no rebuild-epoch key for schema={schema_type} format={table_format}")
+        raise RuntimeError(
+            f"no rebuild-epoch key for schema={cfg.architecture.workload.schema_type.value} "
+            f"format={cfg.architecture.table_format.type.value}"
+        )
 
     # Best-effort optimistic-concurrency bump: read, +1, replace under the
     # same resourceVersion. On a concurrent write, the API server rejects
@@ -161,19 +153,13 @@ def _bump_silver_rebuild_epoch(cfg) -> None:
     )
 
 
-def _utc(stamp: datetime | None) -> datetime | None:
-    """A naive local wall-clock time as a timezone-aware UTC one, as the
-    stage windows from the job manager are; None stays None."""
-    return None if stamp is None else stamp.astimezone(timezone.utc)
-
-
 def _load_latest_datagen_fleet(namespace: str | None = None) -> dict | None:
     """Load the per-pod datagen metrics sidecar written by `lakebench generate`.
 
     Sidecar is keyed by namespace, so `lakebench run` only ever attributes
     fleet metrics that come from a `lakebench generate` against the same
-    namespace as the run. This closes the cross-run silent-attribution hole
-    that would let two parallel UAT runs pollute each other's scorecards.
+    namespace as the run, so two runs in different namespaces never read
+    each other's fleet.
 
     Returns None if the sidecar for `namespace` does not exist, cannot be
     parsed, or does not carry a matching `namespace` payload. Never raises;
@@ -378,7 +364,7 @@ def _run_preflight_infra_check(cfg) -> None:
     print_success("Infrastructure check passed")
 
 
-def _record_local_jobs(collector, cfg, result) -> None:
+def _record_local_jobs(collector, result) -> None:
     """Record one JobMetrics per stage from a local run.
 
     Resources come from the local profile rather than the cluster one. A
@@ -386,8 +372,6 @@ def _record_local_jobs(collector, cfg, result) -> None:
     figure is the single JVM heap -- reporting the cluster's 8 x 48g here would
     make compute_efficiency_gb_per_core_hour meaningless.
     """
-    from datetime import timedelta
-
     from lakebench.metrics import JobMetrics
     from lakebench.modules.pipeline_engines.spark.job import get_local_job_profile
 
@@ -581,17 +565,38 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
 
 # Batch stage status poll. Stage times come from the cluster (_stage_timing),
 # not from this poll; it bounds how long lakebench takes to notice a stage has
-# ended, which sits inside time to value between stages. Was 15 s.
+# ended, which sits inside time to value between stages.
 _STAGE_POLL_S = 5
 
 
-# The batch pipeline stages `run --stage` accepts, in order.
-BATCH_STAGE_NAMES = BATCH_STAGES
-
-
-# The verdict reason a datagen wait-budget timeout records (the exit code is
-# 1, formerly 5; the record keeps the distinction).
+# The verdict reason a datagen wait-budget timeout records: it exits 1 like
+# any failure, and the record keeps the distinction.
 DATAGEN_TIMED_OUT = "datagen timed out"
+
+
+def _gate_bronze_for_generate(cfg, regenerate: bool, allow_stale_bronze: bool, run_metrics):
+    """Clear the way for this run's generate and return the bronze gate.
+
+    An earlier datagen Job's pods could still land files after the gate
+    looked or cleared, so they are stopped first (bounded wait). The gate
+    refuses a non-empty bronze prefix unless --regenerate (owned bucket:
+    clear the datagen prefix) or --allow-stale-bronze (any other bucket,
+    recorded on *run_metrics*). The namespace's fleet sidecar describes the
+    corpus this run replaces: it goes once the gate lets the generate
+    proceed (a refused run keeps the corpus and its sidecar), or before the
+    gate with --regenerate, which may clear part of bronze and then fail.
+    """
+    from lakebench.metrics.datagen_aggregator import drop_sidecar
+
+    stop_previous_datagen_or_exit(cfg)
+    if regenerate:
+        drop_sidecar(cfg.get_namespace())
+    gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
+    if run_metrics is not None:
+        run_metrics.datagen_stale_bronze = gate.record()
+    if not regenerate:
+        drop_sidecar(cfg.get_namespace())
+    return gate
 
 
 def _handle_datagen_timeout(
@@ -602,16 +607,13 @@ def _handle_datagen_timeout(
     timeout_s: int,
     elapsed_s: float,
 ) -> None:
-    """A4 (v1.6): fail the run and stop orphaned compute after a datagen timeout.
+    """Fail the run and stop orphaned compute after a datagen timeout.
 
-    Before this branch the wait loop just fell through to a "Datagen
-    completed" success line even when the timeout had expired: the datagen
-    Job was still running (burning pod resources), any streaming Spark
-    application consuming the trickle was still running, and the follow-up
-    pipeline stages would build on a partial bronze (invariant 3). The fix:
-    delete the datagen Job so it stops writing, delete each streaming
-    SparkApplication that was consuming the trickle so it stops reading,
-    then exit 1. The caller records ``DATAGEN_TIMED_OUT`` in the
+    When the wait budget runs out the datagen Job is still running and any
+    streaming SparkApplication consuming the trickle still reads, and the
+    stages after it would build on a partial bronze. This deletes the Job so
+    it stops writing and each streaming SparkApplication so it stops
+    reading, then exits 1. The caller records ``DATAGEN_TIMED_OUT`` in the
     run's ``failure_reasons``, so the record's ``verdict.reasons`` tells a
     timeout apart from other datagen failures.
     """
@@ -648,8 +650,8 @@ def _submission_failure_reporter(stage_name: str, journal):
     """Print and journal each SUBMISSION_FAILED of a batch stage as it happens.
 
     The operator retries on its own, so the stage keeps waiting; without a
-    line here a 60-90 s retry reads as a slow stage with no reason (the
-    2026-09-27 controller evictions).
+    line here a 60-90 s retry (a controller eviction, for one) reads as a
+    slow stage with no reason.
     """
 
     def _report(failure: dict[str, Any]) -> None:
@@ -742,19 +744,12 @@ def _exclude_c360_check_time(job_metrics) -> float:
     stage's elapsed seconds and in time to value. Returns the seconds
     removed (0 when there is nothing to remove).
     """
-    from datetime import timedelta
-
     facts = getattr(job_metrics, "c360_check", None) or {}
     try:
         secs = float(facts.get("check_seconds") or 0.0)
     except (TypeError, ValueError):
         return 0.0
-    if secs <= 0 or secs >= (job_metrics.elapsed_seconds or 0.0):
-        return 0.0
-    job_metrics.elapsed_seconds -= secs
-    if job_metrics.end_time is not None:
-        job_metrics.end_time -= timedelta(seconds=secs)
-    return secs
+    return _take_off_stage_end(job_metrics, secs)
 
 
 def _exclude_alert_set_time(job_metrics) -> float:
@@ -767,24 +762,23 @@ def _exclude_alert_set_time(job_metrics) -> float:
     c360 check would (``_exclude_c360_check_time``). Returns the seconds
     removed (0 when there is nothing to remove).
     """
-    from datetime import timedelta
-
     try:
         secs = float(getattr(job_metrics, "alert_set_seconds", None) or 0.0)
     except (TypeError, ValueError):
         return 0.0
+    return _take_off_stage_end(job_metrics, secs)
+
+
+def _take_off_stage_end(job_metrics, secs: float) -> float:
+    """Take *secs* of Lakebench's own work off the end of a stage's time.
+    Returns the seconds removed: 0 when *secs* is not positive or not less
+    than the stage's elapsed seconds."""
     if secs <= 0 or secs >= (job_metrics.elapsed_seconds or 0.0):
         return 0.0
     job_metrics.elapsed_seconds -= secs
     if job_metrics.end_time is not None:
         job_metrics.end_time -= timedelta(seconds=secs)
     return secs
-
-
-# Upstream failures a benchmark may carry without failing the run, as
-# (table format, query engine, query name). Each must be a documented bug
-# outside lakebench. Empty today; no known upstream failures are tolerated.
-_KNOWN_QUERY_FAILURES: set[tuple[str, str, str]] = set()
 
 
 def _paired_qph(pre, post) -> tuple[float, float, int] | None:
@@ -813,12 +807,12 @@ def compaction_measurable(cfg) -> bool:
 def _data_file_total(health: dict[str, int]) -> int:
     """Data files across the probed tables; 0 (unknown) when any probe failed.
 
-    ``_probe_table_health`` leaves a failed probe's key out (older code
-    wrote -1, still refused here). Summing what is left read a probe that
-    failed on one side only as a file-count change.
+    ``_probe_table_health`` leaves a failed probe's key out. Summing what is
+    left would read a probe that failed on one side only as a file-count
+    change.
     """
     counts = [v for k, v in health.items() if "file_count" in k and isinstance(v, int)]
-    if not counts or any(v < 0 for v in counts):
+    if not counts:
         return 0
     # A probe that found no count leaves its key out. A total over fewer
     # tables than the other side's reads as a compaction that never ran.
@@ -842,8 +836,8 @@ def _maintenance_value(
     The value is None, with the reason, unless maintenance ran and compaction
     reduced the data file count. With the file count unchanged the two rounds
     differ only in what compaction did not change, and the difference is
-    run-to-run noise: on 2026-09-24 four runs with the same file count before
-    and after read -12.4%, -8.9%, +31.2% and +46.8%.
+    run-to-run noise: four live runs with the same file count before and
+    after read -12.4%, -8.9%, +31.2% and +46.8%.
 
     *settle* is the ``SettleResult`` of the wait before the post round, or
     None when the wait was disabled. A wait that did not settle leaves the
@@ -899,10 +893,9 @@ def _maintenance_value(
 
 # Samples inside a round run back to back, so their range misses drift
 # between rounds: two rounds of the same run with nothing changed between
-# them differed 3-11% in QpH on the live cluster (GOALS repeatability entry,
-# 2026-09-25). A difference within this floor is not reported as a
-# maintenance effect even when the within-round ranges do not overlap.
-# Replace with the measured spread once the repeatability runs land.
+# them differed 3-11% in QpH on a live cluster. A difference within this
+# floor is not reported as a maintenance effect even when the within-round
+# ranges do not overlap.
 _ROUND_DRIFT_FLOOR_PCT = 11.0
 
 
@@ -950,13 +943,27 @@ def _sample_note(kwargs: dict) -> str:
     return f" [dim](median of {len(samples)}, {min(samples):.1f}-{max(samples):.1f}s)[/dim]"
 
 
+def _bench_progress(idx, total, name, phase, **kwargs) -> None:
+    """The console line of one benchmark query, started and done."""
+    if phase == "start":
+        console.print(f"  [{idx}/{total}] {name}...", end=" ")
+    elif phase == "done":
+        elapsed = kwargs.get("elapsed", 0)
+        error = kwargs.get("error", "")
+        if kwargs.get("success", False):
+            console.print(f"[green]{elapsed:.1f}s OK[/green]{_sample_note(kwargs)}")
+        else:
+            short_err = (error[:60] + "...") if len(error) > 60 else error
+            console.print(f"[red]FAIL[/red] ({esc(short_err)})")
+
+
 def _warm_benchmark(runner, query_timeout: int) -> None:
     """One unmeasured pass, so a measured round does not pay first-touch costs.
 
-    Before this, the pre-maintenance round was the first query ever against
-    the new tables (cold metadata and file caches) and the post round the
-    first against the post-maintenance snapshot; each paid a different set of
-    first-touch costs, and the difference was read as the maintenance value.
+    Without it the pre-maintenance round is the first query against the new
+    tables (cold metadata and file caches) and the post round the first
+    against the post-maintenance snapshot; each pays a different set of
+    first-touch costs, and the difference reads as the maintenance value.
     """
     try:
         # One sample: the pass exists to touch every table, not to be timed.
@@ -1054,7 +1061,7 @@ def _settle_after_maintenance(
 
     def _show(p) -> None:
         if p.seconds is None:
-            console.print(f"  +{p.offset_seconds:.0f}s probe [red]FAIL[/red] ({p.error[:60]})")
+            console.print(f"  +{p.offset_seconds:.0f}s probe [red]FAIL[/red] ({esc(p.error[:60])})")
         else:
             console.print(f"  +{p.offset_seconds:.0f}s probe {p.seconds:.1f}s")
 
@@ -1094,9 +1101,8 @@ def bench_query_timeout(cfg) -> int:
     AML analytical queries (full scans, running-balance windows) exceed the
     300 s default at scale >= 5; a timeout there reads as a failed query. Both
     the batch benchmark and the continuous in-stream rounds use this, so the
-    limit a query is held to -- and the limit a crossing is measured against --
-    is one value, not 900 for batch and a silently-defaulted 300 for
-    continuous."""
+    limit a query is held to and the limit a crossing is measured against
+    are one value."""
     return 900 if cfg.architecture.workload.schema_type.value == "financial" else 300
 
 
@@ -1106,11 +1112,10 @@ def _benchmark_gate_problems(
     """Reasons the benchmark result is not a valid score.
 
     QpH is computed over the queries that succeeded, so a run where most
-    queries failed still printed a QpH (live AML run, 2026-09-24: 1 of 8
-    passed, QpH 166, exit 0). Every failure outside the known upstream list
-    fails the run. With *check_empty* (the default), so does a successful
-    query that returned no rows and is not declared allow_empty; the
-    continuous path turns it off for rounds before its last.
+    queries failed would still print a QpH (one live AML run: 1 of 8 passed,
+    QpH 166). Every failure fails the run. With *check_empty* (the default),
+    so does a successful query that returned no rows and is not declared
+    allow_empty; the continuous path turns it off for rounds before its last.
 
     *passed_ever* (continuous only) is the set of query names that succeeded in
     some round of this run. A query that failed only by exceeding its time
@@ -1121,9 +1126,6 @@ def _benchmark_gate_problems(
     is None and a timeout fails as before -- there is no earlier round.
     """
     from lakebench.benchmark.result import is_sla_crossing
-
-    fmt = cfg.architecture.table_format.type.value
-    engine = cfg.architecture.query_engine.type.value
 
     # QueryResult objects (batch) or their to_dict() form (in-stream rounds).
     def _name(q):
@@ -1140,14 +1142,8 @@ def _benchmark_gate_problems(
     def _is_crossing(q):
         return is_sla_crossing(timed_out=_timed_out(q), name=_name(q), passed_ever=passed_ever)
 
-    bad = [
-        q
-        for q in queries
-        if not _ok(q)
-        and (fmt, engine, _name(q)) not in _KNOWN_QUERY_FAILURES
-        and not _is_crossing(q)
-    ]
-    # A query that "succeeded" with no rows measured nothing (invariant 3):
+    bad = [q for q in queries if not _ok(q) and not _is_crossing(q)]
+    # A query that "succeeded" with no rows measured nothing:
     # an empty table, a filter that matched nothing, or a reader that read
     # nothing. Only a query declared allow_empty may return none.
     empty_names = set(empty_benchmark_queries(queries)) if check_empty else set()
@@ -1187,6 +1183,10 @@ def empty_benchmark_queries(queries) -> list[str]:
     return out
 
 
+# Why a batch run has no financial_scoring result when the scorer returned none.
+_SCORING_INCOMPLETE = "the scoring queries did not complete (see the run log)"
+
+
 def _aml_batch_gate_problems(
     gold_jobs: list, scoring: dict | None = None
 ) -> tuple[list[str], list[str]]:
@@ -1213,9 +1213,7 @@ def _aml_batch_gate_problems(
         "anything. Check the gold-finalize driver log."
     )
     if scoring is None or scoring.get("status") == "not_scored":
-        why = (scoring or {}).get(
-            "reason"
-        ) or "the scoring queries did not complete (see the run log)"
+        why = (scoring or {}).get("reason") or _SCORING_INCOMPLETE
         problems.append(f"AML scoring did not produce a result: {why}")
     if scoring is not None and scoring.get("total_alerts") is not None:
         if int(scoring["total_alerts"]) == 0:
@@ -1247,7 +1245,7 @@ def _aml_batch_gate_problems(
 
 
 def _aml_tm_verdict(gold_jobs: list, enabled: bool = True) -> dict:
-    """The P10 TM operations verdict over every gold-finalize cycle.
+    """The TM operations verdict over every gold-finalize cycle.
 
     Separate from detection: only ``fail`` (the layer ran and an invariant is
     violated) fails the run. ``not_run`` says why the layer did not run and
@@ -1293,7 +1291,7 @@ def _aml_tm_verdict(gold_jobs: list, enabled: bool = True) -> dict:
 
 
 def _report_tm_verdict(verdict: dict, label: str) -> bool:
-    """Print the P10 verdict; True when it must fail the run."""
+    """Print the TM operations verdict; True when it must fail the run."""
     status = verdict.get("status")
     if status == "fail":
         for p in verdict.get("problems") or []:
@@ -1351,7 +1349,7 @@ def _held_out_check_only(
     if interrupt is not None:
         interrupt.submitted(status)
     if status.state == JobState.FAILED:
-        print_error(f"Could not submit the held-out check: {esc(status.message)}")
+        print_error(f"Could not submit the held-out check: {status.message}")
         raise typer.Exit(ExitCode.FAILED)
     result = monitor.wait_for_completion(
         app, timeout_seconds=max(600, timeout or 0), poll_interval=15
@@ -1363,14 +1361,20 @@ def _held_out_check_only(
         return
     refused = refusal_in_log(getattr(result, "driver_logs", None))
     if refused:
-        print_error(f"Refused: the corpus is a protected AML corpus ({esc(refused)})")
+        print_error(f"Refused: the corpus is a protected AML corpus ({refused})")
         raise typer.Exit(ExitCode.USAGE)
-    print_error(f"The held-out check failed: {esc(result.message)}")
+    print_error(f"The held-out check failed: {result.message}")
     if getattr(result, "driver_logs", None):
-        console.print("[dim]Driver logs (last 20 lines):[/dim]")
-        for line in result.driver_logs.split("\n")[-20:]:
-            console.print(f"  {esc(line)}")
+        _print_driver_tail(result.driver_logs)
     raise typer.Exit(ExitCode.FAILED)
+
+
+def _print_driver_tail(logs: str) -> None:
+    """The last 20 lines of a driver log, escaped: a line such as
+    ``[/tmp/...]`` is not Rich markup."""
+    console.print("[dim]Driver logs (last 20 lines):[/dim]")
+    for line in logs.split("\n")[-20:]:
+        console.print(f"  {esc(line)}")
 
 
 _PY_ERROR_LINE = re.compile(r"^(?:[A-Za-z_][\w.]*\.)?[A-Za-z_]\w*(?:Error|Exception|Abort): \S")
@@ -1401,6 +1405,16 @@ def no_query_engine_skip(cfg, skip_benchmark: bool) -> tuple[bool, bool]:
             "benchmark and table maintenance skipped"
         )
     return none, skip_benchmark or none
+
+
+def _new_run_id() -> str:
+    """A new run id, also exported as LB_RUN_ID: datagen pods and Spark
+    drivers carry it as their live observability grouping label."""
+    import uuid
+
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    os.environ["LB_RUN_ID"] = run_id
+    return run_id
 
 
 def _run_local_mode(
@@ -1435,9 +1449,6 @@ def _run_local_mode(
         print_error(str(e))
         raise typer.Exit(ExitCode.USAGE)  # noqa: B904
 
-    if stage and stage not in LOCAL_JOB_ORDER:
-        print_error(f"Unknown stage {stage!r}. Expected one of: {', '.join(LOCAL_JOB_ORDER)}")
-        raise typer.Exit(ExitCode.USAGE)
     stages = (stage,) if stage else LOCAL_JOB_ORDER
 
     advisory = scale_advisory(cfg)
@@ -1453,16 +1464,11 @@ def _run_local_mode(
 
     # Same collector and storage the cluster path uses, so `results`,
     # and `report` read local runs without special-casing them.
-    import uuid as _uuid
-
     from lakebench.metrics import MetricsCollector, MetricsStorage, build_config_snapshot
 
     collector = MetricsCollector()
     metrics_storage = MetricsStorage()
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + _uuid.uuid4().hex[:6]
-    # Share the run id with datagen pods and Spark drivers (live observability
-    # grouping label) via the orchestrator process env.
-    os.environ["LB_RUN_ID"] = run_id
+    run_id = _new_run_id()
     snapshot = build_config_snapshot(cfg, run_mode="batch", system="local", config_path=config_file)
     snapshot["local"] = True
     collector.start_run(run_id, cfg.name, snapshot, config_path=config_file)
@@ -1505,7 +1511,7 @@ def _run_local_mode(
         stages=stages,
     )
     print_local_summary(result)
-    _record_local_jobs(collector, cfg, result)
+    _record_local_jobs(collector, result)
 
     _journal_safe(
         j.record,
@@ -1573,18 +1579,14 @@ def _run_local_mode(
         raise typer.Exit(ExitCode.FAILED)
 
 
-def _config_windows(cfg) -> list[tuple[str, str]]:
-    from lakebench.config.c360_run import config_windows
-
-    return config_windows(cfg)
-
-
 def _cycle_series_record(cfg, *, marker: str, reused: bool) -> dict[str, Any]:
     """``metrics.json`` ``cycle_series``: the corpus series marker as this run
     left it (``begun``, ``written``, ``unwritten``, ``conflict``) or found it
     (``read``, ``absent``), whether the run reused the corpus, and the cycle
     windows."""
-    windows = _config_windows(cfg)
+    from lakebench.config.c360_run import config_windows
+
+    windows = config_windows(cfg)
     return {
         "marker": marker,
         "reused": reused,
@@ -1635,8 +1637,6 @@ def _check_series_reuse(
     mode: str,
     include_datagen: bool,
     skip_generate: bool,
-    deploy_only: bool,
-    generate_only: bool,
 ) -> dict[str, Any] | None:
     """For a batch run that reuses the corpus in bronze (``--skip-generate``,
     or one cycle without ``--generate``): the corpus series marker must
@@ -1648,12 +1648,7 @@ def _check_series_reuse(
     from lakebench.exit_codes import PrerequisiteError, SafetyRefusal, UsageError
 
     cycles = run_cycles(cfg)
-    reuses = (
-        mode == "batch"
-        and not deploy_only
-        and not generate_only
-        and (skip_generate or (cycles == 1 and not include_datagen))
-    )
+    reuses = mode == "batch" and (skip_generate or (cycles == 1 and not include_datagen))
     if not reuses:
         return None
     from lakebench.deploy.corpus import bronze_holds_data, read_series, series_problem
@@ -2038,8 +2033,6 @@ def _run_once(
     *series* is the ``metrics.series.SeriesContext`` of a ``--repeat``
     repetition (None otherwise); *allow_auto_deploy* False makes a missing
     namespace an error instead of a deploy (repetitions 2 to N)."""
-    import uuid
-
     from lakebench.cli._sustained import (
         MaintenanceBudget,
         _collect_platform_metrics,
@@ -2123,10 +2116,9 @@ def _run_once(
         # int() because scale is a float: a float timeout would propagate into
         # manifests and log lines that expect a whole number of seconds.
         # Financial adds ~15 min of detection rules to gold-finalize on top
-        # of the batch stages; add a 900s cushion so gold-finalize does not
-        # blow the timeout at scale ~5+ (adversarial-review finding). The
-        # cushion is applied uniformly since the timeout is per-job and
-        # gold-finalize is the tightest budget in the pipeline.
+        # of the batch stages; a 900s cushion keeps gold-finalize inside the
+        # timeout at scale ~5+. The timeout is per job, so every stage gets
+        # the cushion.
         base = max(3600, int(scale * 120))
         is_financial = cfg.architecture.workload.schema_type.value == "financial"
         detection_cushion = 900 if is_financial else 0
@@ -2180,17 +2172,16 @@ def _run_once(
     if not skip_deploy:
         from lakebench.cli._prerequisites import run_prerequisites
 
-        # The --sustained flag does not write back to the config, so the
-        # capacity check is told the mode the run will use. Datagen is left
-        # out only where the run itself releases its cores: under
+        # The capacity check is told the mode the run will use. Datagen is
+        # left out only where the run itself releases its cores: under
         # --skip-generate with a finished lakebench-datagen Job.
-        _use_sustained = _plan.mode == "continuous"
+        _continuous = _run_mode == "continuous"
         _datagen_runs = True
-        if _use_sustained and skip_generate:
+        if _continuous and skip_generate:
             from lakebench.cli._sustained import _datagen_job_state
 
             _datagen_runs = _datagen_job_state(cfg.get_namespace())[0] != "finished"
-        elif not _use_sustained:
+        elif not _continuous:
             # Batch creates datagen pods only in Phase 3 (--generate without
             # --skip-generate) or per cycle of a multi-cycle run that does not
             # reuse its corpus (--skip-generate); otherwise none is counted.
@@ -2201,7 +2192,7 @@ def _run_once(
         # the preflight checks the Trino and datagen sizes this run deploys.
         prereq_report = run_prerequisites(
             cfg,
-            sustained=_use_sustained,
+            sustained=_continuous,
             datagen_runs=_datagen_runs,
             sizing_capacity=cluster_cap,
         )
@@ -2231,8 +2222,6 @@ def _run_once(
         mode=_run_mode,
         include_datagen=include_datagen,
         skip_generate=skip_generate,
-        deploy_only=deploy_only,
-        generate_only=generate_only,
     )
 
     if skip_infra and not skip_deploy:
@@ -2267,8 +2256,8 @@ def _run_once(
 
         _run_preflight_infra_check(cfg)
 
-    # Branch: sustained streaming pipeline (CLI flag overrides config)
-    if _plan.mode == "continuous":
+    # The continuous pipeline (the flag overrides the config's mode).
+    if _run_mode == "continuous":
         _run_sustained(
             cfg,
             config_file,
@@ -2312,10 +2301,7 @@ def _run_once(
     # Initialize metrics collection
     collector = MetricsCollector()
     metrics_storage = MetricsStorage()
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
-    # Share the run id with datagen pods and Spark drivers (live observability
-    # grouping label) via the orchestrator process env.
-    os.environ["LB_RUN_ID"] = run_id
+    run_id = _new_run_id()
     from lakebench.metrics import build_config_snapshot
 
     config_snapshot = build_config_snapshot(cfg, run_mode="batch", config_path=config_file)
@@ -2346,10 +2332,9 @@ def _run_once(
         collector.current_run.maintenance_policy_id = skipped_policy_id()
 
     pipeline_success = True
-    # A4 (v1.6): the finally block below rewrites the exit code to 1 when
-    # pipeline_success is False, which clobbers any distinct code the try
-    # block raised (e.g. 3 for the bronze refusal). Any specific code is
-    # written here first so the finally can honour it.
+    # The exit code the finally block raises when pipeline_success is False.
+    # A path that exits with its own code (3 for the bronze refusal, say)
+    # writes it here first, or the finally would turn it into 1.
     _pipeline_exit_code: int = ExitCode.FAILED
     _exception_in_flight = False
     _datagen_elapsed = 0.0
@@ -2358,14 +2343,32 @@ def _run_once(
     _generated_here = False
     _run_fleet: dict | None = None
     _datagen_output_gb = 0.0
-    _datagen_output_rows = 0
     results: list[tuple[str, bool, float]] = []
     benchmark_qph: float | None = None
     _financial_scoring: dict | None = None
-    _scoring_attempted = False
     # Set when this run's TM layer ran (verdict pass or fail); the benchmark
     # includes the investigator queries only then.
     _tm_run_id: str | None = None
+    # Phase 5 maintenance state, read by the results in the finally block
+    # whether or not maintenance ran.
+    pre_compaction_qph = 0.0
+    _pre_record = None
+    _pre_result = None
+    _maint_value = None
+    # Set when pre-benchmark maintenance was stopped (timeout or cap): a
+    # statement may still be running, so the post-maintenance QpH is not
+    # a clean measurement.
+    maint_stop_reason = ""
+    # Set when streams were (or may have been) writing during pre-benchmark
+    # maintenance: the post-maintenance QpH was then measured under load.
+    maint_live_reason = ""
+    _maint_end = None
+    _settle = None
+    # Set when the settle wait was skipped because no statement ran.
+    _settle_skip: dict | None = None
+    pre_file_count = 0
+    post_file_count = 0
+    maint_elapsed = 0.0
     # Ctrl-C and SIGTERM seal the record INTERRUPTED and stop the objects
     # this run created (cli/_interrupt.py). Installed before the operator
     # check, whose watch-list heal can take the cluster lease: the lease
@@ -2380,6 +2383,8 @@ def _run_once(
     _inflight: tuple[str, Any] | None = None
     _inflight_state: Any = None
     _interrupted: dict | None = None
+    # Set once the run has a cluster client; the storage multiple needs it.
+    k8s = None
 
     try:
         # Check Spark operator
@@ -2449,10 +2454,8 @@ def _run_once(
             _stage = "datagen"
             console.print("[bold]Stage: datagen (ingest)[/bold]")
             print_info("Generating data for pipeline benchmark...")
-            datagen_start = datetime.now()
+            datagen_start = utc_now()
             try:
-                import time as _time
-
                 from rich.progress import (
                     BarColumn,
                     Progress,
@@ -2464,24 +2467,9 @@ def _run_once(
 
                 from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
 
-                # The namespace's fleet sidecar describes a corpus this run
-                # is about to replace. With --regenerate it goes before the
-                # gate, which may empty part of bronze and then fail.
-                from lakebench.metrics.datagen_aggregator import drop_sidecar
-
-                # An earlier datagen Job's pods could still land files after
-                # the gate looked or cleared: stop them first (bounded wait).
-                stop_previous_datagen_or_exit(cfg)
-                if regenerate:
-                    drop_sidecar(cfg.get_namespace())
-                # Refuse a non-empty bronze prefix unless --regenerate
-                # (owned bucket: clear the datagen prefix) or
-                # --allow-stale-bronze (any other bucket, recorded).
-                _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
-                if collector.current_run is not None:
-                    collector.current_run.datagen_stale_bronze = _gate.record()
-                if not regenerate:
-                    drop_sidecar(cfg.get_namespace())
+                _gate = _gate_bronze_for_generate(
+                    cfg, regenerate, allow_stale_bronze, collector.current_run
+                )
 
                 dg_engine = DeploymentEngine(cfg)
                 # The gate's decision, not the flag: objects that appear after
@@ -2507,7 +2495,7 @@ def _run_once(
                         raise typer.Exit(_refused)
 
                 # Progress bar (same as standalone generate command)
-                _dg_start = _time.time()
+                _dg_start = time.time()
                 _initial = datagen_deployer.get_progress()
                 _total_pods = _initial.get("completions", 1)
 
@@ -2522,7 +2510,7 @@ def _run_once(
                     console=console,
                 ) as _dg_bar:
                     _dg_task = _dg_bar.add_task("Generating data", total=_total_pods)
-                    while _time.time() - _dg_start < timeout:
+                    while time.time() - _dg_start < timeout:
                         _dg_prog = datagen_deployer.get_progress()
                         if not _dg_prog.get("running", False):
                             if _dg_prog.get("error"):
@@ -2538,18 +2526,14 @@ def _run_once(
                             print_error(f"OOMKilled: {', '.join(_dg_prog['oom_pods'])}")
                             raise typer.Exit(ExitCode.FAILED)
                         _dg_bar.update(_dg_task, completed=_dg_prog.get("succeeded", 0))
-                        _time.sleep(15)
+                        time.sleep(15)
 
-                # A4 (v1.6): if the wait budget ran out we must NOT print
-                # "Datagen completed" -- the pods are still running, and the
-                # follow-up pipeline stages would build on partial bronze
-                # (invariant 3). Report a distinct exit code, stop the
-                # datagen Job so it stops burning pods, and kill any
-                # SparkApplication that was consuming the trickle from a
-                # prior/concurrent run so the timed-out generate does not
-                # leave orphan compute behind.
+                # The wait budget ran out with the pods still running: the
+                # stages would build on a partial bronze. Fail the run and
+                # stop the datagen Job and any SparkApplication consuming
+                # the trickle, so no orphan compute is left behind.
                 if _dg_timed_out:
-                    _datagen_elapsed = (datetime.now() - datagen_start).total_seconds()
+                    _datagen_elapsed = (utc_now() - datagen_start).total_seconds()
                     # A timeout exits 1 like any failed run; the record
                     # keeps it distinct in verdict.reasons.
                     if collector.current_run is not None:
@@ -2566,35 +2550,33 @@ def _run_once(
 
                 # The progress loop stops when no pod is active, which is
                 # also a Job that failed after its retries: only a Job whose
-                # pods all succeeded is a corpus (invariant 3).
-                if not _dg_timed_out:
-                    _dg_final = datagen_deployer.get_progress()
-                    if _dg_final.get("error") or int(_dg_final.get("succeeded") or 0) < int(
-                        _dg_final.get("completions") or _total_pods or 1
-                    ):
-                        print_error(
-                            "Datagen did not complete: "
-                            f"{_dg_final.get('succeeded', 0)}/{_dg_final.get('completions', '?')} "
-                            f"pods succeeded, {_dg_final.get('failed', 0)} failed"
-                            + (f" ({_dg_final['error']})" if _dg_final.get("error") else "")
-                        )
-                        raise typer.Exit(ExitCode.FAILED)
-                    _series_mark = _record_series_cycle(cfg, 0, 1, run_id)
-                    _cycle_series_after(collector.current_run, cfg, _series_mark)
-                    if _series_mark == "conflict":
-                        raise typer.Exit(ExitCode.REFUSED)
+                # pods all succeeded is a corpus.
+                _dg_final = datagen_deployer.get_progress()
+                if _dg_final.get("error") or int(_dg_final.get("succeeded") or 0) < int(
+                    _dg_final.get("completions") or _total_pods or 1
+                ):
+                    print_error(
+                        "Datagen did not complete: "
+                        f"{_dg_final.get('succeeded', 0)}/{_dg_final.get('completions', '?')} "
+                        f"pods succeeded, {_dg_final.get('failed', 0)} failed"
+                        + (f" ({_dg_final['error']})" if _dg_final.get("error") else "")
+                    )
+                    raise typer.Exit(ExitCode.FAILED)
+                _series_mark = _record_series_cycle(cfg, 0, 1, run_id)
+                _cycle_series_after(collector.current_run, cfg, _series_mark)
+                if _series_mark == "conflict":
+                    raise typer.Exit(ExitCode.REFUSED)
 
-                datagen_end = datetime.now()
+                datagen_end = utc_now()
                 _datagen_elapsed = (datagen_end - datagen_start).total_seconds()
                 _datagen_window = (datagen_start, datagen_end)
                 print_success(f"Datagen completed in {_datagen_elapsed:.0f}s")
                 # This run generated the corpus: its fleet record comes from
                 # its own pods, never from an older sidecar.
                 _generated_here = True
-                if not _dg_timed_out:
-                    from lakebench.metrics.datagen_aggregator import record_generated_fleet
+                from lakebench.metrics.datagen_aggregator import record_generated_fleet
 
-                    _run_fleet = record_generated_fleet(cfg.get_namespace(), _total_pods)
+                _run_fleet = record_generated_fleet(cfg.get_namespace(), _total_pods)
 
                 # Measure bronze bucket after datagen
                 try:
@@ -2605,22 +2587,17 @@ def _run_once(
                     dg_info = _s3_dg.get_bucket_size(s3_cfg.buckets.bronze)
                     if dg_info.size_bytes:
                         _datagen_output_gb = dg_info.size_bytes / (1024**3)
-                    # datagen row count is not measurable from S3 metadata.
-                    # Leaving _datagen_output_rows at 0 signals "unmeasurable"
-                    # so ingest_ratio and pipeline_saturated stay None instead
-                    # of being computed against a fictional `scale * 1_500_000`
-                    # denominator.
+                    # The row count is not measurable from S3 metadata, so
+                    # datagen_output_rows stays 0 (unmeasured) and
+                    # ingest_ratio and pipeline_saturated stay None.
                 except Exception as e:
                     logger.warning("Could not measure bronze bucket size: %s", e)
             except typer.Exit as e:
-                # A4 (v1.6): _handle_datagen_timeout, the OOM / error
-                # branches above and enforce_bronze_gate raise their
-                # own typer.Exit with a specific code (3 for the regenerate
-                # refusal, 4 when S3 cannot be read, 1 for a wait-budget
-                # timeout).
-                # Do not swallow it into a generic Exit(1) -- carry the
-                # code through the finally block so wrappers can tell them
-                # apart from other failures.
+                # _handle_datagen_timeout, the OOM and error branches and
+                # the bronze gate exit with their own code (3 for the
+                # regenerate refusal, 4 when S3 cannot be read, 1 for a
+                # wait-budget timeout): carry it through the finally block
+                # so wrappers can tell them apart.
                 pipeline_success = False
                 _pipeline_exit_code = e.exit_code or _pipeline_exit_code
                 raise
@@ -2640,16 +2617,9 @@ def _run_once(
             (JobType.GOLD_FINALIZE, "gold-finalize", "Finalizing gold layer"),
         ]
 
-        if stage:
-            stages = [(jt, name, desc) for jt, name, desc in all_stages if name == stage]
-            if not stages:
-                print_error(f"Unknown stage: {stage}")
-                print_info(f"Valid stages: {', '.join(BATCH_STAGE_NAMES)}")
-                raise typer.Exit(ExitCode.USAGE)
-        else:
-            stages = all_stages
+        # validate_run_args has refused an unknown --stage.
+        stages = [s for s in all_stages if not stage or s[1] == stage]
 
-        # Multi-cycle batch support (v1.1.0)
         total_cycles = cfg.architecture.pipeline.cycles
 
         # A continuous gold-refresh left by an aborted run (operator still
@@ -2672,36 +2642,25 @@ def _run_once(
                     job_manager, monitor, run_id, _interrupt, timeout, required=total_cycles == 1
                 )
 
-        # B1 --force-rebuild: bump the deployment's rebuild-epoch counter
-        # ONCE per `lakebench run` invocation, before the cycle loop, so
-        # all cycles in this run share one (txnAppId, txnVersion) namespace
-        # keyed on the new epoch. Bumping per-cycle would give each cycle
-        # its own appId, defeating the invariant that a single rebuild is
-        # one epoch.
-        #
-        # Any bump failure is a hard exit. The previous behaviour of "print
-        # a warning and still submit with LB_FORCE_REBUILD=1" left Delta
-        # reading the un-bumped epoch from the ConfigMap and short-
-        # circuiting cycle 0 against the previous rebuild's cycle 0 --
-        # silent zero-row write, exit 0, silver missing all of cycle 2
-        # (invariant 3: exit 0 is not a pass).
+        # --force-rebuild bumps the deployment's rebuild-epoch counter once
+        # per run, before the cycle loop, so all cycles share one
+        # (txnAppId, txnVersion) namespace keyed on the new epoch: a single
+        # rebuild is one epoch. A failed bump is a hard exit: submitting
+        # anyway would leave Delta reading the old epoch and skipping
+        # cycle 0 as a duplicate of the previous rebuild's, a silent
+        # zero-row write.
         if force_rebuild:
-            schema_type = cfg.architecture.workload.schema_type.value
-            table_format = cfg.architecture.table_format.type.value
-            # AML+delta has no rebuild-epoch key; the CLI flag on that
-            # combination is a no-op, not a bumped epoch.
-            if schema_type != "financial" or table_format == "iceberg":
-                try:
-                    _bump_silver_rebuild_epoch(cfg)
-                except Exception as e:
-                    print_error(
-                        f"Could not bump silver rebuild-epoch: {e}\n"
-                        "Refusing to submit silver: without a bumped epoch, "
-                        "Delta's SetTransaction log short-circuits the "
-                        "rebuild's cycle 0 as a duplicate of the previous "
-                        "epoch, silently writing zero rows (invariant 3)."
-                    )
-                    raise typer.Exit(ExitCode.FAILED) from e
+            try:
+                _bump_silver_rebuild_epoch(cfg)
+            except Exception as e:
+                print_error(
+                    f"Could not bump silver rebuild-epoch: {e}\n"
+                    "Refusing to submit silver: without a bumped epoch, "
+                    "Delta's SetTransaction log short-circuits the "
+                    "rebuild's cycle 0 as a duplicate of the previous "
+                    "epoch, silently writing zero rows (invariant 3)."
+                )
+                raise typer.Exit(ExitCode.FAILED) from e
 
         # A multi-cycle run generates each cycle before its stages, unless
         # --skip-generate reuses a finished multi-cycle corpus (checked
@@ -2716,25 +2675,14 @@ def _run_once(
         _cycle_stale_allowed = False
         _cycle_stale_record: dict[str, Any] | None = None
         if _cycles_generate:
-            # Every cycle generates its own bronze: the namespace's fleet
-            # sidecar, and any fleet this run read before the cycles, describe
-            # a corpus the run replaces, and the cycle pods' fleet is not
-            # read, so the record carries no fleet. The sidecar goes once the
-            # gate lets the generate proceed (a refused run keeps the corpus
-            # and its sidecar), or before the gate with --regenerate, which
-            # may clear part of bronze and then fail.
-            from lakebench.metrics.datagen_aggregator import drop_sidecar
-
-            stop_previous_datagen_or_exit(cfg)
-            if regenerate:
-                drop_sidecar(cfg.get_namespace())
-            _gate = enforce_bronze_gate(cfg, regenerate, allow_stale_bronze)
+            # Every cycle generates its own bronze: any fleet this run read
+            # before the cycles describes a corpus the run replaces, and the
+            # cycle pods' fleet is not read, so the record carries no fleet.
+            _gate = _gate_bronze_for_generate(
+                cfg, regenerate, allow_stale_bronze, collector.current_run
+            )
             _cycle_stale_allowed = bool(_gate.stale_allowed)
             _cycle_stale_record = _gate.record()
-            if collector.current_run is not None:
-                collector.current_run.datagen_stale_bronze = _cycle_stale_record
-            if not regenerate:
-                drop_sidecar(cfg.get_namespace())
             _generated_here = True
             _run_fleet = None
         elif not (include_datagen and not skip_generate) and collector.current_run is not None:
@@ -2750,11 +2698,11 @@ def _run_once(
                 collector.current_run.cycle_series = {
                     k: v for k, v in _series_reuse.items() if k != "stale_bronze"
                 }
-        _cycle_windows = _config_windows(cfg)
+        from lakebench.config.c360_run import config_windows
+
+        _cycle_windows = config_windows(cfg)
 
         for cycle_idx in range(total_cycles):
-            # Track per-cycle metrics (v1.1.0)
-            _cycle_start = datetime.now()
             _cycle_jobs: list[JobMetrics] = []
             _cycle_ts_start = ""
             _cycle_ts_end = ""
@@ -2796,14 +2744,8 @@ def _run_once(
                     # Time to value leaves the cycle's datagen out (CycleMetrics).
                     _cycle_dg_start = utc_now().isoformat()
                     datagen_result = _cycle_datagen.deploy_cycle(cycle_idx, total_cycles)
-                    if datagen_result.status == DeploymentStatus.SUCCESS:
-                        _interrupt.datagen_created()
-                        if cycle_idx == 0:
-                            # The deployer wrote the marker unfinished.
-                            _cycle_series_after(collector.current_run, cfg, "begun")
-                    else:
-                        _interrupt.not_created("Job", DATAGEN_JOB)
                     if datagen_result.status != DeploymentStatus.SUCCESS:
+                        _interrupt.not_created("Job", DATAGEN_JOB)
                         # Fatal: continuing would rebuild this cycle from the
                         # previous cycle's bronze, and incremental silver would
                         # append it a second time.
@@ -2818,32 +2760,30 @@ def _run_once(
                             refused_result_code([datagen_result]) or _pipeline_exit_code
                         )
                         break
-                    else:
-                        ts_start = datagen_result.details.get("timestamp_start", "")
-                        ts_end = datagen_result.details.get("timestamp_end", "")
-                        _cycle_ts_start = ts_start
-                        _cycle_ts_end = ts_end
-                        print_info(f"Datagen: {ts_start} to {ts_end}")
+                    _interrupt.datagen_created()
+                    if cycle_idx == 0:
+                        # The deployer wrote the marker unfinished.
+                        _cycle_series_after(collector.current_run, cfg, "begun")
+                    _cycle_ts_start = datagen_result.details.get("timestamp_start", "")
+                    _cycle_ts_end = datagen_result.details.get("timestamp_end", "")
+                    print_info(f"Datagen: {_cycle_ts_start} to {_cycle_ts_end}")
 
-                        # Wait for datagen completion
-                        # The module's time: _time is bound only by Phase 3's
-                        # single-shot generate, which a multi-cycle run skips.
-                        _dg_start = time.time()
-                        dg_wait = _cycle_datagen.wait_for_completion(timeout_seconds=timeout)
-                        _cycle_dg_elapsed = time.time() - _dg_start
-                        if dg_wait.status != DeploymentStatus.SUCCESS:
-                            print_error(f"Datagen did not complete: {dg_wait.message}")
-                            pipeline_success = False
-                            break
-                        _interrupt.finished("Job", DATAGEN_JOB)
-                        _series_mark = _record_series_cycle(cfg, cycle_idx, total_cycles, run_id)
-                        # After the marker write, which is datagen's work too.
-                        _cycle_dg_end = utc_now().isoformat()
-                        _cycle_series_after(collector.current_run, cfg, _series_mark)
-                        if _series_mark == "conflict":
-                            pipeline_success = False
-                            _pipeline_exit_code = ExitCode.REFUSED
-                            break
+                    _dg_start = time.time()
+                    dg_wait = _cycle_datagen.wait_for_completion(timeout_seconds=timeout)
+                    _cycle_dg_elapsed = time.time() - _dg_start
+                    if dg_wait.status != DeploymentStatus.SUCCESS:
+                        print_error(f"Datagen did not complete: {dg_wait.message}")
+                        pipeline_success = False
+                        break
+                    _interrupt.finished("Job", DATAGEN_JOB)
+                    _series_mark = _record_series_cycle(cfg, cycle_idx, total_cycles, run_id)
+                    # After the marker write, which is datagen's work too.
+                    _cycle_dg_end = utc_now().isoformat()
+                    _cycle_series_after(collector.current_run, cfg, _series_mark)
+                    if _series_mark == "conflict":
+                        pipeline_success = False
+                        _pipeline_exit_code = ExitCode.REFUSED
+                        break
                 except Exception as e:
                     print_error(f"Cycle datagen failed: {e}")
                     pipeline_success = False
@@ -2878,8 +2818,8 @@ def _run_once(
 
                 job_start = utc_now()
 
-                # B1 --force-rebuild: the epoch bump ran once above this
-                # cycle loop. The Iceberg cycle-0 guard (silver already
+                # --force-rebuild: the epoch bump ran once above the cycle
+                # loop. The Iceberg cycle-0 guard (silver already
                 # populated + no --force-rebuild) is orthogonal to the
                 # Delta epoch, and the flag is safely ignored by Delta
                 # after cycle 0, so setting it on every silver_build stage
@@ -2895,13 +2835,14 @@ def _run_once(
                 _interrupt.submitted(job_status)
                 if job_status.state == JobState.FAILED:
                     print_error(f"Failed to submit job: {job_status.message}")
+                    _end = utc_now()
                     collector.record_job(
                         JobMetrics(
                             job_name=f"lakebench-{stage_name}",
                             job_type=stage_name,
                             start_time=job_start,
-                            end_time=utc_now(),
-                            elapsed_seconds=(utc_now() - job_start).total_seconds(),
+                            end_time=_end,
+                            elapsed_seconds=(_end - job_start).total_seconds(),
                             timing_source="submit_failed",
                             success=False,
                             error_message=job_status.message,
@@ -2921,20 +2862,17 @@ def _run_once(
                 _max_executors = 0
                 _last_reported_executors = -1
 
-                _last_heartbeat_ts = job_start
                 # The stage's images are read while it runs (batch
                 # executors are deleted when it ends): metrics/provenance.py.
                 _images = collector.stage_image_watch(
                     cfg.get_namespace(), f"lakebench-{stage_name}", at=stage_name
                 )
 
-                def on_progress(
-                    status,
-                    _start=job_start,
-                    _hb=[job_start],  # noqa: B006
-                    _watch=_images,
-                ):
+                _last_heartbeat = job_start
+
+                def on_progress(status, _start=job_start, _watch=_images):
                     nonlocal _max_executors, _last_reported_executors, _inflight_state
+                    nonlocal _last_heartbeat
                     # The monitor reports each state change, the terminal one
                     # too, before it reads the driver log: an interrupt during
                     # that read knows how the application ended.
@@ -2946,10 +2884,10 @@ def _run_once(
                         if status.executor_count != _last_reported_executors:
                             console.print(f"  Running... (executors: {status.executor_count})")
                             _last_reported_executors = status.executor_count
-                            _hb[0] = utc_now()
-                        elif (utc_now() - _hb[0]).total_seconds() >= 60:
+                            _last_heartbeat = utc_now()
+                        elif (utc_now() - _last_heartbeat).total_seconds() >= 60:
                             console.print(f"  Running... ({int(elapsed)}s elapsed)")
-                            _hb[0] = utc_now()
+                            _last_heartbeat = utc_now()
 
                 result = monitor.wait_for_completion(
                     f"lakebench-{stage_name}",
@@ -3094,7 +3032,7 @@ def _run_once(
                         # bronze-verify found a corpus from a held-out or spent
                         # AML seed and read nothing: the protected-corpus refusal.
                         print_error(
-                            f"Refused: {stage_name} found a protected AML corpus ({esc(_protected)})"
+                            f"Refused: {stage_name} found a protected AML corpus ({_protected})"
                         )
                         results.append((stage_name, False, job_metrics.elapsed_seconds))
                         _journal_safe(
@@ -3110,10 +3048,8 @@ def _run_once(
                     if result.driver_logs:
                         cause = driver_error_line(result.driver_logs)
                         if cause:
-                            print_error(f"Cause: {esc(cause)}")
-                        console.print("[dim]Driver logs (last 20 lines):[/dim]")
-                        for line in result.driver_logs.split("\n")[-20:]:
-                            console.print(f"  {line}")
+                            print_error(f"Cause: {cause}")
+                        _print_driver_tail(result.driver_logs)
                     results.append((stage_name, False, job_metrics.elapsed_seconds))
                     _journal_safe(
                         j.record,
@@ -3129,13 +3065,13 @@ def _run_once(
                     pipeline_success = False
                     raise typer.Exit(ExitCode.FAILED)
 
-            # Record CycleMetrics after all stages for this cycle (v1.1.0)
+            # A multi-cycle run records each cycle's metrics after its stages.
             if total_cycles > 1:
                 _cycle_health: dict[str, int] = {}
                 try:
                     _cycle_health = _probe_table_health(cfg, k8s)
-                except Exception:
-                    pass
+                except Exception as e:  # noqa: BLE001 -- the counts stay unknown
+                    logger.warning("cycle %d table health not read: %s", cycle_idx + 1, e)
                 from lakebench.metrics.collector import CycleMetrics as _CM
 
                 _cm = _CM(
@@ -3151,6 +3087,11 @@ def _run_once(
                 )
                 if collector.current_run is not None:
                     collector.current_run.cycles.append(_cm)
+
+        if not pipeline_success:
+            # A cycle's datagen failed or was refused: the corpus is half
+            # built or replaced, so no maintenance or benchmark runs on it.
+            raise typer.Exit(_pipeline_exit_code)
 
         # Summary
         _stage = "pipeline"
@@ -3182,13 +3123,16 @@ def _run_once(
             and pipeline_success
         ):
             _stage = "score-financial"
-            _scoring_attempted = True
             _financial_scoring = _score_financial_via_queries(
                 cfg,
                 run_id,
                 covered=None,
                 timeout=timeout,
             )
+            if _financial_scoring is None:
+                # Recorded, so the verdict says the run's AML result is
+                # missing instead of omitting it.
+                _financial_scoring = _not_scored_record(_SCORING_INCOMPLETE, None)
             _stage = "pipeline"
 
         # AML batch honesty gate, after scoring so a single crashed rule
@@ -3215,7 +3159,7 @@ def _run_once(
                 # The saved verdict names it, not "crashed or interrupted".
                 if _problem not in collector.current_run.failure_reasons:
                     collector.current_run.failure_reasons.append(_problem)
-            # P10 TM operations: its own verdict, recorded for the scorecard.
+            # TM operations: its own verdict, recorded for the scorecard.
             _tm = _aml_tm_verdict(
                 _gold_jobs, enabled=cfg.architecture.workload.tm_operations.enabled
             )
@@ -3227,8 +3171,8 @@ def _run_once(
             if _report_tm_verdict(_tm, "AML batch gate"):
                 pipeline_success = False
 
-        # Customer 360 expected results (D6): every check is reported; the
-        # owner-approved c360_correctness.GATING_CHECKS fail the run.
+        # Customer 360 expected results: every check is reported; the
+        # checks in c360_correctness.GATING_CHECKS fail the run.
         if (
             cfg.architecture.workload.schema_type.value == "customer360"
             and not stage
@@ -3255,7 +3199,7 @@ def _run_once(
                     )
                     collector.current_run.c360_correctness = _c360_rec
                 print_warning(f"Customer 360 expected-result check could not run: {e}")
-            # The gated checks only (D6); a check that could not run fails closed.
+            # The gated checks only; a check that could not run fails closed.
             for _p in _c360.gating_problems(_c360_rec):
                 print_error(_p)
                 pipeline_success = False
@@ -3267,24 +3211,6 @@ def _run_once(
         # Flow: [pre-compaction benchmark] -> maintenance -> [post-compaction benchmark]
         # Pre-compaction benchmark only runs at scale < 50 (OOMs at higher scales
         # due to 200K+ uncompacted files overwhelming Trino memory).
-        pre_compaction_qph = 0.0
-        _pre_record = None
-        _pre_result = None
-        _maint_value = None
-        # Set when pre-benchmark maintenance was stopped (timeout or cap): a
-        # statement may still be running, so the post-maintenance QpH is not
-        # a clean measurement.
-        maint_stop_reason = ""
-        # Set when streams were (or may have been) writing during pre-benchmark
-        # maintenance: the post-maintenance QpH was then measured under load.
-        maint_live_reason = ""
-        _maint_end = None
-        _settle = None
-        # Set when the settle wait was skipped because no statement ran.
-        _settle_skip: dict | None = None
-        pre_file_count = 0
-        post_file_count = 0
-        maint_elapsed = 0.0
         # What each maintenance and compaction call actually did, for the
         # experiment block's effective maintenance. [] when none ran.
         maint_outcomes: list = []
@@ -3311,7 +3237,7 @@ def _run_once(
             )
             for kind in ("expire", "compaction"):
                 maint_outcomes.append({"kind": kind, "user_skip": why})
-            if skip_benchmark and cfg.architecture.query_engine.type.value == "none":
+            if no_query_engine:
                 print_info("Skipped (no query engine)")
             elif skip_benchmark:
                 print_info("Skipped (--skip-benchmark)")
@@ -3321,28 +3247,14 @@ def _run_once(
         if do_maintenance:
             from lakebench.benchmark import BenchmarkRunner as _BR
 
-            def _bench_progress(idx, total, name, phase, **kwargs):
-                if phase == "start":
-                    console.print(f"  [{idx}/{total}] {name}...", end=" ")
-                elif phase == "done":
-                    elapsed = kwargs.get("elapsed", 0)
-                    success = kwargs.get("success", False)
-                    error = kwargs.get("error", "")
-                    if success:
-                        console.print(f"[green]{elapsed:.1f}s OK[/green]{_sample_note(kwargs)}")
-                    else:
-                        short_err = (error[:60] + "...") if len(error) > 60 else error
-                        console.print(f"[red]FAIL[/red] ({short_err})")
-
             _scale = cfg.architecture.workload.datagen.get_effective_scale()
 
             try:
                 # 1. Pre-maintenance file count
                 try:
-                    _pre_health = _probe_table_health(cfg, k8s)
-                    pre_file_count = _data_file_total(_pre_health)
-                except Exception:
-                    pass
+                    pre_file_count = _data_file_total(_probe_table_health(cfg, k8s))
+                except Exception as e:  # noqa: BLE001 -- the count stays unknown (0)
+                    logger.warning("pre-maintenance data file count not read: %s", e)
 
                 # 2. Pre-compaction benchmark (scale < 50 only)
                 if _scale < 50:
@@ -3353,11 +3265,9 @@ def _run_once(
                     # queries with the run's TM id), or pre/post compare
                     # different queries.
                     _pre_runner = _BR(cfg, tm_run_id=_tm_run_id)
-                    # 60 s is too tight for AML pre-compaction queries even
-                    # at small scale; bump to 180 s for AML.
-                    # Same timeout as the post-compaction run: with 180 s here
-                    # and 900 s there, a query that timed out before counted
-                    # only after, and the maintenance delta read -40% on a
+                    # Same timeout as the post-compaction round: a shorter
+                    # one here lets a query time out before and count only
+                    # after, and the maintenance value then reads -40% on a
                     # run where every query got faster.
                     _pre_timeout = bench_query_timeout(cfg)
                     print_info("Warm-up pass (not measured)...")
@@ -3419,7 +3329,7 @@ def _run_once(
                     console,
                     j,
                     retention_threshold=resolve_maintenance_retention(cfg),
-                    timeout=PRE_BENCHMARK_MAINTENANCE_TIMEOUT,
+                    timeout=PRE_BENCHMARK_STATEMENT_TIMEOUT,
                     live_streams=bool(live_apps),
                     budget=maint_budget,
                     outcomes=maint_outcomes,
@@ -3430,7 +3340,7 @@ def _run_once(
                     console,
                     j,
                     live_streams=bool(live_apps),
-                    timeout=PRE_BENCHMARK_COMPACTION_TIMEOUT,
+                    timeout=PRE_BENCHMARK_STATEMENT_TIMEOUT,
                     budget=maint_budget,
                     outcomes=maint_outcomes,
                 )
@@ -3453,10 +3363,9 @@ def _run_once(
 
                 # 4. Post-maintenance file count
                 try:
-                    _post_health = _probe_table_health(cfg, k8s)
-                    post_file_count = _data_file_total(_post_health)
-                except Exception:
-                    pass
+                    post_file_count = _data_file_total(_probe_table_health(cfg, k8s))
+                except Exception as e:  # noqa: BLE001 -- the count stays unknown (0)
+                    logger.warning("post-maintenance data file count not read: %s", e)
                 if not compaction_measurable(cfg):
                     # Delta OPTIMIZE never runs: equal counts are table
                     # health, not a compaction result, and must not publish
@@ -3489,8 +3398,7 @@ def _run_once(
             # Runs after maint_elapsed is taken and outside every stage, so it
             # cannot move time to value or maintenance_pct_of_pipeline.
             # Nothing to settle when no statement ran (DuckDB, or every
-            # operation skipped): run 20260927-001340-6ab705 waited 783 s
-            # after a DuckDB round that ran none.
+            # operation skipped).
             _attempted = _maintenance_statements_attempted(maint_outcomes)
             if maint_elapsed > 0 and _maint_end is not None and _attempted == 0:
                 _settle_skip = {
@@ -3507,7 +3415,7 @@ def _run_once(
                         cfg,
                         _BR(cfg, tm_run_id=_tm_run_id),
                         _pre_result.queries if _pre_result is not None else None,
-                        900 if cfg.architecture.workload.schema_type.value == "financial" else 300,
+                        bench_query_timeout(cfg),
                         _maint_end,
                         trigger=(
                             f"{_attempted} maintenance and compaction statements ran"
@@ -3539,12 +3447,11 @@ def _run_once(
         console.print()
         console.print("[bold dim]Phase 6/7: Benchmark[/bold dim]")
         # Run post-compaction benchmark (or the only benchmark if maintenance skipped)
-        if skip_benchmark:
-            if cfg.architecture.query_engine.type.value == "none":
-                print_info("Skipped (no query engine)")
-            else:
-                print_info("Skipped (--skip-benchmark)")
-        if not skip_benchmark:
+        if no_query_engine:
+            print_info("Skipped (no query engine)")
+        elif skip_benchmark:
+            print_info("Skipped (--skip-benchmark)")
+        else:
             _bench_recorded = False
             try:
                 from lakebench.benchmark import BenchmarkRunner
@@ -3563,19 +3470,6 @@ def _run_once(
                     details={"mode": "power", "cache": "hot"},
                 )
 
-                def _post_bench_progress(idx, total, name, phase, **kwargs):
-                    if phase == "start":
-                        console.print(f"  [{idx}/{total}] {name}...", end=" ")
-                    elif phase == "done":
-                        elapsed = kwargs.get("elapsed", 0)
-                        success = kwargs.get("success", False)
-                        error = kwargs.get("error", "")
-                        if success:
-                            console.print(f"[green]{elapsed:.1f}s OK[/green]{_sample_note(kwargs)}")
-                        else:
-                            short_err = (error[:60] + "...") if len(error) > 60 else error
-                            console.print(f"[red]FAIL[/red] ({short_err})")
-
                 bench_runner = BenchmarkRunner(cfg, tm_run_id=_tm_run_id)
                 # AML analytical queries can exceed the 300 s default at
                 # scale >= 5; a timeout here
@@ -3593,7 +3487,7 @@ def _run_once(
                 bench_result = bench_runner.run_power(
                     cache="hot",
                     iterations=cfg.architecture.benchmark.iterations,
-                    progress_callback=_post_bench_progress,
+                    progress_callback=_bench_progress,
                     query_timeout=_bench_timeout,
                 )
 
@@ -3664,7 +3558,7 @@ def _run_once(
                 _bench_recorded = True
 
                 # Customer 360 benchmark row counts (reporting only: no shape
-                # check is in GATING_CHECKS, D6).
+                # check is in GATING_CHECKS).
                 if (
                     collector.current_run is not None
                     and collector.current_run.c360_correctness is not None
@@ -3680,7 +3574,7 @@ def _run_once(
                             (print_warning if _c360_rec["status"] != "pass" else print_info)(_line)
                     except Exception as e:  # noqa: BLE001 -- reporting only
                         print_warning(f"Customer 360 benchmark row check could not run: {e}")
-                    # Gated shape checks only; none are gated today (D6).
+                    # Gated shape checks only; none are gated today.
                     for _p in _c360.gating_problems(
                         collector.current_run.c360_correctness, only=("benchmark_rows_",)
                     ):
@@ -3828,16 +3722,15 @@ def _run_once(
             # Physical over logical bytes at run end, after the maintenance the
             # policy ran (metrics/storage_multiple.py). Never raises; skipped
             # when the run stopped before it had a cluster client.
-            _sm_k8s = locals().get("k8s")
             if collector.current_run is not None and not pipeline_success:
                 # A failed run's tables are not this run's result.
                 collector.current_run.storage_multiple = {"not_measured": "the run did not pass"}
-            elif collector.current_run is not None and _sm_k8s is not None:
+            elif collector.current_run is not None and k8s is not None:
                 from lakebench.metrics.storage_multiple import measure_run
 
                 print_info("Measuring the storage multiple...")
                 collector.current_run.storage_multiple = measure_run(
-                    cfg, _sm_k8s, None, collector.current_run
+                    cfg, k8s, None, collector.current_run
                 )
         if _interrupted is None and _interrupt.late_signal():
             # Interrupted while the results were gathered: sealed the same way.
@@ -3864,14 +3757,6 @@ def _run_once(
             # persists into metrics.json and renders in the scorecard.
             if _financial_scoring is not None:
                 run_metrics.financial_scoring = _financial_scoring
-            elif _scoring_attempted:
-                # Scoring ran and produced nothing: recorded, so the verdict
-                # can say the run's AML result is missing instead of omitting it.
-                run_metrics.financial_scoring = {
-                    "mode": "batch",
-                    "status": "not_scored",
-                    "reason": "the scoring queries did not complete (see the run log)",
-                }
 
             # Collect platform metrics from Prometheus (best-effort)
             if _interrupted is None:
@@ -3894,51 +3779,47 @@ def _run_once(
                     run_metrics,
                     datagen_elapsed=_datagen_elapsed,
                     datagen_output_gb=_datagen_output_gb,
-                    datagen_output_rows=_datagen_output_rows,
                     datagen_fleet=fleet,
-                    datagen_start=_utc(_datagen_window[0] if _generated_here else None),
-                    datagen_end=_utc(_datagen_window[1] if _generated_here else None),
+                    datagen_start=_datagen_window[0] if _generated_here else None,
+                    datagen_end=_datagen_window[1] if _generated_here else None,
                 )
                 run_metrics.pipeline_benchmark = pb
 
-                # Populate maintenance cost metrics (v1.3)
-                try:
-                    if maint_stop_reason:
-                        pb.maintenance_stopped = True
-                        pb.maintenance_stop_reason = maint_stop_reason
-                    if maint_live_reason:
-                        pb.maintenance_live_streams = True
-                        pb.maintenance_live_streams_reason = maint_live_reason
-                    if maint_elapsed > 0:
-                        pb.maintenance_elapsed_seconds = maint_elapsed
-                    if pre_file_count > 0 and post_file_count > 0:
-                        pb.pre_compaction_file_count = pre_file_count
-                        pb.post_compaction_file_count = post_file_count
-                        pb.compaction_ratio = pre_file_count / max(post_file_count, 1)
-                    if pre_compaction_qph > 0 and benchmark_qph:
-                        # Only a paired comparison after a compaction that
-                        # changed files is a maintenance value; otherwise
-                        # pre and post QpH are left out, since their
-                        # difference would read as one.
-                        if _maint_value is not None and _maint_value[0] is not None:
-                            pb.pre_compaction_qph = pre_compaction_qph
-                            pb.post_compaction_qph = benchmark_qph
-                            pb.maintenance_value_pct = _maint_value[0]
-                            pb.maintenance_paired_queries = _maint_value[1]
-                        elif _maint_value is not None:
-                            pb.maintenance_value_reason = _maint_value[2]
-                            pb.maintenance_paired_queries = _maint_value[1]
-                        pb.pre_compaction_benchmark = _pre_record
-                    if _settle_skip is not None:
-                        pb.maintenance_settle = _settle_skip
-                    if _settle is not None:
-                        pb.maintenance_settle_seconds = _settle.settle_seconds
-                        pb.maintenance_settled = _settle.settled
-                        pb.maintenance_settle_capped = _settle.capped
-                        pb.maintenance_settle_verified = _settle.verified
-                        pb.maintenance_settle = _settle.to_dict()
-                except Exception:
-                    pass  # Maintenance metrics are best-effort
+                # Maintenance cost and value.
+                if maint_stop_reason:
+                    pb.maintenance_stopped = True
+                    pb.maintenance_stop_reason = maint_stop_reason
+                if maint_live_reason:
+                    pb.maintenance_live_streams = True
+                    pb.maintenance_live_streams_reason = maint_live_reason
+                if maint_elapsed > 0:
+                    pb.maintenance_elapsed_seconds = maint_elapsed
+                if pre_file_count > 0 and post_file_count > 0:
+                    pb.pre_compaction_file_count = pre_file_count
+                    pb.post_compaction_file_count = post_file_count
+                    pb.compaction_ratio = pre_file_count / max(post_file_count, 1)
+                if pre_compaction_qph > 0 and benchmark_qph:
+                    # Only a paired comparison after a compaction that
+                    # changed files is a maintenance value; otherwise
+                    # pre and post QpH are left out, since their
+                    # difference would read as one.
+                    if _maint_value is not None and _maint_value[0] is not None:
+                        pb.pre_compaction_qph = pre_compaction_qph
+                        pb.post_compaction_qph = benchmark_qph
+                        pb.maintenance_value_pct = _maint_value[0]
+                        pb.maintenance_paired_queries = _maint_value[1]
+                    elif _maint_value is not None:
+                        pb.maintenance_value_reason = _maint_value[2]
+                        pb.maintenance_paired_queries = _maint_value[1]
+                    pb.pre_compaction_benchmark = _pre_record
+                if _settle_skip is not None:
+                    pb.maintenance_settle = _settle_skip
+                if _settle is not None:
+                    pb.maintenance_settle_seconds = _settle.settle_seconds
+                    pb.maintenance_settled = _settle.settled
+                    pb.maintenance_settle_capped = _settle.capped
+                    pb.maintenance_settle_verified = _settle.verified
+                    pb.maintenance_settle = _settle.to_dict()
 
                 # Print full scorecard panel, only for a record that passes
                 pipeline_success = apply_save_gate(run_metrics, pipeline_success, print_error)
@@ -4021,7 +3902,6 @@ def _run_once(
         _interrupt.restore()
         if not pipeline_success and not _exception_in_flight:
             # Metrics are saved above for diagnosis; the exit code must still
-            # say the run did not succeed. A4 (v1.6): honour a specific code
-            # (e.g. 3 for the bronze refusal) that the try block set before
-            # raising.
+            # say the run did not succeed, with the specific code the try
+            # block set (3 for the bronze refusal, say).
             raise typer.Exit(_pipeline_exit_code)
