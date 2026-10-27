@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local AML fidelity gate over a raw datagen corpus (AML-GOALS R7, A6).
+"""Local AML fidelity gate over a raw datagen corpus.
 
 Runs the bronze adapter of ``aml_features`` over a local corpus in a local
 Spark session, then ``lakebench.aml.fidelity_gate.evaluate_gate``, and writes

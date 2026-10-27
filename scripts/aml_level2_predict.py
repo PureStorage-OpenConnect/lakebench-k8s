@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Commit the Level-2 predictions from the calibration runs (AML-GOALS #46, D-8).
+"""Commit the Level-2 predictions from the calibration runs.
 
 Reads the scale-2 calibration gate reports (one per registered s2 seed, from
 the pinned datagen image), computes per-typology predicted evaluation AP and
@@ -18,11 +18,28 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+
+
+def _write_atomic(path: Path, doc: dict) -> None:
+    """Write ``doc`` to ``path`` so a crash leaves the old file or the new one,
+    with the new one fsynced to disk on return."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(doc, indent=2) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def main(argv=None) -> int:
@@ -33,7 +50,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     from lakebench.aml.predictions import compute_predictions
-    from lakebench.config.datagen_seed import _write_atomic, predictions_path
+    from lakebench.config.datagen_seed import predictions_path
 
     path = args.record or predictions_path()
     doc = json.loads(path.read_text())

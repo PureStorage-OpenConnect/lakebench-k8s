@@ -41,7 +41,7 @@ Usage::
 
     python scripts/aml_heldout_audit.py \\
         --runs-dir lakebench-output/runs --journal-dir lakebench-output/journal \\
-        --ledger <deployments ledger, e.g. EVIDENCE-v1.7.md> --out audit.json
+        --ledger <deployments ledger> --out audit.json
 """
 
 from __future__ import annotations
