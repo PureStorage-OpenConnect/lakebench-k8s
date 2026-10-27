@@ -3,7 +3,7 @@
 Runs at the end of the batch pipeline (bronze_verify -> silver_build ->
 this). Steps:
 
-1. Bootstraps the four Financial gold tables (create-if-not-exists),
+1. Bootstraps the five Financial gold tables (create-if-not-exists),
    matching src/lakebench/deploy/financial_ddl.py.
 2. Emits an initial daily_dashboards baseline row per (day, "baseline")
    derived from silver.transactions -- row count and total volume --
@@ -16,7 +16,7 @@ this). Steps:
    surfaces the error for postmortem.
 
 4. Runs the transaction-monitoring operations layer on the alerts
-   (tm_operations.py, GOALS P10 stages 1, 6, 7, 8): reconciliation,
+   (tm_operations.py, stages 1, 6, 7 and 8): reconciliation,
    scenario coverage, L1 dispositions, cases and SAR decisions, then the
    workflow invariants the CLI gates on.
 
@@ -80,19 +80,14 @@ GOLD_DASH = env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards")
 GOLD_STATUS = env("LB_FINANCIAL_GOLD_DETECTION_STATUS", "gold.detection_status")
 RUN_ID = env("LB_RUN_ID", str(uuid.uuid4()))
 
-# W1 connected-components vertex cap: detection_rules.rule_params reads
-# LB_FINANCIAL_W1_MAX_VERTICES (default 8,000,000, above the scale-10 vertex
-# count of 1.1M entities; raise it via the `financial.w1_max_vertices` config
-# field for larger scales). A value <= 0 keeps the rule's own default.
+#: Rules that take the shared screening base (detection_rules.screen_base_frame).
+SCREEN_BASE_RULES = ("W5_sanctions_match", "W6_pep_counterparty")
 
 # Which W-rules to invoke as part of gold_finalize. Ordering is
 # intentional (cheapest first) so a failure in an expensive rule does
 # not prevent the cheap ones from writing their alerts. W5 and W6 screen
 # payment beneficiaries against the corpus watchlist
 # (bronze/watchlist.parquet); a corpus without one records them as skipped.
-#: Rules that take the shared screening base (detection_rules.screen_base_frame).
-SCREEN_BASE_RULES = ("W5_sanctions_match", "W6_pep_counterparty")
-
 DEFAULT_DETECTION_RULES = (
     "W5_sanctions_match",
     "W6_pep_counterparty",
@@ -165,11 +160,10 @@ TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 # Durable, data-plane record of what each detection rule did this
 # run -- 'ran' (with alert_count), 'skipped' (with reason, e.g. vertex-cap),
 # or 'error' (with the exception class). This is the bridge that lets
-# the scorer mark a skipped rule's target typology "not run" in
-# recall.json instead of 0%, which the log-only rules_skipped in
-# metrics.json could not reach (the recall scorer runs in Spark and reads
-# the data plane, not the driver log). Overwritten every gold_finalize run
-# so it reflects the run that produced the current gold.alerts.
+# the scoring statements (Trino SQL, which reads the data plane, not the
+# driver log) mark a skipped rule's target typology "not run" instead of 0%.
+# Rewritten by every gold_finalize run and every continuous gold-refresh
+# tick, so it reflects the run that produced the current gold.alerts.
 
 DDL_DASH = f"""
 CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_DASH} (
@@ -192,8 +186,8 @@ TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 
 
 def _sealed_txns(spark, txns_fq: str):
-    """Return ``silver.transactions`` semi-joined against silver_batch_versions
-    (I10). Thin wrapper over ``common.sealed_txns_filter`` that also does
+    """Return ``silver.transactions`` semi-joined against silver_batch_versions,
+    so a partial batch is never read. Thin wrapper over ``common.sealed_txns_filter`` that also does
     the initial ``spark.table`` read. Callers that pin at an Iceberg
     snapshot call ``sealed_txns_filter`` directly with their pinned frame.
     """
@@ -214,14 +208,10 @@ def build_baseline_dashboards(txns, run_id: str):
     phantom alert (~10^9 at scale 100).
 
     `entity_count` counts distinct entities across BOTH originator and
-    beneficiary sides. The prior implementation only counted originators,
-    which systematically undercounted unique entities by ~2x on the
-    executive dashboard.
+    beneficiary sides.
 
-    `run_id` is passed in explicitly, not read from a module-level closure.
-    The prior design closed over `RUN_ID` at import time, so a refresh
-    loop's per-tick UUID from a caller module never reached the written
-    rows -- every refresh silently reused the finalize module's UUID.
+    `run_id` is passed in explicitly, not read from the module's RUN_ID,
+    so a caller module's run id reaches the written rows.
     """
     # Stack originator + beneficiary into a single column so we can count
     # distinct entities across both sides. pyspark can't call explode()
@@ -301,7 +291,7 @@ def main() -> None:
     # Earlier runs' alerts are cleared inside run_detection_rules, after this
     # run's 'pending' status is written (see there for why the order matters).
 
-    # I10: read silver.transactions through the sealed-batch filter so a
+    # Read silver.transactions through the sealed-batch filter so a
     # driver crash between the stream's transactions/edges commits and the
     # sidecar sealed marker is invisible to every downstream rule and the
     # baseline dashboards.
@@ -309,10 +299,9 @@ def main() -> None:
     baseline = build_baseline_dashboards(txns, RUN_ID)
     # Delete-only-baseline-then-append: overwrite ONLY the baseline rows,
     # not the whole table. Detection workloads write rows keyed by
-    # non-'baseline' rule_ids into the same table; the previous
-    # createOrReplace / overwrite(lit(True)) would wipe every one of them
-    # on a finalize re-run (silent data loss of the exact rows scoring
-    # depends on). Uses SQL DELETE + append because DataFrameWriterV2's
+    # non-'baseline' rule_ids into the same table, and a whole-table
+    # overwrite on a finalize re-run would wipe the rows scoring depends on.
+    # Uses SQL DELETE + append because DataFrameWriterV2's
     # overwrite(condition) requires a Column that references source-side
     # columns, which is awkward when the intent is a target-side filter.
     spark.sql(f"DELETE FROM {CATALOG}.{GOLD_DASH} WHERE rule_id = 'baseline'")
@@ -327,7 +316,7 @@ def main() -> None:
 
         cleanup_w1_checkpoints(spark)
 
-    # P10: the operations layer on this cycle's alerts. Never raises; a
+    # The operations layer on this cycle's alerts. Never raises; a
     # failure is logged as the 'workflow' invariant, which fails the run.
     from tm_operations import run_tm_operations
 
@@ -398,24 +387,19 @@ def run_detection_rules(
     """Invoke each configured detection rule and append alerts to gold.alerts.
 
     Per-rule isolation: a rule that raises is logged and skipped, and
-    the pipeline continues with the remaining rules. That means one
-    bad rule cannot cost the whole run its baseline row -- which is
-    exactly the failure mode that showed up in the first live S1 run
-    before the W1 alias fix landed.
+    the pipeline continues with the remaining rules, so one bad rule
+    cannot cost the whole run its baseline row.
 
     Idempotency + partial-write safety: for each rule that produces
-    alerts we (1) materialise the alerts frame to a temp view so the
-    write step does not re-compute the rule against silver, then (2)
-    inside a Spark SQL BEGIN/COMMIT-free sequence, ``DELETE`` prior
-    rows for this rule_id and ``INSERT INTO ... SELECT * FROM tmp``
-    in the same driver call. Iceberg's per-statement snapshot commit
-    means a failure of the INSERT half rolls the writer forward with
-    the DELETE snapshot already committed, so we log the incident and
-    exit non-zero for that one rule. The next successful invocation
-    against the same silver corpus re-materialises the alerts from
-    the deterministic rule function. Downstream consumers reading
-    gold.alerts between commits see either the prior committed state
-    or the new one -- never a mix.
+    alerts we (1) persist the alerts frame so the write step does not
+    re-compute the rule against silver, then (2) ``DELETE`` prior rows
+    for this rule_id and ``INSERT INTO ... SELECT * FROM tmp`` in the
+    same driver call. Iceberg commits each statement as its own
+    snapshot, so a failed INSERT leaves the DELETE committed: the rule
+    is logged as failed and its rows are gone until the next successful
+    invocation re-materialises them from the deterministic rule
+    function. A reader between the two commits sees the rule's rows
+    missing, never a mix of old and new rows.
 
     Two concurrent ``lakebench run`` invocations against the
     SAME catalog will race on ``DELETE WHERE rule_id = ...``; the
@@ -430,7 +414,7 @@ def run_detection_rules(
     just the ones that succeeded.
 
     Returns the pass's timings, which the continuous tick logs and measures
-    time to detect against: {"setup_s", "cleanup_s", "finish_s", "rules": {rule_id:
+    time to detect against: {"cleanup_s", "finish_s", "rules": {rule_id:
     {"elapsed_s", "committed_s"}}}. ``committed_s`` is the epoch time at
     which the rule's alerts were committed to gold.alerts, None for a rule
     that did not run (skip or error). ``cleanup_s`` is the per-rule cache
@@ -465,17 +449,14 @@ def run_detection_rules(
     from incremental_detection import INCREMENTAL_RULES, incremental_line
 
     # Which rules to run this invocation. Batch passes None (the full default
-    # set); the continuous gold loop passes a bounded set (W2/W3/W4/W17) plus a
-    # skipped_rules list for the rules it deliberately does NOT run there --
-    # W1 (per-tick graph recompute too costly), W7 (skipped from before
-    # silver_stream appended silver.entities; see gold_refresh_financial), and
-    # W8 (needs a 90-day dormancy gap a narrow continuous corpus cannot hold).
+    # set); the continuous gold loop passes its own set plus a skipped_rules
+    # list for the rules it deliberately does NOT run there (W1, W7, W8; see
+    # gold_refresh_financial).
     # Marking them 'skipped' (not simply omitting them) is what lets
     # the scorer render their typologies "not run" instead of a false 0%.
     rules = tuple(rules) if rules is not None else DEFAULT_DETECTION_RULES
     skipped_rules = tuple(skipped_rules or ())
-    pass_start = time.time()
-    timings: dict = {"setup_s": 0.0, "cleanup_s": 0.0, "finish_s": 0.0, "rules": {}}
+    timings: dict = {"cleanup_s": 0.0, "finish_s": 0.0, "rules": {}}
 
     # Load silver.entities once. The customer-scoped rules (W2, W5-W8) and
     # W7's country lookup need it; loading up-front is cheap
@@ -522,7 +503,6 @@ def run_detection_rules(
     # gone, and scoring then reported 0% recall as a valid result.
     spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE run_id <> '{run_id}'")
     log(f"[detection] cleared {GOLD_ALERTS} rows from runs other than {run_id}")
-    timings["setup_s"] = time.time() - pass_start
     # With profile_stages, each rule runs in its own Spark job group, so its
     # jobs and stages can be attributed to it ([stage-profile] lines, read
     # from the status store after the rule). The caller's group is restored
@@ -634,8 +614,6 @@ def run_detection_rules(
             # vertex cap.
             params = rule_params(fn, run_id, silver_entities)
             params.update((rule_overrides or {}).get(rule_id, {}))
-            if "silver_entities" in sig.parameters and "silver_entities" not in params:
-                params["silver_entities"] = None  # the rule decides (it skips)
             if "screen_base" in sig.parameters and screen_base is not None:
                 params["screen_base"] = screen_base
             run_rule = fn
@@ -649,10 +627,9 @@ def run_detection_rules(
                 rule_txns if (incremental is not None and rule_id in INCREMENTAL_RULES) else txns
             )
             alerts = run_rule(frame, **params)
-            # Persist before counting, so the rule is computed exactly once.
-            # The loop used to count the frame and then INSERT from a temp
-            # view, which is not materialised: every rule ran twice, each run
-            # re-reading silver and redoing its joins. A rule that fails
+            # Persist before counting, so the rule is computed exactly once
+            # (a temp view is not materialised, so counting and then
+            # inserting from one would run the rule twice). A rule that fails
             # while computing has its rows removed by the error handler
             # below, so gold.alerts never shows alerts for a rule whose
             # status is not 'ran'.
@@ -737,17 +714,12 @@ def run_detection_rules(
             # then only this rule's alerts frame is dropped (W5 and W6 persist
             # nothing else).
             keep_screen = screen_base is not None and rule_id in screen_rules[:-1]
-            if tick_frame is not None:
-                # The per-tick cache must survive every rule, so a blanket
+            if tick_frame is not None or keep_screen:
+                # The per-tick cache (continuous, where no shared screening
+                # base is built) must survive every rule, so a blanket
                 # clearCache would wipe it. Drop only this rule's own frames:
                 # its alerts frame here, and its W1/W3/W17 intermediates (which
-                # the rules unpersist themselves). The shared screening base is
-                # dropped once the last screening rule has read it.
-                if rule_frame is not None:
-                    rule_frame.unpersist()
-                if not keep_screen and rule_id in screen_rules:
-                    screen_base = None
-            elif keep_screen:
+                # the rules unpersist themselves).
                 if rule_frame is not None:
                     rule_frame.unpersist()
             else:
@@ -773,7 +745,7 @@ def run_detection_rules(
     timings["status"] = list(status_rows)
     _write_detection_status(spark, status_rows, run_id)
 
-    # P0.5: project the two derived gold tables from the alerts the rules
+    # Project the two derived gold tables from the alerts the rules
     # just wrote. No new detection compute -- entity_clusters is a
     # reshape of W1 alerts, risk_scores a reshape of W4 alerts. Best-effort
     # and isolated: a failure here does not fail the pipeline, and an empty
