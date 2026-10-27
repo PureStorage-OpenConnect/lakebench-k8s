@@ -111,8 +111,8 @@ class TestRunPreflightInfraCheck:
         assert named in out.out + out.err
 
 
-class TestParseSparkInterval:
-    """Tests for _parse_spark_interval()."""
+class TestIntervalSeconds:
+    """Tests for interval_seconds()."""
 
     @pytest.mark.parametrize(
         ("text", "seconds"),
@@ -125,9 +125,9 @@ class TestParseSparkInterval:
         ],
     )
     def test_parse(self, text, seconds):
-        from lakebench.cli._sustained import _parse_spark_interval
+        from lakebench.config.schema import interval_seconds
 
-        assert _parse_spark_interval(text) == seconds
+        assert interval_seconds(text) == seconds
 
 
 class TestResolveMaintenanceRetention:

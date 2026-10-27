@@ -1,7 +1,4 @@
-"""Sustained pipeline helpers for Lakebench CLI.
-
-Extracted from cli/__init__.py to reduce file size.
-"""
+"""Sustained and continuous pipeline helpers for the Lakebench CLI."""
 
 from __future__ import annotations
 
@@ -9,6 +6,7 @@ import dataclasses
 import logging
 import os
 import re
+import socket
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -189,8 +187,11 @@ def _bucket_ownership_problem(cfg, core_v1) -> str | None:
     """
     from lakebench.deploy.ownership import (
         IdentityVerdict,
+        api_server_fingerprint,
         bucket_name_matches_deployment,
         list_lakebench_deployment_names,
+        read_created_buckets,
+        tagless_contents_are_ours,
         verify_bucket_ownership,
     )
     from lakebench.s3 import s3_client_from_config
@@ -199,14 +200,9 @@ def _bucket_ownership_problem(cfg, core_v1) -> str | None:
     raw = s3_client_from_config(s3_cfg).raw_client
     others = None
     b = s3_cfg.buckets
-    from lakebench.deploy.ownership import (
-        api_server_fingerprint,
-        read_created_buckets,
-    )
-
     my_cluster = api_server_fingerprint(cfg.platform.kubernetes.context or "")
     try:
-        # The created record only (not 1.6's adopted-empty one).
+        # The created record only, not the adopted-empty one.
         ns_record = read_created_buckets(core_v1, cfg.get_namespace())
     except Exception:  # noqa: BLE001 -- unreadable: nothing is proven by it
         ns_record = set()
@@ -228,8 +224,6 @@ def _bucket_ownership_problem(cfg, core_v1) -> str | None:
                 # The name alone does not prove the data is ours (deploy adopts
                 # a pre-existing matching bucket on these backends); same
                 # record rule as destroy.
-                from lakebench.deploy.ownership import tagless_contents_are_ours
-
                 try:
                     recorded = tagless_contents_are_ours(core_v1, cfg.get_namespace(), bucket)
                 except Exception:  # noqa: BLE001
@@ -636,42 +630,31 @@ def _find_prometheus_svc(namespace: str, context: str | None = None) -> str | No
     verifies the Service exists before returning it, so callers that want
     a port-forward target do not try one that is not there.
     """
+    from kubernetes import client as k8s_client
+    from kubernetes.client.exceptions import ApiException
+
     from lakebench.k8s.target import ClusterTarget, ContextConflictError
 
     try:
-        from kubernetes import client as k8s_client
-
         ClusterTarget.resolve(context=context or "").activate()
-        v1 = k8s_client.CoreV1Api()
-        v1.read_namespaced_service(PROMETHEUS_SERVICE_NAME, namespace)
-        return PROMETHEUS_SERVICE_NAME
     except ContextConflictError:
         raise
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 -- unreachable cluster: no Prometheus to query
+        return None
 
-    try:
-        result = pinned_kubectl(
-            context,
-            [
-                "get",
-                "svc",
-                PROMETHEUS_SERVICE_NAME,
-                "-n",
-                namespace,
-                "-o",
-                "jsonpath={.metadata.name}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        name = result.stdout.strip()
-        if result.returncode == 0 and name == PROMETHEUS_SERVICE_NAME:
-            return name
-    except Exception:
-        pass
-
+    # The read can fail transiently (a reset connection, a 5xx or a 429); a
+    # 404 (no Service) or 403 (no access) is final. Retry once after a short
+    # wait so a blip does not record platform metrics as uncollected.
+    for attempt in range(2):
+        try:
+            k8s_client.CoreV1Api().read_namespaced_service(PROMETHEUS_SERVICE_NAME, namespace)
+            return PROMETHEUS_SERVICE_NAME
+        except ApiException as e:
+            if e.status in (403, 404) or attempt == 1:
+                return None
+            time.sleep(2)
+        except Exception:  # noqa: BLE001 -- not a read error: no Prometheus to query
+            return None
     return None
 
 
@@ -687,30 +670,27 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
     if not cfg.observability.enabled:
         return
 
-    try:
-        from lakebench.observability.platform_collector import PlatformCollector
+    import httpx
 
+    from lakebench.observability.platform_collector import PlatformCollector
+
+    pf_proc = None
+    try:
         namespace = cfg.get_namespace()
         ctx = cfg.platform.kubernetes.context or None
         # One stack per deployment: Prometheus lives in this namespace.
-        prom_ns = namespace
-        svc_name = _find_prometheus_svc(prom_ns, context=ctx)
+        svc_name = _find_prometheus_svc(namespace, context=ctx)
         if not svc_name:
             console.print("  [yellow]Could not find Prometheus service[/yellow]")
             _platform_not_collected(run_metrics, "no Prometheus service found")
             return
 
         # Try in-cluster DNS first (fast path when running inside K8s)
-        prometheus_url = f"http://{svc_name}.{prom_ns}.svc:9090"
+        prometheus_url = f"http://{svc_name}.{namespace}.svc:9090"
         try:
-            import httpx
-
             httpx.get(f"{prometheus_url}/api/v1/status/config", timeout=5)
-            # DNS resolved and Prometheus responded -- use this URL
         except Exception:
             # DNS failed -- we are outside the cluster. Use port-forward.
-            import socket
-
             local_port = _find_free_port()
             pf_proc = pinned_kubectl_popen(
                 ctx,
@@ -719,14 +699,11 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
                     f"svc/{svc_name}",
                     f"{local_port}:9090",
                     "-n",
-                    prom_ns,
+                    namespace,
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            # Wait for port-forward to be ready
-            import time
-
             for _ in range(20):
                 time.sleep(0.5)
                 try:
@@ -735,7 +712,6 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
                 except OSError:
                     continue
             else:
-                pf_proc.kill()
                 console.print("  [yellow]Could not establish port-forward to Prometheus[/yellow]")
                 _platform_not_collected(run_metrics, "could not reach Prometheus")
                 return
@@ -747,26 +723,18 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
         pm = collector.collect(run_metrics.start_time, run_metrics.end_time or utc_now())
         run_metrics.platform_metrics = pm.to_dict()
 
-        # Clean up port-forward if we started one
-        if "pf_proc" in locals():
-            pf_proc.kill()
-            pf_proc.wait()
-
         if pm.collection_error:
             console.print(f"  [yellow]Platform metrics partial: {pm.collection_error}[/yellow]")
         else:
-            pod_count = len(pm.pods)
-            engine_tag = ""
-            if pm.engine.has_data:
-                engine_tag = " (+ engine metrics)"
-            print_success(f"Platform metrics collected: {pod_count} pods{engine_tag}")
+            engine_tag = " (+ engine metrics)" if pm.engine.has_data else ""
+            print_success(f"Platform metrics collected: {len(pm.pods)} pods{engine_tag}")
     except Exception as e:
-        # Clean up port-forward on error
-        if "pf_proc" in locals():
-            pf_proc.kill()
-            pf_proc.wait()
         console.print(f"  [yellow]Could not collect platform metrics: {e}[/yellow]")
         _platform_not_collected(run_metrics, f"collection failed: {e}")
+    finally:
+        if pf_proc is not None:
+            pf_proc.kill()
+            pf_proc.wait()
 
 
 def _platform_skipped(cfg, run_metrics, why: str) -> None:
@@ -784,17 +752,9 @@ def _platform_not_collected(run_metrics, reason: str) -> None:
 
 def _find_free_port() -> int:
     """Find an available local TCP port."""
-    import socket
-
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
-
-def _parse_spark_interval(interval_str: str) -> int:
-    """Whole seconds in a validated Spark interval string (``"30 seconds"``,
-    ``"5 minutes"``); 0 for ``"0 seconds"``."""
-    return int(interval_seconds(interval_str) or 0)
 
 
 _DAYS_PER_MONTH = 30.5
@@ -807,8 +767,8 @@ def resolve_maintenance_retention(cfg) -> str:
     Returns ``"0s"`` (expire every snapshot older than now) for standard
     workloads. When ``workload.retention_workload`` is True, returns a
     day-string long enough to cover ``retention_months + 6`` months of
-    headroom, so that snapshot history survives maintenance. Expressed in days because the maintenance parser accepts only
-    s/m/h/d suffixes (V-23 in the FinServ-Crime spec).
+    headroom, so that snapshot history survives maintenance. Expressed in
+    days because the maintenance parser accepts only s/m/h/d suffixes.
     """
     workload = cfg.architecture.workload
     if not workload.retention_workload:
@@ -861,10 +821,10 @@ def continuous_round_bounds(
 ) -> tuple[int, float] | None:
     """(per-statement timeout, round budget) for a continuous round, or None.
 
-    The default 30 s exec timeout reported most expire_snapshots and
-    rewrite_data_files statements on real tables as timed out while the
-    engine kept running them, and the next statement then overlapped it.
-    Each statement now gets min(600 s, interval / 2). The round is capped at
+    Each statement gets min(600 s, interval / 2): the 30 s exec default
+    reports most expire_snapshots and rewrite_data_files statements on real
+    tables as timed out while the engine keeps running them, and the next
+    statement then overlaps it. The round is capped at
     interval / 2, so it finishes before the next one is due, and at the time
     left in the run minus the budget grace, so it cannot hold the loop past
     run_duration. None when too little of the run is left for a round.
@@ -957,8 +917,7 @@ def _error_line(text: str, limit: int = 300) -> str:
 
     The message is "exec_sql failed (rc=N): <stdout> | <stderr>", and on a
     live Trino pod stderr starts with kubectl's "Defaulted container ..."
-    notice (journal of run-20260929-204941-1d17f4), so the first line is
-    noise. The prefix and the notice are dropped, then
+    notice, so the first line is noise. The prefix and the notice are dropped, then
     ``summarise_engine_error`` picks the line that states the failure
     (Trino's "Query <id> failed:", beeline's "Error:" or "FAILED:", a
     Python traceback's exception) over log lines printed before it.
@@ -1071,8 +1030,6 @@ def scalar_from_output(engine: str, output: str) -> float | None:
     executor prints it, or None. Trino: one CSV line, quoted. Spark Thrift:
     a tsv2 header, then the value. DuckDB: a JSON payload whose ``data``
     holds the row's Python repr, e.g. ``(1234,)``."""
-    import re
-
     text = (output or "").strip()
     if not text:
         return None
@@ -1105,8 +1062,7 @@ def maintained_tables(cfg) -> list[str]:
     """Tables table maintenance (expire, orphan removal) runs on: those the
     pipeline writes for this workload and mode. Batch Customer 360 has no
     bronze table (bronze-verify reads the datagen Parquet in place); the
-    continuous bronze_raw only exists in continuous mode. Maintenance on it
-    failed 2 of 6 statements on every batch c360 run (live, 61489ab)."""
+    continuous bronze_raw only exists in continuous mode."""
     schema = cfg.architecture.workload.schema_type.value
     continuous = is_continuous_mode(cfg.architecture.pipeline.mode)
     layers: tuple[str, ...] = ("bronze", "silver", "gold")
@@ -1246,8 +1202,7 @@ def expire_round_record(
     whose ``expire_snapshots`` statement finished or timed out (a timed-out
     statement may still have run). A table whose statement failed or was
     not attempted is not listed: that round expired nothing in it.
-    ``engine`` says whose clock took the cutoff (Trino its own; Spark
-    Thrift a literal from this host)."""
+    ``engine`` says whose clock took the cutoff."""
     status = out.get("status") or []
     expired = [
         table
@@ -1864,8 +1819,8 @@ def _table_outcome(plan: list[tuple[str, str]], out: dict) -> dict:
 def _wait_for_query_engine_ready(cfg, k8s, console, timeout: int = 180) -> None:
     """Poll the Trino cluster until all expected worker nodes are active.
 
-    Compaction (e.g. Delta OPTIMIZE via Trino) can exhaust per-node memory
-    and cause Trino worker pods to restart.  A SELECT 1 health check passes
+    Compaction can exhaust per-node memory and cause Trino worker pods to
+    restart.  A SELECT 1 health check passes
     as soon as the coordinator responds, even while workers are still
     reconnecting.  Instead, query system.runtime.nodes and wait until the
     expected worker count is present -- this guarantees distributed queries
@@ -1993,8 +1948,6 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
         fq = f"{catalog}.{table_ref}"
         for metric_name, sql in _build_health(engine, fq).items():
             try:
-                import re as _re
-
                 stdout = query_sql(engine, k8s, pod_name, namespace, sql)
                 if parse_detail is not None:
                     # Delta DESCRIBE DETAIL: a table, not a bare count.
@@ -2018,14 +1971,8 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
                     if not cleaned or cleaned.startswith("-"):
                         continue
                     # Skip column header lines (contain letters like "count")
-                    if _re.fullmatch(r"\d+", cleaned):
+                    if re.fullmatch(r"\d+", cleaned):
                         health[f"{label}_{metric_name}"] = int(cleaned)
-                        _found = True
-                        break
-                    # Beeline tabular: number may be padded with spaces
-                    m = _re.fullmatch(r"\s*(\d+)\s*", cleaned)
-                    if m:
-                        health[f"{label}_{metric_name}"] = int(m.group(1))
                         _found = True
                         break
                 if not _found:
@@ -2076,9 +2023,9 @@ def gold_event_age_sql(engine: str, fq_gold: str, ts_column: str = "interaction_
     NULL and the probe returns NULL, which the caller leaves as UNRECORDED.
 
     Trino and DuckDB take ``date_diff('second', start, end)``. Spark SQL has
-    no string-unit form: Spark Thrift rejected it on every round with
-    INVALID_PARAMETER_VALUE.DATETIME_UNIT (lb16-cs), and adapt_query only
-    rewrites the 'day' form. Spark gets the difference of unix_timestamp
+    no string-unit form (Spark Thrift rejects it with
+    INVALID_PARAMETER_VALUE.DATETIME_UNIT), and adapt_query only rewrites the
+    'day' form. Spark gets the difference of unix_timestamp
     values, which is whole seconds like date_diff.
     """
     newest = f"CAST(MAX({ts_column}) AS TIMESTAMP)"
@@ -2113,7 +2060,7 @@ def _run_benchmark_round(
         timestamp=utc_now(),
     )
 
-    # Table health probe (v1.1.0)
+    # Table health probe
     if k8s is not None:
         try:
             health = _probe_table_health(cfg, k8s)
@@ -2177,10 +2124,8 @@ def _run_benchmark_round(
     if tm_run and investigator_queries != "included":
         bench_runner.tm_run_id = None  # this round runs without IQ1 to IQ4
     # The same per-query limit as the batch benchmark (900 s financial / 300 s
-    # c360): without it the in-stream rounds fell through to run_power's 300 s
-    # default, so financial continuous queries timed out at 300 s while
-    # financial batch allowed 900 s. This value is also the limit a crossing is
-    # measured against.
+    # c360) rather than run_power's 300 s default. This value is also the
+    # limit a crossing is measured against.
     from lakebench.cli._run import bench_query_timeout
 
     query_timeout = bench_query_timeout(cfg)
@@ -2302,7 +2247,6 @@ def _run_benchmark_round(
 def investigator_sessions_after_round(
     bench_runner,
     collector,
-    console,
     j,
     requested: int,
     *,
@@ -2433,8 +2377,8 @@ def pipeline_score_freshness(pb) -> str:
     """The freshness the Pipeline Score line prints: the scored one.
 
     data_freshness_seconds is the continuous primary score. The query-time
-    probe measured event-date age (about 635 days on a 2025 corpus, lb16) and
-    headlined the score line until v1.6; it stays a labelled diagnostic.
+    probe measures event-date age, not freshness, so it stays a labelled
+    diagnostic.
     """
     value = pb.data_freshness_seconds
     return f"{value:.1f}s" if value is not None else "n/a"
@@ -2520,49 +2464,34 @@ def _wait_for_bronze_data(cfg, timeout_seconds: int = 300) -> bool:
     doesn't wedge the sustained CLI here -- the preflight itself
     will surface any real credential issues.
     """
-    import time as _t
-
-    try:
-        from lakebench.s3 import S3Client
-    except Exception:  # noqa: BLE001
-        return True
+    from lakebench.deploy.datagen import bronze_datagen_prefix
+    from lakebench.s3 import s3_client_from_config
+    from lakebench.s3.client import list_user_keys
 
     s3_cfg = cfg.platform.storage.s3
     try:
-        client = S3Client(
-            endpoint=s3_cfg.endpoint,
-            access_key=s3_cfg.access_key,
-            secret_key=s3_cfg.secret_key,
-            region=s3_cfg.region,
-            path_style=s3_cfg.path_style,
-            ca_cert=getattr(s3_cfg, "ca_cert", None) or "",
-            verify_ssl=getattr(s3_cfg, "verify_ssl", True),
-        )
+        client = s3_client_from_config(s3_cfg)
     except Exception as e:  # noqa: BLE001
         logger.warning("Could not construct S3 client for preflight wait: %s", e)
         return True
-
-    from lakebench.deploy.datagen import bronze_datagen_prefix
 
     bronze = s3_cfg.buckets.bronze
     data_prefix = bronze_datagen_prefix(cfg).rstrip("/") + "/"
     if cfg.architecture.workload.schema_type.value == "financial":
         data_prefix += "bronze/pacs008/"
     raw = client.raw_client
-    deadline = _t.time() + timeout_seconds
+    deadline = time.time() + timeout_seconds
     interval = 5.0
-    while _t.time() < deadline:
-        from lakebench.s3.client import list_user_keys
-
+    while time.time() < deadline:
         try:
             keys = list_user_keys(raw, bronze, prefix=data_prefix, limit=50)
         except Exception as e:  # noqa: BLE001
             logger.warning("listing s3://%s failed: %s", bronze, e)
-            _t.sleep(interval)
+            time.sleep(interval)
             continue
         if any(k.rsplit("/", 1)[-1].startswith("part-") and k.endswith(".parquet") for k in keys):
             return True
-        _t.sleep(interval)
+        time.sleep(interval)
     return False
 
 
@@ -2585,8 +2514,7 @@ def _streaming_job_env(run_id: str, run_duration: int) -> dict[str, str]:
 class StreamStartWatch:
     """``wait_until_running`` callback for one stream: reports every
     submission failure while the operator retries it, and a heartbeat while
-    the wait goes on, instead of waiting silently (the 2026-09-27 discovery
-    run printed nothing for 9 minutes while two streams failed five times).
+    the wait goes on, instead of waiting silently while streams fail.
     ``failures`` is what the metrics record: ``{"at", "attempt", "reason",
     "lost_seconds"}``, lost_seconds from the first poll that saw the failure
     to the first that saw another state (good to one poll interval), as for
@@ -2677,8 +2605,7 @@ def maintenance_schedule_lines(
     compaction_source: str,
 ) -> list[tuple[str, str]]:
     """The run header's maintenance lines, as ``(level, text)``: what the
-    table format and query engine will actually run, not the Iceberg
-    schedule for every run (lb16-cf Delta runs printed "Iceberg retention").
+    table format and query engine will actually run.
     """
     fmt = (table_format or "").lower()
     engine = (query_engine or "").lower()
@@ -2706,8 +2633,6 @@ def maintenance_schedule_lines(
 
     if skip_maintenance:
         vacuum = "Delta VACUUM: disabled (--skip-maintenance)"
-    elif engine == "duckdb":
-        vacuum = "Delta VACUUM: not run (DuckDB cannot run table maintenance)"
     elif engine == "spark-thrift":
         vacuum = "Delta VACUUM: not run (it OOMs Spark Thrift at 4Gi)"
     else:
@@ -2730,9 +2655,8 @@ def watch_all_streams(job_manager, watches: dict[str, StreamStartWatch], current
 
     The streams are submitted together but waited on one at a time, so a
     stream whose submission failed while an earlier one was waited on was
-    RUNNING again by its own turn and its failures were never seen: lb16-cf
-    recorded only bronze-ingest's, while silver-stream's and gold-refresh's
-    showed only in the operator watch. Streams already seen running stay
+    RUNNING again by its own turn and its failures would go unseen. Streams
+    already seen running stay
     polled: one that dies and fails its resubmission before its own turn
     would otherwise go unrecorded the same way.
     """
@@ -3047,7 +2971,7 @@ def _measure_bucket_sizes(cfg, collector) -> int | None:
 
 
 #: Auto trickle: aim for this many window lengths of arrival, and never more
-#: than this many files per trigger (the pre-v1.6 fixed default).
+#: than this many files per trigger.
 AUTO_ARRIVAL_MARGIN = 1.2
 AUTO_TRICKLE_CEILING = 50
 #: The trickle's cadence when bronze runs back to back (no interval): a
@@ -3070,10 +2994,9 @@ def resolve_maintenance_schedule(sustained, run_duration: int, *, skip_maintenan
     """The maintenance and compaction intervals this continuous run uses.
 
     Unset intervals are derived from the window (retention: run_duration / 3,
-    within 300..7200; compaction: 2 x retention). The old fixed default,
-    retention_interval 1800 with the default run_duration 1800, never fired,
-    so a default run measured a pipeline with no table maintenance (lb16-cs).
-    An explicit interval that cannot fire inside the window is refused
+    within 300..7200; compaction: 2 x retention), so a default run's
+    maintenance fires inside its window. An explicit interval that cannot
+    fire inside the window is refused
     (``problem``) unless maintenance is disabled: --skip-maintenance for both,
     compaction_enabled false for compaction. A derived one that cannot fire
     (a window under about six minutes) is a warning; the effective
@@ -3131,11 +3054,6 @@ def resolve_maintenance_schedule(sustained, run_duration: int, *, skip_maintenan
 DATAGEN_LEAD_S = 600
 
 
-def datagen_lead_seconds(cfg) -> int:
-    """Seconds between datagen's start and the window's opening, at most."""
-    return DATAGEN_LEAD_S
-
-
 def resolve_trickle(cfg, run_duration: int, *, continuous_datagen: bool = False) -> dict:
     """The max_files_per_trigger this run uses, and why.
 
@@ -3160,16 +3078,14 @@ def resolve_trickle(cfg, run_duration: int, *, continuous_datagen: bool = False)
             "arrival_seconds": None,
             "problem": None,
         }
-    trigger_s = _parse_spark_interval(sustained.bronze_trigger_interval) or TRICKLE_TRIGGER_S
+    trigger_s = int(interval_seconds(sustained.bronze_trigger_interval) or TRICKLE_TRIGGER_S)
+    file_mb = parse_size_to_bytes(cfg.architecture.workload.datagen.file_size) / 1024**2
     try:
         dims = cfg.get_scale_dimensions()
-        file_mb = parse_size_to_bytes(str(cfg.architecture.workload.datagen.file_size)) / (
-            1024 * 1024
-        )
         files = dims.approx_bronze_gb * 1024 / file_mb
     except Exception:  # noqa: BLE001 -- unknown size: keep the ceiling, no refusal
         files = None
-    if files is None or files <= 0 or not trigger_s:
+    if files is None or files <= 0:
         value = explicit or AUTO_TRICKLE_CEILING
         return {
             "value": value,
@@ -3232,8 +3148,8 @@ def cluster_clock_offset_seconds(timeout_s: float = 5.0) -> float | None:
 
 
 def stream_identities(job_manager, job_names: list[str]) -> dict[str, tuple]:
-    """(driver pod, submission attempts) per stream, to tell at the window's
-    end whether a stream restarted inside it."""
+    """(driver pod, submission attempts, last submission time) per stream,
+    to tell at the window's end whether a stream restarted inside it."""
     out: dict[str, tuple] = {}
     for name in job_names:
         try:
@@ -3266,7 +3182,7 @@ def end_of_window_problems(
                 f"closed, not RUNNING ({st.message})"
             )
             continue
-        pod0, attempts0, submitted0 = ((opened or {}).get(name) or (None, None, None))[:3]
+        pod0, attempts0, submitted0 = (opened or {}).get(name) or (None, None, None)
         # The operator reuses the driver pod name and may reset the attempt
         # count on a rerun; lastSubmissionAttemptTime moves on every one.
         if submitted0 and st.start_time and st.start_time != submitted0:
@@ -3295,7 +3211,7 @@ def short_window_problem(cfg, run_duration: int) -> str | None:
     phase relative to gold's timer is arbitrary."""
     from lakebench.metrics.continuous_window import MIN_WINDOW_COMMITS
 
-    gold_s = _parse_spark_interval(cfg.architecture.pipeline.sustained.gold_refresh_interval)
+    gold_s = int(interval_seconds(cfg.architecture.pipeline.sustained.gold_refresh_interval) or 0)
     need = (MIN_WINDOW_COMMITS + 1) * gold_s
     if run_duration >= need:
         return None
@@ -3365,21 +3281,10 @@ def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
     """
     if not gold_refresh_logs:
         return None
-    import re as _re
-
     counts = [
-        int(m) for m in _re.findall(r"cumulative gold\.alerts rows:\s*(\d+)", gold_refresh_logs)
+        int(m) for m in re.findall(r"cumulative gold\.alerts rows:\s*(\d+)", gold_refresh_logs)
     ]
     return max(counts) if counts else None
-
-
-def _aml_alert_gate_applies(schema_type: str) -> bool:
-    """Whether the continuous zero-alert gate runs for this workload schema.
-
-    Only financial detects alerts; Customer360 sustained runs emit none by
-    design and are exempt.
-    """
-    return schema_type == "financial"
 
 
 def _aml_alert_gate_failure(
@@ -3413,14 +3318,6 @@ def _aml_alert_gate_failure(
             "AML continuous gate: detection produced 0 alerts",
         )
     return None
-
-
-def _aml_gate_logs(window_logs: str | None) -> tuple[str | None, dict, dict]:
-    """The gold log the AML gate reads, with its TM invariants and statuses
-    by cycle."""
-    from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_status
-
-    return window_logs, parse_tm_invariants(window_logs), parse_tm_status(window_logs)
 
 
 @restores_handlers
@@ -3466,11 +3363,14 @@ def _run_sustained(
         aml_bronze_verify_timeout_budget,
     )
 
-    run_duration = duration or cfg.architecture.pipeline.sustained.run_duration
+    sustained_cfg = cfg.architecture.pipeline.sustained
+    is_financial = cfg.architecture.workload.schema_type.value == "financial"
+    run_duration = duration or sustained_cfg.run_duration
     # The auto silver wait for bronze scales with this run's window, which
     # --duration sets; resolved here, as the job reads only the config.
-    _sus = cfg.architecture.pipeline.sustained
-    _sus.silver_bronze_wait_seconds = _sus.effective_silver_bronze_wait_seconds(run_duration)
+    sustained_cfg.silver_bronze_wait_seconds = sustained_cfg.effective_silver_bronze_wait_seconds(
+        run_duration
+    )
 
     # The trickle this run offers: derived from the corpus and the window
     # unless the config sets it, and refused when data would stop arriving
@@ -3480,13 +3380,11 @@ def _run_sustained(
     if trickle["problem"]:
         print_error(trickle["problem"])
         raise typer.Exit(ExitCode.USAGE)
-    cfg.architecture.pipeline.sustained.max_files_per_trigger = trickle["value"]
-    if trickle["value"] is not None and not _parse_spark_interval(
-        cfg.architecture.pipeline.sustained.bronze_trigger_interval
-    ):
+    sustained_cfg.max_files_per_trigger = trickle["value"]
+    if trickle["value"] is not None and not interval_seconds(sustained_cfg.bronze_trigger_interval):
         # A trickle is N files per trigger: back to back has no cadence, so
         # the trickle brings its own (recorded with the run's config).
-        cfg.architecture.pipeline.sustained.bronze_trigger_interval = f"{TRICKLE_TRIGGER_S} seconds"
+        sustained_cfg.bronze_trigger_interval = f"{TRICKLE_TRIGGER_S} seconds"
         print_info(
             f"Bronze trigger: every {TRICKLE_TRIGGER_S} s, the trickle's cadence "
             "(back to back has none)"
@@ -3507,7 +3405,6 @@ def _run_sustained(
     # Maintenance inside the window (continuous mode includes periodic
     # maintenance). Resolved values are written back so the config
     # snapshot and the experiment block record the intervals that ran.
-    sustained_cfg = cfg.architecture.pipeline.sustained
     schedule = resolve_maintenance_schedule(
         sustained_cfg, run_duration, skip_maintenance=skip_maintenance
     )
@@ -3668,9 +3565,8 @@ def _run_sustained(
             skip_benchmark = True
 
         # The benchmark runner serves the in-stream rounds. A run that
-        # cannot create it cannot produce the query
-        # evidence continuous mode claims, so it fails here, before any
-        # stream starts (it used to warn and pass with no rounds).
+        # cannot create it cannot produce the query evidence continuous
+        # mode claims, so it fails here, before any stream starts.
         bench_runner = None
         if not skip_benchmark:
             try:
@@ -3679,10 +3575,7 @@ def _run_sustained(
                 # AML with the TM operations layer: the investigator queries
                 # (IQ1 to IQ4) read this run's cases, so each round runs
                 # them once a case exists (_run_benchmark_round's probe).
-                workload = cfg.architecture.workload
-                investigators = (
-                    workload.schema_type.value == "financial" and workload.tm_operations.enabled
-                )
+                investigators = is_financial and cfg.architecture.workload.tm_operations.enabled
                 bench_runner = BenchmarkRunner(cfg, tm_run_id=run_id if investigators else None)
             except Exception as e:  # noqa: BLE001
                 print_error(f"Could not create the benchmark runner: {e}")
@@ -3703,11 +3596,9 @@ def _run_sustained(
             _journal_safe(j.end_command, success=False, message=f"Scripts ConfigMaps: {e}")
             raise typer.Exit(ExitCode.FAILED) from None
 
-        # Start datagen before the stages below: the AML preflight needs parquet
-        # data to infer a schema from, and datagen then runs concurrently with
-        # the continuous jobs, which consume the same prefix as it lands.
-        # Skipping is only sensible when bronze is already being populated by
-        # another process; otherwise the continuous stages have no input.
+        # Datagen starts once the streams run (below) and writes the prefix
+        # they consume. --skip-generate is only sensible when another process
+        # populates bronze; otherwise the continuous stages have no input.
         engine = DeploymentEngine(cfg)
         # Every continuous run starts clean; see _reset_continuous_state, and
         # the table reset in bronze_verify_financial CONTINUOUS_RESET (AML) or
@@ -3716,7 +3607,7 @@ def _run_sustained(
         # not own would already be the damage the gate exists to prevent.
         _stage = "reset"
         _require_reset_ownership(cfg)
-        if cfg.architecture.workload.schema_type.value != "financial" and not force_reset:
+        if not is_financial and not force_reset:
             # c360 keeps existing state unless the operator asks to drop it:
             # a large raw corpus or a batch run's tables took hours to build.
             # A raw-only corpus no larger than this run regenerates, with no
@@ -3751,7 +3642,6 @@ def _run_sustained(
             except typer.Exit:
                 pipeline_success = False
                 raise
-        if not skip_generate:
             # The namespace's fleet sidecar describes the corpus this run
             # clears and regenerates.
             from lakebench.metrics.datagen_aggregator import drop_sidecar
@@ -3794,7 +3684,7 @@ def _run_sustained(
         # starts and creates bronze from the generator's schema
         # (pacs008_schema.json), so it needs no data. C360 uses
         # `bronze_ingest.py`, which infers its schema from the first file.
-        if cfg.architecture.workload.schema_type.value == "financial":
+        if is_financial:
             console.print()
             console.print("[bold]Preflight: registering bronze table via bronze-verify...[/bold]")
             _stage = "preflight"
@@ -3815,17 +3705,12 @@ def _run_sustained(
                 pipeline_success = False
                 raise typer.Exit(ExitCode.FAILED)
             # Preflight budget must scale with data. This bronze-verify reads
-            # whatever raw pacs.008 already sits under the bronze prefix -- and
-            # when a `generate` step precedes `run --sustained` (the standard
-            # cycle) that is close to the full corpus (~100 GB observed at
-            # scale 10 before preflight), not a trickle. bronze_verify_financial
-            # trips the CTAS fallback on it, so the old fixed 1200s cap could
-            # never pass at scale >= 10 -- it timed out with the job still
-            # legitimately RUNNING. The budget is shared with the batch path via
-            # aml_bronze_verify_timeout_budget so the two cannot diverge for
-            # the same job. Using the CLI's sustained ``timeout`` here would be
-            # wrong -- that's the streaming window, not a preflight step, and
-            # the streaming clock only starts after preflight returns.
+            # whatever raw pacs.008 already sits under the bronze prefix, which
+            # after a `generate` step is close to the full corpus, and
+            # bronze_verify_financial trips the CTAS fallback on it. The budget
+            # is shared with the batch path via aml_bronze_verify_timeout_budget
+            # so the two cannot diverge for the same job. The CLI's sustained
+            # ``timeout`` is the streaming window, not a preflight step.
             _preflight_scale = cfg.architecture.workload.datagen.get_effective_scale()
             _preflight_timeout = aml_bronze_verify_timeout_budget(_preflight_scale)
             preflight_result = monitor.wait_for_completion(
@@ -3913,10 +3798,9 @@ def _run_sustained(
                 pipeline_success = False
                 raise typer.Exit(ExitCode.FAILED)
             print_success(f"Submitted: lakebench-{job_name}")
-            for warning in getattr(job_manager, "budget_warnings", None) or []:
+            for warning in job_manager.budget_warnings:
                 print_warning(warning)
-            if isinstance(getattr(job_manager, "budget_warnings", None), list):
-                job_manager.budget_warnings.clear()
+            job_manager.budget_warnings.clear()
             if isinstance(job_status.executor_count, int) and job_status.executor_count > 0:
                 requested_executors[job_name] = job_status.executor_count
             submitted.append((job_type, job_name))
@@ -3940,9 +3824,9 @@ def _run_sustained(
             logger.warning("driver log capture: initial setup failed, continuing: %s", e)
             _driver_log_capturer = None
 
-        # A streaming submission that failed used to go unnoticed until the
-        # end-of-run gates reported zero rows. Confirm each driver is running
-        # first; dependency-download races on the shared operator are retried.
+        # Confirm each driver is running before the window opens, so a failed
+        # submission shows now rather than as zero rows at the gates;
+        # dependency-download races on the shared operator are retried.
         # One shared deadline: the streams start concurrently, so waiting
         # for each in turn with its own budget could take N times as long.
         # Each stream's submission failures are printed, journaled and
@@ -3993,7 +3877,7 @@ def _run_sustained(
                 engine,
                 continuous=True,
                 window_seconds=run_duration,
-                lead_seconds=datagen_lead_seconds(cfg),
+                lead_seconds=DATAGEN_LEAD_S,
             )
             _interrupt.creating("Job", "lakebench-datagen")
             datagen_result = datagen.deploy()
@@ -4058,31 +3942,10 @@ def _run_sustained(
             f"Streaming pipeline running for {run_duration}s ({run_duration / 60:.0f} min)..."
         )
 
-        # In-stream benchmark scheduling
-        sustained_cfg = cfg.architecture.pipeline.sustained
+        # In-stream benchmark scheduling. SustainedConfig already raised
+        # warmup and interval to at least gold_refresh_interval at load.
         bench_warmup = sustained_cfg.benchmark_warmup
         bench_interval = sustained_cfg.benchmark_interval
-        gold_interval_s = _parse_spark_interval(sustained_cfg.gold_refresh_interval)
-
-        # Hard floor: both warmup and interval must be >= gold_refresh_interval.
-        # Gold rewrites the entire table each cycle via createOrReplace().
-        # Warmup < gold interval -> Q9 hits an empty/stale table, inflated QpH.
-        # Interval < gold interval -> rounds overlap with gold rewrites, Q9
-        # contention and inconsistent QpH across rounds.
-        if bench_warmup < gold_interval_s and not skip_benchmark:
-            print_warning(
-                f"benchmark_warmup ({bench_warmup}s) is less than "
-                f"gold_refresh_interval ({gold_interval_s}s) -- "
-                f"clamping warmup to {gold_interval_s}s."
-            )
-            bench_warmup = gold_interval_s
-        if bench_interval < gold_interval_s and not skip_benchmark:
-            print_warning(
-                f"benchmark_interval ({bench_interval}s) is less than "
-                f"gold_refresh_interval ({gold_interval_s}s) -- "
-                f"clamping interval to {gold_interval_s}s."
-            )
-            bench_interval = gold_interval_s
 
         # Guard: skip in-stream rounds if run duration is too short
         can_run_rounds = not skip_benchmark and run_duration >= bench_warmup + bench_interval
@@ -4103,10 +3966,10 @@ def _run_sustained(
         # the expire_snapshots loop and periodic compaction; without
         # skipping, mid-run maintenance would distort a raw
         # freshness/throughput measurement.
-        retention_interval = sustained_cfg.effective_retention_interval(run_duration)
+        retention_interval = schedule["retention_interval"]
         retention_threshold = sustained_cfg.retention_threshold
         compaction_enabled = sustained_cfg.compaction_enabled and not skip_maintenance
-        compaction_interval = sustained_cfg.effective_compaction_interval(run_duration)
+        compaction_interval = schedule["compaction_interval"]
         for _level, _line in maintenance_schedule_lines(
             cfg.architecture.table_format.type.value,
             cfg.architecture.query_engine.type.value,
@@ -4132,7 +3995,7 @@ def _run_sustained(
                 # run with --continuous did not.
                 print_warning(floor_msg)
 
-        # Compaction scheduling (v1.1.0); Delta OPTIMIZE never runs.
+        # Compaction scheduling; Delta OPTIMIZE never runs.
         next_compaction_at = float(compaction_interval) if compaction_enabled else float("inf")
 
         start = time.time()
@@ -4191,12 +4054,7 @@ def _run_sustained(
             )
 
             # Check if it's time for a benchmark round
-            if (
-                can_run_rounds
-                and elapsed >= next_round_at
-                and remaining >= min_remaining
-                and bench_runner_instream is not None
-            ):
+            if can_run_rounds and elapsed >= next_round_at and remaining >= min_remaining:
                 _ns_watch.check(elapsed)
                 round_index += 1
                 console.print(
@@ -4221,7 +4079,6 @@ def _run_sustained(
                     sessions_pending = investigator_sessions_after_round(
                         bench_runner_instream,
                         collector,
-                        console,
                         j,
                         sessions_requested,
                         remaining_s=run_duration - (time.time() - start),
@@ -4291,7 +4148,7 @@ def _run_sustained(
                     )
                 next_maintenance_at = (time.time() - start) + retention_interval
 
-            # Iceberg compaction (v1.1.0). Bounds use the time now, after any
+            # Iceberg compaction. Bounds use the time now, after any
             # maintenance round above, so the two cannot overrun the window.
             if compaction_enabled and elapsed >= next_compaction_at:
                 now = time.time() - start
@@ -4328,7 +4185,7 @@ def _run_sustained(
             sleep_time = loop_sleep_seconds(
                 time.time() - start,
                 elapsed + check_interval,
-                next_round_at if can_run_rounds else float("inf"),
+                next_round_at,
                 next_maintenance_at,
                 next_compaction_at,
                 run_duration,
@@ -4385,11 +4242,8 @@ def _run_sustained(
             dg_info = _s3_dg.get_bucket_size(s3_cfg.buckets.bronze)
             if dg_info.size_bytes:
                 _datagen_output_gb = dg_info.size_bytes / (1024**3)
-            # datagen row count is not measurable from S3 metadata (would need
-            # to parse Parquet footers). Leaving _datagen_output_rows at 0
-            # correctly signals "unmeasurable" downstream -- ingest_ratio and
-            # pipeline_saturated become None rather than being computed against
-            # a fictional `scale * 1_500_000` denominator.
+            # S3 metadata gives no row count; _datagen_output_rows stays 0 so
+            # ingest_ratio and pipeline_saturated read as unmeasured (None).
         except Exception as e:
             logger.warning("Could not measure streaming bronze bucket size: %s", e)
 
@@ -4452,9 +4306,8 @@ def _run_sustained(
                         f"  {job_name}: captured {len(logs):,} bytes ({len(lines)} lines)"
                     )
                     # Show first line to verify format
-                    if lines:
-                        first = lines[0][:80] + "..." if len(lines[0]) > 80 else lines[0]
-                        console.print(f"    first: {first}")
+                    first = lines[0][:80] + "..." if len(lines[0]) > 80 else lines[0]
+                    console.print(f"    first: {first}")
             except Exception as e:
                 driver_logs[job_name] = None
                 print_warning(f"{job_name}: log capture failed: {e}")
@@ -4497,7 +4350,7 @@ def _run_sustained(
         from lakebench.metrics.continuous_window import balance as _balance
 
         _snapshot = getattr(collector.current_run, "config_snapshot", None) or {}
-        _silver_row_cap = cfg.architecture.pipeline.sustained.silver_max_rows_per_trigger
+        _silver_row_cap = sustained_cfg.silver_max_rows_per_trigger
         balance_record = _balance(
             {name: parse_events(driver_logs.get(name), name) for _, name in submitted},
             window_start,
@@ -4557,11 +4410,8 @@ def _run_sustained(
             print_warning(f"balance (advisory): {balance_record['bottleneck']}")
         # The verdict names what failed instead of "crashed or was
         # interrupted".
-        if collector.current_run is not None:
-            for _problem in window_problems:
-                if _problem not in collector.current_run.failure_reasons:
-                    collector.current_run.failure_reasons.append(_problem)
         for _problem in window_problems:
+            _record_failure(collector, _problem)
             print_error(_problem)
         if window_problems:
             pipeline_success = False
@@ -4593,11 +4443,7 @@ def _run_sustained(
                 else continuous_retention_record(
                     cfg,
                     # The rounds serve the AML time-travel reads only.
-                    rounds=(
-                        retention_rounds
-                        if cfg.architecture.workload.schema_type.value == "financial"
-                        else None
-                    ),
+                    rounds=(retention_rounds if is_financial else None),
                 )
             ),
         }
@@ -4634,9 +4480,7 @@ def _run_sustained(
         # covered scorer and the AML gate read it after the streams stop.
         _scored_tick: dict | None = None
         _tick_reason = ""
-        if cfg.architecture.workload.schema_type.value == "financial" and any(
-            n == "gold-refresh" for _, n in submitted
-        ):
+        if is_financial and any(n == "gold-refresh" for _, n in submitted):
             _stage = "gold-ticks"
             _ns_watch.check(time.time() - start)
             _scored_tick, _tick_reason, _tick_problem = record_gold_tick_records(
@@ -4665,7 +4509,7 @@ def _run_sustained(
         _stopped_now = _stop_streams(k8s, namespace, submitted)
         streams_stopped = True
         if (
-            cfg.architecture.workload.schema_type.value == "financial"
+            is_financial
             and not window_problems
             and any(n == "silver-stream" for _, n in _stopped_now)
         ):
@@ -4686,23 +4530,22 @@ def _run_sustained(
             details={"duration_seconds": run_duration},
         )
 
-        # Honest continuous runner. A continuous AML run whose gold stage
-        # produced ZERO alerts is a FAILURE, not a PASS: it means detection
-        # never fired (empty silver, a data-clock/window miss, or a broken
-        # rule), and the whole point of the run -- measuring detection under
-        # a sustained trickle -- did not happen. Exit-code-only success let
-        # this masquerade as PASS on the C360 side; AML asserts on real output.
-        # Evaluated BEFORE the per-stage record loop so streaming_metrics.success
-        # is recorded consistent with the run-level verdict, and it only sets
-        # the flag here -- the non-zero exit is raised at the end of the try so
-        # metrics + streaming stats still persist. Gated to financial so
-        # non-detection C360 sustained runs (no alerts by design) are unaffected.
-        # None gold-refresh logs => FAILURE by deliberate policy
-        # (absence of proof is not proof of success); the trade-off is a
-        # possible false-fail if driver-log capture times out on a very long
-        # run, which is preferred over silently passing an unverifiable run.
-        if _aml_alert_gate_applies(cfg.architecture.workload.schema_type.value):
-            gold_logs, _inv, _tm_status = _aml_gate_logs(driver_logs.get("gold-refresh"))
+        # AML alert gate. A continuous AML run whose gold stage produced no
+        # alerts fails: detection never fired (empty silver, a data-clock or
+        # window miss, or a broken rule), so the run measured nothing.
+        # Evaluated before the per-stage record loop so
+        # streaming_metrics.success agrees with the run verdict; it only sets
+        # the flag, and the non-zero exit is raised at the end of the try so
+        # metrics and streaming stats still persist. Customer 360 detects no
+        # alerts by design and is exempt. Missing gold-refresh logs also fail:
+        # a run whose detection cannot be confirmed does not pass, at the cost
+        # of a false failure when log capture times out on a long run.
+        if is_financial:
+            from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_status
+
+            gold_logs = driver_logs.get("gold-refresh")
+            _inv = parse_tm_invariants(gold_logs)
+            _tm_status = parse_tm_status(gold_logs)
             alert_count = _aml_cumulative_alerts(gold_logs)
             _gate_failure = _aml_alert_gate_failure(gold_logs, alert_count)
             if _gate_failure is not None:
@@ -4714,7 +4557,7 @@ def _run_sustained(
                     f"AML continuous gate: detection produced {alert_count:,} "
                     "alerts over the window."
                 )
-            # P10 TM operations: its own verdict on every operations pass.
+            # TM operations: its own verdict on every operations pass.
             # Only violated invariants fail the run; a layer that could not
             # run (no manifest within the window, an error) is reported as
             # not run, and a missing log as unknown, as in batch.
@@ -4739,10 +4582,10 @@ def _run_sustained(
                     _record_failure(collector, _problem)
                 pipeline_success = False
 
-        # c360 honest continuous gate (AML has its own above).
+        # c360 continuous gate (AML has its own above).
         # A continuous run whose bronze or silver stream processed zero rows
         # moved no data, whatever the exit codes say.
-        if cfg.architecture.workload.schema_type.value != "financial":
+        if not is_financial:
             _rows_by_job: dict[str, int | None] = {}
             for _jt, _jn in submitted:
                 if _jn in _C360_REQUIRED_STREAM_JOBS:
@@ -4872,7 +4715,7 @@ def _run_sustained(
                             _record_failure(collector, f"Round {idx}: {problem}")
                             pipeline_success = False
             except Exception as e:
-                if cfg.architecture.workload.schema_type.value == "financial":
+                if is_financial:
                     print_warning(f"Benchmark aggregation failed: {e}")
                 else:
                     # The rounds' gates are the run's only answer check.
@@ -4886,7 +4729,7 @@ def _run_sustained(
         # Recall over what the last completed tick inside the window saw,
         # with the streams stopped and every gate decided, so a run that
         # failed one reads not_scored. Best effort: never fails the run.
-        if cfg.architecture.workload.schema_type.value == "financial":
+        if is_financial:
             from lakebench.cli._aml_post import continuous_scoring
 
             _stage = "score-financial"
@@ -4938,7 +4781,7 @@ def _run_sustained(
             # no position deletes, so it is not in the set.
             if (
                 cfg.architecture.table_format.type.value == "iceberg"
-                and cfg.architecture.workload.schema_type.value == "financial"
+                and is_financial
                 and sustained_cfg.silver_write_mode.value == "merge_on_read"
                 and streams_stopped
             ):
@@ -4966,7 +4809,7 @@ def _run_sustained(
 
         # Summary. Only the green "completed" panel is success-gated: printing
         # it after the gate flagged FAILURE would contradict the red error and
-        # read as a pass to an operator scanning stdout (adversarial-review P1).
+        # read as a pass to an operator scanning stdout.
         if pipeline_success:
             console.print(
                 Panel(
@@ -4985,8 +4828,7 @@ def _run_sustained(
         # only set the flag (so the record loop + benchmark aggregation
         # could still persist). Raise now, inside the try, so the finally
         # block still runs (metrics + journal persist with success=False)
-        # and the process exits 1 -- the exact signal an exit-code-only UAT
-        # runner reads.
+        # and the process exits 1.
         if not pipeline_success:
             raise typer.Exit(ExitCode.FAILED)
 
@@ -5019,7 +4861,7 @@ def _run_sustained(
         console.print()
         print_warning(f"Interrupted by {_interrupted['signal']} during {_stage}")
         if (
-            cfg.architecture.workload.schema_type.value == "financial"
+            is_financial
             and collector.current_run is not None
             and collector.current_run.financial_scoring is None
         ):
