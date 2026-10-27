@@ -64,12 +64,6 @@ _HEX64 = re.compile(r"[0-9a-f]{64}")
 _INT_TEXT = re.compile(r"[+-]?[0-9][0-9_]*")
 
 
-def _held_out(seed: int) -> str | None:
-    """``heldout_role`` of an integer seed; raises when the held-out record
-    cannot be read."""
-    return ds.heldout_role(int(seed))
-
-
 def corpus_fields_reason(schema: str | None, seed: Any, role: Any) -> str | None:
     """Why a corpus with this schema, ``datagen.seed`` and ``corpus_role`` is
     a protected AML corpus, or None: a protected role, or a seed that hashes
@@ -218,15 +212,15 @@ def recorded_seed_role(value: Any) -> str | None:
         roles = [recorded_seed_role(v) for v in value]
         return next((r for r in roles if r is not None), None)
     if isinstance(value, int):
-        return _held_out(value)
+        return ds.heldout_role(int(value))
     if isinstance(value, float):
-        return _held_out(int(value)) if value.is_integer() else None
+        return ds.heldout_role(int(value)) if value.is_integer() else None
     if isinstance(value, str):
         text = value.strip()
         if _HEX64.fullmatch(text.lower()):
             return _hash_role(text.lower())
         if _INT_TEXT.fullmatch(text):
-            return _held_out(int(text.replace("_", "")))
+            return ds.heldout_role(int(text.replace("_", "")))
         try:
             d = Decimal(text)
         except InvalidOperation:
@@ -234,7 +228,7 @@ def recorded_seed_role(value: Any) -> str | None:
         # A seed has at most 19 digits; a huge exponent is not one (and int()
         # of it would build an enormous number).
         if d.is_finite() and d.adjusted() < 20 and d == d.to_integral_value():
-            return _held_out(int(d))
+            return ds.heldout_role(int(d))
     return None
 
 
