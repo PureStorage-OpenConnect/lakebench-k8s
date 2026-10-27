@@ -1,20 +1,20 @@
-"""Parse and gate the P10 transaction-monitoring lines of the AML gold driver.
+"""Parse and gate the transaction-monitoring lines of the AML gold driver.
 
 tm_operations.py (in the Spark driver) logs, per cycle or operations tick:
 
 - ``[tm-status] status=<ran|not_run|disabled|waiting> cycle=<n> reason=<text>``:
   whether the layer ran, and why not;
 - ``[tm-invariant] <name>: status=<pass|fail> cycle=<n> detail=<text>``, one
-  line per workflow invariant (P10.2) when it ran;
+  line per workflow invariant when it ran;
 - ``[tm-ops] <json>``, the operations summary the scorecard renders.
 
-The P10 verdict (:func:`tm_verdict`) is separate from detection scoring:
+The TM verdict (:func:`tm_verdict`) is separate from detection scoring:
 
 - ``fail``: the layer ran and an invariant is violated. The tables users query
   are inconsistent, so the run fails.
 - ``not_run``: the layer could not run (no manifest, a layer error, a
   continuous window that ended before the manifest was ready, or a driver log
-  with no TM lines). The P10 gate is not met and the report says why, but
+  with no TM lines). The TM gate is not met and the report says why, but
   detection results stand and the run is not failed for it.
 - ``disabled``: ``workload.tm_operations.enabled`` is false; nothing is gated.
 - ``unknown``: no driver log was captured (for a batch run, for any cycle),
@@ -101,7 +101,7 @@ def tm_verdict(
     continuous: bool = False,
     label: str = "",
 ) -> dict[str, Any]:
-    """The P10 verdict for one run (see the module docstring).
+    """The TM verdict for one run (see the module docstring).
 
     Returns ``{"status", "reason", "problems", "cycles_ran", "cycles_not_run"}``.
     Only ``problems`` (non-empty when status is ``fail``) fail the run.

@@ -63,8 +63,6 @@ class SeriesContext:
     d1: str | None = None
     # -- reported back by the repetition --
     run_id: str | None = None
-    #: The ``bronze_listing_sha256`` this repetition's own record observed.
-    observed_digest: str | None = None
     sealed: bool = False
     #: A signal arrived during the repetition (even one that only flagged,
     #: after the record was sealed): the series stops.
@@ -79,14 +77,10 @@ class SeriesContext:
             self.run_id = getattr(run_metrics, "run_id", None)
             run_metrics.series = {"id": self.series_id, "index": self.index, "size": self.size}
             inputs = (getattr(run_metrics, "config_snapshot", None) or {}).get("experiment_inputs")
-            obs = inputs.get("corpus_observation") if isinstance(inputs, dict) else None
-            self.observed_digest = (
-                obs.get("bronze_listing_sha256") if isinstance(obs, Mapping) else None
-            )
             # Persisted whatever the digest: the record is built from it, and
-            # a digest that differs from D1 makes the build record the corpus
-            # problem "bronze changed during this repetition" and keep the
-            # record's own corpus block.
+            # a digest that differs from repetition 1's makes the build record
+            # the corpus problem "bronze changed during this repetition" and
+            # keep the record's own corpus block.
             if self.inherited is not None and isinstance(inputs, dict):
                 inputs["inherited_corpus"] = self.inherited
             self.sealed = True

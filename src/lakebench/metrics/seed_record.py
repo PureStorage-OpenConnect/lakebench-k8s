@@ -13,8 +13,8 @@ written as the recorded form the readers already know
 and a seed that cannot be checked (the held-out record cannot be read) is
 withheld, ``{"seed_ref": None}`` (fail closed).
 
-Every other seed stays plaintext, so the record still names its seed
-(invariant 5), compares with records written before this rule, and passes
+Every other seed stays plaintext, so the record still names its seed,
+compares with records written before this rule, and passes
 the fail-closed readers that require a seed they can check. Hashing an
 unprotected seed would hide nothing: the salt is public, a small seed is
 recovered from its hash at once, and the seed is in the datagen Job's args
@@ -26,8 +26,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-#: The Customer 360 default seed (``datagen_seed.NON_AML_DEFAULT_SEED``).
-_C360_DEFAULT = 42
 #: The AML calibration seed when the pre-registration cannot be read.
 _CALIBRATION_FALLBACK = 43
 
@@ -35,13 +33,15 @@ _CALIBRATION_FALLBACK = 43
 def public_seeds() -> frozenset[int]:
     """The development seeds a record may show: 42 and the AML calibration
     seed (43 unless the pre-registration says otherwise)."""
+    from lakebench.config.datagen_seed import NON_AML_DEFAULT_SEED
+
     try:
         from lakebench.config.datagen_seed import calibration_seed
 
         cal = int(calibration_seed())
     except Exception:  # noqa: BLE001 -- unreadable: the published value
         cal = _CALIBRATION_FALLBACK
-    return frozenset({_C360_DEFAULT, cal})
+    return frozenset({NON_AML_DEFAULT_SEED, cal})
 
 
 def _as_int(value: Any) -> int | None:
