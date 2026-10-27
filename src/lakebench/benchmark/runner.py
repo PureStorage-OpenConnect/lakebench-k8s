@@ -638,9 +638,7 @@ class BenchmarkRunner:
 
         The first failed execution ends the repeats and fails the query: a
         timed-out sample is the timeout, not a measurement, and repeating a
-        timeout would cost another full ``query_timeout`` each time. Before
-        this, the median mixed failed and successful timings and the result
-        took the success flag of the last repeat only.
+        timeout would cost another full ``query_timeout`` each time.
         """
         times: list[float] = []
         sources: list[str] = []

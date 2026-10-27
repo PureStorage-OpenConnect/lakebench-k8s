@@ -8,8 +8,9 @@
 --   hit_alerts  = distinct code-alerts that are on target
 -- Placeholders: {catalog}, {run_id}, {alerts_pin}, {manifest_pin},
 -- {targets_values} (VALUES of (rule_id, target_typology) for the designated
--- rules that ran). The assembler also needs the uncoded-alert count and the
--- per-typology instance counts; those come from by_code_meta.sql.tmpl.
+-- rules that ran). The assembler also needs the uncoded-alert count, from
+-- by_code_meta.sql.tmpl, and the per-typology instance counts, from
+-- coverage_recall.sql.tmpl.
 -- Memory shape: the alerts' payment lists are exploded once, as the probe
 -- side of the join to the manifest (build side); only on-target matches are
 -- fanned out over the codes and made distinct.
@@ -46,25 +47,25 @@ on_target AS (
   JOIN manifest_uetr mu ON mu.uetr = u.uetr AND mu.typology_type = al.target
   CROSS JOIN UNNEST(al.reason_codes) AS c(code)
 ),
-n_by AS (
-  SELECT rule_id, code, COUNT(DISTINCT alert_id) AS n FROM codes GROUP BY rule_id, code
+code_alerts AS (
+  SELECT rule_id, code,
+         COUNT(DISTINCT alert_id) AS n_by,
+         COUNT(DISTINCT CASE WHEN with_txn THEN alert_id END) AS n_with_txn
+  FROM codes
+  GROUP BY rule_id, code
 ),
-n_with_txn AS (
-  SELECT rule_id, code, COUNT(DISTINCT alert_id) AS n FROM codes WHERE with_txn GROUP BY rule_id, code
-),
-hit_inst AS (
-  SELECT rule_id, code, COUNT(DISTINCT typology_id) AS n FROM on_target GROUP BY rule_id, code
-),
-hit_alerts AS (
-  SELECT rule_id, code, COUNT(DISTINCT alert_id) AS n FROM on_target GROUP BY rule_id, code
+code_hits AS (
+  SELECT rule_id, code,
+         COUNT(DISTINCT typology_id) AS hit_inst,
+         COUNT(DISTINCT alert_id) AS hit_alerts
+  FROM on_target
+  GROUP BY rule_id, code
 )
-SELECT nb.rule_id, nb.code,
-       nb.n AS n_by,
-       COALESCE(nt.n, 0) AS n_with_txn,
-       COALESCE(hi.n, 0) AS hit_inst,
-       COALESCE(ha.n, 0) AS hit_alerts
-FROM n_by nb
-LEFT JOIN n_with_txn nt ON nt.rule_id = nb.rule_id AND nt.code = nb.code
-LEFT JOIN hit_inst hi ON hi.rule_id = nb.rule_id AND hi.code = nb.code
-LEFT JOIN hit_alerts ha ON ha.rule_id = nb.rule_id AND ha.code = nb.code
-ORDER BY nb.rule_id, nb.code;
+SELECT ca.rule_id, ca.code,
+       ca.n_by,
+       ca.n_with_txn,
+       COALESCE(ch.hit_inst, 0) AS hit_inst,
+       COALESCE(ch.hit_alerts, 0) AS hit_alerts
+FROM code_alerts ca
+LEFT JOIN code_hits ch ON ch.rule_id = ca.rule_id AND ch.code = ca.code
+ORDER BY ca.rule_id, ca.code;

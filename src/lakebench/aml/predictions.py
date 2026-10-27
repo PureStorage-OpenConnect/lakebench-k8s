@@ -1,4 +1,4 @@
-"""Level-2 predictions from the calibration runs (AML-GOALS section 9 #46, D-8).
+"""Level-2 predictions from the calibration runs (D-8).
 
 Level 2 is published as "calibrated difficulty replicates out of sample":
 before any registered look, the per-typology evaluation AP is predicted from

@@ -1,18 +1,19 @@
 """AML (Financial-crime / AML) library.
 
-Pure-Python helpers used by the Spark scoring scripts. Kept out of
-``spark/scripts/`` because those live inside the Spark image and are
-executed with `spark-submit`; the code here runs on the driver or in
-plain-Python tests, and does not import pyspark at module level.
+Pure-Python code that runs on the CLI side, on the Spark driver or in plain
+tests, and does not import pyspark at module level:
 
-Current members:
-
-- :mod:`reference_score` -- leakage-gate computation and reference-
-  detector (scikit-learn GBT) training/evaluation. Used by
-  ``spark/scripts/score_financial_reference.py`` and directly tested
-  in ``tests/test_aml_reference_score.py``.
-- :mod:`fidelity_gate` -- the pre-registered AML fidelity gate (AP per
+- :mod:`scoring_queries`: assembles the recall and precision record from the
+  scoring SQL run on Trino.
+- :mod:`rule_meta`: the rule metadata (priority cutoffs, rule-to-typology
+  map, customer-scoped rules) shared with the Spark detection rules.
+- :mod:`fidelity_gate`: the pre-registered AML fidelity gate (AP per
   typology, D5 shortcuts, band and Level-2 summary, D2, D11), reading every
-  constant from ``aml_preregistration.json``. Used by the same Spark script
-  (silver) and by ``scripts/aml_gate.py`` (bronze, local).
+  constant from ``aml_preregistration.json``.
+- :mod:`reference_score`: the band leakage gate.
+- :mod:`scale_invariance`, :mod:`d8_shards`, :mod:`predictions`: D8 scale
+  invariance, its shard plan, and the Level-2 predictions from the
+  calibration runs.
+- :mod:`look_guard`: refuses the protected evaluation and robustness corpora
+  outside their registered look.
 """

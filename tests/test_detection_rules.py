@@ -2,8 +2,8 @@
 
 The rules run inside Spark drivers, so most of these read the driver scripts
 as source or AST instead of importing them: the packaged AML reference data,
-the rule dispatch and typology maps against their orchestrator-side copies,
-which rules each gold script schedules and the gold.alerts column order. Also the
+the rule dispatch and typology map, which rules each gold script schedules
+and the gold.alerts column order. Also the
 scripts ConfigMaps shipping the reference JSON and the Spark Thrift memory
 the autosizer gives a financial workload.
 """
@@ -116,21 +116,6 @@ def _module_const_dict(tree, name):
                 for k, v in zip(node.value.keys, node.value.values, strict=True)
             }
     return None
-
-
-def test_rule_target_typology_matches_aml_queries():
-    """The driver-side RULE_TARGET_TYPOLOGY must stay in lock-step with the
-    orchestrator-side RULE_TARGETS -- they live on opposite sides of the
-    package boundary and the scorer relies on them agreeing."""
-    from lakebench.benchmark.aml_queries import RULE_TARGETS
-
-    tree = ast.parse(RULE_META_PATH.read_text())
-    driver_map = _module_const_dict(tree, "RULE_TARGET_TYPOLOGY")
-    assert driver_map is not None, "RULE_TARGET_TYPOLOGY must be defined"
-    assert driver_map == RULE_TARGETS, (
-        "RULE_TARGET_TYPOLOGY (aml.rule_meta) and RULE_TARGETS (aml_queries) "
-        f"drifted: {driver_map} vs {RULE_TARGETS}"
-    )
 
 
 def test_scoring_statements_scope_alerts_by_run_id():

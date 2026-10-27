@@ -36,7 +36,7 @@ class FakeExecutor:
 
 
 def _covered_ids():
-    return {n: i for i, (n, _) in enumerate(sq._COVERED, start=100)}
+    return {n: i for i, n in enumerate(sq._COVERED, start=100)}
 
 
 def _cov_instances(spec):
@@ -102,11 +102,6 @@ def test_covered_scored_run_mixes_states():
             "Global alert counts": [["25", "18"]],
             "Per-rule chance": [["6", "W2_structuring", "1"]],
             "an evidence cap cut": [],
-            "Distinct instance count per typology_type": [
-                ["micro_structuring", "10"],
-                ["cycle", "4"],
-                ["random", "6"],
-            ],
             "MAX(expected_workload)": [
                 ["micro_structuring", "W2_structuring"],
                 ["cycle", "W3_round_tripping"],
@@ -170,7 +165,6 @@ def test_batch_run():
             "Global alert counts": [["25", "18"]],
             "Per-rule chance": [],
             "an evidence cap cut": [],
-            "Distinct instance count per typology_type": [["micro_structuring", "10"]],
             "MAX(expected_workload)": [["micro_structuring", "W2_structuring"]],
             "Per-reason-code counts": [
                 ["W2_structuring", "W2_SUB_THRESHOLD_BURST", "20", "18", "6", "16"],
@@ -232,7 +226,6 @@ def test_batch_ignores_coverage():
             "Global alert counts": [["25", "18"]],
             "Per-rule chance": [],
             "an evidence cap cut": [],
-            "Distinct instance count per typology_type": [["micro_structuring", "3"]],
             "MAX(expected_workload)": [["micro_structuring", "W2_structuring"]],
             "Per-reason-code counts": [],
             "CARDINALITY(a.reason_codes)": [["0", "25"]],
@@ -337,7 +330,6 @@ def test_zero_alerts_fp_rate_none():
             "Global alert counts": [["0", "0"]],
             "Per-rule chance": [],
             "an evidence cap cut": [],
-            "Distinct instance count per typology_type": [["micro_structuring", "10"]],
             "MAX(expected_workload)": [["micro_structuring", "W2_structuring"]],
             "Per-reason-code counts": [],
             "CARDINALITY(a.reason_codes)": [["0", "0"]],
@@ -389,7 +381,6 @@ def _covered_rescreen_exe(rescreen_rows, rescreen_error=None):
         "Global alert counts": [["25", "18"]],
         "Per-rule chance": [],
         "an evidence cap cut": [],
-        "Distinct instance count per typology_type": [["sanctions_match", "10"]],
         "MAX(expected_workload)": [["sanctions_match", "W5_sanctions"]],
         "Per-reason-code counts": [],
         "CARDINALITY(a.reason_codes)": [["0", "25"]],
@@ -510,7 +501,6 @@ def test_unreadable_customer_count_is_null_not_zero():
             ],
             "Coverage and covered-recall": rows,
             "Global alert counts": [["25", "18"]],
-            "Distinct instance count per typology_type": [["micro_structuring", "10"]],
             "CARDINALITY(a.reason_codes)": [["0", "25"]],
         }
     )

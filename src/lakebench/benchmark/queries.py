@@ -16,8 +16,8 @@ Categories:
   - analytics (Q5, Q6): Window functions and CTE with multi-branch CASE.
   - operational (Q9): Gold layer executive dashboard read.
 
-The Financial set adds an ``investigator`` class (IQ1-IQ4, GOALS P10 stage
-9) over the TM operations tables.
+The Financial set adds an ``investigator`` class (IQ1-IQ4) over the TM
+operations tables.
 """
 
 from __future__ import annotations
@@ -45,6 +45,10 @@ class BenchmarkQuery:
     sql: str
     allow_empty: bool = False
 
+
+# The Customer 360 queries also run on Spark Thrift and DuckDB, whose
+# adapters rewrite only the first DATE_DIFF of a statement: keep at most one
+# per query (Q6 has one).
 
 # ---------------------------------------------------------------------------
 # Class A: Silver Table Scans (large table, I/O-bound)
@@ -300,11 +304,6 @@ _FQ2 = BenchmarkQuery(
     name="FQ2_top_corridors_window",
     display_name="Top payment corridors by volume (last 30 days)",
     query_class="filter_prune",
-    # `date_add('day', -30, ts)` is Trino syntax; Spark Thrift and DuckDB
-    # reject the 3-arg form. Use the ANSI INTERVAL literal which both
-    # engines parse consistently. Trino: `ts - INTERVAL '30' DAY`, Spark:
-    # `ts - INTERVAL 30 DAYS`, DuckDB: `ts - INTERVAL 30 DAY`. All three
-    # of those parse `ts - INTERVAL '30' DAY` correctly.
     sql="""\
 SELECT
   originator_bank_bic,
@@ -477,12 +476,9 @@ ORDER BY a.alert_ts DESC, a.alert_id""",
 )
 
 
-# Investigator queries (GOALS P10 stage 9) over the TM operations tables.
-# Each picks its subject from gold.cases the way an investigator would open
-# their queue, so it runs against whatever cases the run produced. SQL is
-# Trino dialect with at most one DATE_DIFF per query (the Spark Thrift and
-# DuckDB adapters rewrite the first occurrence) and INTERVAL arithmetic in
-# place of date_add, which all three engines parse. Every read of a TM table
+# Investigator queries over the TM operations tables. Each picks its subject
+# from gold.cases the way an investigator would open their queue, so it runs
+# against whatever cases the run produced. Every read of a TM table
 # is scoped to the run ({tm_run_id}), and the runner leaves the class out
 # unless this run's TM layer ran: otherwise they would time a stale or empty
 # table under the same query-set id.
@@ -707,7 +703,7 @@ _FINANCIAL_QUERIES: list[BenchmarkQuery] = [
     _FQ4,  # analytics
     _FQ5,  # operational
     _FQ8,  # operational
-    *INVESTIGATOR_QUERIES,  # investigator (P10 stage 9)
+    *INVESTIGATOR_QUERIES,  # investigator
 ]
 
 
@@ -721,8 +717,7 @@ BENCHMARK_QUERIES_BY_DOMAIN: dict[WorkloadSchema, list[BenchmarkQuery]] = {
 def get_benchmark_queries(schema: WorkloadSchema) -> list[BenchmarkQuery]:
     """Return the benchmark query set for a workload schema.
 
-    Unknown schemas fall back to the Customer 360 set to preserve prior
-    behavior for CUSTOM and any other value pending its own query set.
+    A schema without its own set gets the Customer 360 set.
     """
     return BENCHMARK_QUERIES_BY_DOMAIN.get(schema, _CUSTOMER360_QUERIES)
 
@@ -815,7 +810,6 @@ def legacy_query_set_id(queries, recorded_at=None) -> str:
     )
 
 
-# Backward-compatible alias. New code should call
-# ``get_benchmark_queries(schema)`` or read ``BENCHMARK_QUERIES_BY_DOMAIN``
-# directly so the benchmark set travels with the workload schema.
+# The Customer 360 set, for callers that run it without a workload schema
+# (the local DuckDB path). Others call ``get_benchmark_queries(schema)``.
 BENCHMARK_QUERIES: list[BenchmarkQuery] = _CUSTOMER360_QUERIES

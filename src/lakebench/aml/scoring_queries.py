@@ -41,18 +41,13 @@ RunTsv = Callable[[str, int], list[list[str | None]]]
 
 _TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "benchmark/queries/aml/trino/scoring"
 
-#: The scorer's computed_by stamp (was lb-score-financial for the Spark job).
+#: The scorer's computed_by stamp.
 COMPUTED_BY = "lb-score-query"
 
-#: Tick snapshot suffixes, by table, as covered mode names them.
-_COVERED = (
-    ("txns", "silver.transactions"),
-    ("entities", "silver.entities"),
-    ("accounts", "silver.accounts"),
-    ("versions", "silver.silver_batch_versions"),
-    ("alerts", "gold.alerts"),
-    ("status", "gold.detection_status"),
-)
+#: The tables covered mode pins at the tick snapshot, by snapshot_ids key:
+#: silver transactions, entities, accounts and batch versions, gold alerts
+#: and detection status.
+_COVERED = ("txns", "entities", "accounts", "versions", "alerts", "status")
 
 #: Which pin placeholder each table reference uses.
 _PINS = ("txns", "entities", "accounts", "versions", "alerts", "status", "manifest")
@@ -62,9 +57,7 @@ _PINS = ("txns", "entities", "accounts", "versions", "alerts", "status", "manife
 class RulesMeta:
     """The rule/reason-code vocabulary the assembler needs, injected so this
     module stays importable without the Spark scripts. The CLI unit builds it
-    from the pure rule-metadata module (the home the reason-code vocabulary,
-    HIGH_PRIORITY_CUTOFFS, CUSTOMER_SCOPED_RULES and RULE_TARGET_TYPOLOGY move
-    to beside subject_index); the tests build it with fixed values.
+    from ``lakebench.aml.rule_meta``; the tests build it with fixed values.
 
     - ``reason_codes``: rule_id -> ordered tuple of the codes it can write,
       base first (aml_reason_codes.REASON_CODES).
@@ -93,8 +86,8 @@ def _template(name: str) -> str:
 def _named_failures(run_tsv: RunTsv) -> RunTsv:
     """Wrap *run_tsv* so an engine failure names the statement that failed
     (its first line: the template name, or the text of an inline statement).
-    A 60-minute run reported only 'Query exceeded distributed total memory
-    limit' with no way to tell which of eleven statements it was."""
+    Trino's own message, such as 'Query exceeded distributed total memory
+    limit', does not say which statement it was."""
 
     def run(sql: str, timeout: int) -> list[list[str | None]]:
         try:
@@ -115,7 +108,7 @@ def _pins(snapshot_ids: dict[str, int] | None) -> dict[str, str]:
     """
     out = {f"{name}_pin": "" for name in _PINS}
     if snapshot_ids is not None:
-        for name, _ in _COVERED:
+        for name in _COVERED:
             out[f"{name}_pin"] = f"FOR VERSION AS OF {int(snapshot_ids[name])}"
     return out
 
@@ -356,11 +349,6 @@ def _evidence_cap(
     return {_s(r[0]): _i(r[1]) for r in run_tsv(sql, timeout)}
 
 
-def _n_inst(run_tsv: RunTsv, catalog: str, pins: dict[str, str], timeout: int) -> dict[str, int]:
-    sql = _template("n_inst.sql.tmpl").format(catalog=catalog, manifest_pin=pins["manifest_pin"])
-    return {_s(r[0]): _i(r[1]) for r in run_tsv(sql, timeout)}
-
-
 def _workload_categories(
     run_tsv: RunTsv, catalog: str, pins: dict[str, str], timeout: int
 ) -> dict[str, str | None]:
@@ -432,7 +420,7 @@ def _by_code(
     fp: dict[str, dict[str, float | None]] = {}
     counts: dict[str, dict[str, int]] = {}
     for rule in rules:
-        seen = {c for (rr, c) in n_by if rr == rule and c is not None}
+        seen = {c for (rr, c) in n_by if rr == rule}
         base = list(REASON_CODES.get(rule, ()))
         vocab = base + sorted(seen - set(base))
         total = n_inst.get(ran_targets[rule], 0)
@@ -600,13 +588,6 @@ def _summary_from_counts(
     return summary
 
 
-def _recall_of(counts: dict[str, int], denom_key: str, state: str) -> float | None:
-    denom = counts[denom_key]
-    if not denom or state not in ("scored", "partial"):
-        return None
-    return counts["designated_hits"] / denom
-
-
 def score(
     run_tsv: RunTsv,
     *,
@@ -671,7 +652,10 @@ def score(
         timeout=timeout,
     )
     capped = _evidence_cap(run_tsv, catalog, pins, status_run_id, timeout)
-    n_inst = _n_inst(run_tsv, catalog, pins, timeout)
+    # The recall_by_code denominator: instances per typology_type over the
+    # full manifest, which corpus_instances already counts (_guard_manifest
+    # refuses repeated typology_ids).
+    n_inst = {typ: c["corpus_instances"] for typ, c in cov.items()}
     workload = _workload_categories(run_tsv, catalog, pins, timeout)
     by_code = _by_code(
         run_tsv, catalog, pins, status_run_id, targets_sql, ran_targets, n_inst, meta, timeout
@@ -704,8 +688,9 @@ def score(
             pins,
             status_run_id,
             cov,
-            set(covered_hits),
             summary,
+            designated,
+            rule_status,
             scoped,
             workload,
             timeout,
@@ -772,25 +757,15 @@ def _manifest_subject_rows(
     return out
 
 
-def _typology_row_state(
-    typ: str, designated: dict[str, list[str]], rule_status: dict[str, str]
-) -> tuple[str, str | None]:
-    """(detection_status, designated_rules) for a typology, as compute_scores
-    state_rows carries them."""
-    return (
-        _typology_state(typ, designated, rule_status),
-        ",".join(sorted(designated.get(typ, []))) or None,
-    )
-
-
 def _batch_record(
     run_tsv: RunTsv,
     catalog: str,
     pins: dict[str, str],
     run_id: str,
     cov: dict[str, dict[str, int]],
-    covered_ids: set[str],
     summary: dict[str, Any],
+    designated: dict[str, list[str]],
+    rule_status: dict[str, str],
     scoped: set[str],
     workload: dict[str, str | None],
     timeout: int,
@@ -799,20 +774,14 @@ def _batch_record(
     per-typology recall rows, the subject-customer check and customer_count.
     recall is designated_hits / corpus_instances, null unless scored/partial.
     """
-    designated: dict[str, list[str]] = {}
-    rule_status: dict[str, str] = {}
-    for r in summary["rules"]:
-        rule_status[r["rule_id"]] = r["status"]
-        if r.get("target_typology"):
-            designated.setdefault(r["target_typology"], []).append(r["rule_id"])
-
     # Batch scores the whole manifest: every instance's subject is checked.
     subj_rows = _manifest_subject_rows(run_tsv, catalog, pins, timeout, None)
     check = _subject_check(run_tsv, catalog, pins, subj_rows, scoped, timeout)
     typologies = []
     for typ in sorted(cov):
         c = cov[typ]
-        state, des_rules = _typology_row_state(typ, designated, rule_status)
+        state = _typology_state(typ, designated, rule_status)
+        des_rules = ",".join(sorted(designated.get(typ, []))) or None
         corpus = c["corpus_instances"]
         recall = (
             (c["designated_hits"] / corpus) if (corpus and state in ("scored", "partial")) else None
@@ -903,7 +872,8 @@ def _covered_record(
     typologies = []
     for typ in sorted(cov):
         c = cov[typ]
-        state, des_rules = _typology_row_state(typ, designated, rule_status)
+        state = _typology_state(typ, designated, rule_status)
+        des_rules = ",".join(sorted(designated.get(typ, []))) or None
         covn = c["covered_instances"]
         corpus = c["corpus_instances"]
         ex_dh, ex_ih = excluded_hits.get(typ, (0, 0))
@@ -930,7 +900,7 @@ def _covered_record(
             }
         )
     covered_block = {
-        **{f"{name}_snapshot": snapshot_ids[name] for name, _ in _COVERED},
+        **{f"{name}_snapshot": snapshot_ids[name] for name in _COVERED},
         "typologies": typologies,
         "excluded_typologies": [
             {"typology_type": t, "reason": why} for t, why in sorted(excluded.items())

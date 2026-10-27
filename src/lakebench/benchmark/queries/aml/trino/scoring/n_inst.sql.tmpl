@@ -1,8 +1,0 @@
--- Distinct instance count per typology_type over the FULL manifest
--- (manifest_uetrs grouped by typology_type, countDistinct typology_id). The
--- recall_by_code denominator (n_inst) and a cross-check for corpus_instances.
--- Placeholders: {catalog}, {manifest_pin}.
-SELECT typology_type, COUNT(DISTINCT typology_id) AS n_inst
-FROM {catalog}.bronze.manifest {manifest_pin}
-GROUP BY typology_type
-ORDER BY typology_type;

@@ -66,12 +66,10 @@ MAX_QUERY_TIMEOUT_S = 300
 #: Below this per-query timeout the sessions are not started (``no_time``).
 MIN_QUERY_TIMEOUT_S = 30
 
-#: The memory limits Lakebench sets on each engine (Trino:
-#: templates/trino/configmap.yaml.j2; Spark Thrift: its server sizing).
-MEMORY_BOUNDS = {
-    "trino": "BOUNDED BY Trino query.max-memory (Lakebench-set)",
-    "spark-thrift": "BOUNDED BY Spark Thrift server memory (Lakebench-set)",
-}
+#: The memory limit Lakebench sets on the engine (Trino:
+#: templates/trino/configmap.yaml.j2). Sessions run only on AML, which runs
+#: only on Trino.
+MEMORY_BOUNDS = {"trino": "BOUNDED BY Trino query.max-memory (Lakebench-set)"}
 
 
 #: Seconds an engine client may take past a query's timeout to clean it up
@@ -225,7 +223,7 @@ def run_sessions(
         shuffle=False,
     )
     end = now()
-    engine = runner._engine_name() if hasattr(runner, "_engine_name") else None
+    engine = runner._engine_name()
     return session_record(
         requested, cases, result, baseline, start, end, timeout_s=timeout, engine=engine
     )
