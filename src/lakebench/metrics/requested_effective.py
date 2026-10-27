@@ -38,8 +38,7 @@ labelled in ``limits.bound``.
 A mismatch is an entry whose request was explicit and not met, or an
 "auto" request that resolved to a value labelled even when chosen
 automatically (``LABEL_WHEN_AUTO``: incremental gold, which aggregates part
-of silver; the gold scripts no longer choose it automatically, so this
-guards against that returning). Incremental gold chosen by Lakebench for
+of silver). Incremental gold chosen by Lakebench for
 cycles 2+ of a multi-cycle run (source ``cycle``) is by design and not a
 mismatch. The entries are stored facts; which of them are mismatches is
 decided when the record is read, so a later rule applies to an older

@@ -148,8 +148,8 @@ def alert_set_expected(exp: Mapping[str, Any] | None) -> bool:
 
 def alert_set_missing(exp: Mapping[str, Any] | None) -> str | None:
     """Why the results of *exp* are not established for want of an alert
-    set (ladder step 4), or None. Only an AML batch block written by 1.7
-    must carry one; a malformed one counts as missing."""
+    set, or None. Only an AML batch block must carry one; a malformed one
+    counts as missing."""
     if not alert_set_expected(exp):
         return None
     value = alert_set_of(exp)

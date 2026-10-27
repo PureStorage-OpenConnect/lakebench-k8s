@@ -413,3 +413,84 @@ class TestReportCarriesWhatAReaderCompares:
         html = ReportGenerator._alert_set_html(exp)
         for rule, rows in (("W2", "3"), ("W5", "4"), ("total", "7")):
             assert re.search(rf"<td>{rule}</td>\s*<td>{rows}</td>", html)
+
+
+def test_pod_metrics_parse_sets_match_the_dataclass():
+    """from_json_obj projects and casts the fields PodMetrics declares. The
+    frozen literals below are the contract with the datagen JSON: a field
+    added or retyped on the dataclass must be a deliberate change to them."""
+    from lakebench.metrics import datagen_aggregator as dga
+
+    allowed = {
+        "node_id",
+        "node_count",
+        "schema",
+        "cores_used",
+        "cpu_request_millicores",
+        "bucket",
+        "prefix",
+        "file_size_mb",
+        "rows_per_file",
+        "total_files",
+        "files_written",
+        "bytes_written",
+        "rows_written",
+        "elapsed_s",
+        "setup_s",
+        "gen_s",
+        "build_batch_s",
+        "encode_parquet_s",
+        "s3_put_s",
+        "throughput_mbps",
+        "cpu_seconds",
+        "cpu_hr_per_tb",
+        "world_s",
+        "typology_s",
+        "reference_s",
+        "scale",
+        "corpus_months",
+        "population",
+        "total_txns",
+        "typology_instances",
+        "target_tb",
+        "customer_id_max",
+        "dirty_ratio",
+        "delivery_mode",
+    }
+    ints = {
+        "node_id",
+        "node_count",
+        "cores_used",
+        "cpu_request_millicores",
+        "file_size_mb",
+        "rows_per_file",
+        "total_files",
+        "files_written",
+        "bytes_written",
+        "rows_written",
+        "corpus_months",
+        "population",
+        "total_txns",
+        "typology_instances",
+        "customer_id_max",
+    }
+    floats = {
+        "elapsed_s",
+        "setup_s",
+        "gen_s",
+        "build_batch_s",
+        "encode_parquet_s",
+        "s3_put_s",
+        "throughput_mbps",
+        "cpu_seconds",
+        "cpu_hr_per_tb",
+        "world_s",
+        "typology_s",
+        "reference_s",
+        "scale",
+        "target_tb",
+        "dirty_ratio",
+    }
+    assert set(dga._POD_FIELDS) == allowed
+    assert set(dga._POD_INT_FIELDS) == ints
+    assert set(dga._POD_FLOAT_FIELDS) == floats

@@ -181,7 +181,7 @@ def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
 
 
 def ticks_unpinned(ticks: list[dict[str, Any]]) -> int:
-    """Ticks whose logged ``txns`` or ``versions`` token is not an int (d3):
+    """Ticks whose logged ``txns`` or ``versions`` token is not an int:
     detection ran on them without the pinned sealed read."""
     return sum(
         1 for t in ticks if not (is_pin(t.get("pinned_txns")) and is_pin(t.get("pinned_versions")))

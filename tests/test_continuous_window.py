@@ -282,6 +282,98 @@ def test_stage_fields_are_measured_or_absent():
     assert gold.output_rows == 14
 
 
+@pytest.mark.parametrize("job", sorted(HEALTHY))
+def test_duplicated_lines_from_a_resumed_capture_count_once(job):
+    """A capture resumed after the kubelet severed it re-fetches an overlap:
+    the repeated lines add no rows and no batch times."""
+    lines = HEALTHY[job].splitlines()
+    cut = len(lines) // 2
+    resumed = "\n".join(lines[:cut] + lines[cut - 4 :]) + "\n"
+    c = MetricsCollector()
+    once, twice = c.parse_streaming_logs(HEALTHY[job], job), c.parse_streaming_logs(resumed, job)
+    for key in (
+        "total_rows_processed",
+        "total_batches",
+        "batch_size",
+        "micro_batch_duration_ms",
+        "median_batch_duration_ms",
+        "batch_span_seconds",
+    ):
+        assert getattr(twice, key) == getattr(once, key), key
+
+
+def _handoff_lags_by_scan(events_by_job, at):
+    """A plain linear-scan reference for handoff_lags, for the bisect
+    implementation to match."""
+    from lakebench.metrics.continuous_window import HANDOFFS, _epoch
+
+    bronze = events_by_job.get("bronze-ingest") or []
+    silver = events_by_job.get("silver-stream") or []
+    gold = events_by_job.get("gold-refresh") or []
+    out = {name: None for name, _, _ in HANDOFFS}
+    landed = [e for e in bronze if e.kind == "landing" and e.at <= at and e.value is not None]
+    if landed:
+        out["datagen->bronze"] = max(0.0, _epoch(at) - max(e.value or 0.0 for e in landed))
+
+    def waiting(upstream, consumer, start):
+        commits = sorted(e.at for e in upstream if e.kind == "commit" and e.at <= at)
+        if not commits:
+            return None
+        starts = [e.at for e in consumer if e.kind == start and e.at <= at]
+        last = max(starts) if starts else None
+        pending = [c for c in commits if last is None or c > last]
+        return max(0.0, (at - pending[0]).total_seconds()) if pending else 0.0
+
+    out["bronze->silver"] = waiting(bronze, silver, "transform")
+    out["silver->gold"] = waiting(silver, gold, "aggregate")
+    return out
+
+
+def _big_logs(window_s, bronze_every, silver_every, gold_every):
+    b, s, g, i, t = [], [], [], 0, 0.0
+    while t < window_s:
+        b.append(_line(t, f"[landing] batch={i} oldest={t + 1e9 - 2:.1f} newest={t + 1e9:.1f}"))
+        b.append(_line(t, f"Batch {i}: writing {26000 + i:,} rows to ice.bronze.raw"))
+        b.append(_line(t + 3, f"Batch {i}: committed in 3.0s"))
+        i, t = i + 1, t + bronze_every
+    i, t = 0, 5.0
+    while t < window_s:
+        s.append(_line(t, f"Batch {i}: transforming {52000 + (i % 7) * 100:,} rows"))
+        s.append(_line(t + 8, f"Batch {i}: committed to ice.silver.t in 8.0s"))
+        i, t = i + 1, t + silver_every
+    c, t, prev = 1, 20.0, 0
+    while t < window_s:
+        prev += 1000 if c % 3 else 0
+        tag = " (silver idle)" if c % 4 == 0 else ""
+        g.append(_line(t + 1, f"Cycle {c}: aggregating {prev:,} Silver records"))
+        g.append(_line(t + 5, f"Cycle {c}: data freshness {40 + c % 9}.0s{tag}"))
+        g.append(_line(t + 6, f"Cycle {c}: refreshed ice.gold.g in 6.0s (14 KPI records)"))
+        c, t = c + 1, t + gold_every
+    return {
+        "bronze-ingest": "\n".join(b) + "\n",
+        "silver-stream": "\n".join(s) + "\n",
+        "gold-refresh": "\n".join(g) + "\n",
+    }
+
+
+@pytest.mark.parametrize(
+    "logs",
+    [DISCOVERY, HEALTHY, _big_logs(3600, 10, 20, 60)],
+    ids=["discovery", "healthy", "big"],
+)
+def test_handoff_lags_bisect_matches_a_linear_scan(logs):
+    """The bisect handoff_lags (and the index balance/_phase_samples share)
+    returns exactly what a plain scan does, at every sample offset, on the
+    fixtures and a long synthetic run."""
+    from lakebench.metrics.continuous_window import handoff_lags
+
+    events = {job: parse_events(log, job) for job, log in logs.items()}
+    span = max((e.at - W0).total_seconds() for evs in events.values() for e in evs if evs)
+    for off in range(0, int(span) + 90, 3):
+        at = W0 + timedelta(seconds=off)
+        assert handoff_lags(events, at) == _handoff_lags_by_scan(events, at)
+
+
 def test_gold_freshness_comes_from_cycles_inside_the_window():
     logs = gold_log([(-300, 100, 900, False), (60, 200, 40, False), (360, 300, 45, False)])
     g = StreamingJobMetrics(job_name="g", job_type="gold-refresh")

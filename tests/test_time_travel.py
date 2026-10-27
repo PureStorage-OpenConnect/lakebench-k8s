@@ -361,17 +361,6 @@ def test_verdict(states, incomplete, verdict):
     assert (reason == "") == (verdict == "pass")
 
 
-def test_spark_thrift_cutoff_is_on_the_host_clock():
-    # The cluster is 10 minutes behind; Spark Thrift's cutoff literal is the
-    # host's time, so the offset does not apply and a 09:55 commit is covered.
-    ticks = [_rec(1, T1, committed="2026-10-03T09:55:00Z"), _rec(2, T2)]
-    rounds = [{**_round(1, "2026-10-03T11:00:00Z"), "engine": "spark-thrift"}]
-    got = tt.merge(
-        _continuous(ticks, rounds, -600.0), _result([(1, "expired"), (2, "verified")]), POLICY
-    )
-    assert got["ticks"][0]["state"] == "expired"
-
-
 def test_a_recorded_tick_with_no_result_is_an_error():
     cont = _continuous([_rec(1, T1), _rec(2, T2)], [])
     got = tt.merge(cont, _result([(2, "verified")]), POLICY)
@@ -631,15 +620,6 @@ def test_a_hash_pass_cut_short_leaves_the_rest_not_read_not_mismatched(job, monk
     out = _run(job, [_rec(2, T2), _rec(3, T3)])
     assert _states(out) == ["not_read", "verified"]
     assert out["incomplete"] is True
-
-
-def test_spark_thrift_rounds_use_their_start():
-    # Spark Thrift's cutoff literal was taken before the round started: a
-    # commit after start - 1h but before end - 1h is not covered.
-    tick = _rec(1, T1, committed="2026-10-03T10:02:00Z")
-    rnd = {**_round(1, "2026-10-03T11:05:00Z"), "started_at": "2026-10-03T11:00:00Z"}
-    assert tt.expired_by(tick, [rnd], "30m", None) is not None  # Trino: end - 1h
-    assert tt.expired_by(tick, [{**rnd, "engine": "spark-thrift"}], "30m", None) is None
 
 
 def test_a_run_that_failed_after_the_reads_does_not_keep_their_verdict():

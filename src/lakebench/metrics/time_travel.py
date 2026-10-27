@@ -64,25 +64,21 @@ def expired_by(
     A round explains it when it ran ``expire_snapshots`` on the tick's table
     (the statement finished or timed out, so it may have run) and the
     snapshot was committed (writer clock, in the cluster) before the round's
-    latest possible cutoff minus the retention it applied. Trino takes the
-    cutoff on its own clock during the round, so the latest is the round's
-    end (this host's clock) moved to the cluster clock by *clock_offset_s*
-    (cluster minus host), when known. Spark Thrift's cutoff is a literal
-    this host computed before the round started, so the latest is the
-    round's start, on this host's clock. The
-    entry names the earliest round that could have expired the snapshot
+    latest possible cutoff minus the retention it applied. Trino, which runs
+    AML maintenance, takes the cutoff on its own clock during the round, so
+    the latest is the round's end (this host's clock) moved to the cluster
+    clock by *clock_offset_s* (cluster minus host), when known. The entry
+    names the earliest round that could have expired the snapshot
     (``basis``); ``ran_at`` is that round's end on this host's clock."""
     committed = _utc(tick.get("committed_at"))
     if committed is None:
         return None
     table = _bare_table(tick.get("table"))
+    shift = timedelta(seconds=clock_offset_s or 0.0)
     for r in rounds:
-        # Spark Thrift's older_than literal is this host's time; Trino's is its own.
-        on_host = r.get("engine") == "spark-thrift"
-        shift = timedelta(seconds=0.0 if on_host else (clock_offset_s or 0.0))
         if table not in {_bare_table(t) for t in r.get("expired_tables") or ()}:
             continue
-        ended = _utc(r.get("started_at") if on_host else r.get("ended_at"))
+        ended = _utc(r.get("ended_at"))
         applied_s = _seconds(r.get("applied_expire"))
         if ended is None or applied_s is None:
             continue
