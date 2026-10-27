@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Scan a repository's history and messages with gitleaks, beyond a baseline.
 
-Used by the ``secrets-history`` CI job and the release gate's
-``gitleaks-history`` check, so both apply the same rules:
+Run by the release gate's ``gitleaks-history`` check and by
+``make rc-gate``, scanning the history to these rules:
 
 1. every commit reachable from ``--rev`` (default ``HEAD``), with
    ``--remerge-diff`` so a change made in a two-parent merge commit itself is
