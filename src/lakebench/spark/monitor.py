@@ -1,6 +1,7 @@
 """Spark job monitoring for Lakebench.
 
-Backward-compat re-export. Implementation moved to
+The names the CLI and tests import from ``lakebench.spark.monitor``, so tests
+patch them here; the implementation is
 ``lakebench.modules.pipeline_engines.spark.monitor``.
 """
 

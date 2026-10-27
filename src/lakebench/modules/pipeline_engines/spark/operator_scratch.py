@@ -1,16 +1,14 @@
 """The Spark Operator controller's ``/tmp`` scratch volume.
 
 The operator runs spark-submit inside its controller pod, and spark-submit
-resolves ``spark.jars.packages`` with Ivy into ``spark.jars.ivy`` (before 1.7,
-``/tmp/.ivy2`` for every lakebench job; since 1.7 the jobs name lb-deps jar
-URLs and set no packages, but other tenants' applications may). The
-controller's root filesystem is
-read-only (chart ``controller.securityContext.readOnlyRootFilesystem``), so
-``/tmp`` is the chart's ``tmp`` emptyDir, and chart 2.5.1 (like 2.4.0) caps
-it at ``sizeLimit: 1Gi``. The Iceberg or Delta runtime, hadoop-aws and the
-AWS SDK bundle for one Spark line come to about 1.2 GB, so the kubelet
-evicts the controller once the cache fills: 19 times in 100 minutes on
-2026-09-27. Each eviction costs leader election, a cold Ivy cache and a
+resolves ``spark.jars.packages`` with Ivy into ``spark.jars.ivy``. Lakebench
+jobs name lb-deps jar URLs and set no packages, but other tenants'
+applications may. The controller's root filesystem is read-only (chart
+``controller.securityContext.readOnlyRootFilesystem``), so ``/tmp`` is the
+chart's ``tmp`` emptyDir, which the chart caps at ``sizeLimit: 1Gi``. The
+Iceberg or Delta runtime, hadoop-aws and the AWS SDK bundle for one Spark
+line come to about 1.2 GB, so the kubelet evicts the controller once the
+cache fills, and each eviction costs leader election, a cold Ivy cache and a
 SUBMISSION_FAILED retry for any job mid-submission, on every tenant.
 
 This module holds the pure parts: the Helm values that size the volume, and
