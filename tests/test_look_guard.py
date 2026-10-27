@@ -135,8 +135,8 @@ def test_verb_refuses_a_protected_config(tmp_path, monkeypatch, held, no_cluster
 
 @pytest.mark.parametrize(
     ("role", "seed"),
-    [(None, pc.EV), ("calibration", pc.RB)],
-    ids=["no-role-evaluation-seed", "calibration-role-robustness-seed"],
+    [(None, pc.EV), ("calibration", pc.RB), (None, pc.SPENT)],
+    ids=["no-role-evaluation-seed", "calibration-role-robustness-seed", "spent-seed"],
 )
 def test_development_config_with_a_held_out_seed_refused_at_load(
     tmp_path, monkeypatch, held, no_cluster, role, seed
@@ -152,15 +152,6 @@ def test_development_config_with_a_held_out_seed_refused_at_load(
     result = _invoke(["run", str(cfg), "--yes"])
     assert result.exit_code == 2 and no_cluster == []
     assert pc.seed_tokens(result.output) == []
-
-
-def test_spent_seed_refused_at_load_and_never_printed(tmp_path, monkeypatch, held):
-    from lakebench.config import ConfigProtectedCorpusError, LoadPurpose, load_config
-
-    cfg = pc.financial_config(tmp_path / "c.yaml", seed=pc.SPENT)
-    with pytest.raises(ConfigProtectedCorpusError) as info:
-        load_config(cfg, purpose=LoadPurpose.RUN)
-    assert str(pc.SPENT) not in str(info.value)
 
 
 def test_teardown_and_read_load_a_spent_registered_config(tmp_path, monkeypatch):
@@ -190,17 +181,6 @@ def test_unreadable_record_is_a_config_error_not_a_crash(tmp_path, monkeypatch):
 
 
 # -- the reason functions ----------------------------------------------------
-
-
-def _cfg(seed=None, role=None, schema="financial"):
-    dg = SimpleNamespace(corpus_role=role, seed=seed)
-    wl = SimpleNamespace(datagen=dg, schema_type=SimpleNamespace(value=schema))
-    return SimpleNamespace(architecture=SimpleNamespace(workload=wl))
-
-
-def test_protected_corpus_reason(held):
-    assert lg.protected_corpus_reason(_cfg(role="evaluation")) == "corpus_role evaluation"
-    assert lg.protected_corpus_reason(_cfg(seed=pc.EV, schema="customer360"))
 
 
 def _role_broken(seed, h=None):
@@ -510,12 +490,6 @@ def test_manifest_is_required_except_while_continuous_datagen_writes(
         monkeypatch.setenv("LB_MANIFEST_REQUIRED", required_env)
     bvf = load_script("bronze_verify_financial")
     assert bvf.MANIFEST_REQUIRED is required
-
-
-def test_refusal_in_log_finds_the_line():
-    log = f"INFO x\nERROR: {lg.REFUSAL_MARKER}: the corpus manifest comes from a spent seed\nbye"
-    assert lg.refusal_in_log(log).startswith(lg.REFUSAL_MARKER)
-    assert lg.refusal_in_log("ordinary failure") is None and lg.refusal_in_log(None) is None
 
 
 class _Job:

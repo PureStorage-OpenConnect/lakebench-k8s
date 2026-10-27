@@ -49,24 +49,6 @@ def test_unreadable_look_record_never_prints_its_message(monkeypatch):
     assert "look record unreadable: ValueError)" in _plain(html)
 
 
-def test_stamp_registered_look_names_this_run(monkeypatch):
-    run_id = load_record("1320bd")["run_id"]
-    _with_looks(
-        monkeypatch,
-        [
-            {
-                "role": "evaluation",
-                "state": "complete",
-                "run_ids": [run_id],
-                "report_sha256": "ab" * 32,
-            }
-        ],
-    )
-    text = _plain(_render_dict(load_record("1320bd")))
-    assert f"Evidence class: registered look: evaluation (report sha256 {'ab' * 6})" in text
-    assert "Recall (registered look: evaluation)" in text
-
-
 def _calibration(record):
     record["experiment"]["corpus"]["corpus_role"] = "calibration"
 
@@ -132,15 +114,15 @@ def test_stamp_follows_the_look_record(monkeypatch, looks, edit, expected):
 @pytest.mark.parametrize(
     ("run_id", "stage_only", "expect_warning"),
     [
-        ("be2b70", None, True),
-        ("825153", None, True),
+        # The above-105% warning (be2b70, 825153) reaches the page in
+        # test_scale_ratio_warning_reaches_the_page; here keep the no-warning
+        # cases: inside the band, and a stage-only run.
         ("5105a0", None, False),
         ("825153", "silver-build", False),
     ],
 )
 def test_scale_ratio_badge_warning(run_id, stage_only, expect_warning):
-    """More data than the scale asks for warns; inside the band or on a
-    stage-only run it does not."""
+    """Inside the band or on a stage-only run, the badge does not warn."""
     from lakebench.metrics.verdict import compute_badge_status
     from tests.fixtures.stored_records import load_metrics
 
@@ -366,7 +348,7 @@ def test_provenance_in_the_front_panel():
 
 def test_look_run_ids_must_be_a_list(monkeypatch):
     """A string run_ids names no run (no substring match); the same look
-    with a real list does."""
+    with a real list does, and a registered look names this run on the page."""
     from lakebench.config import datagen_seed
 
     run_id = load_record("1320bd")["run_id"]
@@ -376,11 +358,21 @@ def test_look_run_ids_must_be_a_list(monkeypatch):
         monkeypatch.setattr(
             datagen_seed,
             "load_looks",
-            lambda path=None: [{"role": "evaluation", "state": "complete", "run_ids": run_ids}],
+            lambda path=None: [
+                {
+                    "role": "evaluation",
+                    "state": "complete",
+                    "run_ids": run_ids,
+                    "report_sha256": "ab" * 32,
+                }
+            ],
         )
         return _text("1320bd")
 
-    assert "Recall (registered look: evaluation)" in looks_with([run_id])
+    listed = looks_with([run_id])
+    assert "Recall (registered look: evaluation)" in listed
+    # A registered look stamps the evidence class and the report sha256.
+    assert f"Evidence class: registered look: evaluation (report sha256 {'ab' * 6})" in listed
     text = looks_with(bad)
     assert "Recall (uncalibrated, in-sample)" in text
     assert "Recall (registered look" not in text

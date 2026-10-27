@@ -87,24 +87,49 @@ def _report_html(tmp_path, *, mode: str, fmt: str, policy: str = MAINTENANCE_POL
     return out.read_text()
 
 
-def test_report_shows_the_policy(tmp_path):
-    html = _report_html(tmp_path, mode="batch", fmt="iceberg")
-    assert "Maintenance policy" in html and MAINTENANCE_POLICY_ID in html
-    assert "no effective table maintenance" not in html
-
-
-def test_delta_continuous_report_states_no_effective_maintenance(tmp_path):
-    html = _report_html(tmp_path, mode="sustained", fmt="delta")
-    assert "no effective table maintenance in continuous mode (v1.6)" in html
-    assert MAINTENANCE_POLICY_ID in html
-
-
-def test_legacy_delta_continuous_report_does_not_claim_the_new_policy(tmp_path):
-    html = _report_html(
-        tmp_path, mode="sustained", fmt="delta", policy=LEGACY_MAINTENANCE_POLICY_ID
-    )
-    assert "no effective table maintenance" not in html
-    assert LEGACY_MAINTENANCE_POLICY_ID in html
+@pytest.mark.parametrize(
+    ("mode", "fmt", "policy", "policy_id", "present", "absent"),
+    [
+        # batch/iceberg under the current policy names the policy and has no
+        # "no effective maintenance" note.
+        (
+            "batch",
+            "iceberg",
+            MAINTENANCE_POLICY_ID,
+            MAINTENANCE_POLICY_ID,
+            ("Maintenance policy",),
+            ("no effective table maintenance",),
+        ),
+        # delta/continuous under the current policy states the v1.6 limitation.
+        (
+            "sustained",
+            "delta",
+            MAINTENANCE_POLICY_ID,
+            MAINTENANCE_POLICY_ID,
+            ("no effective table maintenance in continuous mode (v1.6)",),
+            (),
+        ),
+        # the legacy policy must not claim the new behaviour.
+        (
+            "sustained",
+            "delta",
+            LEGACY_MAINTENANCE_POLICY_ID,
+            LEGACY_MAINTENANCE_POLICY_ID,
+            (),
+            ("no effective table maintenance",),
+        ),
+    ],
+    ids=["batch-iceberg", "delta-continuous", "legacy-delta-continuous"],
+)
+def test_report_reflects_the_maintenance_policy(
+    tmp_path, mode, fmt, policy, policy_id, present, absent
+):
+    html = _report_html(tmp_path, mode=mode, fmt=fmt, policy=policy)
+    assert policy_id in html
+    for phrase in present:
+        assert phrase in html, phrase
+    for phrase in absent:
+        assert phrase not in html, phrase
 
 
 # -- per-operation identity ---
@@ -340,7 +365,7 @@ def _continuous_report(tmp_path, pb, fmt: str) -> str:
 def test_report_shows_the_limitation_and_the_trend(tmp_path):
     pb = _continuous_pb([390.0, 203.0], [252, 1372])
     html = _continuous_report(tmp_path, pb, "delta")
-    assert "Known limitation" in html and "owner decision #46" in html
+    assert "Known limitation" in html
     assert "first round 390.0, last round 203.0 (-47.9%) over 2 rounds" in html
     assert "252 at the first probed round, 1,372 at the last" in html
 

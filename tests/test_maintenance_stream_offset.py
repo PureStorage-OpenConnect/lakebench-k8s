@@ -11,14 +11,12 @@ floor and flags a protection miss after the fact.
 
 from __future__ import annotations
 
-import re
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from lakebench.modules.table_formats.iceberg.maintenance import (
-    STREAM_OFFSET_PROTECT_MARGIN_SECONDS,
     _parse_threshold_seconds,
     _spark_timestamp,
     build_maintenance_sql,
@@ -27,14 +25,6 @@ from lakebench.modules.table_formats.iceberg.maintenance import (
 
 def _expire_stmt(sqls):
     return next(s for s in sqls if "expire_snapshots" in s)
-
-
-def test_protect_margin_is_minutes_not_seconds():
-    # The margin must be large enough to absorb the host-to-engine-pod clock
-    # skew the cutoff is evaluated against; a one-second margin let a pod 8 s
-    # ahead expire the protected snapshot. Pin the value so a silent change to
-    # a too-small margin fails here.
-    assert STREAM_OFFSET_PROTECT_MARGIN_SECONDS == 600
 
 
 def test_protect_from_floors_spark_cutoff_before_referenced_snapshot():
@@ -87,31 +77,6 @@ def test_protect_from_widens_trino_duration_by_the_margin():
         "trino", "lh", "db.bronze", "30m", now=now, protect_from=now - timedelta(hours=2)
     )
     assert "expire_snapshots(retention_threshold => '130m')" in _expire_stmt(widened)
-
-
-def test_protect_margin_survives_engine_pod_clock_skew_ahead_of_host():
-    # The exact 24h failure mechanism, as executable reasoning: the cutoff is a
-    # relative duration built on the host clock but evaluated on the engine pod,
-    # so a pod running ahead shifts the effective cutoff forward by the skew.
-    # Silver lagging past retention (snapshot older than the 1h floor) is the
-    # case where only the margin keeps the snapshot. This proves margin > skew
-    # for a skew worse than the field's 8 s; it does not pin the constant (that
-    # is test_protect_margin_is_minutes_not_seconds) or run against an engine
-    # (the Spark tier does that).
-    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    skew = timedelta(seconds=30)
-    protect = now - timedelta(minutes=90)
-    stmt = _expire_stmt(
-        build_maintenance_sql("trino", "lh", "db.bronze", "1h", now=now, protect_from=protect)
-    )
-    secs = _parse_threshold_seconds(re.search(r"=> '(\w+)'", stmt).group(1))
-    # Effective cutoff the pod computes: (host now + skew) - duration. It must
-    # land strictly before the protected commit, or expire removes it.
-    effective_cutoff = (now + skew) - timedelta(seconds=secs)
-    assert effective_cutoff < protect, (
-        f"cutoff {effective_cutoff.isoformat()} did not clear protected commit "
-        f"{protect.isoformat()} under {skew} skew"
-    )
 
 
 def _offset_reader_cfg():

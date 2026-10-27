@@ -99,13 +99,18 @@ def test_sigterm_reaches_the_saved_handler_after_release(own_ns):
         signal.signal(signal.SIGTERM, previous)
 
 
-def test_second_signal_repeats_the_time_left(own_ns):
+def test_second_signal_repeats_the_time_left(own_ns, capsys):
     with pytest.raises(KeyboardInterrupt):
         with cl.cluster_lock(_core(), timeout=0):
             os.kill(os.getpid(), signal.SIGINT)
             os.kill(os.getpid(), signal.SIGINT)
             _core().create_namespaced_config_map(NS, _cm("still-runs"))
+    # The body still runs to completion ...
     assert ("configmaps", NS, "still-runs") in own_ns.store
+    # ... and the second signal repeats the hold budget left.
+    err = capsys.readouterr().err
+    assert "still finishing the shared change under the cluster lease (hold budget" in err
+    assert "Interrupt once more to abort now" in err
 
 
 @pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
@@ -127,19 +132,21 @@ def test_third_signal_aborts_but_still_releases(own_ns, capsys, sig):
     assert "repair-operator" in capsys.readouterr().err
 
 
-def test_handlers_restored_after_a_clean_exit(own_ns):
+@pytest.mark.parametrize("body_raises", [False, True], ids=["clean-exit", "body-error"])
+def test_lease_releases_and_restores_handlers_on_exit(own_ns, body_raises):
+    # Whether the body exits cleanly or raises, the lease is released and the
+    # deferred handlers are restored; the handler is replaced while held.
     before = {s: signal.getsignal(s) for s in cl._DEFERRED_SIGNALS}
-    with cl.cluster_lock(_core(), timeout=0):
-        assert signal.getsignal(signal.SIGINT) is not before[signal.SIGINT]
-    assert {s: signal.getsignal(s) for s in cl._DEFERRED_SIGNALS} == before
-
-
-def test_body_error_still_releases_and_restores(own_ns):
-    before = signal.getsignal(signal.SIGINT)
-    with pytest.raises(RuntimeError, match="boom"):
+    if body_raises:
+        with pytest.raises(RuntimeError, match="boom"):
+            with cl.cluster_lock(_core(), timeout=0):
+                assert signal.getsignal(signal.SIGINT) is not before[signal.SIGINT]
+                raise RuntimeError("boom")
+    else:
         with cl.cluster_lock(_core(), timeout=0):
-            raise RuntimeError("boom")
-    assert _lease_deleted(own_ns) and signal.getsignal(signal.SIGINT) is before
+            assert signal.getsignal(signal.SIGINT) is not before[signal.SIGINT]
+    assert {s: signal.getsignal(s) for s in cl._DEFERRED_SIGNALS} == before
+    assert _lease_deleted(own_ns)
 
 
 def test_off_main_thread_the_lease_works_without_deferral(own_ns):
@@ -302,37 +309,31 @@ def test_any_call_refused_once_the_budget_is_spent(own_ns, monkeypatch):
             _pinned.pinned_kubectl("c", ["get", "ns"])
 
 
-def test_signals_during_the_release_cannot_leak_the_lease(own_ns, monkeypatch):
-    """Ctrl-C mashed while the lease is released: the release still completes."""
+@pytest.mark.parametrize("body_signals", [0, 3], ids=["clean-body", "aborted-body"])
+def test_signals_during_the_release_cannot_leak_the_lease(own_ns, monkeypatch, body_signals):
+    """Ctrl-C mashed while the lease is released: the release still completes
+    and the lock is not left. A clean body raises KeyboardInterrupt; a body
+    already aborted by three interrupts raises LeaseAbort, and a fourth during
+    the release still cannot leak the lease."""
     rec = own_ns
     real_release = cl.release_cluster_lock
+    # The release itself takes the interrupts: three on a clean body, one more
+    # after the body already aborted.
+    release_signals = 3 if body_signals == 0 else 1
 
     def interrupted_release(core_v1, handle):
-        for _ in range(3):
+        for _ in range(release_signals):
             os.kill(os.getpid(), signal.SIGINT)
         real_release(core_v1, handle)
 
     monkeypatch.setattr(cl, "release_cluster_lock", interrupted_release)
-    with pytest.raises(KeyboardInterrupt):
+    expected = KeyboardInterrupt if body_signals == 0 else cl.LeaseAbort
+    with pytest.raises(expected) as exc:
         with cl.cluster_lock(_core(), timeout=0):
-            pass
-    assert ("configmaps", cl.LOCK_NAMESPACE, cl.LOCK_CONFIGMAP_NAME) not in rec.store
-
-
-def test_a_signal_after_the_abort_cannot_leak_the_lease(own_ns, monkeypatch):
-    rec = own_ns
-    real_release = cl.release_cluster_lock
-
-    def interrupted_release(core_v1, handle):
-        os.kill(os.getpid(), signal.SIGINT)  # the fourth Ctrl-C
-        real_release(core_v1, handle)
-
-    monkeypatch.setattr(cl, "release_cluster_lock", interrupted_release)
-    with pytest.raises(cl.LeaseAbort) as exc:
-        with cl.cluster_lock(_core(), timeout=0):
-            for _ in range(3):
+            for _ in range(body_signals):
                 os.kill(os.getpid(), signal.SIGINT)
-    assert exc.value.signum == signal.SIGINT
+    if body_signals:
+        assert exc.value.signum == signal.SIGINT
     assert ("configmaps", cl.LOCK_NAMESPACE, cl.LOCK_CONFIGMAP_NAME) not in rec.store
 
 

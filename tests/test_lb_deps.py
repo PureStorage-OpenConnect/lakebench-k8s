@@ -232,9 +232,20 @@ def test_fetch_mismatch_exits_4_and_leaves_nothing(env, served_set, tmp_path, ca
     assert not (dest / jar).exists() and not (dest / (jar + ".part")).exists()
 
 
-def test_fetch_rejects_an_edited_manifest(served_set, tmp_path):
-    m = json.loads(served_set["man"].read_text())
+def _edit_sha(m):
     m["groups"]["jars"][0]["sha256"] = "0" * 64
+
+
+def _reorder(m):
+    m["jar_order"] = list(reversed(m["jar_order"]))
+
+
+@pytest.mark.parametrize("edit", [_edit_sha, _reorder], ids=["edited-sha", "reordered"])
+def test_fetch_rejects_a_tampered_manifest(served_set, tmp_path, edit):
+    # The pinset covers both the per-jar hashes and the order, so an edited
+    # sha256 and a reordered jar_order both fail the fetch with EXIT_HASH.
+    m = json.loads(served_set["man"].read_text())
+    edit(m)
     served_set["man"].write_text(json.dumps(m))
     assert _fetch(served_set, tmp_path / "o") == lb_deps.EXIT_HASH
 
@@ -266,10 +277,3 @@ def test_a_reordered_set_on_the_pvc_fails_verification(env, capsys):
     assert "does not hash" in lb_deps.verify_set(sd.name)
     capsys.readouterr()
     assert env.run("serve", "--port", "0") == lb_deps.EXIT_HASH
-
-
-def test_fetch_refuses_a_reordered_manifest(served_set, tmp_path):
-    m = json.loads(served_set["man"].read_text())
-    m["jar_order"] = list(reversed(m["jar_order"]))
-    served_set["man"].write_text(json.dumps(m))
-    assert _fetch(served_set, tmp_path / "o") == lb_deps.EXIT_HASH

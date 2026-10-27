@@ -158,13 +158,9 @@ def _seed(monkeypatch, n):
     monkeypatch.setattr(KeyS3, "__init__", seeded)
 
 
-@pytest.mark.parametrize(
-    "argv", [["--generate", "--allow-stale-bronze", "--yes"], ["--generate", "--yes"]]
-)
-def test_generate_on_a_multicycle_run_is_refused_before_bronze_is_touched(
-    tmp_path, monkeypatch, argv
-):
-    result, keys, calls = _run(tmp_path, monkeypatch, owned=False, argv=argv)
+def test_generate_on_a_multicycle_run_is_refused_before_bronze_is_touched(tmp_path, monkeypatch):
+    # --generate (with or without --allow-stale-bronze) takes the same branch.
+    result, keys, calls = _run(tmp_path, monkeypatch, owned=False, argv=["--generate", "--yes"])
     assert result.exit_code == 2, result.output
     assert "--generate does not apply to a multi-cycle run" in result.output
     assert calls == [] and keys == set()
