@@ -1,8 +1,7 @@
 """Local (non-Kubernetes) deployment orchestrator.
 
-Runs the whole lakehouse on one host with podman or docker. Nine of the
-fourteen Kubernetes deploy steps do not apply, which is what makes this
-tractable:
+Runs the whole lakehouse on one host with podman or docker. Most of the
+Kubernetes deploy steps do not apply, which is what makes this tractable:
 
     namespace       -> container name prefix
     secrets         -> env vars on the container
@@ -23,7 +22,7 @@ service, no PostgreSQL, and no bootstrap.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from lakebench.deploy.garage import GarageCredentials, GarageDeployer
@@ -53,21 +52,10 @@ class LocalDeployment:
     runtime_cli: str
     workdir: Path
     buckets: tuple[str, ...]
-    skipped: tuple[tuple[str, str], ...] = field(default=SKIPPED_COMPONENTS)
 
     @property
     def endpoint(self) -> str:
         return self.credentials.endpoint
-
-    @property
-    def port(self) -> int:
-        """Host port Garage actually published on.
-
-        Not necessarily the configured default: a second stack on the same host
-        is allocated the next free port.
-        """
-        _, _, tail = self.credentials.endpoint.rpartition(":")
-        return int(tail) if tail.isdigit() else 0
 
 
 class LocalDeployer:
