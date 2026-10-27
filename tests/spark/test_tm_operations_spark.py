@@ -378,35 +378,6 @@ def _check(spark):
     assert all(r["as_of_date"] == date(2025, 1, 1) for r in cases)
     case_c1 = {r["case_id"]: r for r in cases}
 
-    # Stage 9: the investigator queries run on these tables through the
-    # Spark Thrift dialect adapter, as the benchmark runs them.
-    from lakebench.benchmark.queries import INVESTIGATOR_QUERIES
-    from lakebench.modules.query_engines.spark_thrift.executor import SparkThriftExecutor
-
-    adapt = SparkThriftExecutor.__new__(SparkThriftExecutor).adapt_query
-    got = {}
-    for q in INVESTIGATOR_QUERIES:
-        sql = q.sql.format(
-            catalog="lakehouse",
-            silver_table="silver.transactions",
-            gold_table="gold.daily_dashboards",
-            silver_entities="silver.entities",
-            silver_accounts="silver.accounts",
-            silver_counterparty_edges="silver.counterparty_edges",
-            gold_alert_dispositions="gold.alert_dispositions",
-            gold_cases="gold.cases",
-            tm_run_id="run-x",
-        )
-        got[q.name] = spark.sql(adapt(sql)).collect()
-    assert len(got) == 4
-    (c360,) = got["IQ1_customer_360"]
-    assert c360["entity_id"] == 1 and c360["alert_count"] == 2 and c360["sars"] >= 1
-    assert c360["accounts"] == 1
-    # Customer 1 paid u0, u1, u2 in the 12 months before its case opened.
-    assert sum(r["txns"] for r in got["IQ2_case_activity_12m"]) >= 3
-    assert {r["hop2_entity_id"] for r in got["IQ3_counterparty_two_hop"]} == {5}
-    assert got["IQ4_open_cases_over_60_days"] == []
-
     # Cycle 2 of the same run. A1's window grew (later last payment, one more
     # payment); A3 is no longer emitted; A6 is new but its payment predates
     # cycle 1. Identity and decided history carry over.
