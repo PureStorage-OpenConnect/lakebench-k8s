@@ -156,10 +156,11 @@ def test_alias_resolves_to_the_renamed_key():
 
 
 def _bound_kinds(**limits) -> list[str]:
-    """The bound kinds experiment._bound_kinds writes for these limits."""
-    from lakebench.metrics.experiment import _bound_kinds
+    """The bound kinds build_experiment records for these limits."""
+    from lakebench.metrics.bounds import bound_entries
 
-    return _bound_kinds(limits, {"skipped": limits.pop("skipped_rules", {})})
+    rules = {"skipped": limits.pop("skipped_rules", {})}
+    return sorted({kind for kind, _line in bound_entries(limits, rules)})
 
 
 def test_each_bound_kind_caps_the_metrics_it_bounds():

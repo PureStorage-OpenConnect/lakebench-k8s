@@ -22,9 +22,9 @@ a winner direction) or ``none``. A metric is directional, so a delta in it
 can be better or worse, only when its band is ``performance`` and its
 direction is ``higher`` or ``lower``.
 
-``cap_dependence`` lists the bound kinds (``limits.bound_kinds``, as
-``metrics/experiment._bound_kinds`` writes them; ``*`` matches any job
-type, and ``{job}`` the job type of the stage a key names) that, when they
+``cap_dependence`` lists the bound kinds (``limits.bound_kinds``; ``*``
+matches any job type, and ``{job}`` the job type of the stage a key names)
+that, when they
 bound a run, bound this metric: it is then capped, not infrastructure
 performance. ``capped_by`` takes the trickle, which is not a bound kind, as
 ``extra``.
@@ -35,23 +35,6 @@ have one entry per mode, and ``lookup`` takes the run's mode. ``lookup``
 refuses ``mode=None`` for a key whose unit, direction or band differs by
 mode (``ModeRequired``), and answers it with every mode's caps when only the
 caps differ.
-
-History of band and direction changes to published metrics:
-
-- 1.7: direction had been derived from name tokens. ``qph_degradation_pct``
-  is lower is better (was higher). Not directional (were higher or lower):
-  ``qph_spread``, ``maintenance_value_pct``, ``window_seconds``,
-  ``benchmark_rounds_count``, ``benchmark_samples_per_query``,
-  ``total_rows_processed``, ``bronze_busy_fraction``, ``corpus_ingest_ratio``,
-  ``query_time_event_age_seconds``, ``arrival_seconds``,
-  ``window_arrival_fraction``, ``pre_window_rows``, ``released_rows``,
-  ``corpus_drain_seconds``, the time-to-detect alert and cycle counts,
-  ``maintenance_pct_of_pipeline``, ``maintenance_paired_queries``,
-  ``maintenance_settle_seconds``, the maintenance file and snapshot counts,
-  ``storage_reclaimed_mb``, and in a continuous run ``total_core_hours`` and
-  ``total_elapsed_seconds``. ``compaction_ratio`` is higher (was lower) and
-  diagnostic; ``ingest_ratio`` is a guard, best inside [0.95, 1.05] (was
-  higher).
 """
 
 from __future__ import annotations
@@ -61,6 +44,19 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Literal
+
+# BOUND_TRICKLE is not a bound kind; a reader passes it to ``capped_by`` as
+# ``extra`` when ``bounds.trickle_bound`` holds.
+from lakebench.metrics.bounds import (
+    BOUND_AUTOSIZE,
+    BOUND_EXECUTOR_BUDGET,
+    BOUND_EXECUTOR_CAP,
+    BOUND_EXECUTOR_OVERRIDE,
+    BOUND_MAINTENANCE,
+    BOUND_RULE_CAP,
+    BOUND_TM_ALERTS,
+    BOUND_TRICKLE,
+)
 
 Direction = Literal["higher", "lower", "target", "none"]
 Band = Literal[
@@ -101,20 +97,6 @@ _CONT = frozenset({CONTINUOUS})
 _BOTH = frozenset({BATCH, CONTINUOUS})
 _ALL_WL = frozenset({"customer360", "financial"})
 _AML = frozenset({"financial"})
-
-# Bound kinds come from metrics/bounds.py (the one registry of kinds);
-# BOUND_TRICKLE is not a kind, and a reader passes it to ``capped_by`` as
-# ``extra`` when ``bounds.trickle_bound`` holds.
-from lakebench.metrics.bounds import (  # noqa: E402
-    BOUND_AUTOSIZE,
-    BOUND_EXECUTOR_BUDGET,
-    BOUND_EXECUTOR_CAP,
-    BOUND_EXECUTOR_OVERRIDE,
-    BOUND_MAINTENANCE,
-    BOUND_RULE_CAP,
-    BOUND_TM_ALERTS,
-    BOUND_TRICKLE,
-)
 
 #: Caps on batch pipeline times, throughput and compute: executor counts
 #: (cap, budget, a binding override), auto-sizing, and AML rule and TM caps (a skipped rule makes gold faster).
