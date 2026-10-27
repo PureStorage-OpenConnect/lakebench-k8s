@@ -4081,3 +4081,103 @@ def run_c360_gold_finalize(*, title, app_name, namespace, size_fn, write):
     # Expected-result facts (metrics/c360_correctness.py), after the timing above.
     log_c360_check(spark, silver_tbl, gold_tbl)
     spark.stop()
+
+
+# ---------------------------------------------------------------------------
+# Silver stream startup (silver_stream.py, silver_stream_delta.py)
+# ---------------------------------------------------------------------------
+
+_SILVER_TABLE_WAIT_INTERVAL = 15  # seconds between checks
+# Capped from run_duration / 4 by job.py so the wait cannot spend the whole
+# window before the empty-rows gate fires. 1800 is the fallback when job.py
+# did not export the env var (a test harness or an older deployment).
+SILVER_BRONZE_WAIT_MAX = int(os.environ.get("LB_SILVER_BRONZE_WAIT_SECONDS", "1800"))
+
+
+def _exists_or_false(spark, table):
+    """``table_exists`` with any probe error treated as not-yet (log and
+    return False), so a transient catalog error only means wait longer."""
+    try:
+        return table_exists(spark, table)
+    except Exception as e:  # noqa: BLE001
+        log(f"Bronze table probe error: {type(e).__name__}: {e}")
+        return False
+
+
+def wait_for_bronze_table(spark, bronze_tbl):
+    """Block until *bronze_tbl* exists, then log how long it took.
+
+    Bronze-ingest creates bronze_raw on its first batch and silver-stream
+    starts concurrently, so the table is often absent at first. Raises
+    SilverAbort if it has not appeared within SILVER_BRONZE_WAIT_MAX.
+    """
+    waited = 0
+    while not _exists_or_false(spark, bronze_tbl):
+        if waited >= SILVER_BRONZE_WAIT_MAX:
+            log(f"Bronze table {bronze_tbl} not found after {waited}s, giving up")
+            spark.stop()
+            raise SilverAbort(f"bronze did not appear in wait window ({SILVER_BRONZE_WAIT_MAX}s)")
+        log(f"Waiting for {bronze_tbl} to be created ({waited}s elapsed)...")
+        time.sleep(_SILVER_TABLE_WAIT_INTERVAL)
+        waited += _SILVER_TABLE_WAIT_INTERVAL
+    log(f"Bronze table {bronze_tbl} exists (waited {waited}s)")
+
+
+def silver_stream_accumulator(write_batch):
+    """(foreachBatch handler, totals getter) that fold each batch's returned
+    row count into a lock-protected total.
+
+    ``write_batch(df, batch_id)`` returns the rows a micro-batch committed.
+    Spark's ListenerBus swallows Python listener exceptions, so the total is
+    kept on the driver thread main() blocks on, not in a listener.
+    """
+    import threading
+
+    total = [0]
+    lock = threading.Lock()
+
+    def handler(df, bid):
+        written = write_batch(df, bid)
+        with lock:
+            total[0] += int(written or 0)
+
+    def read_total():
+        with lock:
+            return total[0]
+
+    return handler, read_total
+
+
+# ---------------------------------------------------------------------------
+# Bronze ingest startup (bronze_ingest.py, bronze_ingest_delta.py)
+# ---------------------------------------------------------------------------
+
+_LANDING_WAIT_INTERVAL = 15  # seconds between checks
+_LANDING_WAIT_MAX = 1800  # 30 minutes
+
+
+def wait_for_landing_schema(spark, landing_zone):
+    """Wait for Parquet files in *landing_zone* and return their inferred
+    schema.
+
+    Datagen writes self-describing Parquet; in continuous mode it starts
+    concurrently and may not have written a file yet. Stops the session and
+    exits 1 if nothing arrives within the wait window.
+    """
+    waited = 0
+    while True:
+        try:
+            inferred_schema = spark.read.parquet(landing_zone).schema
+            if len(inferred_schema) > 0:
+                log(f"Inferred schema with {len(inferred_schema)} columns (waited {waited}s)")
+                return inferred_schema
+        except Exception as e:  # noqa: BLE001
+            if waited == 0 or waited % 60 == 0:
+                log(f"Landing zone probe error: {type(e).__name__}: {e}")
+        if waited >= _LANDING_WAIT_MAX:
+            log(f"No Parquet files in {landing_zone} after {waited}s, giving up")
+            spark.stop()
+            raise SystemExit(1)
+        log(f"Waiting for Parquet files in landing zone ({waited}s elapsed)...")
+        time.sleep(_LANDING_WAIT_INTERVAL)
+        waited += _LANDING_WAIT_INTERVAL

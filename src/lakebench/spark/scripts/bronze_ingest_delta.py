@@ -20,7 +20,6 @@ bronze_raw: the new query would re-read the whole landing zone into it.
 
 Environment variables (set by job.py):
     LB_BRONZE_URI        - s3a://bronze-bucket/
-    BRONZE_BUCKET        - bucket name (for checkpoint path)
     LB_ICEBERG_CATALOG   - Spark catalog: spark_catalog for Delta + Hive
     CHECKPOINT_LOCATION  - s3a://bronze-bucket/checkpoints/bronze-ingest/
     TRIGGER_INTERVAL     - e.g., "0 seconds" (back to back)
@@ -46,12 +45,10 @@ from common import (
     replay_possible,
     set_utc_session,
     table_exists,
+    wait_for_landing_schema,
     write_delta_table,
 )
 from pyspark.sql import SparkSession
-
-_LANDING_WAIT_INTERVAL = 15  # seconds between checks
-_LANDING_WAIT_MAX = 1800  # 30 minutes
 
 
 def bronze_target():
@@ -141,26 +138,7 @@ def main() -> None:
 
     arrived = arrival_time(spark, bronze_uri, checkpoint_location)
 
-    # Wait for Parquet files in the landing zone, then infer schema. Datagen
-    # writes self-describing Parquet; in continuous mode it starts
-    # concurrently and may not have written any files yet.
-    waited = 0
-    while True:
-        try:
-            inferred_schema = spark.read.parquet(landing_zone).schema
-            if len(inferred_schema) > 0:
-                log(f"Inferred schema with {len(inferred_schema)} columns (waited {waited}s)")
-                break
-        except Exception as e:
-            if waited == 0 or waited % 60 == 0:
-                log(f"Landing zone probe error: {type(e).__name__}: {e}")
-        if waited >= _LANDING_WAIT_MAX:
-            log(f"No Parquet files in {landing_zone} after {waited}s, giving up")
-            spark.stop()
-            raise SystemExit(1)
-        log(f"Waiting for Parquet files in landing zone ({waited}s elapsed)...")
-        time.sleep(_LANDING_WAIT_INTERVAL)
-        waited += _LANDING_WAIT_INTERVAL
+    inferred_schema = wait_for_landing_schema(spark, landing_zone)
 
     refuse_fresh_checkpoint_over_data(spark, checkpoint_location, table_name)
     reader = spark.readStream.schema(inferred_schema)

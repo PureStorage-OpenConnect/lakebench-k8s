@@ -13,7 +13,6 @@ This is the continuous-pipeline equivalent of gold_finalize.py.
 
 Environment variables (set by job.py):
     LB_ICEBERG_CATALOG   - Iceberg catalog name (e.g., "lakehouse")
-    CATALOG_NAME         - same as LB_ICEBERG_CATALOG
     CHECKPOINT_LOCATION  - s3a://gold-bucket/checkpoints/gold-refresh/
     TRIGGER_INTERVAL     - "0 seconds" (back to back) or a timer, e.g. "5 minutes"
 """

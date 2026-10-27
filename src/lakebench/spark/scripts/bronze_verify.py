@@ -3,8 +3,8 @@
 Fails the job (exit 1) when bronze could not produce a meaningful silver:
 no rows, a missing or wrongly typed column that silver or gold computes on,
 a key column that is entirely null, or no row that survives the silver
-quality filter. These used to be warnings or not checked at all, so an empty
-or schema-broken bronze passed and the run reported success on no data.
+quality filter. Without these checks an empty or schema-broken bronze
+passed and the run reported success on no data.
 
 LB_CONTINUOUS_RESET=1 turns the job into the continuous preflight instead:
 it drops the tables the continuous jobs write (bronze_raw, silver,
@@ -296,15 +296,11 @@ def main() -> None:
     total_time = time.time() - start_time
     input_size_gb = path_size_gb(spark, source)
 
-    # C2 (silver-plan): record the bronze-side data clock so silver's env
-    # builder (job.py._build_env_vars) can resolve LB_DATA_CLOCK to the
-    # newest bronze event date rather than falling all the way to today.
-    # ``ts_max`` is the max(event_timestamp) verify_bronze already computed
-    # in the same aggregation pass; no extra Spark scan.
-    write_bronze_data_clock(
-        env("LAKEBENCH_NAMESPACE", ""),
-        stats.get("ts_max") if isinstance(stats, dict) else None,
-    )
+    # Record the bronze-side data clock so silver's env builder can resolve
+    # LB_DATA_CLOCK to the newest bronze event date rather than falling all
+    # the way to today. ``ts_max`` is the max(event_timestamp) verify_bronze
+    # already computed in the same aggregation pass; no extra Spark scan.
+    write_bronze_data_clock(env("LAKEBENCH_NAMESPACE", ""), stats.get("ts_max"))
 
     log("=" * 60)
     log("Bronze Verification COMPLETED")
