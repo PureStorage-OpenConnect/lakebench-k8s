@@ -49,12 +49,13 @@ def _fixture_heldout(monkeypatch):
     ts.use_fixture(monkeypatch)
 
 
-def test_replicates_are_not_held_out():
+def test_replicate_seed_set_is_clean():
+    # No replicate is a held-out seed.
+    heldout = ds.load_heldout()
     for s in REPLICATES:
-        assert ds.heldout_role(s, ds.load_heldout()) is None
-
-
-def test_replicates_are_distinct_and_not_calibration_or_spent_seeds():
+        assert ds.heldout_role(s, heldout) is None, s
+    # The replicates are distinct and share nothing with calibration or spent
+    # seeds.
     assert len(REPLICATES) == len(set(REPLICATES))
     assert not set(REPLICATES) & set(FIXED)
 

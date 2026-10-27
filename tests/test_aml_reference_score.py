@@ -18,42 +18,38 @@ from lakebench.aml.reference_score import (
 
 
 class TestLeakageGate:
-    def test_leaking_band_flagged(self):
-        """AML audit's structuring-band example: baseline count is
-        very small relative to typology in the USD 9500..9999 band."""
+    @pytest.mark.parametrize(
+        ("label", "baseline", "threshold", "verdict", "ratio", "overall"),
+        [
+            # AML audit's structuring-band example: baseline tiny next to
+            # typology leaks (USD 9500..9999 band, typology 1000).
+            ("leaking", 3, None, LeakageVerdict.LEAKING, 0.003, False),
+            # enough baseline density passes.
+            ("passing", 500, None, LeakageVerdict.PASS, 0.5, True),
+            # a ratio exactly at the threshold passes (>=, not >).
+            ("boundary", 100, DEFAULT_LEAKAGE_RATIO, LeakageVerdict.PASS, None, None),
+        ],
+    )
+    def test_single_band_verdict(self, label, baseline, threshold, verdict, ratio, overall):
+        kw = {"threshold_ratio": threshold} if threshold is not None else {}
         report = compute_leakage_gate(
             [
                 {
                     "currency": "USD",
                     "band_lo": 9500.0,
                     "band_hi": 9999.0,
-                    "baseline_count": 3,
+                    "baseline_count": baseline,
                     "typology_count": 1000,
                 },
-            ]
+            ],
+            **kw,
         )
-        assert not report.overall_pass
         row = report.rows[0]
-        assert row.verdict is LeakageVerdict.LEAKING
-        assert row.ratio_baseline_over_typology == pytest.approx(0.003)
-
-    def test_passing_band_flagged(self):
-        """A band with enough baseline density is not the sole label."""
-        report = compute_leakage_gate(
-            [
-                {
-                    "currency": "USD",
-                    "band_lo": 9500.0,
-                    "band_hi": 9999.0,
-                    "baseline_count": 500,
-                    "typology_count": 1000,
-                },
-            ]
-        )
-        assert report.overall_pass
-        row = report.rows[0]
-        assert row.verdict is LeakageVerdict.PASS
-        assert row.ratio_baseline_over_typology == pytest.approx(0.5)
+        assert row.verdict is verdict, label
+        if ratio is not None:
+            assert row.ratio_baseline_over_typology == pytest.approx(ratio), label
+        if overall is not None:
+            assert report.overall_pass is overall, label
 
     def test_no_typology_does_not_affect_overall_when_others_pass(self):
         """A currency with zero typology rows carries no leakage claim
@@ -109,22 +105,6 @@ class TestLeakageGate:
         """Nothing scored, or no typology planted in any band, must not
         masquerade as a clean gate."""
         assert not compute_leakage_gate(rows).overall_pass
-
-    def test_boundary_ratio_is_pass(self):
-        """Ratio exactly at the threshold passes (>=, not >)."""
-        report = compute_leakage_gate(
-            [
-                {
-                    "currency": "USD",
-                    "band_lo": 9500.0,
-                    "band_hi": 9999.0,
-                    "baseline_count": 100,
-                    "typology_count": 1000,
-                },
-            ],
-            threshold_ratio=DEFAULT_LEAKAGE_RATIO,
-        )
-        assert report.rows[0].verdict is LeakageVerdict.PASS
 
     def test_overall_pass_requires_every_band(self):
         """A single LEAKING band flips overall_pass to False even if

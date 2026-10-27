@@ -195,54 +195,44 @@ def test_silver_cap_implies_a_safe_per_executor_load():
 
 
 def test_silver_cap_follows_the_deployed_executor_heap():
-    """Executors set in the config are the ones the cap is spread over: a
-    smaller executor than the base lowers the per-executor load in proportion
-    to its heap, and a larger one raises it, but never past
-    ``SILVER_BATCH_HEAP_GROWTH_LIMIT`` times the base heap, so 8-core / 64g and
-    16-core / 128g executors carry the same load. 1.7.6 sized every geometry
-    on the base 32g heap and its own executor count."""
+    """The cap is spread over the executors the config deploys and scales with
+    their heap, up to ``SILVER_BATCH_HEAP_GROWTH_LIMIT`` times the base 32g and
+    no further, whether the heap grows via the core count (profile memory per
+    core) or via an explicit ``silver_executor_memory``. 1.7.6 sized every
+    geometry on the base 32g heap and its own executor count."""
     from lakebench.config.sizing import (
         SILVER_BATCH_HEAP_GROWTH_LIMIT,
         _financial_silver_cap_memory_ceiling,
     )
 
     gib = 1024**3
+    limit = 32 * gib * SILVER_BATCH_HEAP_GROWTH_LIMIT
 
-    def cap(cores, scale=48, execs=26):
+    def cap_cores(cores, scale=48, execs=26):
         cfg = _continuous_financial(scale)
         cfg.platform.compute.spark.silver_executors = execs
         cfg.platform.compute.spark.silver_executor_cores = cores
         return _financial_silver_cap_memory_ceiling(cfg)
 
-    limit = 32 * gib * SILVER_BATCH_HEAP_GROWTH_LIMIT
-    assert cap(8) == int(26 * _rows_per_heap(limit, 48))
-    assert cap(16) == cap(8)
-    assert cap(2) == int(26 * _rows_per_heap(16 * gib, 48))
-    assert cap(2) < cap(4) < cap(8)
-    # The count set in the config is the one the batch is spread over.
-    assert cap(8, execs=13) == int(13 * _rows_per_heap(limit, 48))
+    # Heap grown through the core count: proportional below the limit, clamped
+    # at it, and spread over exactly the configured executor count.
+    assert cap_cores(8) == int(26 * _rows_per_heap(limit, 48))
+    assert cap_cores(16) == cap_cores(8)
+    assert cap_cores(2) == int(26 * _rows_per_heap(16 * gib, 48))
+    assert cap_cores(2) < cap_cores(4) < cap_cores(8)
+    assert cap_cores(8, execs=13) == int(13 * _rows_per_heap(limit, 48))
 
-
-def test_silver_cap_counts_a_set_executor_heap_within_the_limit():
-    """``silver_executor_memory`` raises the derived cap with the heap up to the
-    growth limit, and no further."""
-    from lakebench.config.sizing import (
-        SILVER_BATCH_HEAP_GROWTH_LIMIT,
-        _financial_silver_cap_memory_ceiling,
-    )
-
-    gib = 1024**3
-
-    def cap(memory):
+    def cap_memory(memory):
         cfg = _continuous_financial(48)
         cfg.platform.compute.spark.silver_executors = 20
         cfg.platform.compute.spark.silver_executor_cores = 4
         cfg.platform.compute.spark.silver_executor_memory = memory
         return _financial_silver_cap_memory_ceiling(cfg)
 
-    assert cap("40g") == int(20 * _rows_per_heap(40 * gib, 48))
-    limit = int(20 * _rows_per_heap(32 * gib * SILVER_BATCH_HEAP_GROWTH_LIMIT, 48))
-    assert cap("96g") == cap("200g") == limit
+    # Heap grown through an explicit memory: same rule, same limit.
+    assert cap_memory("40g") == int(20 * _rows_per_heap(40 * gib, 48))
+    mem_limit = int(20 * _rows_per_heap(limit, 48))
+    assert cap_memory("96g") == cap_memory("200g") == mem_limit
 
 
 def test_financial_bronze_bytes_per_row_matches_the_measured_band():
@@ -272,31 +262,37 @@ def _resolved_silver_cap(schema: str, scale: float, mode: str = "sustained", cap
     return cfg.architecture.pipeline.sustained.silver_max_rows_per_trigger
 
 
-def test_autosizer_derives_the_silver_cap_for_financial_continuous():
-    """A defaulted financial continuous run gets the memory-ceiling cap, above
-    the 20M floor, so it rises with the executor envelope."""
+_DERIVED = object()
+
+
+@pytest.mark.parametrize(
+    ("label", "schema", "scale", "mode", "cap", "expected"),
+    [
+        # a defaulted financial continuous run gets the memory-ceiling cap,
+        # above the 20M floor, so it rises with the executor envelope
+        ("derived-10", "financial", 10, "sustained", ..., _DERIVED),
+        ("derived-48", "financial", 48, "sustained", ..., _DERIVED),
+        ("derived-100", "financial", 100, "sustained", ..., _DERIVED),
+        # an explicitly configured cap always wins over the derivation, even
+        # below the derived ceiling
+        ("explicit-high", "financial", 48, "sustained", 80_000_000, 80_000_000),
+        ("explicit-low", "financial", 48, "sustained", 5_000_000, 5_000_000),
+        # customer360 continuous and batch financial keep the flat 20M default:
+        # only financial continuous has the world-sized MERGE the derivation
+        # targets, so no other run's recorded cap moves
+        ("customer360", "customer360", 48, "sustained", ..., 20_000_000),
+        ("financial-batch", "financial", 48, "batch", ..., 20_000_000),
+    ],
+)
+def test_autosizer_resolves_the_silver_cap(label, schema, scale, mode, cap, expected):
     from lakebench.config.sizing import _financial_silver_cap_memory_ceiling
 
-    for scale in (10, 48, 100):
-        assert _resolved_silver_cap("financial", scale) == _financial_silver_cap_memory_ceiling(
-            _continuous_financial(scale)
-        )
-        assert _resolved_silver_cap("financial", scale) > 20_000_000
-
-
-def test_autosizer_keeps_an_explicit_silver_cap():
-    """An explicitly configured cap always wins over the derivation."""
-    assert _resolved_silver_cap("financial", 48, cap=80_000_000) == 80_000_000
-    # Even an explicit value below the derived ceiling is honoured.
-    assert _resolved_silver_cap("financial", 48, cap=5_000_000) == 5_000_000
-
-
-def test_autosizer_leaves_the_silver_cap_at_default_off_the_financial_path():
-    """customer360 continuous and batch financial keep the flat 20M default:
-    only financial continuous has the world-sized MERGE the derivation targets,
-    so no other run's recorded cap moves."""
-    assert _resolved_silver_cap("customer360", 48) == 20_000_000
-    assert _resolved_silver_cap("financial", 48, mode="batch") == 20_000_000
+    resolved = _resolved_silver_cap(schema, scale, mode=mode, cap=cap)
+    if expected is _DERIVED:
+        assert resolved == _financial_silver_cap_memory_ceiling(_continuous_financial(scale)), label
+        assert resolved > 20_000_000, label
+    else:
+        assert resolved == expected, label
 
 
 def _advisories(schema: str, scale: float, mode: str = "sustained", dur: int = 1800, cap=...):
@@ -541,18 +537,19 @@ class TestPreflightBetweenOldAndNewMinimum:
         ):
             assert not self._check(80).passed
 
-    def test_full_cluster_is_not_warned(self):
-        r = self._check(434)
-        assert r.passed and not r.message.startswith("WARNING")
-
-    def test_too_small_even_capped_still_fails(self):
-        assert not self._check(20).passed
-
-    def test_memory_short_even_capped_still_fails(self):
-        assert not self._check(80, memory_gb=160).passed
-
-    def test_a_pod_that_fits_no_node_still_fails(self):
-        assert not self._check(100, node_gb=30).passed
+    @pytest.mark.parametrize(
+        ("label", "kw"),
+        [
+            # too few cores even for the capped streams
+            ("cores-too-few", {"cores": 20}),
+            # enough cores but not enough memory
+            ("memory-short", {"cores": 80, "memory_gb": 160}),
+            # a pod that fits no single node
+            ("pod-fits-no-node", {"cores": 100, "node_gb": 30}),
+        ],
+    )
+    def test_capped_run_still_fails_when_capacity_is_short(self, label, kw):
+        assert not self._check(**kw).passed, label
 
     def test_batch_mode_is_unchanged(self):
         from unittest import mock

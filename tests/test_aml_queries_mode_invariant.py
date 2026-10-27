@@ -1,8 +1,9 @@
-"""FQ4 and IQ3 answer the same on batch and continuous silver, on DuckDB.
+"""FQ4 and IQ3 answer the same on batch and continuous silver.
 
-The Spark tier (tests/spark/test_aml_queries_mode_invariant_spark.py) runs
-the product's batch and micro-batch write paths. This test runs the same
-two queries on DuckDB, one of the engines the benchmark runs them on,
+The benchmark runs AML queries on Trino only; the engine proof is in the
+Spark tier (tests/spark/test_aml_queries_mode_invariant_spark.py), which runs
+the product's batch and micro-batch write paths. This is a fast in-process
+check of the queries' SQL semantics: it runs the same two queries on DuckDB
 against tables laid out the two ways by hand:
 
 * batch: one edge row per (source, target) pair; statements numbered and
