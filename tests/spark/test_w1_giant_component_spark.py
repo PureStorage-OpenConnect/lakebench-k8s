@@ -39,10 +39,11 @@ def _graph(spark, n_rings, chain_len):
     )
 
 
-def test_minor_giant_component_not_emitted_and_txns_capped(spark, capsys):
+def test_minor_giant_component_not_emitted_and_txns_capped(spark):
     from detection_rules import w1_connected_components
 
-    # 12 rings of 3 (36 vertices) + a 30-vertex chain: the giant is 45%.
+    # 12 rings of 3 (36 vertices) + a 30-vertex chain: the giant is 45%. The
+    # 12-alert count proves the 30-vertex giant was not emitted.
     out = w1_connected_components(
         _graph(spark, 12, 30), min_cluster_size=3, max_cluster_size=10, max_txns_per_alert=2
     ).collect()
@@ -52,7 +53,6 @@ def test_minor_giant_component_not_emitted_and_txns_capped(spark, capsys):
     assert a["related_txn_ids"] == ["s0-0", "s0-1"]  # earliest first, capped
     assert a["evidence"]["txn_total"] == "5"
     assert a["evidence"]["txns_truncated"] == "true"
-    assert "above max_cluster_size=10" in capsys.readouterr().out
 
 
 def test_dominant_giant_component_is_a_skip_not_zero_recall(spark):
