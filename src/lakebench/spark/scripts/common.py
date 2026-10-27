@@ -844,6 +844,16 @@ def _hadoop_fs(spark, uri):
     return fs, jvm.org.apache.hadoop.fs.Path(target)
 
 
+def _delete_uri(spark, path: str, who: str) -> None:
+    """Recursively delete ``path`` through the Hadoop FileSystem. Best effort."""
+    try:
+        fs, p = _hadoop_fs(spark, path)
+        if fs.exists(p):
+            fs.delete(p, True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[{who}] cleanup of {path} failed: {e}")
+
+
 def _delete_children(spark, location, keep=()):
     """Delete every child of ``location`` except the names in ``keep``."""
     fs, path = _hadoop_fs(spark, location)
