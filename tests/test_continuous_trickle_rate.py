@@ -352,11 +352,14 @@ def _metrics(pb):
     return pm
 
 
-def test_report_does_not_fail_a_trickle_bound_run():
+def test_report_does_not_fail_a_trickle_bound_or_unmeasured_silver_run():
     from lakebench.metrics.verdict import compute_badge_status
 
-    _, reasons, _ = compute_badge_status(_metrics(_live_s100()))
-    assert not any("Ingest ratio" in r for r in reasons), reasons
+    # A trickle-bound run, and a run whose silver is unmeasured, are not failed
+    # on the ingest ratio.
+    for label, pb in [("trickle-bound", _live_s100()), ("silver-unmeasured", _silver_unmeasured())]:
+        _, reasons, _ = compute_badge_status(_metrics(pb))
+        assert not any("Ingest ratio" in r for r in reasons), (label, reasons)
 
 
 def test_report_still_fails_a_stalled_run():
@@ -369,13 +372,6 @@ def test_report_still_fails_a_stalled_run():
     silver_behind = _live_s100(silver_committed=40_000_000)
     _, reasons, _ = compute_badge_status(_metrics(silver_behind))
     assert any("silver did not keep pace" in r for r in reasons)
-
-
-def test_report_does_not_fail_a_run_whose_silver_is_unmeasured():
-    from lakebench.metrics.verdict import compute_badge_status
-
-    _, reasons, _ = compute_badge_status(_metrics(_silver_unmeasured()))
-    assert not any("Ingest ratio" in r for r in reasons), reasons
 
 
 # -- the parser path: driver log text to the verdict -----------------------------
@@ -486,18 +482,11 @@ def test_bronze_log_gap_refuses_to_score_ingest_ratio():
 
 
 def test_complete_bronze_log_scores_normally():
-    """No gap (or an unmeasured gap) is a complete capture: the guard stays out
-    of the way and ingest_ratio keeps its value."""
-    pb = _live_s100(bronze_max_batch_id_gap=0)
-    assert pb.bronze_log_incomplete is False
-    assert pb.ingest_ratio == pytest.approx(0.1875, abs=1e-4)
-
-
-def test_scattered_empty_batches_do_not_false_trip():
-    """Bronze empty/replay batches log an id but no 'writing' line, so a
-    perfectly complete log can be sparse: many gaps of 1, never one long run.
-    The largest run is what the guard reads, so a sparse log still scores. A
-    gap of 1 (an empty batch between two committed ones) must not trip it."""
-    pb = _live_s100(bronze_max_batch_id_gap=1)
-    assert pb.bronze_log_incomplete is False
-    assert pb.ingest_ratio == pytest.approx(0.1875, abs=1e-4)
+    """No gap, or a gap of 1 (an empty/replay batch between two committed ones),
+    is still a complete capture: the guard stays out of the way and
+    ingest_ratio keeps its value. The guard reads the largest run, so a sparse
+    log of single gaps still scores."""
+    for gap in (0, 1):
+        pb = _live_s100(bronze_max_batch_id_gap=gap)
+        assert pb.bronze_log_incomplete is False, gap
+        assert pb.ingest_ratio == pytest.approx(0.1875, abs=1e-4), gap

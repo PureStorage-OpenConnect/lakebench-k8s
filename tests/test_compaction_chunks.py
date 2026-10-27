@@ -80,11 +80,23 @@ def test_compaction_plan_chunks_at_90():
         assert sum(late in _covered(stmt, [late]) for stmt in plan) == 1, late
 
 
-def test_ninety_partitions_or_fewer_keep_one_unchunked_statement():
+def test_unchunked_cases():
+    silver_single = [f"ALTER TABLE {SILVER} EXECUTE optimize(file_size_threshold => '128MB')"]
+    gold_single = [f"ALTER TABLE {GOLD} EXECUTE optimize(file_size_threshold => '128MB')"]
+    # 90 partitions or fewer keep one unchunked statement; 91 chunk.
     for n in (0, 1, 90):
-        plan = build_compaction_plan("trino", "lakehouse", SILVER, "128MB", _days(n))
-        assert plan == [f"ALTER TABLE {SILVER} EXECUTE optimize(file_size_threshold => '128MB')"], n
+        assert build_compaction_plan("trino", "lakehouse", SILVER, "128MB", _days(n)) == (
+            silver_single
+        ), n
     assert len(build_compaction_plan("trino", "lakehouse", SILVER, "128MB", _days(91))) == 2
+    # A table not on the partition map.
+    assert build_compaction_plan("trino", "lakehouse", GOLD, "128MB", _days(366)) == gold_single
+    # Partitions not read (or the read failed).
+    assert len(build_compaction_plan("trino", "lakehouse", SILVER, "128MB", None)) == 1
+    # Spark Thrift's rewrite_data_files has no writer limit.
+    assert build_compaction_plan("spark-thrift", "lakehouse", SILVER, "128MB", _days(366)) == [
+        f"CALL lakehouse.system.rewrite_data_files(table => '{SILVER}')"
+    ]
 
 
 def test_null_partition_gets_its_own_statement():
@@ -96,19 +108,6 @@ def test_null_partition_gets_its_own_statement():
     assert [p.split(" WHERE ")[1] for p in plan] == [
         "interaction_date IS NOT NULL",
         "interaction_date IS NULL",
-    ]
-
-
-def test_unchunked_cases():
-    days = _days(366)
-    single = [f"ALTER TABLE {GOLD} EXECUTE optimize(file_size_threshold => '128MB')"]
-    # A table not on the partition map.
-    assert build_compaction_plan("trino", "lakehouse", GOLD, "128MB", days) == single
-    # Partitions not read (or the read failed).
-    assert len(build_compaction_plan("trino", "lakehouse", SILVER, "128MB", None)) == 1
-    # Spark Thrift's rewrite_data_files has no writer limit.
-    assert build_compaction_plan("spark-thrift", "lakehouse", SILVER, "128MB", days) == [
-        f"CALL lakehouse.system.rewrite_data_files(table => '{SILVER}')"
     ]
 
 

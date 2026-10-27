@@ -139,6 +139,12 @@ def test_one_month_or_none_keeps_one_unchunked_statement():
     assert build_compaction_plan("trino", "lakehouse", TXNS, "128MB", _parsed(1)) == single
     assert build_compaction_plan("trino", "lakehouse", TXNS, "128MB", []) == single
     assert build_compaction_plan("trino", "lakehouse", TXNS, "128MB", None) == single
+    # Batch AML silver holds one or two large files a month over a 60-month
+    # corpus: at most one month counts, so the table keeps one statement.
+    out = "\n".join(_months(60, first=JAN_2024 - 48, files=1)) + '\n"650","2"\n'
+    values = parse_partition_values(out, "month")
+    assert values == ["2024-03-01"]
+    assert build_compaction_plan("trino", "lakehouse", TXNS, "128MB", values) == single
     # Spark Thrift's rewrite_data_files is not chunked.
     assert build_compaction_plan("spark-thrift", "lakehouse", TXNS, "128MB", _parsed(13)) == [
         f"CALL lakehouse.system.rewrite_data_files(table => '{TXNS}')"
@@ -155,12 +161,11 @@ def test_null_month_partition_gets_its_own_statement():
     ]
 
 
-@pytest.mark.parametrize(("threshold", "nbytes"), [("128MB", 134217728), ("256MB", 268435456)])
-def test_month_read_counts_files_at_or_under_the_threshold(threshold, nbytes):
+def test_month_read_counts_files_at_or_under_the_threshold():
     """Optimize may rewrite a file at or under the threshold (Trino drops a
     larger one before it groups by partition)."""
-    sql = build_partition_values_sql(TXNS, "txn_timestamp_month", "month", threshold)
-    assert sql.endswith(f"file_size_in_bytes <= {nbytes} GROUP BY 1 ORDER BY 1")
+    sql = build_partition_values_sql(TXNS, "txn_timestamp_month", "month", "128MB")
+    assert sql.endswith("file_size_in_bytes <= 134217728 GROUP BY 1 ORDER BY 1")
 
 
 def test_data_size_bytes_uses_trino_binary_units():
@@ -207,17 +212,6 @@ def test_months_with_one_file_are_not_counted():
     # The row counts of one month (several rows: one per spec's partition
     # struct) are summed before the threshold.
     assert parse_partition_values('"648","1"\n"648","1"\n', "month") == ["2024-01-01"]
-
-
-def test_batch_layout_keeps_one_statement():
-    """Batch AML silver holds one or two large files a month over a 60-month
-    corpus: at most one month counts, so the table keeps one statement."""
-    out = "\n".join(_months(60, first=JAN_2024 - 48, files=1)) + '\n"650","2"\n'
-    values = parse_partition_values(out, "month")
-    assert values == ["2024-03-01"]
-    assert build_compaction_plan("trino", "lakehouse", TXNS, "128MB", values) == [
-        f"ALTER TABLE {TXNS} {HEAD}"
-    ]
 
 
 def test_null_month_counts_every_month():

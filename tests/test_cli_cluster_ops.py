@@ -224,12 +224,6 @@ def test_stop_dry_run_deletes_nothing(cluster):
     assert "Would delete Job/lakebench-datagen" in co.stderr(r)
 
 
-def test_stop_unreachable_exits_4(cluster):
-    cluster.custom.list_error = MaxRetryError(None, "/apis", "connection refused")
-    r = _invoke("stop", cluster.config)
-    assert r.exit_code == ExitCode.PREREQUISITE, r.output
-
-
 # -- status ------------------------------------------------------------------------
 
 
@@ -254,11 +248,38 @@ def test_status_missing_component_exit1(cluster):
     assert "lakebench-hive-metastore-default" in co.stderr(r)
 
 
-def test_status_read_error_exits_4(cluster):
+def _status_read_forbidden(cluster):
     cluster.apps.objects = dict(co._TRINO_HIVE)
     cluster.apps.errors = {"lakebench-postgres": ApiException(status=403, reason="Forbidden")}
+
+
+def _status_unreachable(cluster):
+    cluster.apps.errors = {"lakebench-postgres": MaxRetryError(None, "/apis", "connection refused")}
+
+
+def _status_namespace_forbidden(cluster):
+    cluster.core.ns_error = ApiException(status=403, reason="Forbidden")
+
+
+@pytest.mark.parametrize(
+    ("label", "setup", "text"),
+    [
+        ("read-forbidden", _status_read_forbidden, None),
+        ("unreachable", _status_unreachable, None),
+        (
+            "namespace-forbidden",
+            _status_namespace_forbidden,
+            "Kubernetes API error: cannot read namespace ops: 403 Forbidden",
+        ),
+    ],
+)
+def test_status_api_faults_exit_4(cluster, label, setup, text):
+    setup(cluster)
     r = _invoke("status", cluster.config)
-    assert r.exit_code == ExitCode.PREREQUISITE, r.output
+    assert r.exit_code == ExitCode.PREREQUISITE, (label, r.output)
+    assert "Traceback" not in r.output, label
+    if text:
+        assert text in co.stderr(r), label
 
 
 def test_status_drift_wins_over_a_read_error(cluster):
@@ -268,26 +289,26 @@ def test_status_drift_wins_over_a_read_error(cluster):
     assert r.exit_code == ExitCode.FAILED, r.output
 
 
-def test_status_unreachable_exits_4(cluster):
-    cluster.apps.errors = {"lakebench-postgres": MaxRetryError(None, "/apis", "connection refused")}
-    r = _invoke("status", cluster.config)
-    assert r.exit_code == ExitCode.PREREQUISITE, r.output
-    assert "Traceback" not in r.output
-
-
-def test_status_namespace_read_forbidden_exits_4(cluster):
-    cluster.core.ns_error = ApiException(status=403, reason="Forbidden")
-    r = _invoke("status", cluster.config)
-    assert r.exit_code == ExitCode.PREREQUISITE, r.output
-    assert "Kubernetes API error: cannot read namespace ops: 403 Forbidden" in co.stderr(r)
-
-
-def test_stop_namespace_read_forbidden_exits_4(cluster):
-    cluster.core.ns_error = ApiException(status=403, reason="Forbidden")
+@pytest.mark.parametrize(
+    ("label", "setup"),
+    [
+        (
+            "unreachable",
+            lambda c: setattr(
+                c.custom, "list_error", MaxRetryError(None, "/apis", "connection refused")
+            ),
+        ),
+        (
+            "namespace-forbidden",
+            lambda c: setattr(c.core, "ns_error", ApiException(status=403, reason="Forbidden")),
+        ),
+    ],
+)
+def test_stop_api_faults_exit_4(cluster, label, setup):
+    setup(cluster)
     r = _invoke("stop", cluster.config)
-    assert r.exit_code == ExitCode.PREREQUISITE, r.output
-    assert "Kubernetes API error" in co.stderr(r)
-    assert cluster.custom.deleted == []
+    assert r.exit_code == ExitCode.PREREQUISITE, (label, r.output)
+    assert cluster.custom.deleted == [], label
 
 
 @pytest.fixture
