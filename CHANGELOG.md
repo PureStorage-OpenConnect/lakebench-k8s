@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - **`lakebench query --format json` and `--format csv` now parse the Trino and DuckDB result correctly, instead of taking the first data row as column names (json) or writing each comma-separated line into a single cell (csv).** The two formats and the interactive REPL split every result line on tabs, but only the Trino and DuckDB executors return comma-separated rows with no header, so `--format json` reported one fewer row than ran and keyed every row by the first row's values, and `--format csv` emitted one quoted cell per line. All three now go through the same row reader as `--json`, which builds objects only for the Spark Thrift engine (its output names its columns) and emits list rows for Trino and DuckDB. The `--json` document and the Spark Thrift output are unchanged.
+- The Customer 360 SIMPLE silver full build now writes with the configured `distribution_mode` and fanout, as every other silver write path already did, instead of a hardcoded hash distribution with no fanout. At the default (`hash`, no fanout) the written table and every recorded metric are unchanged; only a run that set `distribution_mode: none` is affected, where the first append already flipped the table to `none` and the full build is now consistent from the start.
+- The Customer 360 continuous-reset preflight now compares landing-zone directories through the shared URI normaliser. On the `s3a://` paths a deployment uses this is identical to before; it differs only on local `file:/x` versus `file:///x` spellings, which it now treats as the same directory and keeps rather than deletes. No recorded value, alert or count depends on this.
 
 ## [1.7.13] - 2026-10-24
 
