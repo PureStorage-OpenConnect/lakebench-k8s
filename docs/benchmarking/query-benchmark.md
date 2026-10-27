@@ -43,7 +43,7 @@ Example: 8 queries in 40 s give (8 / 40) x 3600 = 720 QpH.
 
 ## Cache modes
 
-`hot` or `cold` (`lakebench benchmark --cold`; `run` uses hot). Cold flushes the engine's metadata cache (`CALL iceberg.system.flush_metadata_cache()` on Trino, equivalents on Spark Thrift and DuckDB): before each query in power mode, once before all streams in throughput mode.
+`hot` or `cold` (`lakebench benchmark --cold`; `run` uses hot). Cold flushes the engine's metadata cache (`CALL lakehouse.system.flush_metadata_cache()` on Trino, equivalents on Spark Thrift and DuckDB): before each query in power mode, once before all streams in throughput mode.
 
 ## In-stream rounds
 
