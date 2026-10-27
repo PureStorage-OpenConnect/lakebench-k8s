@@ -192,27 +192,11 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "max_executors": 10,
         "base_partitions": 32,
     },
-    # The reference detector took silver-build's profile through a fallback
-    # that is now an error (MissingSizingProfile); this is a literal copy of
-    # it, so its manifest does not change.
-    "score-financial-reference": {
-        "driver_cores": 4,
-        "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
-        "executor_cores": 4,
-        "executor_memory": "48g",
-        "executor_memory_overhead": "12g",
-        # 300Gi (was 150Gi). At scale 100, live UAT hit "No space left
-        # on device" mid-silver-build: c360's window + wide-join shuffle
-        # spill exceeds 150Gi per executor once the max_executors cap
-        # (28) means data-per-executor stops decreasing with scale.
-        # Portworx px-csi-scratch is repl=1 (ephemeral), so growing this
-        # only costs bare block storage. Do not shrink.
-        "scratch_size": "300Gi",
-        "base_executors": 8,  # scale <= 10
-        "executors_per_100_scale": 12,  # add 12 per 100 scale units
-        "max_executors": _MAX_EXECUTORS_SAFE,
-        "base_partitions": 64,
-    },
+}
+# The reference detector runs on silver-build's profile with a fixed
+# scratch size.
+_JOB_PROFILES["score-financial-reference"] = {
+    k: v for k, v in _JOB_PROFILES["silver-build"].items() if k != "scratch_gib_per_scale"
 }
 
 
@@ -535,8 +519,6 @@ def balance_executor_need(
 #: profile's size is above the executor cap (fewer, larger pods put less load
 #: on the Kubernetes API).
 _EXECUTOR_CORE_STEPS = (8, 16)
-#: The streaming jobs whose executor size the config may set.
-_EXECUTOR_STAGE_JOBS = ("bronze-ingest", "silver-stream", "gold-refresh")
 
 
 def _executor_cores_override(job_type: str, config: Any | None) -> int | None:
@@ -729,7 +711,7 @@ def streaming_executor_count(
         if base is not None:
             profile = _auto_shape(job_type, base, config, sc, sch)
     need = balance_executor_need(job_type, profile, config, scale=sc, schema=sch)
-    n = max(_scale_executor_count(profile, sc), need)
+    n = max(executor_count(profile, sc), need)
     return min(n, int(profile.get("max_executors", _MAX_EXECUTORS_SAFE)))
 
 
@@ -803,8 +785,6 @@ EXECUTOR_OVERRIDE_FIELDS: dict[str, tuple[str, str]] = {
     "gold-refresh": ("gold_executors", "gold_refresh"),
 }
 
-_STREAMING_JOBS = frozenset({"bronze-ingest", "silver-stream", "gold-refresh"})
-
 
 def stage_key_applies(job_type: str, config: Any) -> bool:
     """Whether the stage key sizes *job_type* in this config's mode.
@@ -816,7 +796,8 @@ def stage_key_applies(job_type: str, config: Any) -> bool:
     from lakebench.config.schema import is_continuous_mode
 
     return not (
-        job_type not in _STREAMING_JOBS and is_continuous_mode(config.architecture.pipeline.mode)
+        job_type not in STREAMING_JOB_TYPES
+        and is_continuous_mode(config.architecture.pipeline.mode)
     )
 
 
@@ -891,25 +872,13 @@ def gold_refresh_checkpoint_uri(cfg) -> str:
 
 
 def get_job_profile(job_type: str, schema_type: str | None = None) -> dict[str, Any] | None:
-    """Return the resource profile for a given job type.
+    """The resource profile of *job_type*, a copy, or None if it is unknown.
 
-    Args:
-        job_type: Job type string (e.g. "bronze-verify", "silver-build").
-        schema_type: Workload schema (e.g. "financial"). When given, the
-            schema's ``_SCHEMA_PROFILE_OVERRIDES`` are merged on top of the base
-            profile, so the returned memory/scratch/executor fields match what
-            the job actually deploys. The metrics/scorecard path MUST pass this
-            or it under-reports AML resources (e.g. bronze-verify as 6Gi when
-            the pod requests 20Gi). Omitting it keeps
-            the c360 base for backward compatibility.
-
-    Returns:
-        Profile dict copy or None if job_type is unknown.
+    The metrics path must pass *schema_type*: without it the Customer 360
+    base is returned and AML resources are under-reported (bronze-verify as
+    6Gi when the pod requests 20Gi).
     """
-    if schema_type is not None:
-        return _resolve_job_profile(job_type, schema_type)
-    profile = _JOB_PROFILES.get(job_type)
-    return dict(profile) if profile else None
+    return _resolve_job_profile(job_type, schema_type)
 
 
 def get_executor_count(job_type: str, scale: float, schema_type: str | None = None) -> int:
@@ -927,14 +896,8 @@ def get_executor_count(job_type: str, scale: float, schema_type: str | None = No
     Returns:
         Expected executor count, or 0 if job_type is unknown.
     """
-    profile = (
-        _resolve_job_profile(job_type, schema_type)
-        if schema_type is not None
-        else _JOB_PROFILES.get(job_type)
-    )
-    if not profile:
-        return 0
-    return _scale_executor_count(profile, scale)
+    profile = _resolve_job_profile(job_type, schema_type)
+    return executor_count(profile, scale) if profile else 0
 
 
 def aml_bronze_verify_timeout_budget(scale: float) -> int:
@@ -1050,7 +1013,7 @@ def _job_requirement(
     """
     profile = (
         stage_profile(job_type, config, scale=scale, schema=schema_type)
-        if job_type in _EXECUTOR_STAGE_JOBS
+        if job_type in STREAMING_JOB_TYPES
         else _resolve_job_profile(job_type, schema_type)
     )
     if not profile:
@@ -1063,7 +1026,7 @@ def _job_requirement(
     executors = (
         streaming_executor_count(job_type, profile, config, scale=scale, schema=schema_type)
         if job_type in _BALANCE_STAGES
-        else _scale_executor_count(profile, scale)
+        else executor_count(profile, scale)
     )
     override = executor_override(job_type, config)
     if override is not None:
@@ -1939,17 +1902,10 @@ def _deps_ready_init(cfg: LakebenchConfig, deps: Any) -> dict[str, Any]:
 REFERENCE_SET_JOB_TYPES: tuple[JobType, ...] = (JobType.SCORE_FINANCIAL_REFERENCE,)
 
 
-# Streaming job types (for conditional manifest logic)
-_STREAMING_JOB_TYPES = frozenset(
-    {
-        JobType.BRONZE_INGEST,
-        JobType.SILVER_STREAM,
-        JobType.GOLD_REFRESH,
-    }
-)
-# The same jobs in data-flow order, upstream first (the concurrent budget
-# grants spare cores in this order).
+# The streaming jobs in data-flow order, upstream first (the concurrent
+# budget grants spare cores in this order).
 _STREAMING_PIPELINE_ORDER = (JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH)
+_STREAMING_JOB_TYPES = frozenset(_STREAMING_PIPELINE_ORDER)
 
 
 class JobState(Enum):
