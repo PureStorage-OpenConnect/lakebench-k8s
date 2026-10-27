@@ -256,7 +256,7 @@ def _namespace_identity(cfg):
         ) from e
 
 
-def _state_path_or_refuse(cfg, config_file: Path) -> str:
+def _state_path_or_refuse(cfg, config_file: Path) -> Path:
     """The deploy state file's path for this config, or exit 4 when the name
     makes it unrecordable."""
     from lakebench.config import deploy_state as ds
