@@ -98,6 +98,8 @@ class TrinoExecutor(PodExecutor):
         self.table_format = table_format
         self.kube_context = kube_context or None
         self._pod: str | None = None
+        # Set once the catalog is found to have no flush procedure.
+        self._flush_unsupported = False
 
     def engine_name(self) -> str:
         return "trino"
@@ -340,8 +342,11 @@ class TrinoExecutor(PodExecutor):
         """Flush the Iceberg metadata cache of this deployment's Trino catalog.
 
         A failed flush is logged, not raised: the round still runs, but warm.
+        A catalog that does not register the procedure (the Iceberg REST
+        catalog, which Polaris deployments use) is reported once and not
+        called again.
         """
-        if self.table_format == "delta":
+        if self.table_format == "delta" or self._flush_unsupported:
             return
         try:
             pod = self._discover_pod()
@@ -364,10 +369,18 @@ class TrinoExecutor(PodExecutor):
                 timeout=30,
             )
             if result.returncode != 0:
-                logger.warning(
-                    "Trino metadata cache flush failed: %s",
-                    summarise_engine_error(result.stderr or ""),
-                )
+                stderr = result.stderr or ""
+                if "Procedure not registered" in stderr:
+                    self._flush_unsupported = True
+                    logger.warning(
+                        "Trino catalog %s has no flush_metadata_cache procedure; "
+                        "cold runs on it keep Trino's metadata cache warm",
+                        self.catalog_name,
+                    )
+                else:
+                    logger.warning(
+                        "Trino metadata cache flush failed: %s", summarise_engine_error(stderr)
+                    )
         except (subprocess.TimeoutExpired, subprocess.SubprocessError):
             logger.warning("Failed to flush Trino metadata cache")
 
