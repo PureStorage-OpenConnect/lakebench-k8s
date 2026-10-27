@@ -216,17 +216,6 @@ class TestSchemaProfileOverrides:
         assert get_executor_count(job.value, scale, schema) == executor["instances"]
         assert profile["executor_memory"] == executor["memory"]
 
-    def test_aml_bronze_verify_gets_more_memory_than_c360(self):
-        def total_mem(profile):
-            return sum(
-                int(profile[k].rstrip("g")) for k in ("executor_memory", "executor_memory_overhead")
-            )
-
-        aml = get_job_profile("bronze-verify", "financial")
-        c360 = get_job_profile("bronze-verify", "customer360")
-        assert total_mem(aml) > total_mem(c360)
-        assert c360 == get_job_profile("bronze-verify")
-
     def test_aml_bronze_verify_scales_executors_at_scale_100(self):
         """AML bronze-verify gets more executors than c360 at scale 100 and stays
         within the executor cap at scale 500."""

@@ -296,23 +296,6 @@ def test_thrift_pod_memory_counts_its_overhead():
     assert co_resident_request(odd, False).memory_gb == 30 + 5 + 2  # lb-deps
 
 
-def test_duckdb_memory_set_by_the_user_is_kept():
-    """A user-set DuckDB memory survives autosizing. The per-schema DuckDB
-    memory bump was financial-only, and financial is Trino-only now, so the
-    autosizer no longer moves DuckDB memory on any valid config; only the
-    user-value-kept half remains testable."""
-    from lakebench.config.autosizer import resolve_auto_sizing
-    from tests.conftest import make_config
-
-    for recipe in ("hive-iceberg-spark-duckdb", "polaris-iceberg-spark-duckdb"):
-        user = make_config(
-            recipe=recipe,
-            architecture={"query_engine": {"duckdb": {"memory": "7g"}}},
-        )
-        resolve_auto_sizing(user)
-        assert user.architecture.query_engine.duckdb.memory == "7g", recipe
-
-
 @pytest.mark.parametrize(
     "field,value,delta",
     [

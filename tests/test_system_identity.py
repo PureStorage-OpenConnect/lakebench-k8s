@@ -385,11 +385,15 @@ def test_unparseable_node_makes_the_inventory_a_gap(cluster) -> None:
 
 
 def test_local_run() -> None:
+    # observe_system: every cluster part is not observed on a local run.
     out = si.observe_system(None, _cfg(), s3_client=_S3(), local=True)
     assert out["type"] == "local"
     assert out["partial"] is True
     for part in si.CLUSTER_PARTS:
         assert out["parts"][part] == {"not_observed": "local run"}
+    # observe_load: the allocatable half is not observed either.
+    load = si.observe_load(None, "mine", local=True)
+    assert load["allocatable"] == {"not_observed": "local run"}
 
 
 def test_reader_bug_is_a_gap_not_a_crash(cluster) -> None:
@@ -509,22 +513,24 @@ def test_load_pod_overhead_counts() -> None:
     assert si.observe_load(k8s, "mine")["cotenant_requested"]["cpu"] == 1.25
 
 
-def test_refused_pod_list_is_not_observed() -> None:
-    k8s, _ = _load_cluster(pod_error=_ApiError(403))
+@pytest.mark.parametrize(
+    ("error_site", "allocatable_observed"),
+    [
+        # a refused pod list leaves allocatable observed but the cotenant half not
+        ("pod_error", True),
+        # a refused node list leaves both halves not observed
+        ("node_error", False),
+    ],
+)
+def test_a_refused_list_leaves_its_half_not_observed(error_site, allocatable_observed) -> None:
+    k8s, _ = _load_cluster(**{error_site: _ApiError(403)})
     out = si.observe_load(k8s, "mine")
-    assert si.is_observed(out["allocatable"])
-    assert out["cotenant_requested"] == {"not_observed": "cluster-wide pod list: forbidden (403)"}
-
-
-def test_refused_node_list_leaves_both_halves_not_observed() -> None:
-    k8s, _ = _load_cluster(node_error=_ApiError(403))
-    out = si.observe_load(k8s, "mine")
-    assert not si.is_observed(out["allocatable"]) and not si.is_observed(out["cotenant_requested"])
-
-
-def test_local_load_is_not_observed() -> None:
-    out = si.observe_load(None, "mine", local=True)
-    assert out["allocatable"] == {"not_observed": "local run"}
+    assert si.is_observed(out["allocatable"]) is allocatable_observed, error_site
+    assert not si.is_observed(out["cotenant_requested"]), error_site
+    if error_site == "pod_error":
+        assert out["cotenant_requested"] == {
+            "not_observed": "cluster-wide pod list: forbidden (403)"
+        }
 
 
 def test_run_samples_land_in_the_inputs_and_the_block(cluster) -> None:

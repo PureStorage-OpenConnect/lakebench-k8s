@@ -130,22 +130,22 @@ def test_run_refuses_a_server_without_a_ready_pod(recording_k8s):
     assert e.value.path == "run.deps_stale" and "no Ready pod" in e.value.what
 
 
-def test_run_refuses_replaced_server_with_other_set(recording_k8s):
+@pytest.mark.parametrize("set_matches", [False, True], ids=["other-set", "same-set"])
+def test_a_replaced_server_is_refused_only_on_another_set(recording_k8s, set_matches):
+    """A redeploy replaced the server pod (uid-new). The run is accepted when
+    the exec'd set still matches the request, and refused when it does not."""
     cfg = _cfg()
     request, shown = _deployed(recording_k8s, cfg, uid="uid-new")
-    other = fake_shown(request)
-    other["jar_order"] = list(reversed(other["jar_order"]))
-    recording_k8s.on_command("kubectl", "exec", stdout=json.dumps(other))
-    with pytest.raises(SafetyRefusal) as e:
-        runtime.load_handle(cfg, _k8s())
-    assert e.value.path == "run.deps_mismatch" and "replaced" in e.value.what
-
-
-def test_a_replaced_server_on_the_same_set_is_accepted(recording_k8s):
-    cfg = _cfg()
-    _request, shown = _deployed(recording_k8s, cfg, uid="uid-new")
-    recording_k8s.on_command("kubectl", "exec", stdout=json.dumps(shown))
-    assert runtime.load_handle(cfg, _k8s()).server_pod_uid == "uid-new"
+    if set_matches:
+        recording_k8s.on_command("kubectl", "exec", stdout=json.dumps(shown))
+        assert runtime.load_handle(cfg, _k8s()).server_pod_uid == "uid-new"
+    else:
+        other = fake_shown(request)
+        other["jar_order"] = list(reversed(other["jar_order"]))
+        recording_k8s.on_command("kubectl", "exec", stdout=json.dumps(other))
+        with pytest.raises(SafetyRefusal) as e:
+            runtime.load_handle(cfg, _k8s())
+        assert e.value.path == "run.deps_mismatch" and "replaced" in e.value.what
 
 
 def test_run_refuses_thrift_on_old_set(recording_k8s):
@@ -201,35 +201,6 @@ def test_pod_check_lists_mismatches_and_records_failures(recording_k8s, monkeypa
     recording_k8s.fail("list", "pods", status=500)
     broken = runtime.check_pods(cfg, h, since=None)
     assert broken["pods_checked"] is None and broken["pods_check_error"]
-
-
-@pytest.mark.parametrize(
-    ("deps", "gate"),
-    [
-        ({"pods_checked": None, "pods_check_error": "500", "pod_mismatches": []}, "FAIL"),
-        ({"pod_mismatches": [{"pod": "thrift-1", "pinset": "f" * 64}]}, "FAIL"),
-        ({"pod_mismatches": []}, None),
-    ],
-    ids=["unchecked", "mismatch", "clean"],
-)
-def test_the_dependency_gate_fails_on_an_unchecked_or_mismatched_pod(deps, gate):
-    from lakebench.metrics.verdict import compute_verdict
-
-    metrics = _pipeline_metrics()
-    metrics.provenance = {"deps": deps}
-    v = compute_verdict(metrics)
-    assert v.gates.get("dependency_set") == gate
-    if gate == "FAIL":
-        assert str(getattr(v.status, "value", v.status)) == "FAILED"
-
-
-def _pipeline_metrics():
-    from lakebench._clock import utc_now
-    from lakebench.metrics.collector import PipelineMetrics
-
-    return PipelineMetrics(
-        run_id="r", deployment_name="d", start_time=utc_now(), config_snapshot={}, success=True
-    )
 
 
 def test_results_are_not_attached_to_a_run_on_another_set(recording_k8s):

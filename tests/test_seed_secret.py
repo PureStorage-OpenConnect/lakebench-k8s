@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -503,30 +502,24 @@ def test_seed_file_must_be_owner_only(tmp_path):
         g.read_seed_file(f)
 
 
-def test_registered_look_refuses_a_seed_on_the_command_line(tmp_path):
-    corpus = tmp_path / "c"
-    corpus.mkdir()
-    r = subprocess.run(
+def test_registered_look_refuses_a_seed_on_the_command_line(monkeypatch, tmp_path, capsys):
+    rc, seen = _run_gate(
+        monkeypatch,
+        tmp_path,
         [
-            sys.executable,
-            str(REPO / "scripts/aml_gate.py"),
-            str(corpus),
             "--registered",
             "evaluation",
             "--seed",
             "7777",
             "--out",
             str(tmp_path / "o.json"),
-            "--generator-image",
-            "repo@sha256:" + "0" * 64,
+            *LOOK,
         ],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "PYTHONPATH": str(REPO / "src")},
-        timeout=120,
     )
-    assert r.returncode == 1
-    assert "--seed-file" in r.stderr and "never from --seed" in r.stderr
+    err = capsys.readouterr().err
+    assert rc == 1 and "seed" not in seen
+    assert "--seed-file" in err and "never from --seed" in err
+    assert _no_seed_in(err)
 
 
 def _run_gate(monkeypatch, tmp_path, argv, stop_at="predictions"):

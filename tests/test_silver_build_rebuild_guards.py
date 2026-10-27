@@ -75,14 +75,21 @@ class _Df:
 BASE = "s3a://lb-bronze/customer/interactions/"
 
 
-def test_later_cycle_rebuild_without_its_own_files_refuses():
-    """Every row would be tagged 0; a retry would then append the cycle twice."""
-    df = _Df([BASE + "part-000000.parquet", BASE + "part-c001-000000.parquet"])
-    with pytest.raises(_Abort, match="no bronze file is named part-c002-"):
-        _tag_batch()(df, 2, False)
-
-
-def test_cycle_one_is_not_satisfied_by_cycle_ten():
-    df = _Df([BASE + "part-000000.parquet", BASE + "part-c010-000000.parquet"])
-    with pytest.raises(_Abort):
-        _tag_batch()(df, 1, False)
+@pytest.mark.parametrize(
+    ("files", "cycle", "match"),
+    [
+        # a later-cycle rebuild with none of its own files: every row would be
+        # tagged 0 and a retry would then append the cycle twice
+        (
+            ["part-000000.parquet", "part-c001-000000.parquet"],
+            2,
+            "no bronze file is named part-c002-",
+        ),
+        # cycle 1 is not satisfied by cycle 10's files
+        (["part-000000.parquet", "part-c010-000000.parquet"], 1, ""),
+    ],
+)
+def test_rebuild_refuses_when_it_cannot_tag_its_cycle(files, cycle, match):
+    df = _Df([BASE + f for f in files])
+    with pytest.raises(_Abort, match=match or None):
+        _tag_batch()(df, cycle, False)

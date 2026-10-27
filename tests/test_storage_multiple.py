@@ -418,11 +418,18 @@ def test_too_many_snapshots_skip_the_retained_read():
     assert _row(out, "silver.txn")["separable"] is False
 
 
-def test_time_budget_stops_further_statements():
+def test_the_budget_clock_stops_statements_and_bounds_the_listing():
+    # The budget runs out across statements: further ones are not measured.
     ticks = iter(range(0, 10_000, 100))
     out, _ = _measure(clock=lambda: float(next(ticks)), budget_seconds=250)
     assert out["budget_spent"].startswith("the 250 s budget ran out")
     assert any("time budget" in (t.get("not_measured") or "") for t in out["tables"])
+
+    # The same clock also bounds the listing: a listing past the budget is a
+    # TimeoutError on its bucket.
+    ticks = iter([0.0] + [1000.0] * 100)
+    out, _ = _measure(clock=lambda: next(ticks), budget_seconds=600)
+    assert _listing_errors(out)["lb-bronze"] == "TimeoutError"
 
 
 def test_partial_listing_yields_no_multiple():
@@ -452,12 +459,6 @@ def test_partial_listing_yields_no_multiple():
     assert _listing_errors(out) == {"lb-silver": "OSError"}
     assert _bucket(out, "lb-silver")["physical_bytes"] is None
     assert out["total"]["tables_measured"] == 2 and out["total"]["tables"] == 3
-
-
-def test_budget_bounds_the_listing():
-    ticks = iter([0.0] + [1000.0] * 100)
-    out, _ = _measure(clock=lambda: next(ticks), budget_seconds=600)
-    assert _listing_errors(out)["lb-bronze"] == "TimeoutError"
 
 
 def test_stage_only_run_is_not_measured():

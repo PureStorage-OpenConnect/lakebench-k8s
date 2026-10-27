@@ -52,20 +52,13 @@ def _assert_handlers_restored(sentinel) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "scenario, stage, how",
-    [
-        ("batch_c360", "silver-build", "SIGINT"),
-        ("batch_c360", "silver-build", "raise"),
-        # Financial scoring is a synchronous query, not an interruptible
-        # SparkApplication, so there is no scoring stage to interrupt.
-    ],
-)
-def test_interrupt_batch_seals_interrupted(
-    tmp_path, monkeypatch, sentinel_sigterm, scenario, stage, how
-):
-    """A signal while a stage runs: INTERRUPTED, 130, its app deleted by uid."""
-    trace, rec, record = _run(scenario, tmp_path, monkeypatch, interrupt=(stage, how))
+@pytest.mark.parametrize("how", ["SIGINT", "raise"])
+def test_interrupt_batch_seals_interrupted(tmp_path, monkeypatch, sentinel_sigterm, how):
+    """A signal while a stage runs: INTERRUPTED, 130, its app deleted by uid.
+    The observations never raise either: the datagen prefix is listed once and
+    the record carries the corpus observation and the end load sample."""
+    stage = "silver-build"
+    trace, rec, record = _run("batch_c360", tmp_path, monkeypatch, interrupt=(stage, how))
     assert trace["unscripted"] == []
     assert trace["exit_code"] == 130
     assert record["success"] is False
@@ -87,28 +80,18 @@ def test_interrupt_batch_seals_interrupted(
     assert set(rec.apps) == {f"lakebench-{s[0]}" for s in rec.submits[:-1]}
     # Nothing after the in-flight stage ran; it is recorded as interrupted.
     assert rec.submits[-1][0] == stage
-    if scenario == "batch_c360":  # the AML score stage is not a pipeline job record
-        jobs = record["jobs"]
-        assert jobs[-1]["job_type"] == stage
-        assert jobs[-1]["error_message"] == "interrupted"
-        assert jobs[-1]["success"] is False
-    _assert_handlers_restored(sentinel_sigterm)
-
-
-def test_the_corpus_and_end_load_are_observed_after_an_interrupt(tmp_path, monkeypatch):
-    """The observations never raise: after an interrupt the datagen prefix is
-    listed once and the record carries the corpus observation and the end
-    load sample."""
-    trace, rec, record = _run(
-        "batch_c360", tmp_path, monkeypatch, interrupt=("silver-build", "SIGINT")
-    )
-    assert trace["exit_code"] == 130
+    jobs = record["jobs"]
+    assert jobs[-1]["job_type"] == stage
+    assert jobs[-1]["error_message"] == "interrupted"
+    assert jobs[-1]["success"] is False
+    # The corpus and end-load observations still run after the interrupt.
     assert ["S3", "paginate list_objects_v2", "runchar-bronze", "customer/interactions/"] in [
         c[:4] for c in rec.calls
     ]
     inputs = record["config_snapshot"]["experiment_inputs"]
     assert "corpus_observation" in inputs
     assert "end" in inputs["observed"]["allocatable"]
+    _assert_handlers_restored(sentinel_sigterm)
 
 
 def test_interrupt_batch_generate_keeps_the_finished_datagen_job(

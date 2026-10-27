@@ -63,15 +63,31 @@ def _cov_instances(spec):
     return rows, covered_ids
 
 
-def _base_rows(*, manifest, status, uncoded="0"):
-    """Rows common to a scored run: one designated rule ran, W2."""
-    return {
-        # manifest_guard: (typology_id, seed)
-        "for the assembler's two guards": manifest,
-        "FROM {catalog}.gold.detection_status".replace("{catalog}", "lh"): status,
-        # by_code_meta uncoded/total
-        "CARDINALITY(a.reason_codes)": [[uncoded, "10"]],
+def _scored_rows(**over):
+    """The canned rows of a scored W2 micro_structuring run (one designated
+    rule ran). Every value can be overridden per test; passing a key its value
+    replaces the default, so each test states only what differs."""
+    base = {
+        "for the assembler's two guards": [["micro_structuring_1_0", "43"]],
+        "FROM lh.gold.detection_status": [
+            ["W2_structuring", "run-x", "ran", "micro_structuring", "5", ""],
+        ],
+        "Coverage and covered-recall": _cov_instances({"micro_structuring": (10, 10, 0, 6, 7)})[0],
+        "Per-rule false positives": [["W2_structuring", "20", "5", "30", "40"]],
+        "Global alert counts": [["25", "18"]],
+        "Per-rule chance": [],
+        "an evidence cap cut": [],
+        "MAX(expected_workload)": [["micro_structuring", "W2_structuring"]],
+        "Per-reason-code counts": [
+            ["W2_structuring", "W2_SUB_THRESHOLD_BURST", "20", "18", "6", "16"],
+        ],
+        "CARDINALITY(a.reason_codes)": [["0", "25"]],
+        "Resolve a chunk of subject": [["1001", "1", "1"]],
+        "participant_entity_ids": [["micro_structuring_t_0", "micro_structuring", "1001", "43"]],
+        "detectable_by": [],
     }
+    base.update(over)
+    return base
 
 
 def test_covered_scored_run_mixes_states():
@@ -86,39 +102,24 @@ def test_covered_scored_run_mixes_states():
         }
     )
     exe = FakeExecutor(
-        {
-            "for the assembler's two guards": [
-                ["micro_structuring_1_0", "43"],
-                ["cycle_2_0", "43"],
-                ["random_9_0", "43"],
-            ],
-            "FROM lh.gold.detection_status": [
-                ["W2_structuring", "run-x", "ran", "micro_structuring", "5", ""],
-            ],
-            # coverage_recall: one row per instance (typ_id, typ, is_covered,
-            # no_participant, designated_hit, incidental_hit).
-            "Coverage and covered-recall": _cov_rows,
-            "Per-rule false positives": [["W2_structuring", "20", "5", "30", "40"]],
-            "Global alert counts": [["25", "18"]],
-            "Per-rule chance": [["6", "W2_structuring", "1"]],
-            "an evidence cap cut": [],
-            "MAX(expected_workload)": [
-                ["micro_structuring", "W2_structuring"],
-                ["cycle", "W3_round_tripping"],
-                ["random", "random"],
-            ],
-            "Per-reason-code counts": [
-                ["W2_structuring", "W2_SUB_THRESHOLD_BURST", "20", "18", "6", "16"],
-            ],
-            "CARDINALITY(a.reason_codes)": [["0", "25"]],
-            # subject check chunk + manifest subject rows (typology_id first;
-            # micro_structuring_t_0 is covered, so the covered pass keeps it).
-            "Resolve a chunk of subject": [["1001", "1", "1"]],
-            "participant_entity_ids": [
-                ["micro_structuring_t_0", "micro_structuring", "1001", "43"]
-            ],
-            "detectable_by": [],
-        }
+        _scored_rows(
+            **{
+                "for the assembler's two guards": [
+                    ["micro_structuring_1_0", "43"],
+                    ["cycle_2_0", "43"],
+                    ["random_9_0", "43"],
+                ],
+                # coverage_recall: one row per instance (typ_id, typ,
+                # is_covered, no_participant, designated_hit, incidental_hit).
+                "Coverage and covered-recall": _cov_rows,
+                "Per-rule chance": [["6", "W2_structuring", "1"]],
+                "MAX(expected_workload)": [
+                    ["micro_structuring", "W2_structuring"],
+                    ["cycle", "W3_round_tripping"],
+                    ["random", "random"],
+                ],
+            }
+        )
     )
     rec = sq.score(
         exe.run_tsv,
@@ -152,32 +153,7 @@ def test_covered_scored_run_mixes_states():
 
 
 def test_batch_run():
-    exe = FakeExecutor(
-        {
-            "for the assembler's two guards": [["micro_structuring_1_0", "43"]],
-            "FROM lh.gold.detection_status": [
-                ["W2_structuring", "run-x", "ran", "micro_structuring", "5", ""],
-            ],
-            "Coverage and covered-recall": _cov_instances({"micro_structuring": (10, 10, 0, 6, 7)})[
-                0
-            ],
-            "Per-rule false positives": [["W2_structuring", "20", "5", "30", "40"]],
-            "Global alert counts": [["25", "18"]],
-            "Per-rule chance": [],
-            "an evidence cap cut": [],
-            "MAX(expected_workload)": [["micro_structuring", "W2_structuring"]],
-            "Per-reason-code counts": [
-                ["W2_structuring", "W2_SUB_THRESHOLD_BURST", "20", "18", "6", "16"],
-            ],
-            "CARDINALITY(a.reason_codes)": [["0", "25"]],
-            "Resolve a chunk of subject": [["1001", "1", "1"]],
-            "participant_entity_ids": [
-                ["micro_structuring_t_0", "micro_structuring", "1001", "43"]
-            ],
-            "detectable_by": [],
-            "WHERE is_customer": [["4321"]],
-        }
-    )
+    exe = FakeExecutor(_scored_rows(**{"WHERE is_customer": [["4321"]]}))
     rec = sq.score(
         exe.run_tsv,
         catalog="lh",
@@ -216,23 +192,14 @@ def test_batch_ignores_coverage():
         ["micro_structuring_t_2", "micro_structuring", "0", "0", "0", "0"],
     ]
     exe = FakeExecutor(
-        {
-            "for the assembler's two guards": [["micro_structuring_1_0", "43"]],
-            "FROM lh.gold.detection_status": [
-                ["W2_structuring", "run-x", "ran", "micro_structuring", "5", ""],
-            ],
-            "Coverage and covered-recall": rows,
-            "Per-rule false positives": [["W2_structuring", "20", "5", "30", "40"]],
-            "Global alert counts": [["25", "18"]],
-            "Per-rule chance": [],
-            "an evidence cap cut": [],
-            "MAX(expected_workload)": [["micro_structuring", "W2_structuring"]],
-            "Per-reason-code counts": [],
-            "CARDINALITY(a.reason_codes)": [["0", "25"]],
-            "Resolve a chunk of subject": [],
-            "participant_entity_ids": [],
-            "detectable_by": [],
-        }
+        _scored_rows(
+            **{
+                "Coverage and covered-recall": rows,
+                "Per-reason-code counts": [],
+                "Resolve a chunk of subject": [],
+                "participant_entity_ids": [],
+            }
+        )
     )
     rec = sq.score(
         exe.run_tsv,
@@ -318,25 +285,22 @@ def test_subject_chunking_boundary(monkeypatch):
 
 def test_zero_alerts_fp_rate_none():
     exe = FakeExecutor(
-        {
-            "for the assembler's two guards": [["micro_structuring_1_0", "43"]],
-            "FROM lh.gold.detection_status": [
-                ["W2_structuring", "run-x", "ran", "micro_structuring", "0", ""],
-            ],
-            "Coverage and covered-recall": _cov_instances({"micro_structuring": (10, 0, 0, 0, 0)})[
-                0
-            ],
-            "Per-rule false positives": [],
-            "Global alert counts": [["0", "0"]],
-            "Per-rule chance": [],
-            "an evidence cap cut": [],
-            "MAX(expected_workload)": [["micro_structuring", "W2_structuring"]],
-            "Per-reason-code counts": [],
-            "CARDINALITY(a.reason_codes)": [["0", "0"]],
-            "Resolve a chunk of subject": [],
-            "participant_entity_ids": [],
-            "detectable_by": [],
-        }
+        _scored_rows(
+            **{
+                "FROM lh.gold.detection_status": [
+                    ["W2_structuring", "run-x", "ran", "micro_structuring", "0", ""],
+                ],
+                "Coverage and covered-recall": _cov_instances(
+                    {"micro_structuring": (10, 0, 0, 0, 0)}
+                )[0],
+                "Per-rule false positives": [],
+                "Global alert counts": [["0", "0"]],
+                "Per-reason-code counts": [],
+                "CARDINALITY(a.reason_codes)": [["0", "0"]],
+                "Resolve a chunk of subject": [],
+                "participant_entity_ids": [],
+            }
+        )
     )
     rec = sq.score(
         exe.run_tsv,
