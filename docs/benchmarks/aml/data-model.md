@@ -3,13 +3,14 @@
 ## 2. Data model
 
 - All tables are Iceberg; the AML workload refuses Delta at config load.
-- Every table is format-version 2, snappy, metadata delete-after-commit, 50
-  previous metadata versions.
+- Every table is format-version 2 with metadata delete-after-commit and 50
+  previous metadata versions. All but `bronze.manifest`, `bronze.accounts`
+  and a CTAS-registered bronze table also set snappy.
 - No table declares a primary key; the keys below are logical.
 
-Row counts marked recorded were measured in one batch run at each scale (n=1,
-at that run's seed); counts marked formula follow from the scale. Bronze and
-everything downstream move with the seed through the screening track
+Row counts marked recorded come from one batch run per scale (n=1); counts
+marked formula follow from the scale. Bronze and downstream counts vary with
+the seed through the number of screening rows
 ([3.2](generation.md#32-scale-factor)).
 
 ### 2.1 Raw corpus (S3, written by the generator)
@@ -53,6 +54,10 @@ depends on the seed.
 |---|---|---|---|---|
 | `architecture.tables.bronze` (default `default.bronze_raw`) | one payment, schema inferred from the Parquet | unpartitioned (zero-copy `add_files`, or a CTAS fallback) | 26,671,867 | 266,718,594 |
 | `bronze.manifest` | one planted instance, CTAS of the manifest Parquet | unpartitioned | 7,285 | 73,083 |
+| `bronze.accounts` | one account of the generator's account master: its `holder_entity_id` and `iban`, CTAS from `account.parquet` | unpartitioned | not recorded | not recorded |
+
+The scoring statements read `bronze.accounts` to map a planted participant's
+generator id to its silver entity key through the account IBAN.
 
 In continuous mode the bronze table gains `ingest_ts` and the bronze-ingest
 stream fills it.
@@ -77,8 +82,9 @@ stream fills it.
 - `entity_id` is `xxhash64` of the LEI, else a hash of upper(name), country
   and upper(city). `silver.entities` is larger than the party file because
   it includes counterparties outside the modelled world.
-- Silver rows carry the per-run sentinels `_batch_id`, `_stream_id` and
-  `ingest_ts`, excluded from content parity.
+- The sentinels `_batch_id` and `_stream_id` (every silver table except
+  entities, accounts and batch versions) and `ingest_ts` (transactions only)
+  are excluded from content parity.
 - `silver.entity_profiles.profile_updated_ts` is stamped from the silver data
   clock ([3.5](generation.md#35-content-time-range-and-dirty-data)).
 
@@ -88,12 +94,12 @@ stream fills it.
 |---|---|---|---|---|---|
 | `gold.alerts` | one alert from one rule in this run | `alert_id` (per-run UUID) | `months(alert_ts)` | 712,775 | 7,419,581 |
 | `gold.detection_status` | one rule's outcome for the run | (`rule_id`, `run_id`) | none | 9 | 9 |
-| `gold.daily_dashboards` | one (day, rule_id, disposition); one `baseline` row per settlement day | (`day`, `rule_id`, `disposition`) | none | not recorded | not recorded |
+| `gold.daily_dashboards` | one `baseline` row per settlement day (the only rows written) | (`dashboard_date`, `rule_id`, `disposition`, `priority`) | none | not recorded | not recorded |
 | `gold.risk_scores` | one entity scored by W4 | (`entity_id`, `model_id`) | none | not recorded | not recorded |
-| `gold.entity_clusters` | one W1 cluster member | cluster id | none | not recorded (W1 skipped) | not recorded (W1 skipped) |
-| `gold.tm_reconciliation` | one monitoring-completeness ledger row per cycle | (`run_id`, cycle) | none | not recorded | not recorded |
-| `gold.scenario_coverage` | one scenario's coverage row | scenario | none | not recorded | not recorded |
-| `gold.alert_dispositions` | one alert's L1 disposition | alert identity | none | 712,775 | 7,419,581 |
+| `gold.entity_clusters` | one W1 cluster | `cluster_id` | none | not recorded (W1 skipped) | not recorded (W1 skipped) |
+| `gold.tm_reconciliation` | one cycle-ledger line (completeness, exclusion, dq or funnel) | (`run_id`, `cycle`, `section`, `item`) | none | not recorded | not recorded |
+| `gold.scenario_coverage` | one rule, or one planted typology no rule targets | (`rule_id`, `typology`) | none | not recorded | not recorded |
+| `gold.alert_dispositions` | one alert's L1 disposition | `alert_key` | none | 712,775 | 7,419,581 |
 | `gold.cases` | one L2 case (at most one open per customer) | `case_id` | none | 66,177 | 687,407 |
 
 `gold.alerts` columns: `alert_id`, `rule_id`, `rule_version`, `model_id`,

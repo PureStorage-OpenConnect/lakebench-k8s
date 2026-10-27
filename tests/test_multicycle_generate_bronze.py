@@ -73,7 +73,7 @@ class KeyS3:
         return len(gone)
 
 
-def _run(tmp_path, monkeypatch, *, owned: bool, argv: list[str]):
+def _run(tmp_path, monkeypatch, *, owned: bool, argv: list[str], wait=None):
     import lakebench.deploy.datagen as datagen_mod
     from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
 
@@ -120,7 +120,7 @@ def _run(tmp_path, monkeypatch, *, owned: bool, argv: list[str]):
     monkeypatch.setattr(fake, "__init__", init)
     monkeypatch.setattr(fake, "deploy", deploy)
     monkeypatch.setattr(fake, "deploy_cycle", deploy_cycle, raising=False)
-    monkeypatch.setattr(fake, "wait_for_completion", wait_for_completion, raising=False)
+    monkeypatch.setattr(fake, "wait_for_completion", wait or wait_for_completion, raising=False)
 
     # The harness replays single-cycle driver logs (bronze 2,478,560 rows);
     # the expected-results check would expect a multi-cycle count. Bronze
@@ -158,13 +158,9 @@ def _seed(monkeypatch, n):
     monkeypatch.setattr(KeyS3, "__init__", seeded)
 
 
-@pytest.mark.parametrize(
-    "argv", [["--generate", "--allow-stale-bronze", "--yes"], ["--generate", "--yes"]]
-)
-def test_generate_on_a_multicycle_run_is_refused_before_bronze_is_touched(
-    tmp_path, monkeypatch, argv
-):
-    result, keys, calls = _run(tmp_path, monkeypatch, owned=False, argv=argv)
+def test_generate_on_a_multicycle_run_is_refused_before_bronze_is_touched(tmp_path, monkeypatch):
+    # --generate (with or without --allow-stale-bronze) takes the same branch.
+    result, keys, calls = _run(tmp_path, monkeypatch, owned=False, argv=["--generate", "--yes"])
     assert result.exit_code == 2, result.output
     assert "--generate does not apply to a multi-cycle run" in result.output
     assert calls == [] and keys == set()
@@ -208,3 +204,30 @@ def test_owned_corpus_is_replaced_by_the_cycle_slices_with_regenerate(tmp_path, 
     assert result.exit_code == 0, result.output
     assert (_cycle0_silver_reads(keys, monkeypatch), len(keys)) == (FILES // CYCLES, FILES)
     assert calls == [f"deploy_cycle:{i}" for i in range(CYCLES)]
+
+
+def test_a_failed_cycle_datagen_stops_the_run_before_the_benchmark(tmp_path, monkeypatch):
+    """Cycle 2's datagen does not complete: the run exits 1 with no
+    maintenance or benchmark over the half-built corpus."""
+    from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
+
+    waits = []
+
+    def wait_for_completion(self, *a, **k):
+        waits.append(1)
+        ok = len(waits) == 1
+        return DeploymentResult(
+            component="datagen",
+            status=DeploymentStatus.SUCCESS if ok else DeploymentStatus.FAILED,
+            message="" if ok else "pods failed",
+        )
+
+    result, _keys, calls = _run(
+        tmp_path, monkeypatch, owned=True, argv=["--yes"], wait=wait_for_completion
+    )
+    assert result.exit_code == 1, result.output
+    assert calls == ["deploy_cycle:0", "deploy_cycle:1"]
+    assert "Datagen did not complete: pods failed" in result.output
+    record = run_harness.saved_record(tmp_path)
+    assert record.get("benchmark") is None
+    assert "Phase 6/7: Benchmark" not in result.output

@@ -26,7 +26,7 @@ from typing import Annotated, Any
 
 import typer
 
-from lakebench.cli._helpers import console, err_console, esc, print_error
+from lakebench.cli._helpers import console, err_console, esc, manual_capacity, print_error
 from lakebench.cli._json import json_option
 from lakebench.exit_codes import ExitCode
 
@@ -40,12 +40,6 @@ _POLARIS_DEPLOYMENT = "lakebench-polaris"
 
 
 # -- egress -------------------------------------------------------------------
-
-
-def _host(url: str) -> str:
-    from urllib.parse import urlparse
-
-    return urlparse(url).hostname or url
 
 
 def _registry(image: str) -> str:
@@ -142,18 +136,6 @@ def _raw_polaris_secret(path: Path) -> Any:
     return pol.get("client_secret") if isinstance(pol, dict) else None
 
 
-def _deploy_generates_polaris_secret() -> bool:
-    """Whether this tree's deploy generates the Polaris client secret.
-
-    Before per-deployment secrets, ``schema.require_polaris_client_secret``
-    makes deploy refuse a Polaris config with no ``client_secret``; the
-    per-deployment secrets change removes it.
-    """
-    from lakebench.config import schema
-
-    return not hasattr(schema, "require_polaris_client_secret")
-
-
 def polaris_secret_line(cfg: Any, path: Path, k8s: Any = None) -> str | None:
     """Where the Polaris client secret comes from; None for other catalogs.
 
@@ -173,11 +155,6 @@ def polaris_secret_line(cfg: Any, path: Path, k8s: Any = None) -> str | None:
         return f"client secret: from ${{{m.group(1)}}}{partly}"
     if raw:
         return "client secret: set in the config file (plaintext)"
-    if not _deploy_generates_polaris_secret():
-        return (
-            "client secret: not set; deploy refuses a Polaris config without "
-            "architecture.catalog.polaris.client_secret"
-        )
     if k8s is None:
         return (
             "client secret: generated at deploy for a new Polaris "
@@ -212,18 +189,6 @@ def _polaris_deployed(k8s: Any, ns: str) -> bool:
 
 
 # -- one config ---------------------------------------------------------------
-
-
-def _manual_capacity(cores: int, memory_gb: int) -> Any:
-    from lakebench.k8s.client import ClusterCapacity
-
-    return ClusterCapacity(
-        total_cpu_millicores=cores * 1000,
-        total_memory_bytes=memory_gb * 1024**3,
-        node_count=0,
-        largest_node_cpu_millicores=cores * 1000,
-        largest_node_memory_bytes=memory_gb * 1024**3,
-    )
 
 
 def plan_one(
@@ -532,7 +497,7 @@ def plan(
     if (cores is None) != (memory is None):
         print_error("--cores and --memory go together")
         raise typer.Exit(ExitCode.USAGE)
-    capacity = _manual_capacity(cores, memory) if cores is not None and memory else None
+    capacity = manual_capacity(cores, memory) if cores is not None and memory else None
     offline = offline or as_json or capacity is not None
 
     configs, plans, code = [], [], int(ExitCode.OK)

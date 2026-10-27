@@ -16,30 +16,47 @@ def _job(alerts=None, errors=None, tm=_PASS):
     return SimpleNamespace(alerts_by_rule=alerts or {}, rule_errors=errors or {}, tm_invariants=tm)
 
 
-def test_zero_alerts_fails():
-    probs, _ = _aml_batch_gate_problems([_job({"W2": 0})])
-    assert any("zero alerts" in p for p in probs)
-
-
-def test_scoring_total_is_authoritative():
-    probs, _ = _aml_batch_gate_problems([_job({})], {"total_alerts": 0})
-    assert any("zero alerts" in p for p in probs)
-    assert _aml_batch_gate_problems([_job({"W2": 0})], {"total_alerts": 12}) == ([], [])
-
-
-def test_missing_logs_without_an_alert_total_is_a_warning_not_a_failure():
-    probs, warns = _aml_batch_gate_problems([_job({})], {"status": "scored"})
-    assert probs == [] and warns
-
-
 @pytest.mark.parametrize(
-    "scoring", [None, {"mode": "batch", "status": "not_scored", "reason": "refused"}]
+    ("label", "jobs", "scoring", "check"),
+    [
+        # zero alerts in the log fails
+        ("zero-in-log", [_job({"W2": 0})], None, lambda p, w: any("zero alerts" in x for x in p)),
+        # the scoring total overrides the log: zero total fails even if the log is empty
+        (
+            "zero-total",
+            [_job({})],
+            {"total_alerts": 0},
+            lambda p, w: any("zero alerts" in x for x in p),
+        ),
+        # a non-zero scoring total passes even when the log shows zero
+        ("total-wins", [_job({"W2": 0})], {"total_alerts": 12}, lambda p, w: (p, w) == ([], [])),
+        # a scored result with no alert total is a warning, not a failure
+        ("scored-no-total", [_job({})], {"status": "scored"}, lambda p, w: p == [] and bool(w)),
+        # a batch run whose score job produced no result fails, with the reason
+        (
+            "no-scoring",
+            [_job({"W2": 3})],
+            None,
+            lambda p, w: len(p) == 1 and "AML scoring did not produce a result" in p[0],
+        ),
+        (
+            "refused-scoring",
+            [_job({"W2": 3})],
+            {"mode": "batch", "status": "not_scored", "reason": "refused"},
+            lambda p, w: len(p) == 1 and "AML scoring did not produce a result" in p[0],
+        ),
+        # a violated TM invariant is not part of the detection gate
+        (
+            "tm-not-gated",
+            [_job({"W2": 3}, tm={"1": {"sars_le_cases": {"status": "fail", "detail": "x"}}})],
+            {"total_alerts": 3},
+            lambda p, w: p == [],
+        ),
+    ],
 )
-def test_scoring_without_a_result_fails(scoring):
-    """A batch run whose score job failed or refused the corpus has
-    unchecked answers: it fails, with the reason."""
-    probs, _ = _aml_batch_gate_problems([_job({"W2": 3})], scoring)
-    assert len(probs) == 1 and "AML scoring did not produce a result" in probs[0]
+def test_detection_gate_problems(label, jobs, scoring, check):
+    probs, warns = _aml_batch_gate_problems(jobs, scoring)
+    assert check(probs, warns), (label, probs, warns)
 
 
 def test_crashed_rule_fails_even_with_other_alerts():
@@ -59,10 +76,6 @@ def test_no_gold_job_is_not_judged_here():
 
 
 def test_skipped_behavioural_rule_warns():
-    from types import SimpleNamespace
-
-    from lakebench.cli._run import _aml_batch_gate_problems
-
     job = SimpleNamespace(
         rule_errors={},
         alerts_by_rule={"W2_structuring": 5},
@@ -93,12 +106,6 @@ def _tjob(alerts=None, tm=_PASS, status=None, ops=None):
         tm_status=status or {},
         tm_ops=ops,
     )
-
-
-def test_tm_is_not_part_of_the_detection_gate():
-    tm = {"1": {"sars_le_cases": {"status": "fail", "detail": "SARs 5 <= cases 4"}}}
-    probs, _ = _aml_batch_gate_problems([_job({"W2": 3}, tm=tm)], {"total_alerts": 3})
-    assert probs == []
 
 
 def _tm_case(name):
@@ -183,7 +190,7 @@ def test_aml_tm_verdict(case, status, problems):
 
 def test_scoring_count_line_never_calls_every_typology_scored():
     """Live s1 run 2026-09-26 said '15 typologies scored' when 6 were."""
-    from lakebench.cli._run import scoring_count_line
+    from lakebench.cli._aml_post import scoring_count_line
 
     typs = [{"typology_type": f"t{i}", "detection_status": "scored"} for i in range(6)]
     typs += [{"typology_type": f"n{i}", "detection_status": "no_rule"} for i in range(8)]

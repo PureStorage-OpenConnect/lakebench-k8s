@@ -376,6 +376,22 @@ def test_readiness_waits_run_after_the_lease_is_released():
     assert order.index("lease taken") < order.index("lease released") < order.index("wait")
 
 
+def test_confirm_prompt_states_the_watch_list_lease_wait():
+    """The prompt gives the wait a deploy or destroy really has behind an
+    install: three holders at the watch-list hold budget."""
+    from lakebench.deploy import cluster_lock as cl
+    from lakebench.modules.pipeline_engines.spark import operator as op
+
+    prompts: list[str] = []
+    fake = _Fake("spark-operator", [ABSENT])
+    report, _ = _run(
+        {"spark-operator": fake}, ["spark-operator"], confirm=lambda p: prompts.append(p) or False
+    )
+    assert report.code == sc.EXIT_FAILED and fake.installs == []
+    assert cl.WATCH_LIST_LOCK_TIMEOUT_S == 3 * cl.LEASE_MAX_HOLD_S == op._WATCH_LIST_LOCK_TIMEOUT_S
+    assert "up to 37.5 minutes each" in prompts[0]
+
+
 def test_prepare_runs_before_the_lease_and_a_failure_changes_nothing():
     order: list[str] = []
 
@@ -436,8 +452,8 @@ def test_deploy_never_installs_under_fixture():
     observability deploys in the namespace with the kubelet binding skipped
     (ClusterRole absent), and makes no shared mutation."""
     from lakebench.deploy.engine import DeploymentEngine, DeploymentStatus
-    from lakebench.deploy.hive import HiveDeployer
     from lakebench.deploy.observability import ObservabilityDeployer
+    from lakebench.modules.catalogs.hive.deployer import HiveDeployer
 
     cfg = make_config(name=NS, observability={"enabled": True})
     with recording(NS) as rec:
@@ -615,10 +631,6 @@ def _seed_operator_not_ready(rec):
 
 def _seed_leftover_spark_crd(rec):
     rec.add_crd("sparkapplications", "sparkoperator.k8s.io", "SparkApplication")
-
-
-def _seed_observability_only(rec):
-    _seed_observability(rec)
 
 
 def _seed_partial_stackable(rec):

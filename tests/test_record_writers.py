@@ -197,6 +197,100 @@ def test_record_kind_round_trips():
     assert (back.record_kind, back.parent_run_id) == ("benchmark", PARENT)
 
 
+def _filled(cls, **fixed):
+    """An instance of *cls* with every field set to a non-default value."""
+    import dataclasses
+    from datetime import datetime, timedelta, timezone
+
+    t0 = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    kw = {}
+    for i, f in enumerate(dataclasses.fields(cls), start=1):
+        t = str(f.type)
+        if f.name in fixed:
+            kw[f.name] = fixed[f.name]
+        elif "datetime" in t:
+            kw[f.name] = t0 + timedelta(seconds=i)
+        elif t.startswith("bool"):
+            kw[f.name] = True
+        elif t.startswith("int"):
+            kw[f.name] = i + 1
+        elif t.startswith("float"):
+            kw[f.name] = i + 0.5
+        elif t.startswith("str"):
+            kw[f.name] = f"v{i}"
+        elif t.startswith("list[dict"):
+            kw[f.name] = [{"k": i}]
+        elif t.startswith("dict"):
+            kw[f.name] = {"k": {"v": float(i)}}
+    return cls(**kw)
+
+
+@pytest.mark.parametrize("mode", ["batch", "sustained"])
+def test_pipeline_benchmark_round_trips_every_field(mode):
+    """to_dict, load, to_dict again: every stage and score field survives, so a
+    benchmark record copied from its parent keeps the parent's values."""
+    from lakebench.metrics.collector import PipelineBenchmark, StageMetrics
+
+    stage = _filled(StageMetrics, stage_name="bronze", stage_type="streaming", engine="spark")
+    pb = _filled(
+        PipelineBenchmark,
+        pipeline_mode=mode,
+        stages=[stage],
+        stage_latency_profile=[1.0, 2.0, 3.0],
+        query_benchmark=None,
+        benchmark_rounds=[],
+        cycles=[],
+        config_snapshot={"scale": 1},
+    )
+    first = pb.to_dict()
+    loaded = MetricsStorage()._dict_to_metrics(
+        {"run_id": "r", "start_time": first["start_time"], "pipeline_benchmark": first}
+    )
+    assert loaded.pipeline_benchmark.to_dict() == first
+
+
+def test_latest_run_lookups_match_list_runs_without_judging(tmp_path, monkeypatch):
+    """The latest-run lookups read the rows list_runs returns, in its order,
+    over the fixture records plus a larger synthetic set, and never judge a
+    record to find them."""
+    runs = tmp_path / "runs"
+    shutil.copytree(FIXTURES, runs, ignore=shutil.ignore_patterns("MANIFEST.json"))
+    for i in range(300):
+        rid = f"20261001-{i:06d}-syn{i % 7}"
+        rec = {
+            "run_id": rid if i % 50 else PARENT,  # a few repeat a fixture's id
+            "deployment_name": [NAME, "other", None][i % 3],
+            "start_time": f"2026-10-{1 + i % 28:02d}T{i % 24:02d}:00:00"
+            + ("+00:00" if i % 2 else ""),
+            **({"record_kind": "benchmark"} if i % 5 == 0 else {}),
+        }
+        if i % 11 == 0:
+            (runs / f"run-{rid}.json").write_text(json.dumps(rec))  # legacy flat layout
+        else:
+            (runs / f"run-{rid}").mkdir()
+            (runs / f"run-{rid}" / "metrics.json").write_text(json.dumps(rec))
+    storage = MetricsStorage(runs)
+    keys = ("run_id", "deployment_name", "record_kind", "start_time")
+    assert [{k: r[k] for k in keys} for r in storage.list_runs()] == storage._run_index()
+
+    want = [storage.get_latest_run()] + [
+        storage.get_latest_run_for_deployment(n, writable=w)
+        for n in (NAME, "other", "missing", None)
+        for w in (False, True)
+    ]
+
+    def _judged(_):
+        raise AssertionError("a latest-run lookup judged a record")
+
+    monkeypatch.setattr("lakebench.metrics.verdict.verdict_of", _judged)
+    got = [storage.get_latest_run()] + [
+        storage.get_latest_run_for_deployment(n, writable=w)
+        for n in (NAME, "other", "missing", None)
+        for w in (False, True)
+    ]
+    assert [m and m.run_id for m in got] == [m and m.run_id for m in want]
+
+
 # ---------------------------------------------------------------------------
 # report and results
 # ---------------------------------------------------------------------------

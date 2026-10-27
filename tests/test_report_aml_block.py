@@ -14,6 +14,8 @@ import re
 from datetime import datetime
 from html import unescape
 
+import pytest
+
 from lakebench.metrics import PipelineMetrics
 from lakebench.metrics.collector import StreamingJobMetrics
 from tests.fixtures.report_consistency_helpers import _render_dict, mismatches
@@ -128,24 +130,35 @@ def test_continuous_recall_covered_with_coverage():
     assert mismatches(record, html) == []
 
 
-def test_totals_labelled_when_a_rule_skipped_on_a_cap():
-    """W1 skipped on vertex-cap (a Lakebench cap the verdict lists in
-    rule_caps): the funnel, Total alerts and the off-target rate carry the
-    cap; the skip reason names it."""
+@pytest.mark.parametrize(
+    ("rule", "cap", "full"),
+    [
+        # W1 on vertex-cap is a Lakebench cap the verdict lists in rule_caps:
+        # the funnel, Total alerts and off-target rate all carry it.
+        ("W1_connected_components", "vertex-cap", True),
+        # A cap skip is labelled whether or not the verdict's allowed set lists
+        # it (metrics/bounds.py's rule).
+        ("W2_structuring", "edge-cap", False),
+    ],
+)
+def test_a_rule_skipped_on_a_cap_labels_the_totals(rule, cap, full):
     record = load_record("1320bd")
     gold = next(j for j in record["jobs"] if j["job_type"] == "gold-finalize")
-    gold["rules_skipped"]["W1_connected_components"] = "vertex-cap"
-    html = _render_dict(record)
-    text = _plain(html)
-    total = record["financial_scoring"]["total_alerts"]
-    assert (
-        f"Total alerts over the rules that ran (W1_connected_components skipped: vertex-cap): "
-        f"{total:,} BOUNDED BY: rule W1_connected_components cap" in text
-    )
-    assert re.search(r"Overall off-target rate .*?: \d+\.\d% BOUNDED BY: rule W1", text)
-    funnel = _funnel(text)
-    assert f"Rule alerts (scoring) {total:,} BOUNDED BY: rule W1_connected_components cap" in funnel
-    assert "Every count here comes from the rules that ran" in funnel
+    gold["rules_skipped"][rule] = cap
+    if not full:
+        gold["alerts_by_rule"].pop(rule, None)
+    text = _plain(_render_dict(record))
+    assert f"BOUNDED BY: rule {rule} cap" in text, rule
+    if full:
+        total = record["financial_scoring"]["total_alerts"]
+        assert (
+            f"Total alerts over the rules that ran ({rule} skipped: {cap}): "
+            f"{total:,} BOUNDED BY: rule {rule} cap" in text
+        )
+        assert re.search(r"Overall off-target rate .*?: \d+\.\d% BOUNDED BY: rule W1", text)
+        funnel = _funnel(text)
+        assert f"Rule alerts (scoring) {total:,} BOUNDED BY: rule {rule} cap" in funnel
+        assert "Every count here comes from the rules that ran" in funnel
 
 
 def test_totals_not_capped_on_a_data_skip():
@@ -181,17 +194,6 @@ def test_nested_counts_and_withdrawn_alerts_reconcile():
     assert "TM rule alerts = customer + non-customer dispositions - withdrawn" in funnel
     assert "dispositions sum to customer + non-customer dispositions" in funnel
     assert "differ" not in funnel
-
-
-def test_any_cap_skip_is_labelled_even_outside_the_allowed_set():
-    """A skip reason naming a cap labels the totals whether or not the
-    verdict allows it (metrics/bounds.py's rule)."""
-    record = load_record("1320bd")
-    gold = next(j for j in record["jobs"] if j["job_type"] == "gold-finalize")
-    gold["rules_skipped"]["W2_structuring"] = "edge-cap"
-    gold["alerts_by_rule"].pop("W2_structuring", None)
-    text = _plain(_render_dict(record))
-    assert "BOUNDED BY: rule W2_structuring cap" in text
 
 
 def test_continuous_totals_name_their_scope():
@@ -280,9 +282,10 @@ def _section(text: str, start: str, end: str) -> str:
     return text[i : text.index(end, i + len(start))]
 
 
-def test_continuous_excluded_rules_are_not_no_data():
+def test_continuous_excluded_rules_are_not_no_data_and_counted():
     """A record keeps the rules its run excluded: ebb26f ran before W5 and
-    W6 joined continuous, so they read excluded, never no data."""
+    W6 joined continuous, so they read excluded, never no data, and the limits
+    panel counts the excluded rules that did not run."""
     from lakebench.metrics.storage import MetricsStorage
     from lakebench.metrics.verdict import continuous_excluded_rules
 
@@ -297,19 +300,9 @@ def test_continuous_excluded_rules_are_not_no_data():
         row = re.search(rf"{rule} \S+ (.*?)(?= W\d|$)", table)
         assert row and "excluded in continuous mode" in row.group(1), rule
     assert "no data" not in table
-
-
-def test_continuous_aml_counts_rules_not_run():
-    from lakebench.metrics.storage import MetricsStorage
-    from lakebench.metrics.verdict import continuous_excluded_rules
-
-    record = load_record("ebb26f")
     executed = set(record["experiment"]["rules"]["executed"])
-    excluded = continuous_excluded_rules(
-        MetricsStorage.__new__(MetricsStorage)._dict_to_metrics(record)
-    )
     not_run = [r for r in excluded if r not in executed]
-    panel = _section(_text("ebb26f"), "Limits", "Generated by Lakebench")
+    panel = _section(text, "Limits", "Generated by Lakebench")
     assert f"{len(not_run)} detection rules not run in continuous mode" in panel
 
 

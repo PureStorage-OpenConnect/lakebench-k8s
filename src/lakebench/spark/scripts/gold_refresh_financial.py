@@ -1,113 +1,93 @@
-"""Gold Refresh (Financial, continuous) -- baseline rollup + periodic detection.
+"""Gold Refresh (Financial, continuous) -- periodic detection and baseline.
 
 Runs the gold stage of the continuous AML pipeline (bronze_ingest ->
-silver_stream -> this) on a periodic timer (LB_FINANCIAL_GOLD_REFRESH_S
-seconds). Each tick does two things against the moving silver corpus:
+silver_stream -> this) on a timer (LB_FINANCIAL_GOLD_REFRESH_S seconds).
+Each tick pins one silver.transactions snapshot, filtered to sealed
+micro-batches, and then:
 
-1. Bring each detection rule's alerts up to date with the pinned silver
-   (re-detecting what the new rows can change) and rewrite them into
-   gold.alerts.
-2. Refresh the daily_dashboards baseline rows (rule_id='baseline').
+1. Brings each detection rule's alerts up to date with the pinned silver and
+   rewrites them into gold.alerts, rule by rule, cheapest first, each rule's
+   alerts visible when its own write commits.
+2. Refreshes the daily_dashboards baseline rows (rule_id='baseline'), after
+   detection so alerts never wait on it.
+3. Runs the operations layer (tm_operations) when its interval is due.
 
-Previously this script refreshed only the baseline dashboard and ran NO
-detection: a continuous AML run produced zero alerts, nothing to score, and
-(before the honest-runner gate landed) could still report PASS. This is the
-continuous half of the detection spine.
-
-Why re-detection from the new rows, not a sliding window:
-An earlier design scanned a data-clock window [max(txn_timestamp) - w, max]
-each tick. Adversarial review found two fatal flaws: (a) a static corpus
-trickled onto bronze arrives out of event-time order, so max(txn_timestamp)
-pinned to the corpus end almost immediately and every window anchored there,
-leaving older typologies permanently unscanned -> silent recall loss vs
-batch; and (b) the content-hash alert_id keyed on the in-window txn SET
-drifted as the window slid, so the same episode produced many alert rows.
-Gold then re-ran every rule over the whole corpus each tick, whose cost grew
-with the run. Now each rule re-detects from the earliest event time among
-the rows new since its last pass (incremental_detection): every rule is local
-in event time, so only alerts within the rule's own windows of those rows can
-change, and the rest are kept. That holds for any arrival order (old rows
-only widen the pass), and each tick's alerts equal a full recompute over the
-pinned silver. A continuous run's own datagen delivers in event-time order,
-so a pass reads about the new rows plus the rule's windows.
+Incremental re-detection: each rule re-detects from the earliest event time
+among the rows new since its last pass (incremental_detection). Every rule is
+local in event time, so only alerts within the rule's own windows of those
+rows can change, and the rest are kept. That holds for any arrival order (old
+rows only widen the pass), so each tick's alerts equal a full recompute over
+the pinned silver. A sliding data-clock window would not: a corpus trickled
+onto bronze out of event-time order pins the window to the corpus end and
+leaves older typologies unscanned.
 
 Rule set in continuous mode:
-- RUN: W2/W3/W4/W17. All read silver.transactions; W2 is customer-scoped and
-  also reads silver.entities, which silver_stream appends per micro-batch
-  (after the batch's transactions, so a tick can miss a new customer's alert
-  until the next tick).
-- SKIPPED (recorded as status='skipped' so score renders "not run", not a
-  false 0%): W1 (per-tick connected-components recompute is too costly; the
-  windowed-recompute variant is Phase 5b), W7 (skipped since before
-  silver_stream appended silver.entities; that original reason no longer
-  holds, and enabling it here has not been tested), W8 (needs a >=90-day dormancy gap a narrow continuous corpus cannot hold).
+- RUN: W4, W2, W5, W6, W17, W3 (CONTINUOUS_RULES). W2 is customer-scoped and
+  also reads silver.entities live, which silver_stream appends after the
+  batch's transactions, so a tick can miss a new customer's alert until the
+  next tick.
+- SKIPPED (recorded as status='skipped' so scoring renders "not run", not a
+  false 0%): W1 (a per-tick connected-components recompute is too costly),
+  W7 (not tested in continuous mode), W8 (needs a >=90-day dormancy gap a
+  narrow continuous corpus cannot hold).
 
 A rule that errors or skips on a tick loses the rows it wrote on earlier
-ticks of the run, and its status for the tick is 'error' or 'skipped'. So a
+ticks of the run, and its status for the tick is 'error' or 'skipped', so a
 transient failure on the last tick scores that rule's typologies as not run,
-never as the previous tick's alerts under a status that says otherwise.
+never as the previous tick's alerts under a status that says otherwise. An
+alert whose content (entity, sorted related transactions) an earlier tick
+wrote keeps that tick's detected_ts, so detected_ts is the first detection.
 
-detected_ts semantics in continuous: each tick rewrites a rule's alerts, and
-an alert whose content (entity, sorted related transactions) an earlier tick
-wrote keeps that tick's detected_ts, so it is the first detection.
-
-Every continuous rule runs every tick.
-
-Time to detect (Phase 4a): alert_id is a fresh uuid() on every tick, so first
-detection is found by content instead. An alert is newly raised on a tick
-when its (rule_id, entity_id, sorted related_txn_ids) was not in gold.alerts
-at the snapshot before the tick. Its time to detect is the moment its rule's
-INSERT into gold.alerts committed minus the newest bronze ingest_ts among its
-related transactions, i.e. from the moment the last piece of its evidence
-arrived (its file landed in the raw zone, see common.arrival_time) to the
-moment the alert was visible in gold. The rule's
-detected_ts is not used: it is stamped when the rule starts computing, so it
-would leave the detection time itself out. Each tick logs a histogram
-(common.ttd_line); the collector merges the ticks.
-
-Tick order (lane U, run-20260925-135005-4b7a97: 1,280 s time to detect at
-scale 10). Every tick is a full recompute, so what can be cut is what sits
-between new evidence and its alert. The tick pins one silver snapshot of
-transactions, then runs the rules cheapest first (W4 and W2 are single joins
-and windows; W17 and W3 are multi-level path searches, about four fifths of
-the detection pass on a local measurement), each committing its alerts as it
-finishes, and refreshes the baseline dashboard after detection instead of
-before it. Every rule still sees the whole pinned corpus, so its alerts are
-the batch result for that snapshot (W2 also reads silver.entities live).
-The time-to-detect measurement changed with it: an alert is measured at its
-own rule's commit, not at the end of the pass. The ticks also log the old
-pass-end histogram and one histogram per rule, so a run stays comparable with
-earlier ones and a rule that now runs later (W3) shows as such. Each tick logs a phase breakdown ("Cycle N: tick timing
-...") that the collector keeps per cycle.
-An episode that grows gets a new content key, so each re-raise is measured
-against the transaction that changed it. An alert re-raised after a rule
-error, or raised late because its evidence lies outside related_txn_ids (W2
-waits for the customer's entity row), is measured against its related
-transactions and so reads as a long time to detect, never a short one.
+Time to detect: alert_id is a fresh uuid() on every tick, so first detection
+is found by content. An alert is newly raised on a tick when its (rule_id,
+entity_id, sorted related_txn_ids) was not in gold.alerts at the snapshot
+before the tick. Its time to detect is the moment its rule's INSERT into
+gold.alerts committed minus the newest bronze ingest_ts among its related
+transactions, i.e. from the moment the last piece of its evidence arrived
+(its file landed in the raw zone, see common.arrival_time) to the moment the
+alert was visible in gold. detected_ts is not used: it is stamped when the
+rule starts computing. Each tick logs a histogram per rule and one at the
+end of the pass (common.ttd_line), and a phase breakdown ("Cycle N: tick
+timing ..."); the collector merges the ticks. An episode that grows gets a
+new content key, so each re-raise is measured against the transaction that
+changed it. An alert re-raised after a rule error, or raised late because its
+evidence lies outside related_txn_ids (W2 waits for the customer's entity
+row), is measured against its related transactions and so reads as a long
+time to detect, never a short one.
 
 Refresh discipline:
 - Baseline overwrites ONLY rule_id='baseline' rows (DELETE + append); the
   detection rows (other rule_ids) written the same tick are never wiped.
 - SIGTERM/SIGINT triggers a clean loop exit rather than a kubelet SIGKILL.
 - After MAX_CONSECUTIVE_FAILURES consecutive whole-tick failures the script
-  exits non-zero so K8s Job status reflects reality. A single
-  misbehaving rule is isolated inside run_detection_rules and does NOT count
-  as a tick failure.
+  exits non-zero so K8s Job status reflects reality. A single misbehaving
+  rule is isolated inside run_detection_rules and does NOT count as a tick
+  failure.
 """
 
 from __future__ import annotations
 
+import json
 import signal
 import sys
 import time
 import uuid
 from datetime import datetime, timezone
 
-from bronze_verify_financial import BRONZE_URI, MANIFEST_PATH, MANIFEST_TABLE, register_manifest
+from bronze_verify_financial import (
+    ACCOUNT_URI,
+    ACCOUNTS_TABLE,
+    BRONZE_URI,
+    MANIFEST_PATH,
+    MANIFEST_TABLE,
+    register_accounts,
+    register_manifest,
+)
 from common import (
     TTD_SNAPSHOT_UNKNOWN,
     SealedFilterError,
     TtdBaseline,
+    alert_set_fingerprint,
     ensure_alert_columns,
     ensure_namespaces_for_ddl,
     ensure_partition_transform,
@@ -129,6 +109,15 @@ from gold_finalize_financial import (
     DDL_STATUS,
     build_baseline_dashboards,
     run_detection_rules,
+)
+from incremental_detection import (
+    DAY_US,
+    FULL,
+    IncrementalDetection,
+    _disjoint_spans,
+    _within,
+    merge_spans,
+    widen,
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
@@ -154,6 +143,7 @@ from pyspark.storagelevel import StorageLevel
 from tm_operations import (
     TM_RETRY_NOT_READY_S,
     bootstrap_tm_tables,
+    current_snapshot_id,
     params_from_env,
     read_at_snapshot,
     run_tm_operations,
@@ -197,9 +187,7 @@ TTD_BROADCAST_ROWS = 2_000_000
 # windows before the customer filter, which it applies every pass).
 # Order: each rule's alerts are visible when its own write commits, so the
 # single-join rules go before the path searches, and among those W17 (many
-# alerts) before W3 (few), which makes W3's alerts wait on W17. Measured on a
-# local 3.4M-row silver (lane U, warm tick): W4 8.8 s for 33,902 alerts, W2
-# 5.5 s for 259, W17 32.8 s for 2,542, W3 29.1 s for 155. Rules are
+# alerts) before W3 (few), which makes W3's alerts wait on W17. Rules are
 # independent, so the order changes when alerts appear, never which.
 CONTINUOUS_RULES = (
     "W4_risk_propagation",
@@ -211,10 +199,9 @@ CONTINUOUS_RULES = (
 )
 # Continuous W4 raises one alert per entity per week of payments, not one per
 # entity over its whole history, so a tick recomputes only the weeks of its
-# new rows (owner, 2026-10-08). Batch W4 keeps one alert per entity.
+# new rows. Batch W4 keeps one alert per entity.
 # Continuous W5 is the transaction screen only: a rescreen alert reads a
-# counterparty's whole payment history (owner, 2026-10-08: batch only,
-# labelled).
+# counterparty's whole payment history, so rescreening is batch only.
 CONTINUOUS_RULE_OVERRIDES = {
     "W4_risk_propagation": {"alert_window_hours": 7 * 24},
     "W5_sanctions_match": {"rescreen": False},
@@ -251,9 +238,7 @@ def _bootstrap_gold_tables(spark) -> None:
     gold.daily_dashboards (baseline refresh) and run_detection_rules issues
     DELETE FROM gold.alerts + writeTo overwrite on gold.risk_scores /
     gold.entity_clusters (derived projections), all of which require the
-    tables to exist. Creating only alerts+status (the earlier bug) left a
-    fresh continuous catalog failing every tick on a missing daily_dashboards
-    and silently failing the derived projections. Mirrors the exact DDL set
+    tables to exist. Mirrors the exact DDL set
     gold_finalize_financial.main() bootstraps so both modes converge on one
     schema. All CREATE TABLE IF NOT EXISTS -- idempotent on restart.
     """
@@ -456,13 +441,9 @@ def ttd_stats(arrivals, detected_s, bin_s=TTD_BIN_S, detected_by_rule=None):
 
     With ``detected_by_rule`` it also returns "by_rule" ({rule_id: {"alerts",
     "max_s", "bins"}}, per-commit times) and "pass_end" ({"alerts", "max_s",
-    "bins"}: every alert measured at ``detected_s``, the definition used
-    before per-rule commit times), so a rule that got slower is not hidden in
-    the merged histogram. pass_end keeps the old timestamp but not the old
-    tick: the baseline no longer precedes detection and silver is pinned at
-    tick start, so against a run before lane U, old-TTD minus pass_end is the
-    baseline move plus the pin, and pass_end minus the merged figure is the
-    rule order.
+    "bins"}: every alert measured at ``detected_s``, the end of the pass), so
+    a rule that got slower is not hidden in the merged histogram, and
+    pass_end minus the merged figure is what the rule order saves.
     """
     arrival_s = unix_micros(col("arrival_ts")) / 1e6
     ttd = greatest(lit(0.0), _detected_expr(detected_s, detected_by_rule) - arrival_s)
@@ -545,21 +526,7 @@ def _empty_ttd_stats():
 def _current_snapshot(spark, fq_table):
     """``fq_table``'s current snapshot id; None when it has none yet;
     TTD_SNAPSHOT_UNKNOWN when the lookup failed."""
-    try:
-        rows = spark.sql(
-            f"SELECT snapshot_id FROM {fq_table}.history "
-            "WHERE is_current_ancestor ORDER BY made_current_at DESC LIMIT 1"
-        ).collect()
-    except Exception as e:  # noqa: BLE001
-        log(f"[metrics] snapshot of {fq_table} unavailable: {one_line(e)}")
-        return TTD_SNAPSHOT_UNKNOWN
-    return int(rows[0][0]) if rows else None
-
-
-def _prior_alerts_snapshot(spark):
-    """gold.alerts' current snapshot id; None when it has none yet (every
-    alert is new); TTD_SNAPSHOT_UNKNOWN when the lookup failed."""
-    return _current_snapshot(spark, f"{CATALOG}.{GOLD_ALERTS}")
+    return current_snapshot_id(spark, fq_table, unknown=TTD_SNAPSHOT_UNKNOWN, tag="metrics")
 
 
 def _token(snapshot):
@@ -603,8 +570,8 @@ def _pin_silver(spark):
     sid = _current_snapshot(spark, fq)
     if sid is None or sid == TTD_SNAPSHOT_UNKNOWN:
         rows, _ = iceberg_table_stats(spark, fq)
-        # I10: hide mid-batch crash rows from every rule that reads this
-        # frame. Fallback path (no pinned snapshot) still filters.
+        # Mid-batch crash rows stay hidden from every rule on this
+        # unpinned path too.
         return (
             sealed_txns_filter(spark, spark.table(fq), CATALOG, SILVER_BATCH_VERSIONS),
             sid,
@@ -626,7 +593,7 @@ def _pin_silver(spark):
             )
             versions_used = "unknown"
     if txns is None:
-        # I10: today's current-state filter; a batch sealed after this pin
+        # Today's current-state filter; a batch sealed after this pin
         # but before the filter runs becomes visible on the next tick.
         txns = sealed_txns_filter(spark, pinned, CATALOG, SILVER_BATCH_VERSIONS)
     tt = snapshot_record(spark, fq, sid)
@@ -747,7 +714,6 @@ def _ttd_scope(scope, committed, incremental):
     added: since the last measured tick, a rule's new alerts lie in its write
     spans and their transactions in its read spans; None for either means
     anywhere. A rule that wrote nothing this tick adds nothing."""
-    from incremental_detection import merge_spans
 
     def union(a, b):
         return None if a is None or b is None else merge_spans(a + b)
@@ -865,7 +831,6 @@ def _scoped_arrivals(new_txns, txns, n, seen, scope, held):
     inside its rule's read spans, and the old ones left out were all seen.
     A frame persisted here is appended to ``held``, for the caller to drop
     once the result is consumed."""
-    from incremental_detection import _within, merge_spans
 
     small = n <= TTD_BROADCAST_ROWS
     if not scope or any(read is None for _, read in scope.values()):
@@ -897,8 +862,20 @@ class TickState:
     """What a tick carries to the next: manifest registration, the last
     freshness sample, the time-to-detect baseline and the TM clock."""
 
-    def __init__(self, run_start, window_end_s=0.0, manifest_ready=False, incremental=None):
+    def __init__(
+        self,
+        run_start,
+        window_end_s=0.0,
+        manifest_ready=False,
+        incremental=None,
+        accounts_ready=False,
+    ):
         self.manifest_ready = manifest_ready
+        # bronze.accounts (the account-to-holder map the scorer joins to
+        # silver) is registered once, as soon as datagen has finished writing
+        # account.parquet (a multipart upload that lands after the first
+        # manifest).
+        self.accounts_ready = accounts_ready
         # Per-rule detection state between ticks (incremental_detection);
         # None runs every rule as a full recompute.
         self.incremental = incremental
@@ -936,6 +913,7 @@ class TickState:
             window_end_s,
             manifest_ready=table_exists(spark, f"{CATALOG}.{MANIFEST_TABLE}"),
             incremental=_incremental_detection(spark),
+            accounts_ready=table_exists(spark, f"{CATALOG}.{ACCOUNTS_TABLE}"),
         )
 
 
@@ -947,7 +925,6 @@ def _incremental_detection(spark):
     import os
 
     from detection_rules import _delete_uri
-    from incremental_detection import IncrementalDetection
 
     base = os.getenv("LB_GOLD_URI")
     if not base:
@@ -962,7 +939,6 @@ def refresh_baseline(spark, txns, cut) -> None:
     """Rewrite the baseline rows (rule_id 'baseline') of the days in ``cut``
     (event-time spans, see tick_position) from ``txns``; every day when
     ``cut`` is incremental_detection.FULL; nothing when it is None."""
-    from incremental_detection import DAY_US, FULL, _within, widen
 
     if cut is None:
         return
@@ -987,7 +963,6 @@ def refresh_baseline(spark, txns, cut) -> None:
 
 def _union_cut(a, b):
     """Two cuts (tick_position) as one: FULL wins, None is nothing."""
-    from incremental_detection import FULL, merge_spans
 
     if a is None or b is None:
         return b if a is None else a
@@ -1009,7 +984,6 @@ def tick_position(txns, seen):
     counts as seen only once its rows were read: a sealed batch whose rows
     are briefly absent (silver replays it after a restart) is new when they
     come back."""
-    from incremental_detection import FULL
 
     if not {"_stream_id", "_batch_id"} <= set(txns.columns):
         # No batch columns to place a row: every tick is a full recompute.
@@ -1022,7 +996,6 @@ def tick_position(txns, seen):
         new = new | (
             (col("_stream_id") == lit(stream_id)) & (col("_batch_id") > lit(int(batch_id)))
         )
-    from incremental_detection import DAY_US, _disjoint_spans
 
     # One row per (stream, day of new rows): datagen pods drift apart in
     # event time, so a tick's new rows lie on separate runs of days.
@@ -1062,6 +1035,20 @@ def manifest_files(spark):
         return None
 
 
+def account_file_exists(spark) -> bool:
+    """Whether datagen has finished writing the account master (a completed
+    multipart upload is the only way the key exists); False when it cannot be
+    checked."""
+    try:
+        jvm = spark._jvm  # type: ignore[attr-defined]
+        hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+        path = jvm.org.apache.hadoop.fs.Path(ACCOUNT_URI)
+        return bool(path.getFileSystem(hconf).exists(path))
+    except Exception as e:  # noqa: BLE001
+        log(f"[accounts] could not check {ACCOUNT_URI}: {one_line(e)}")
+        return False
+
+
 def run_tick(spark, state, cycle) -> dict:
     """One detection tick. Returns its phase timings ({name: seconds}, in
     order, ``total`` last), which are also logged as the tick timing line.
@@ -1088,6 +1075,11 @@ def run_tick(spark, state, cycle) -> dict:
         if register_manifest(spark):
             state.manifest_ready = True
             state.manifest_files = files
+    # The account master is written once, as a multipart upload that lands
+    # after the first manifest; register it when the key exists (the scoring
+    # statements map datagen ids to silver keys through it).
+    if not state.accounts_ready and account_file_exists(spark):
+        state.accounts_ready = register_accounts(spark)
     # Pinned before anything reads silver, so every reader sees this corpus.
     pinned_at = time.time()
     txns, sid, versions_used, silver_rows, newest_ingest_s, tt = _pin_silver(spark)
@@ -1123,7 +1115,9 @@ def run_tick(spark, state, cycle) -> dict:
     # is what this tick's alerts are compared against to find the newly
     # raised ones.
     t = time.time()
-    ttd_base = state.ttd_baseline.begin(_prior_alerts_snapshot(spark), state.prev_tick_seen)
+    ttd_base = state.ttd_baseline.begin(
+        _current_snapshot(spark, f"{CATALOG}.{GOLD_ALERTS}"), state.prev_tick_seen
+    )
     # The silver position this tick read, from its own rows: the next tick's
     # new rows, late alerts and incremental cut are all judged against it.
     cut, seen_now = tick_position(txns, state.prev_tick_seen)
@@ -1133,12 +1127,11 @@ def run_tick(spark, state, cycle) -> dict:
         state.baseline_cut = _union_cut(state.baseline_cut, cut)
     # Parsed by metrics/continuous_window.py: a cycle with None found no new
     # silver row, and is left out of gold's cadence.
-    from incremental_detection import FULL
 
     earliest = cut if cut is None or cut == FULL else cut[0][0]
     log(f"Cycle {cycle}: earliest new event time (us) {earliest}")
     if cut is not None and cut != FULL:
-        days = sum(hi - lo for lo, hi in cut) / 86_400_000_000
+        days = sum(hi - lo for lo, hi in cut) / DAY_US
         log(f"Cycle {cycle}: new rows in {len(cut)} span(s), {days:.0f} day(s)")
     if state.incremental is not None:
         state.incremental.begin_tick(cut, CONTINUOUS_RULES)
@@ -1150,29 +1143,31 @@ def run_tick(spark, state, cycle) -> dict:
                 f"(cut capped at MAX_SPANS; deferred by rule: {carried})"
             )
     state.prev_tick_seen = seen_now
-    detection = run_detection_rules(
-        spark,
-        txns,
-        RUN_ID,
-        rules=CONTINUOUS_RULES,
-        skipped_rules=CONTINUOUS_SKIPPED_RULES,
-        first_detection=True,
-        incremental=state.incremental,
-        rule_overrides=CONTINUOUS_RULE_OVERRIDES,
+    detection = (
+        run_detection_rules(
+            spark,
+            txns,
+            RUN_ID,
+            rules=CONTINUOUS_RULES,
+            skipped_rules=CONTINUOUS_SKIPPED_RULES,
+            first_detection=True,
+            incremental=state.incremental,
+            rule_overrides=CONTINUOUS_RULE_OVERRIDES,
+        )
+        or {}
     )
     detection_end_s = time.time()
     # The alerts and statuses this tick committed: the covered scorer reads
     # gold.alerts and the detection status at exactly these snapshots.
     # Each rule's status at this tick, so a verdict can judge the scored
     # tick's rules even when scoring could not run.
-    records.append(rule_status_line(cycle, (detection or {}).get("status", [])))
+    records.append(rule_status_line(cycle, detection.get("status", [])))
     log(records[-1])
     records.append(
         f"Cycle {cycle}: committed alerts={_token(_current_snapshot(spark, f'{CATALOG}.{GOLD_ALERTS}'))}"
         f" status={_token(_current_snapshot(spark, f'{CATALOG}.{GOLD_STATUS}'))} run={RUN_ID}"
     )
     log(records[-1])
-    detection = detection or {}
     rule_times = detection.get("rules", {})
     # Everything in the pass but the rules and the status/projection writes:
     # the snapshot lookup, the pending status, clearing other runs' rows.
@@ -1215,12 +1210,25 @@ def run_tick(spark, state, cycle) -> dict:
 
     # This run's alerts only. Rules skipped in continuous mode keep alerts
     # from earlier runs, and counting those let the continuous gate pass with
-    # no continuous detection at all.
+    # no continuous detection at all. One aggregate gives both the row count
+    # and the alert-set fingerprint, so the scored tick carries the
+    # fingerprint the covered score compares against the batch run without a
+    # second pass over gold.alerts after the window.
     t = time.time()
-    total_alerts = int(
-        spark.table(f"{CATALOG}.{GOLD_ALERTS}").where(col("run_id") == RUN_ID).count()
+    alert_fp = alert_set_fingerprint(
+        spark.table(f"{CATALOG}.{GOLD_ALERTS}").where(col("run_id") == RUN_ID)
     )
+    total_alerts = int(alert_fp["rows"])
     phases["count"] = time.time() - t
+    # The scored tick's alert-set fingerprint, as one compact JSON line the
+    # covered score reads back (tick_records) instead of a second pass over
+    # gold.alerts after the window. run is a field inside the JSON so the
+    # nested object stays on one parseable line.
+    records.append(
+        f"Cycle {cycle}: alert-set "
+        + json.dumps({"run": RUN_ID, "alert_set": alert_fp}, separators=(",", ":"))
+    )
+    log(records[-1])
     elapsed = time.time() - tick
     log(f"[detection] cumulative gold.alerts rows: {total_alerts}")
     log(f"Tick complete in {elapsed:.1f}s (gold.alerts rows: {total_alerts})")
@@ -1258,15 +1266,14 @@ def run_tick(spark, state, cycle) -> dict:
         detected_by_rule=committed,
         scope=state.ttd_scope,
     ):
-        state.ttd_baseline.measured(_prior_alerts_snapshot(spark))
+        state.ttd_baseline.measured(_current_snapshot(spark, f"{CATALOG}.{GOLD_ALERTS}"))
         state.ttd_scope = {}
     phases["ttd"] = time.time() - t
 
-    # P10 operations layer. It runs every continuous_interval_seconds,
+    # Operations layer. It runs every continuous_interval_seconds,
     # measured from the end of the last pass, so detection ticks always run
     # between passes however long a pass takes; plus one final pass timed to
-    # finish before the window closes. One pass over the full corpus costs
-    # about a minute at scale 10 (55.3 s on run-20260925-135005-4b7a97).
+    # finish before the window closes.
     # Waits for data and the manifest (dispositions are simulated from it); a
     # window that ends first reports the layer as not run. Never raises.
     t = time.time()
@@ -1287,24 +1294,23 @@ def run_tick(spark, state, cycle) -> dict:
                 # did no work, so it neither starts the interval nor counts
                 # as the last pass. Retry shortly.
                 tm_clock["not_ready_at"] = time.time()
-                phases["tm"] = time.time() - t
-                phases["total"] = time.time() - tick
-                log(tick_timing_line(cycle, silver_rows, phases))
-                return phases
-            tm_clock["end"] = time.time()
-            tm_clock["elapsed"] = tm_clock["end"] - now
-            # Gold was not refreshed while the pass ran: its staleness now
-            # includes the pass, so it is sampled again while data is moving
-            # -- the tick sampled, or bronze took rows during the pass that
-            # gold has not seen. A drained corpus's idle time never counts.
-            after_bronze_s = _newest_ingest_epoch_s(spark, f"{CATALOG}.{BRONZE_TABLE}")
-            arrived = (
-                after_bronze_s is not None
-                and newest_ingest_s is not None
-                and after_bronze_s > newest_ingest_s
-            )
-            if newest_ingest_s is not None and (fresh_sampled or arrived):
-                log(f"Cycle {cycle}: data freshness {max(0.0, time.time() - newest_ingest_s):.0f}s")
+            else:
+                tm_clock["end"] = time.time()
+                tm_clock["elapsed"] = tm_clock["end"] - now
+                # Gold was not refreshed while the pass ran: its staleness now
+                # includes the pass, so it is sampled again while data is moving
+                # -- the tick sampled, or bronze took rows during the pass that
+                # gold has not seen. A drained corpus's idle time never counts.
+                after_bronze_s = _newest_ingest_epoch_s(spark, f"{CATALOG}.{BRONZE_TABLE}")
+                arrived = (
+                    after_bronze_s is not None
+                    and newest_ingest_s is not None
+                    and after_bronze_s > newest_ingest_s
+                )
+                if newest_ingest_s is not None and (fresh_sampled or arrived):
+                    log(
+                        f"Cycle {cycle}: data freshness {max(0.0, time.time() - newest_ingest_s):.0f}s"
+                    )
         else:
             log(
                 # cycle=0: no operations pass has a number yet (they are

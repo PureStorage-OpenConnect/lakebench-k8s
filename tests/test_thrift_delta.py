@@ -114,12 +114,13 @@ def test_thrift_pod_limit_exceeds_heap(heap, limit):
     assert k8s_memory_bytes(limit) > spark_memory_bytes(heap)
 
 
-@pytest.mark.parametrize(
-    "recipe,heap",
-    [("hive-iceberg-spark-thrift", "4g"), ("hive-delta-spark-thrift", "4g")],
-)
-def test_rendered_thrift_pod_limit_above_heap(recipe, heap):
-    container = _container(_render_thrift(_thrift_cfg(recipe, cores=2, memory=heap)))
+def test_rendered_thrift_pod_limit_above_heap():
+    # Both table formats render the same pod-limit branch; one recipe proves
+    # the template wires heap + overhead into the pod limit.
+    heap = "4g"
+    container = _container(
+        _render_thrift(_thrift_cfg("hive-delta-spark-thrift", cores=2, memory=heap))
+    )
     conf = _conf(container)
     assert conf["spark.driver.memory"] == heap
     res = container["resources"]

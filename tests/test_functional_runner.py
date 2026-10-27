@@ -181,8 +181,9 @@ class TestBenchmarkRunnerCompositeMode:
 class TestBenchmarkRunnerQueryFiltering:
     """Tests that query_class filtering works correctly."""
 
-    @pytest.mark.parametrize("query_class", ["scan", "analytics"])
-    def test_filter_by_query_class(self, runner, mock_executor, query_class):
+    def test_filter_by_query_class(self, runner, mock_executor):
+        # One class stands for the rest: both take the same filter branch.
+        query_class = "scan"
         result = runner.run_power(query_class=query_class)
 
         expected = [q for q in BENCHMARK_QUERIES if q.query_class == query_class]

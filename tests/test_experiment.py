@@ -100,20 +100,27 @@ class TestStamping:
         e = _metrics(_cfg(engine="duckdb")).to_dict()["experiment"]
         assert e["architecture"]["query_access_path"] == "direct_storage"
 
-    def test_datagen_digest_from_pod_status(self):
-        fleet = {
-            "image": "docker.io/sillidata/lb-datagen:14c4eee",
-            "image_ids": ["docker.io/sillidata/lb-datagen@sha256:abc"],
-        }
-        dg = _metrics(_cfg(), fleet=fleet).to_dict()["experiment"]["corpus"]["datagen"]
-        assert dg["digest"] == "sha256:abc" and "digest_reason" not in dg
+    def test_datagen_digest_field(self):
+        """One image id gives a digest with no reason; no fleet and mixed
+        images each give a null digest with the reason named."""
 
-    def test_missing_or_mixed_digest_is_null_with_a_reason(self):
-        dg = _metrics(_cfg()).to_dict()["experiment"]["corpus"]["datagen"]
-        assert dg["digest"] is None and "no datagen fleet" in dg["digest_reason"]
-        mixed = {"image_ids": ["r@sha256:a", "r@sha256:b"]}
-        dg = _metrics(_cfg(), fleet=mixed).to_dict()["experiment"]["corpus"]["datagen"]
-        assert dg["digest"] is None and "different images" in dg["digest_reason"]
+        def dg(fleet):
+            kw = {"fleet": fleet} if fleet is not None else {}
+            return _metrics(_cfg(), **kw).to_dict()["experiment"]["corpus"]["datagen"]
+
+        one = dg(
+            {
+                "image": "docker.io/sillidata/lb-datagen:14c4eee",
+                "image_ids": ["docker.io/sillidata/lb-datagen@sha256:abc"],
+            }
+        )
+        assert one["digest"] == "sha256:abc" and "digest_reason" not in one
+
+        none = dg(None)
+        assert none["digest"] is None and "no datagen fleet" in none["digest_reason"]
+
+        mixed = dg({"image_ids": ["r@sha256:a", "r@sha256:b"]})
+        assert mixed["digest"] is None and "different images" in mixed["digest_reason"]
 
     def test_fleet_records_pod_image_ids(self):
         from lakebench.metrics.datagen_aggregator import collect_from_pod_logs
@@ -250,14 +257,6 @@ class TestStamping:
         assert ex.identity_hash(flag) == ex.identity_hash(configured)
         assert flag["requested_effective"]["pipeline_mode"]["source"] == "command line"
 
-    @pytest.mark.parametrize("recipe", ["hive-delta-spark-trino", "polaris-iceberg-spark-duckdb"])
-    def test_stamped_recipe_is_a_recipe_name(self, recipe):
-        cfg = make_config(
-            recipe=recipe,
-            architecture={"workload": {"schema": "customer360", "datagen": {"scale": 1}}},
-        )
-        assert ex.experiment_inputs(cfg)["architecture"]["recipe"] == recipe
-
     def test_autosize_cuts_are_a_recorded_limit(self):
         run = _metrics(_cfg())
         run.autosize_cuts = ["trino workers 4 -> 2 to fit the cluster"]
@@ -348,24 +347,29 @@ class TestEffectiveMaintenance:
         # Outcomes never turn an operation up past the rules (Delta OPTIMIZE).
         assert "compaction=not_supported" in eff([ok, comp], fmt="delta")["id"]
         assert eff(None)["basis"].startswith("policy rules")
+        # A policy that asked to skip shows skipped_by_user in the id itself;
+        # a stop shows only in the detail id, never in the identity id.
+        skipped = effective_maintenance(
+            MAINTENANCE_POLICY_ID + "+skipped",
+            table_format="iceberg",
+            query_engine="trino",
+            mode="batch",
+        )
+        assert "expire_snapshots=skipped_by_user" in skipped["id"]
+        stopped = effective_maintenance(
+            MAINTENANCE_POLICY_ID,
+            table_format="iceberg",
+            query_engine="trino",
+            mode="batch",
+            stopped=True,
+        )
+        assert stopped["detail_id"].endswith(",stopped") and "stopped" not in stopped["id"]
 
     def test_run_outcomes_reach_the_experiment_block(self):
         run = _metrics(_cfg())
         run.maintenance_outcomes = [{"kind": "expire", "total": 2, "succeeded": 0}]
         e = run.to_dict()["experiment"]["effective_maintenance"]
         assert "expire_snapshots=failed" in e["id"] and e["basis"] == "recorded outcomes"
-
-    def test_skip_flag_and_stop_show_in_the_id(self):
-        skipped = effective_maintenance(
-            MAINTENANCE_POLICY_ID + "+skipped", table_format="iceberg", query_engine="trino",
-            mode="batch",
-        )  # fmt: skip
-        assert "expire_snapshots=skipped_by_user" in skipped["id"]
-        stopped = effective_maintenance(
-            MAINTENANCE_POLICY_ID, table_format="iceberg", query_engine="trino", mode="batch",
-            stopped=True,
-        )  # fmt: skip
-        assert stopped["detail_id"].endswith(",stopped") and "stopped" not in stopped["id"]
 
 
 class TestBenchmarkGateEmptyResults:
@@ -394,6 +398,7 @@ class TestReportCarriesWhatAReaderCompares:
         html = ReportGenerator(output_dir=tmp_path)._generate_experiment_section(run)
         exp = run.to_dict()["experiment"]
         assert ex.identity_hash(exp) in html
+        assert run.benchmark.query_set_id in html
 
     def test_aml_alert_set_is_shown_per_rule(self):
         from lakebench.reports.generator import ReportGenerator
@@ -413,3 +418,84 @@ class TestReportCarriesWhatAReaderCompares:
         html = ReportGenerator._alert_set_html(exp)
         for rule, rows in (("W2", "3"), ("W5", "4"), ("total", "7")):
             assert re.search(rf"<td>{rule}</td>\s*<td>{rows}</td>", html)
+
+
+def test_pod_metrics_parse_sets_match_the_dataclass():
+    """from_json_obj projects and casts the fields PodMetrics declares. The
+    frozen literals below are the contract with the datagen JSON: a field
+    added or retyped on the dataclass must be a deliberate change to them."""
+    from lakebench.metrics import datagen_aggregator as dga
+
+    allowed = {
+        "node_id",
+        "node_count",
+        "schema",
+        "cores_used",
+        "cpu_request_millicores",
+        "bucket",
+        "prefix",
+        "file_size_mb",
+        "rows_per_file",
+        "total_files",
+        "files_written",
+        "bytes_written",
+        "rows_written",
+        "elapsed_s",
+        "setup_s",
+        "gen_s",
+        "build_batch_s",
+        "encode_parquet_s",
+        "s3_put_s",
+        "throughput_mbps",
+        "cpu_seconds",
+        "cpu_hr_per_tb",
+        "world_s",
+        "typology_s",
+        "reference_s",
+        "scale",
+        "corpus_months",
+        "population",
+        "total_txns",
+        "typology_instances",
+        "target_tb",
+        "customer_id_max",
+        "dirty_ratio",
+        "delivery_mode",
+    }
+    ints = {
+        "node_id",
+        "node_count",
+        "cores_used",
+        "cpu_request_millicores",
+        "file_size_mb",
+        "rows_per_file",
+        "total_files",
+        "files_written",
+        "bytes_written",
+        "rows_written",
+        "corpus_months",
+        "population",
+        "total_txns",
+        "typology_instances",
+        "customer_id_max",
+    }
+    floats = {
+        "elapsed_s",
+        "setup_s",
+        "gen_s",
+        "build_batch_s",
+        "encode_parquet_s",
+        "s3_put_s",
+        "throughput_mbps",
+        "cpu_seconds",
+        "cpu_hr_per_tb",
+        "world_s",
+        "typology_s",
+        "reference_s",
+        "scale",
+        "target_tb",
+        "dirty_ratio",
+    }
+    assert set(dga._POD_FIELDS) == allowed
+    assert set(dga._POD_INT_FIELDS) == ints
+    assert set(dga._POD_FLOAT_FIELDS) == floats

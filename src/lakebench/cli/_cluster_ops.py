@@ -45,9 +45,7 @@ STAGES: tuple[str, ...] = (
     "bronze-ingest",
     "silver-stream",
     "gold-refresh",
-    "score-financial",
     "score-financial-reference",
-    "time-travel-financial",
 )
 
 
@@ -322,6 +320,10 @@ class StopOutcome:
 # ``kubectl logs -f`` into ``<run_dir>/drivers/`` so the first driver's
 # output survives that delete.
 FINISHED_APP_STATES = frozenset({"COMPLETED", "FAILED"})
+# FINISHED_APP_STATES and the two states the operator passes through on the
+# way to them: an application in any of these will not run more work, though
+# the operator may still resubmit one in FAILING or SUCCEEDING.
+FINISHING_APP_STATES = FINISHED_APP_STATES | {"SUCCEEDING", "FAILING"}
 
 
 def _app_state(item: dict[str, Any]) -> str:

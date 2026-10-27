@@ -32,13 +32,12 @@ from collections.abc import Mapping
 from datetime import date, timedelta
 from typing import Any
 
-# D6: the owner approves the meaning before any check gates a run. A check
-# id here makes its failure fail the run. Owner decision 2026-09-27: checks
-# 0 to 14 (every invariant and reconcile check) and 17 (the headline average
-# transaction value) of the expected-results table gate;
-# the other statistical and the benchmark shape checks stay reporting only.
-# The numbers below are the table's; the same 16 ids sit at positions 0-14
-# and 17 of pipeline_checks' output for a run with a bronze-verify count.
+# A check id here makes its failure fail the run: checks 0 to 14 (every
+# invariant and reconcile check) and 17 (the headline average transaction
+# value) of the expected-results table gate; the other statistical and the
+# benchmark shape checks stay reporting only. The same 16 ids sit at
+# positions 0-14 and 17 of pipeline_checks' output for a run with a
+# bronze-verify count.
 GATING_CHECKS: frozenset[str] = frozenset(
     {
         "bronze_rows_match_datagen",  # 0
@@ -169,7 +168,9 @@ def expected_context(cfg) -> dict[str, Any]:
     # of the window rule the datagen deployer also reads).
     start, end = series_clock(cfg)
     dims = cfg.get_scale_dimensions()
-    file_size_mb = _size_bytes(dg.file_size) // (1024 * 1024)
+    from lakebench.config.schema import parse_size_to_bytes
+
+    file_size_mb = parse_size_to_bytes(dg.file_size) // (1024 * 1024)
     return {
         "window_start": str(start)[:10],
         "window_end": str(end)[:10],
@@ -181,15 +182,6 @@ def expected_context(cfg) -> dict[str, Any]:
             for codec, bpr in BYTES_PER_ROW.items()
         },
     }
-
-
-def _size_bytes(size: str) -> int:
-    """deploy/datagen.py ``_parse_size_to_bytes``: "64mb" -> bytes."""
-    t = str(size).strip().upper()
-    for suffix, mult in (("TB", 1024**4), ("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
-        if t.endswith(suffix):
-            return int(float(t[: -len(suffix)]) * mult)
-    return int(t.rstrip("B") or 0)
 
 
 def datagen_rows(bronze_gb: float, file_size_mb: int, bytes_per_row: float) -> int:

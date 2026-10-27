@@ -1,0 +1,39 @@
+-- Resolve a chunk of subject datagen ids to (dg_id, mapped, is_customer):
+--  mapped       = the dg_id resolves to a silver entity key (via bronze
+--                 account IBAN -> silver account holder key), 1/0;
+--  is_customer  = that key is a customer in silver.entities (MAX over rows:
+--                 an entity listed twice is a customer if any row says so), 1/0
+--                 (0 when unmapped).
+-- The assembler supplies {dg_ids}, a comma list of the chunk's distinct
+-- dg_ids, and pairs the result back to (typology_type, dg_id) it holds.
+-- Placeholders: {catalog}, {accounts_pin}, {entities_pin}, {dg_ids}.
+WITH ids AS (
+  SELECT CAST(x AS BIGINT) AS dg_id FROM (VALUES {dg_ids}) AS t(x)
+),
+id_map AS (
+  SELECT dg_id, MIN(key) AS key
+  FROM (
+    SELECT CAST(a.holder_entity_id AS BIGINT) AS dg_id, a.iban
+    FROM {catalog}.bronze.accounts a
+    WHERE a.iban IS NOT NULL
+  ) acct
+  JOIN (
+    SELECT iban, holder_entity_id AS key
+    FROM {catalog}.silver.accounts {accounts_pin}
+    WHERE iban IS NOT NULL
+  ) s ON acct.iban = s.iban
+  GROUP BY dg_id
+),
+ent AS (
+  SELECT entity_id AS key, MAX(CASE WHEN is_customer THEN 1 ELSE 0 END) AS is_customer
+  FROM {catalog}.silver.entities {entities_pin}
+  GROUP BY entity_id
+)
+SELECT i.dg_id,
+       CASE WHEN im.key IS NULL THEN 0 ELSE 1 END AS mapped,
+       CASE WHEN im.key IS NOT NULL AND COALESCE(e.is_customer, 0) = 1 THEN 1 ELSE 0 END
+         AS is_customer
+FROM ids i
+LEFT JOIN id_map im ON im.dg_id = i.dg_id
+LEFT JOIN ent e ON e.key = im.key
+ORDER BY i.dg_id;

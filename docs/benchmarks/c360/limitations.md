@@ -2,9 +2,8 @@
 
 ## 12. Known limitations
 
-- **Proven on one system type.** Live runs so far are on OpenShift with
-  Portworx scratch and FlashBlade S3; the minimum cluster is what `lakebench
-  plan` reports.
+- **Proven on one system type**: OpenShift with Portworx scratch and
+  FlashBlade S3. `lakebench plan` reports the minimum cluster.
 - **Supported tuples outside the release matrix are unverified.** Customer
   360 is supported only on the cells the
   [support table](../../compatibility-matrix.md#support-states) lists; every
@@ -13,35 +12,36 @@
   unverified.
 - **Settings outside the experiment identity** (query-engine sizing, storage
   classes, datagen execution, continuous trigger intervals) leave identities
-  equal unless they move the in-stream round count
+  equal; a `gold_refresh_interval` that raises the warmup and interval floor
+  enough to change the in-stream round count is a condition
   ([7.3](execution-rules.md#73-permitted-tuning-still-publishable)). State
-  them beside any published comparison.
+  these settings beside any published comparison.
 - **Only 16 of the 34 expected-result checks gate the run**
-  ([5.2](correctness.md#52-expected-result-checks-batch-only)). The 16 fail the
-  run and its exit code when they fail or do not run; the other 18
-  statistical and row-count checks are recorded only.
-  - A statistical check at 6 standard errors can fail a correct run by
-    chance (the module puts that probability well under 1e-6 per check).
+  ([5.2](correctness.md#52-expected-result-checks-batch-only)). A gated check
+  that fails or does not run fails the run with a non-zero exit; the other 18
+  (statistical and row-count checks) are recorded only.
+  - The one gated statistical check, `avg_transaction_value_overall`, can
+    fail a correct run by chance, with probability well under 1e-6.
   - Continuous runs have no expected-result checks. Their correctness rests
     on the window gate and the last in-stream round's row counts.
 - **Continuous QpH can be over a smaller query set**: a failed Q9 is tolerated
   in rounds, and rounds over different sets give `query_set_id: blended`, are
   not assessed, and `composite_qph_basis` records the rounds per set.
-- **Multi-cycle regenerates every cycle**, even with `--skip-generate`, so it
-  cannot reuse an existing corpus; `--generate` is refused. Before cycle 0 the
-  run clears the datagen prefix in a bronze bucket this deployment can prove
-  it owns. In any other bucket existing objects are refused unless
-  `--allow-stale-bronze`; cycle 0 then reads them as this run's data and can
-  over-count rows.
-- **Lakebench names no winner**; comparing runs is left to the reader
-  ([10](comparability.md#10-comparability)).
+- **Multi-cycle generates every cycle** unless `--skip-generate` reuses a
+  finished corpus of this config (checked against its series marker);
+  `--generate` is refused. Before cycle 0 a non-empty datagen prefix is
+  refused unless `--regenerate` clears it (a bronze bucket this deployment
+  owns) or `--allow-stale-bronze` writes over it (any other bucket). With
+  `--allow-stale-bronze`, cycle 0 reads the old objects as this run's data
+  and can over-count rows.
+- **Lakebench names no winner**: [10](comparability.md#10-comparability)
+  states when two runs compare; the comparison is the reader's.
 - **Delta continuous has no effective maintenance**: small files accumulate
   and in-window QpH can decline, so its composite QpH is not a steady-state
   figure. Delta batch never runs OPTIMIZE, and on Spark Thrift no VACUUM.
-- **DuckDB runs no maintenance** and reads storage directly: it differs from
-  Trino or Thrift in access path (Architecture) and effective maintenance (a
-  condition). Two runs that both used `--skip-maintenance` have the same
-  effective maintenance.
+- **DuckDB runs no maintenance** and reads storage directly. Against Trino
+  or Thrift it differs in access path (Architecture) and, unless both runs
+  used `--skip-maintenance`, in effective maintenance (a condition).
 - **Continuous throughput follows the offered load** (10 MB/s per scale unit
   by default). When the pipeline keeps up, rows per second is that load. It
   is a capacity only when datagen stays ahead with bronze busy

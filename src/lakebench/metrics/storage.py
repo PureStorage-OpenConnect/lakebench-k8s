@@ -28,6 +28,7 @@ to work.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
@@ -69,15 +70,9 @@ _JOB_ALIASES: dict[str, tuple[str, ...]] = {
 def _dataclass_from_dict(
     cls: type, data: dict[str, Any], aliases: dict[str, tuple[str, ...]] | None = None
 ):
-    """Reconstruct a dataclass instance from a JSON-dict, iterating fields.
-
-    Class-level fix for a hand-copy-drift shape on the LOAD side. Two
-    live-caught instances (silver-plan r3 silver_tables + extra_metrics on
-    JobMetrics; extra_metrics on StreamingJobMetrics) reached metrics.json
-    via asdict() but reverted to defaults on load because the hand-written
-    kwargs list at each ctor site drifted behind the dataclass. Iterating
-    dataclasses.fields() removes that shape: a new field on the dataclass
-    flows automatically on both save (asdict) and load (this helper).
+    """Reconstruct a dataclass instance from a JSON-dict, iterating fields,
+    so a new field on the dataclass loads as it was saved (asdict) without a
+    hand-written kwargs list that can fall behind.
 
     * datetime fields (start_time / end_time on JobMetrics) are handled by
       the caller AFTER construction, since the dict carries ISO strings.
@@ -87,8 +82,6 @@ def _dataclass_from_dict(
     * A missing key falls back to the dataclass default (default value
       or default_factory), matching the behaviour of an omitted kwarg.
     """
-    import dataclasses
-
     kwargs: dict[str, Any] = {}
     field_aliases = aliases or {}
     _DATETIME_FIELDS = frozenset({"start_time", "end_time"})
@@ -185,60 +178,58 @@ def _deserialize_benchmark_rounds(
                 gold_data_file_count=th.get("gold_data_file_count", rm.get("gold_data_file_count")),
                 gold_snapshot_count=th.get("gold_snapshot_count", rm.get("gold_snapshot_count")),
             )
-        rounds.append(
-            BenchmarkMetrics(
-                mode=r.get("mode", "power"),
-                cache=r.get("cache", "hot"),
-                scale=r.get("scale", 0),
-                qph=r.get("qph", 0.0),
-                total_seconds=r.get("total_seconds", 0.0),
-                queries=r.get("queries", []),
-                query_set_id=r.get("query_set_id")
-                or legacy_query_set_id(r.get("queries"), recorded_at),
-                engine=recorded_engine(r),
-                iterations=r.get("iterations", 1),
-                streams=r.get("streams", 1),
-                stream_results=r.get("stream_results", []),
-                round_meta=round_meta,
-                round_record=(
-                    {k: r.get(k) for k in _ROUND_RECORD_KEYS}
-                    if "executed_query_set_id" in r
-                    else None
-                ),
-            )
-        )
+        bench = _benchmark_from_dict(r, recorded_at)
+        bench.round_meta = round_meta
+        if "executed_query_set_id" in r:
+            bench.round_record = {k: r.get(k) for k in _ROUND_RECORD_KEYS}
+        rounds.append(bench)
     return rounds
 
 
-def recorded_qph_basis(record: Any) -> dict[str, Any] | None:
-    """The ``composite_qph_basis`` of a stored metrics.json record, read from
-    its in-stream rounds (collector.composite_qph_basis) so a record written
-    before the basis was stored gets the same answer. A record that keeps
-    no rounds gives its stored basis, or None."""
-    from .collector import composite_qph_basis
-
-    rounds = _recorded_rounds(record)
-    if rounds:
-        return composite_qph_basis(rounds)[0]
-    if not isinstance(record, dict) or "error" in record:
-        return None
-    pb = record.get("pipeline_benchmark") or {}
-    stored = (pb.get("scores") or {}).get("composite_qph_basis") if isinstance(pb, dict) else None
-    return stored if isinstance(stored, dict) else None
-
-
-def _recorded_rounds(record: Any) -> list[BenchmarkMetrics]:
-    """A stored record's in-stream rounds, loaded as ``_dict_to_metrics``
-    loads them; rounds that are not objects are skipped."""
-    if not isinstance(record, dict) or "error" in record:
-        return []
-    pb = record.get("pipeline_benchmark") or {}
-    raw = pb.get("benchmark_rounds") if isinstance(pb, dict) else None
-    if not isinstance(raw, list):
-        return []
-    return _deserialize_benchmark_rounds(
-        [r for r in raw if isinstance(r, dict)], record.get("start_time")
+def _benchmark_from_dict(d: dict[str, Any], recorded_at: str | None) -> BenchmarkMetrics:
+    """A stored benchmark. One from before query-set ids gets a pinned legacy
+    id only if it is newer than the last SQL change (*recorded_at*)."""
+    return BenchmarkMetrics(
+        mode=d.get("mode", "power"),
+        cache=d.get("cache", "hot"),
+        scale=d.get("scale", 0),
+        qph=d.get("qph", 0.0),
+        total_seconds=d.get("total_seconds", 0.0),
+        queries=d.get("queries", []),
+        query_set_id=d.get("query_set_id") or legacy_query_set_id(d.get("queries"), recorded_at),
+        engine=recorded_engine(d),
+        iterations=d.get("iterations", 1),
+        streams=d.get("streams", 1),
+        stream_results=d.get("stream_results", []),
     )
+
+
+def _job_from_dict(d: dict[str, Any]) -> JobMetrics:
+    job = _dataclass_from_dict(JobMetrics, d, aliases=_JOB_ALIASES)
+    if d.get("start_time"):
+        job.start_time = datetime.fromisoformat(d["start_time"])
+    if d.get("end_time"):
+        job.end_time = datetime.fromisoformat(d["end_time"])
+    return job
+
+
+def _stage_from_dict(d: dict[str, Any]) -> StageMetrics:
+    """A stored stage. Every field written is read back; a stored None stays
+    None (``output_rows``: not measured), except the fields an older record
+    wrote as null and whose default is not."""
+    kwargs: dict[str, Any] = {"stage_name": "", "stage_type": "", "engine": ""}
+    for f in dataclasses.fields(StageMetrics):
+        if f.name in d and f.name not in ("start_time", "end_time"):
+            kwargs[f.name] = d[f.name]
+    kwargs["timing_source"] = kwargs.get("timing_source") or ""
+    kwargs["submission_failures"] = list(kwargs.get("submission_failures") or [])
+    kwargs["submission_retry_seconds"] = kwargs.get("submission_retry_seconds") or 0.0
+    stage = StageMetrics(**kwargs)
+    if d.get("start_time"):
+        stage.start_time = datetime.fromisoformat(d["start_time"])
+    if d.get("end_time"):
+        stage.end_time = datetime.fromisoformat(d["end_time"])
+    return stage
 
 
 #: The keys MetricsCollector.record_round writes beside a round's benchmark.
@@ -272,36 +263,7 @@ def _deserialize_cycles(
     """Deserialize cycle metrics from JSON."""
     cycles: list[CycleMetrics] = []
     for c in raw_cycles:
-        jobs = []
-        for jd in c.get("jobs", []):
-            jobs.append(
-                JobMetrics(
-                    job_name=jd.get("job_name", ""),
-                    job_type=jd.get("job_type", ""),
-                    elapsed_seconds=jd.get("elapsed_seconds", 0),
-                    success=jd.get("success", False),
-                    error_message=jd.get("error_message"),
-                    input_size_gb=jd.get("input_size_gb", 0),
-                    output_size_gb=jd.get("output_size_gb", 0),
-                    input_rows=jd.get("input_rows", 0),
-                    output_rows=jd.get("output_rows", 0),
-                )
-            )
-        bench = None
         bd = c.get("benchmark")
-        if bd:
-            bench = BenchmarkMetrics(
-                mode=bd.get("mode", "power"),
-                cache=bd.get("cache", "hot"),
-                scale=bd.get("scale", 0),
-                qph=bd.get("qph", 0.0),
-                total_seconds=bd.get("total_seconds", 0.0),
-                queries=bd.get("queries", []),
-                query_set_id=bd.get("query_set_id")
-                or legacy_query_set_id(bd.get("queries"), recorded_at),
-                engine=recorded_engine(bd),
-                iterations=bd.get("iterations", 1),
-            )
         cycles.append(
             CycleMetrics(
                 cycle_index=c.get("cycle_index", 0),
@@ -312,8 +274,8 @@ def _deserialize_cycles(
                 datagen_skipped=bool(c.get("datagen_skipped", False)),
                 datagen_start=c.get("datagen_start", "") or "",
                 datagen_end=c.get("datagen_end", "") or "",
-                jobs=jobs,
-                benchmark=bench,
+                jobs=[_job_from_dict(jd) for jd in c.get("jobs", [])],
+                benchmark=_benchmark_from_dict(bd, recorded_at) if bd else None,
                 table_health=c.get("table_health", {}),
             )
         )
@@ -350,6 +312,21 @@ def _create_exclusive(tmp_path: str, filepath: Path) -> None:
 def _stored_scores(data: dict[str, Any]) -> dict[str, Any] | None:
     scores = (data.get("pipeline_benchmark") or {}).get("scores")
     return scores if isinstance(scores, dict) else None
+
+
+def _read_run_key(filepath: Path) -> dict[str, Any] | None:
+    """The keys a latest-run lookup reads from a metrics JSON."""
+    try:
+        with open(filepath) as f:
+            data = json.load(f)
+        return {
+            "run_id": data.get("run_id"),
+            "deployment_name": data.get("deployment_name"),
+            "record_kind": data.get("record_kind") or "run",
+            "start_time": data.get("start_time"),
+        }
+    except (json.JSONDecodeError, KeyError):
+        return None
 
 
 class MetricsStorage:
@@ -452,28 +429,22 @@ class MetricsStorage:
         Returns:
             List of run summaries (most recent first)
         """
+        return self._scan(self._read_run_summary)
+
+    def _run_index(self) -> list[dict[str, Any]]:
+        """``list_runs`` rows with only the keys the latest-run lookups read
+        (run_id, deployment_name, record_kind, start_time), in the same
+        order, without judging every record."""
+        return self._scan(_read_run_key)
+
+    def _scan(self, read: Any) -> list[dict[str, Any]]:
         runs: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
-
-        if not self.metrics_dir.is_dir():
-            return runs
-
-        # New layout: per-run directories
-        for run_dir in sorted(self.metrics_dir.iterdir(), reverse=True):
-            metrics_file = run_dir / "metrics.json"
-            if run_dir.is_dir() and run_dir.name.startswith("run-") and metrics_file.exists():
-                summary = self._read_run_summary(metrics_file)
-                if summary and summary["run_id"] not in seen_ids:
-                    runs.append(summary)
-                    seen_ids.add(summary["run_id"])
-
-        # Legacy layout: flat run-*.json files
-        for filepath in sorted(self.metrics_dir.glob("run-*.json"), reverse=True):
-            if filepath.is_file():
-                summary = self._read_run_summary(filepath)
-                if summary and summary["run_id"] not in seen_ids:
-                    runs.append(summary)
-                    seen_ids.add(summary["run_id"])
+        for filepath in self._iter_metrics_files():
+            summary = read(filepath)
+            if summary and summary["run_id"] not in seen_ids:
+                runs.append(summary)
+                seen_ids.add(summary["run_id"])
 
         # Re-sort combined list by start_time descending. Parsed, not as
         # strings: runs from v1.6 record UTC with an offset, older ones naive
@@ -490,9 +461,8 @@ class MetricsStorage:
 
             pb = data.get("pipeline_benchmark")
             pb_scores = pb.get("scores", {}) if pb else {}
-            # Carry the persisted verdict block through the summary so
-            # ``lakebench report --list`` (and any other summary consumer)
-            # can prefer verdict.status over raw ``success`` (OD-6).
+            # The stored verdict block, so ``lakebench report --list`` can
+            # prefer verdict.status over raw ``success``.
             verdict = data.get("verdict") if isinstance(data.get("verdict"), dict) else None
             from lakebench.metrics.verdict import verdict_of
 
@@ -537,7 +507,7 @@ class MetricsStorage:
         Returns:
             PipelineMetrics or None if no runs exist
         """
-        runs = [r for r in self.list_runs() if r.get("record_kind", "run") == "run"]
+        runs = [r for r in self._run_index() if r.get("record_kind", "run") == "run"]
         if not runs:
             return None
 
@@ -551,8 +521,7 @@ class MetricsStorage:
         Parallel deployments share a single lakebench-output tree, so an
         unscoped ``get_latest_run()`` reads whichever deployment happened to
         finish last -- a callsite that then rewrites the record corrupts
-        another deployment's history (SP-2 owns the deployment_id fix; this
-        helper is the interim scope-by-name path).
+        another deployment's history. This scopes by deployment name.
 
         Legacy records recorded before v1.6 did not persist deployment_name.
         For READ callers (``writable=False``), when no exact match is found
@@ -585,7 +554,7 @@ class MetricsStorage:
             return self.get_latest_run()
 
         legacy_fallback_id: str | None = None
-        for info in self.list_runs():
+        for info in self._run_index():
             if info.get("record_kind", "run") != "run":
                 # A benchmark record is a copy of a run, not a run (see
                 # get_latest_run); compare's config resolution skips it too.
@@ -628,25 +597,8 @@ class MetricsStorage:
         Returns:
             PipelineMetrics instance
         """
-        # When the run was recorded: a benchmark from before query-set ids
-        # gets a pinned legacy id only if it is newer than the last SQL change.
         recorded_at = data.get("start_time")
-        jobs = []
-        for job_data in data.get("jobs", []):
-            # Class-level reload: iterate dataclass fields so every JobMetrics
-            # field flows automatically. The hand-written kwargs list here
-            # previously omitted silver_tables + extra_metrics -- disk showed
-            # them via asdict() but load reverted to defaults (hand-copy drift on
-            # the READ side, adversarial-review finding 2026-09-28). Same
-            # mirror defect on StreamingJobMetrics.extra_metrics, fixed below.
-            job = _dataclass_from_dict(JobMetrics, job_data, aliases=_JOB_ALIASES)
-
-            if job_data.get("start_time"):
-                job.start_time = datetime.fromisoformat(job_data["start_time"])
-            if job_data.get("end_time"):
-                job.end_time = datetime.fromisoformat(job_data["end_time"])
-
-            jobs.append(job)
+        jobs = [_job_from_dict(job_data) for job_data in data.get("jobs", [])]
 
         queries = []
         for query_data in data.get("queries", []):
@@ -716,98 +668,16 @@ class MetricsStorage:
         if data.get("end_time"):
             metrics.end_time = datetime.fromisoformat(data["end_time"])
 
-        # Deserialize benchmark if present
         bench_data = data.get("benchmark")
         if bench_data:
-            metrics.benchmark = BenchmarkMetrics(
-                mode=bench_data.get("mode", "power"),
-                cache=bench_data.get("cache", "hot"),
-                scale=bench_data.get("scale", 0),
-                qph=bench_data.get("qph", 0.0),
-                total_seconds=bench_data.get("total_seconds", 0.0),
-                queries=bench_data.get("queries", []),
-                query_set_id=bench_data.get("query_set_id")
-                or legacy_query_set_id(bench_data.get("queries"), recorded_at),
-                engine=recorded_engine(bench_data),
-                iterations=bench_data.get("iterations", 1),
-                streams=bench_data.get("streams", 1),
-                stream_results=bench_data.get("stream_results", []),
-            )
+            metrics.benchmark = _benchmark_from_dict(bench_data, recorded_at)
 
         # Deserialize pipeline benchmark if present
         pb_data = data.get("pipeline_benchmark")
         if pb_data:
-            pb_stages = []
-            for s_data in pb_data.get("stages", []):
-                stage = StageMetrics(
-                    stage_name=s_data.get("stage_name", ""),
-                    stage_type=s_data.get("stage_type", ""),
-                    engine=s_data.get("engine", ""),
-                    elapsed_seconds=s_data.get("elapsed_seconds", 0.0),
-                    timing_source=s_data.get("timing_source") or "",
-                    timing_resolution_seconds=s_data.get("timing_resolution_seconds"),
-                    submission_failures=list(s_data.get("submission_failures") or []),
-                    submission_retry_seconds=s_data.get("submission_retry_seconds") or 0.0,
-                    success=s_data.get("success", False),
-                    error_message=s_data.get("error_message"),
-                    input_size_gb=s_data.get("input_size_gb", 0.0),
-                    output_size_gb=s_data.get("output_size_gb", 0.0),
-                    input_rows=s_data.get("input_rows", 0),
-                    output_rows=s_data.get("output_rows", 0),
-                    throughput_gb_per_second=s_data.get("throughput_gb_per_second", 0.0),
-                    throughput_rows_per_second=s_data.get("throughput_rows_per_second", 0.0),
-                    executor_count=s_data.get("executor_count", 0),
-                    executor_cores=s_data.get("executor_cores", 0),
-                    executor_memory_gb=s_data.get("executor_memory_gb", 0.0),
-                    latency_ms=s_data.get("latency_ms"),
-                    freshness_seconds=s_data.get("freshness_seconds"),
-                    freshness_active_seconds=s_data.get("freshness_active_seconds"),
-                    trailing_idle_cycles=s_data.get("trailing_idle_cycles", 0),
-                    committed_rows=s_data.get("committed_rows"),
-                    batch_span_seconds=s_data.get("batch_span_seconds"),
-                    ttd_alerts=s_data.get("ttd_alerts"),
-                    ttd_unmatched=s_data.get("ttd_unmatched", 0),
-                    ttd_late=s_data.get("ttd_late", 0),
-                    ttd_unmeasured_cycles=s_data.get("ttd_unmeasured_cycles", 0),
-                    ttd_p50_seconds=s_data.get("ttd_p50_seconds"),
-                    ttd_p95_seconds=s_data.get("ttd_p95_seconds"),
-                    ttd_max_seconds=s_data.get("ttd_max_seconds"),
-                    total_batches=s_data.get("total_batches", 0),
-                    batch_size=s_data.get("batch_size", 0),
-                    unique_rows_processed=s_data.get("unique_rows_processed"),
-                    window_input_rows=s_data.get("window_input_rows"),
-                    pre_window_input_rows=s_data.get("pre_window_input_rows"),
-                    window_commits=s_data.get("window_commits"),
-                    window_new_data_cycles=s_data.get("window_new_data_cycles"),
-                    last_write_offset_seconds=s_data.get("last_write_offset_seconds"),
-                    trickle_start_offset_seconds=s_data.get("trickle_start_offset_seconds"),
-                    queries_executed=s_data.get("queries_executed", 0),
-                    queries_per_hour=s_data.get("queries_per_hour", 0.0),
-                )
-                if s_data.get("start_time"):
-                    stage.start_time = datetime.fromisoformat(s_data["start_time"])
-                if s_data.get("end_time"):
-                    stage.end_time = datetime.fromisoformat(s_data["end_time"])
-                pb_stages.append(stage)
-
-            # Reconstruct query_benchmark from the nested dict if present
+            pb_stages = [_stage_from_dict(s_data) for s_data in pb_data.get("stages", [])]
             qb_data = pb_data.get("query_benchmark")
-            query_benchmark = None
-            if qb_data:
-                query_benchmark = BenchmarkMetrics(
-                    mode=qb_data.get("mode", "power"),
-                    cache=qb_data.get("cache", "hot"),
-                    scale=qb_data.get("scale", 0),
-                    qph=qb_data.get("qph", 0.0),
-                    total_seconds=qb_data.get("total_seconds", 0.0),
-                    queries=qb_data.get("queries", []),
-                    query_set_id=qb_data.get("query_set_id")
-                    or legacy_query_set_id(qb_data.get("queries"), recorded_at),
-                    engine=recorded_engine(qb_data),
-                    iterations=qb_data.get("iterations", 1),
-                    streams=qb_data.get("streams", 1),
-                    stream_results=qb_data.get("stream_results", []),
-                )
+            query_benchmark = _benchmark_from_dict(qb_data, recorded_at) if qb_data else None
 
             scores = pb_data.get("scorecard", pb_data.get("scores", {}))
             _basis = scores.get("composite_qph_basis")
@@ -850,6 +720,12 @@ class MetricsStorage:
                 ingest_ratio=scores.get(
                     "ingest_ratio", scores.get("ingestion_completeness_ratio", 0.0)
                 ),
+                bronze_log_incomplete=bool(scores.get("bronze_log_incomplete", False)),
+                ingest_ratio_unscored_reason=scores.get("ingest_ratio_unscored_reason"),
+                stage_capacity=pb_data.get("stage_capacity"),
+                query_time_event_age_seconds=(pb_data.get("diagnostics") or {}).get(
+                    "query_time_event_age_seconds", 0.0
+                ),
                 pipeline_saturated=scores.get("pipeline_saturated", False),
                 corpus_drained=scores.get("corpus_drained"),
                 intake_limit=scores.get("intake_limit"),
@@ -883,7 +759,6 @@ class MetricsStorage:
                 cycles=_deserialize_cycles(pb_data.get("cycles", []), recorded_at),
                 qph_degradation_pct=scores.get("qph_degradation_pct"),
                 qph_degradation_withheld=scores.get("qph_degradation_withheld"),
-                # Maintenance metrics (v1.3)
                 maintenance_elapsed_seconds=scores.get("maintenance_elapsed_seconds", 0.0),
                 maintenance_stopped=bool(scores.get("maintenance_stopped", False)),
                 maintenance_stop_reason=scores.get("maintenance_stop_reason", ""),
@@ -893,6 +768,9 @@ class MetricsStorage:
                 pre_compaction_file_count=scores.get("pre_compaction_file_count", 0),
                 post_compaction_file_count=scores.get("post_compaction_file_count", 0),
                 compaction_ratio=scores.get("compaction_ratio", 0.0),
+                snapshots_expired=scores.get("snapshots_expired", 0),
+                orphan_files_removed=scores.get("orphan_files_removed", 0),
+                storage_reclaimed_mb=scores.get("storage_reclaimed_mb", 0.0),
                 pre_compaction_qph=scores.get("pre_compaction_qph", 0.0),
                 post_compaction_qph=scores.get("post_compaction_qph", 0.0),
                 maintenance_value_pct=scores.get("maintenance_value_pct"),
@@ -909,147 +787,3 @@ class MetricsStorage:
                 metrics.pipeline_benchmark.end_time = datetime.fromisoformat(pb_data["end_time"])
 
         return metrics
-
-    def export_csv(self, output_path: Path | str) -> Path:
-        """Export all runs to CSV format with per-job columns.
-
-        Args:
-            output_path: Output CSV file path
-
-        Returns:
-            Path to CSV file
-        """
-        import csv
-
-        output_path = Path(output_path)
-
-        batch_job_types = ["bronze_verify", "silver_build", "gold_finalize"]
-        streaming_job_types = ["bronze_ingest", "silver_stream", "gold_refresh"]
-        pipeline_stages = ["datagen", "bronze", "silver", "gold", "query"]
-
-        fieldnames = [
-            "run_id",
-            "deployment_name",
-            "start_time",
-            "success",
-            "total_elapsed_seconds",
-            "job_count",
-            "scale",
-            "processing_pattern",
-            "qph",
-            "bronze_size_gb",
-            "silver_size_gb",
-            "gold_size_gb",
-            "streaming_count",
-            "time_to_value_seconds",
-            "pipeline_throughput_gb_per_second",
-        ]
-        for jt in batch_job_types:
-            fieldnames.extend(
-                [
-                    f"{jt}_seconds",
-                    f"{jt}_input_size_gb",
-                    f"{jt}_output_rows",
-                ]
-            )
-        for jt in streaming_job_types:
-            fieldnames.extend(
-                [
-                    f"{jt}_total_batches",
-                    f"{jt}_total_rows_processed",
-                    f"{jt}_throughput_rps",
-                    f"{jt}_freshness_seconds",
-                ]
-            )
-        for ps in pipeline_stages:
-            fieldnames.extend(
-                [
-                    f"pb_{ps}_seconds",
-                    f"pb_{ps}_input_gb",
-                    f"pb_{ps}_output_gb",
-                    f"pb_{ps}_gb_per_s",
-                ]
-            )
-
-        rows: list[dict[str, Any]] = []
-        seen_ids: set[str] = set()
-        for filepath in self._iter_metrics_files():
-            try:
-                with open(filepath) as f:
-                    data = json.load(f)
-
-                rid = data.get("run_id", "")
-                if rid in seen_ids:
-                    continue
-                seen_ids.add(rid)
-                if (data.get("record_kind") or "run") != "run":
-                    continue  # a benchmark record repeats its run's pipeline numbers
-
-                from lakebench.metrics.verdict import passed as _record_passed
-                from lakebench.metrics.verdict import verdict_status as _verdict_status
-
-                row: dict[str, Any] = {
-                    "run_id": data.get("run_id"),
-                    "deployment_name": data.get("deployment_name"),
-                    "start_time": data.get("start_time"),
-                    # OD-6: 'success' now reflects the verdict when a v1.6
-                    # record has one, falling back to raw success for
-                    # legacy v1.5 exports. verdict_status is added so a
-                    # downstream reader can tell PASSED from REFUSED etc.
-                    "success": _record_passed(data),
-                    "verdict_status": _verdict_status(data),
-                    "total_elapsed_seconds": data.get("total_elapsed_seconds"),
-                    "job_count": len(data.get("jobs", [])),
-                    "scale": data.get("config_snapshot", {}).get("scale"),
-                    "processing_pattern": data.get("config_snapshot", {}).get("processing_pattern"),
-                    "qph": data.get("benchmark", {}).get("qph") if data.get("benchmark") else None,
-                    "bronze_size_gb": data.get("bronze_size_gb"),
-                    "silver_size_gb": data.get("silver_size_gb"),
-                    "gold_size_gb": data.get("gold_size_gb"),
-                    "streaming_count": len(data.get("streaming", [])),
-                }
-
-                for job_data in data.get("jobs", []):
-                    prefix = job_data.get("job_type", "").replace("-", "_")
-                    if prefix in batch_job_types:
-                        row[f"{prefix}_seconds"] = job_data.get("elapsed_seconds", 0)
-                        row[f"{prefix}_input_size_gb"] = job_data.get("input_size_gb", 0)
-                        row[f"{prefix}_output_rows"] = job_data.get("output_rows", 0)
-
-                for s_data in data.get("streaming", []):
-                    prefix = s_data.get("job_type", "").replace("-", "_")
-                    if prefix in streaming_job_types:
-                        row[f"{prefix}_total_batches"] = s_data.get("total_batches", 0)
-                        row[f"{prefix}_total_rows_processed"] = s_data.get(
-                            "total_rows_processed", 0
-                        )
-                        row[f"{prefix}_throughput_rps"] = s_data.get("throughput_rps", 0)
-                        row[f"{prefix}_freshness_seconds"] = s_data.get("freshness_seconds", 0)
-
-                # Pipeline benchmark stage columns
-                pb = data.get("pipeline_benchmark")
-                if pb:
-                    pb_scores = pb.get("scores", {})
-                    row["time_to_value_seconds"] = pb_scores.get("time_to_value_seconds")
-                    row["pipeline_throughput_gb_per_second"] = pb_scores.get(
-                        "pipeline_throughput_gb_per_second"
-                    )
-                    matrix = pb.get("stage_matrix", {})
-                    for ps in pipeline_stages:
-                        stage_data = matrix.get(ps, {})
-                        row[f"pb_{ps}_seconds"] = stage_data.get("elapsed_seconds")
-                        row[f"pb_{ps}_input_gb"] = stage_data.get("input_size_gb")
-                        row[f"pb_{ps}_output_gb"] = stage_data.get("output_size_gb")
-                        row[f"pb_{ps}_gb_per_s"] = stage_data.get("throughput_gb_per_second")
-
-                rows.append(row)
-            except (json.JSONDecodeError, KeyError):
-                continue
-
-        with open(output_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(rows)
-
-        logger.info(f"Exported {len(rows)} runs to {output_path}")
-        return output_path

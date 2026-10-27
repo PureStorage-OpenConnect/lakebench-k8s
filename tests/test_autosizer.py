@@ -69,35 +69,26 @@ class TestAutosizerLeavesSparkToTheProfiles:
 class TestAutoSizingClusterAware:
     """Tests for cluster-aware scaling: cap small scales, scale up large."""
 
-    def test_small_cluster_caps_datagen(self):
-        """Small cluster caps datagen parallelism to fit."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 10}}},
-        )
-
-        # Small cluster: 4 nodes, 8 cores each = 32 cores total
-        cap = ClusterCapacity(
-            total_cpu_millicores=32000,
-            total_memory_bytes=128 * 1024**3,
-            node_count=4,
-            largest_node_cpu_millicores=8000,
-            largest_node_memory_bytes=32 * 1024**3,
-        )
-
-        resolve_auto_sizing(config, cap)
-
-        datagen = config.architecture.workload.datagen
-        coord = config.architecture.query_engine.trino.coordinator
-        worker = config.architecture.query_engine.trino.worker
-
-        # Datagen + co-resident must fit in 32 cores
-        co_resident = int(coord.cpu) + worker.replicas * int(worker.cpu) + 1
-        total = datagen.parallelism * int(datagen.cpu) + co_resident
-        assert total <= 32, f"datagen phase: {total} > 32"
-
-    @pytest.mark.parametrize(("scale", "pattern"), [(1, "medallion"), (1000, "streaming")])
-    def test_no_overprovisioning(self, scale, pattern):
+    @pytest.mark.parametrize(
+        ("scale", "pattern", "cap"),
+        [
+            # Big cluster (8 x 40 = 320 cores): scales up but never overshoots.
+            (
+                1,
+                "medallion",
+                ClusterCapacity(320000, 8 * 432 * 1024**3, 8, 40000, 432 * 1024**3),
+            ),
+            (
+                1000,
+                "streaming",
+                ClusterCapacity(320000, 8 * 432 * 1024**3, 8, 40000, 432 * 1024**3),
+            ),
+            # Small cluster (4 x 8 = 32 cores): datagen parallelism is capped to
+            # fit.
+            (10, "medallion", ClusterCapacity(32000, 128 * 1024**3, 4, 8000, 32 * 1024**3)),
+        ],
+    )
+    def test_no_overprovisioning(self, scale, pattern, cap):
         """Datagen demand plus the co-resident pods must not exceed cluster
         capacity: never schedule more pods than the cluster can run."""
         config = LakebenchConfig(
@@ -106,15 +97,6 @@ class TestAutoSizingClusterAware:
                 "workload": {"datagen": {"scale": scale}},
                 "processing": {"pattern": pattern},
             },
-        )
-
-        # 8 worker nodes x 40 cores = 320 cores
-        cap = ClusterCapacity(
-            total_cpu_millicores=320000,
-            total_memory_bytes=8 * 432 * 1024**3,
-            node_count=8,
-            largest_node_cpu_millicores=40000,
-            largest_node_memory_bytes=432 * 1024**3,
         )
 
         resolve_auto_sizing(config, cap)
@@ -297,3 +279,11 @@ def test_datagen_mode_resolution(scale, mode, expected):
         name="test", architecture={"workload": {"datagen": {"scale": scale, "mode": mode}}}
     )
     assert _resolve_datagen_mode(config) == expected
+
+
+def test_auto_sizing_log_keeps_a_fractional_scale(caplog):
+    """A local-mode scale below 1 is logged as written, not truncated to 0."""
+    config = LakebenchConfig(name="test", architecture={"workload": {"datagen": {"scale": 0.01}}})
+    with caplog.at_level("INFO", logger="lakebench.config.autosizer"):
+        resolve_auto_sizing(config)
+    assert "Auto-sized for scale=0.01 " in caplog.text

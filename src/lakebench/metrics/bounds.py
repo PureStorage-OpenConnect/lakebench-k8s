@@ -25,6 +25,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from lakebench.config.schema import interval_seconds
+
 # Kind patterns as experiment limits write them; ``*`` matches any job type.
 BOUND_EXECUTOR_CAP = "*: executor cap"
 BOUND_EXECUTOR_BUDGET = "*: concurrent executor budget"
@@ -36,9 +38,6 @@ BOUND_MAINTENANCE = "pre-benchmark maintenance budget"
 #: Not a bound kind (see the module docstring); readers pass it to
 #: ``metric_registry.capped_by`` as ``extra`` when ``trickle_bound`` holds.
 BOUND_TRICKLE = "trickle"
-#: The ML loop's executor cap; it sits in the loop's own limits, never in the
-#: pipeline's ``bound_kinds``.
-BOUND_ML_LOOP_EXECUTOR_CAP = "ML loop executor cap"
 
 #: ``limits.bound`` lines that come from the trickle start with this.
 TRICKLE_LINE_PREFIX = "trickle:"
@@ -217,7 +216,7 @@ def trigger_lines(snapshot: Mapping[str, Any], *, trickle: bool) -> list[str]:
     sustained = snapshot.get("sustained") or {}
     out = []
     for stage, key in _TRIGGER_KEYS:
-        seconds = _interval_seconds(sustained.get(key))
+        seconds = interval_seconds(sustained.get(key))
         if seconds and not (trickle and stage == "bronze-ingest"):
             out.append(
                 f"{TRIGGER_LINE_PREFIX} {stage} runs every {seconds:g} s ({key}): between "
@@ -231,12 +230,6 @@ def trigger_lines(snapshot: Mapping[str, Any], *, trickle: bool) -> list[str]:
 
 def _num(value: Any) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
-
-
-def _interval_seconds(interval: Any) -> float | None:
-    from lakebench.metrics.collector import _interval_seconds as parse
-
-    return parse(interval)
 
 
 def _trickle_value(snapshot: Mapping[str, Any], trickle: Mapping[str, Any]) -> Any:
@@ -280,7 +273,7 @@ def _from_record(rec: Mapping[str, Any]) -> dict[str, Any] | None:
         "intake_limit": scores.get("intake_limit"),
         "window_s": _num(scores.get("window_seconds")),
         "last_write_offset_s": _num(bronze.get("last_write_offset_seconds")),
-        "trigger_s": _interval_seconds(
+        "trigger_s": interval_seconds(
             (snapshot.get("sustained") or {}).get("bronze_trigger_interval")
         ),
         "corpus_rows": _num(pb_snap.get("datagen_output_rows")),
@@ -310,7 +303,7 @@ def _from_metrics(metrics: Any) -> dict[str, Any] | None:
         # As metrics.json records it (0.1 s).
         "window_s": round(window, 1) if window is not None else None,
         "last_write_offset_s": _num(getattr(bronze, "last_write_offset_seconds", None)),
-        "trigger_s": _interval_seconds(
+        "trigger_s": interval_seconds(
             (snapshot.get("sustained") or {}).get("bronze_trigger_interval")
         ),
         "corpus_rows": _num(pb_snap.get("datagen_output_rows")),

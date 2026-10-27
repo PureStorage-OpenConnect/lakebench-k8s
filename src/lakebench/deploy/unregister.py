@@ -1,10 +1,10 @@
 """Unregister a medallion layer's tables before `clean` empties its bucket.
 
-`lakebench clean silver|gold` empties buckets and used to leave
-the catalog alone, so the next run met catalog entries whose files were gone:
-a Delta table fails every read (DELTA_TABLE_NOT_FOUND), an Iceberg table on a
-Hive catalog fails to load its missing metadata file. Removing the entries
-before the bucket is emptied lets the next run create the tables afresh.
+`lakebench clean silver|gold` empties buckets. A catalog entry left
+behind points at files that are gone: a Delta table fails every read
+(DELTA_TABLE_NOT_FOUND), an Iceberg table on a Hive catalog fails to load its
+missing metadata file. Removing the entries before the bucket is emptied lets
+the next run create the tables afresh.
 
 The statements are destroy's (deploy/destroy.py, table step), on the
 deployment's own Trino or Spark Thrift pod:
@@ -68,7 +68,6 @@ def unregister_layer_tables(cfg: Any, layer: str, bucket: str, k8s: Any) -> Laye
     """
     from lakebench.deploy.destroy import (
         _S3_URI_RE,
-        _is_schema_missing,
         _is_table_missing,
         _split_table,
         _table_location_bucket,
@@ -102,14 +101,14 @@ def unregister_layer_tables(cfg: Any, layer: str, bucket: str, k8s: Any) -> Laye
         else:
             sql = build_drop_table_sql(maint_engine, table)
             if table_format == "delta":
-                seen: list[str] = []
-                where, why = _table_location_bucket(
-                    _query_marking_gone(query_sql, seen),
+                where, why, error = _table_location_bucket(
+                    query_sql,
                     maint_engine,
                     k8s,
                     pod_name,
                     namespace,
                     table,
+                    missing_log_is_gone=True,
                 )
                 if why == "missing":
                     continue
@@ -118,7 +117,7 @@ def unregister_layer_tables(cfg: Any, layer: str, bucket: str, k8s: Any) -> Laye
                     # The log is gone, but DROP still deletes a managed
                     # table's directory: only in the bucket being emptied,
                     # read from the path Delta's error names.
-                    named = set(_S3_URI_RE.findall(seen[-1] if seen else ""))
+                    named = set(_S3_URI_RE.findall(error))
                     if named != {bucket}:
                         if named:
                             out.kept.append(
@@ -144,7 +143,7 @@ def unregister_layer_tables(cfg: Any, layer: str, bucket: str, k8s: Any) -> Laye
             out.failed.append((table, str(e)))
             break
         except Exception as e:  # noqa: BLE001
-            if _is_table_missing(e) or _is_schema_missing(e):
+            if _is_table_missing(e):
                 continue
             text = " ".join(str(e).split())[:200]
             (out.stuck if _FILES_GONE_RE.search(str(e)) else out.failed).append((table, text))
@@ -152,21 +151,3 @@ def unregister_layer_tables(cfg: Any, layer: str, bucket: str, k8s: Any) -> Laye
         out.unregistered.append(table)
         logger.info("unregistered %s via %s before emptying %s", table, maint_engine, bucket)
     return out
-
-
-def _query_marking_gone(query_sql: Any, seen: list[str]) -> Any:
-    """``query_sql``, with a log-less Delta table's error reported in the
-    form destroy's location reader treats as "files gone". It matches on the
-    whole error, not the shortened text the reader keeps."""
-
-    def run(*args: Any, **kwargs: Any) -> str:
-        try:
-            return str(query_sql(*args, **kwargs))
-        except Exception as e:
-            text = str(e)
-            seen.append(text)
-            if re.search(r"\[DELTA_TABLE_NOT_FOUND\]|\[DELTA_PATH_DOES_NOT_EXIST\]", text):
-                raise RuntimeError("[DELTA_PATH_DOES_NOT_EXIST] " + text) from e
-            raise
-
-    return run

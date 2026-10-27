@@ -2,8 +2,8 @@
 
 Every label that names a mode or a measurement condition reads from here,
 so the page, the terminal report and the end-of-run panel say the same
-thing. Lakebench modes are batch and continuous: older records store
-continuous as ``sustained``, and the page never shows that word, nor
+thing. Lakebench modes are batch and continuous: records store continuous
+as ``pipeline_mode: sustained``, and the page never shows that word, nor
 "streaming".
 """
 

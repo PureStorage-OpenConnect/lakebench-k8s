@@ -1,25 +1,25 @@
 """Verdict value object for a Lakebench run.
 
-Historically a run reported a single ``success`` boolean. That was too coarse:
-the process exit code, the HTML badge, and the underlying pipeline / benchmark
-gate outcomes can disagree. A run whose CLI exited 0 with all jobs succeeded
-can still be FAILED by the badge (e.g. sustained runs where bronze never
-kept pace with the trickle, or a stage fell behind through the window).
+A single ``success`` boolean is too coarse: the process exit code, the HTML
+badge, and the underlying pipeline / benchmark gate outcomes can disagree. A
+run whose CLI exited 0 with all jobs succeeded can still be FAILED by the
+badge (e.g. sustained runs where bronze never kept pace with the trickle, or
+a stage fell behind through the window).
 
 This module defines the ``Verdict`` value object, the shared badge helper
 (``compute_badge_status``) that both this module and ``reports.generator``
-use, and the small readers (``has_verdict``, ``verdict_status``, ``passed``)
-that every raw-``success`` consumer goes through so v1.6 records prefer the
-verdict and v1.5 records fall back to the legacy flag.
+use, and the small readers (``verdict_status``, ``passed``) that every
+raw-``success`` consumer goes through so v1.6 records prefer the verdict and
+v1.5 records fall back to the legacy flag.
 
-Owner decision OD-6: v1.6 ``success == (verdict.status == "PASSED")``. A
-v1.5 record (no verdict block) is legacy: never comparable, never a perf
-baseline.
+A v1.6 record has ``success == (verdict.status == "PASSED")``. A v1.5 record
+(no verdict block) is legacy: never comparable, never a perf baseline.
 """
 
 from __future__ import annotations
 
 import copy
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -28,6 +28,8 @@ from lakebench.metrics import c360_correctness
 
 if TYPE_CHECKING:
     from lakebench.metrics.collector import PipelineMetrics
+
+logger = logging.getLogger(__name__)
 
 
 VerdictStatus = Literal["PASSED", "FAILED", "REFUSED", "INTERRUPTED"]
@@ -79,8 +81,7 @@ class Verdict:
         """
         # Validate gate vocab strictly: an unknown value (for example the
         # past-tense ``"FAILED"``) must raise, not silently be treated as
-        # PASS. Callers today emit PASS or FAIL; new callers see the failure
-        # immediately.
+        # PASS.
         for name, value in gate_outcomes.items():
             if value not in _VALID_GATE_OUTCOMES:
                 raise ValueError(
@@ -113,9 +114,7 @@ class Verdict:
 
         # Deep copy on ingress so a caller cannot mutate a nested list inside
         # ``qualifiers`` after this Verdict is constructed (the dataclass is
-        # frozen, but ``dict(other)`` would only shallow-copy). Callers today
-        # pass scalars, so no behaviour change; the invariant holds for
-        # future callers.
+        # frozen, but ``dict(other)`` would only shallow-copy).
         return cls(
             status=status,
             reasons=kept_reasons,
@@ -140,17 +139,9 @@ class Verdict:
 # ---------------------------------------------------------------------------
 # Legacy-fallback readers. A v1.6 record carries a ``verdict`` block written
 # by the collector; a v1.5 record does not. Every raw-``success`` consumer
-# now goes through ``passed`` (or ``verdict_status`` + a comparison) so v1.6
+# goes through ``passed`` (or ``verdict_status`` + a comparison) so v1.6
 # records use the verdict and v1.5 records fall back to the legacy flag.
 # ---------------------------------------------------------------------------
-
-
-def has_verdict(record: Mapping[str, Any] | None) -> bool:
-    """True when *record* carries a ``verdict`` block with a string status."""
-    if record is None:
-        return False
-    v = record.get("verdict")
-    return isinstance(v, Mapping) and isinstance(v.get("status"), str)
 
 
 def verdict_status(record: Mapping[str, Any] | None) -> str | None:
@@ -188,8 +179,8 @@ def stored_passed(record: Mapping[str, Any] | None) -> bool:
     return status == "PASSED" if status is not None else bool(record.get("success", False))
 
 
-#: Verdict statuses from strictest to least strict (``Verdict.PRIORITY``).
-_STRICTNESS = {"FAILED": 0, "INTERRUPTED": 1, "REFUSED": 2, "PASSED": 3}
+#: Verdict statuses from strictest to least strict.
+_STRICTNESS = {status: rank for rank, status in enumerate(Verdict.PRIORITY)}
 
 
 def verdict_of(record: Mapping[str, Any] | None) -> dict[str, str | None]:
@@ -222,14 +213,12 @@ def judge(record: Mapping[str, Any]) -> dict[str, Any]:
     error: str | None = None
     if _is_run_record(record):
         try:
-            again = _recompute(record)
+            again = verdict_from_record(record)
             recomputed = again.status
             reasons = [str(r) for r in again.reasons if not str(r).startswith("Gate '")]
         except Exception as e:  # noqa: BLE001 -- an unreadable record never reads passed
-            import logging
-
             error = f"{type(e).__name__}: {e}"
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "run %s: verdict not recomputable (%s); read as not passed",
                 record.get("run_id"),
                 e,
@@ -316,6 +305,22 @@ def compute_badge_status(
     Warnings are not failures; they surface as an amber badge when
     ``passed`` is True. A run is failed when any reason is recorded.
     """
+    return _badge_status(
+        metrics,
+        record_gates(metrics),
+        _failed_queries(metrics),
+        _requested_effective_mismatches(metrics),
+    )
+
+
+def _badge_status(
+    metrics: PipelineMetrics,
+    gates: dict[str, _GateResult],
+    failed_queries: list[str],
+    mismatched: dict[str, dict[str, Any]],
+) -> tuple[bool, list[str], list[str]]:
+    """``compute_badge_status`` over the record gates, failed queries and
+    requested/effective mismatches the caller already computed."""
     reasons: list[str] = []
     warnings: list[str] = []
 
@@ -356,50 +361,31 @@ def compute_badge_status(
     # Data completeness
     if pb is not None:
         if is_sustained and pb.ingest_ratio is None:
-            reason = getattr(pb, "ingest_ratio_unscored_reason", None)
+            reason = pb.ingest_ratio_unscored_reason
             warnings.append(
                 f"Ingest ratio not scored: {reason}"
                 if reason
                 else "Ingest ratio unmeasurable (datagen row count unknown)"
             )
-        elif (
-            is_sustained
-            and pb.ingest_ratio is not None
-            and pb.ingest_ratio < 0.95
-            and pb.intake_limit == "trickle_rate"
-            and pb.pipeline_saturated is False
-        ):
-            # The configured trickle bounded intake and the pipeline kept
-            # pace with it: a caveat on the ratio, not a failure.
-            warnings.append(pb.trickle_note() or "Intake held to the trickle rate")
-        elif (
-            is_sustained
-            and pb.ingest_ratio is not None
-            and pb.ingest_ratio < 0.95
-            and pb.intake_limit == "trickle_rate"
-            and pb.pipeline_saturated is None
-        ):
-            warnings.append(
-                f"Ingest ratio {pb.ingest_ratio:.2f}: intake held to the trickle rate, "
-                "but silver's pace was not measured, so saturation is unknown"
-            )
-        elif (
-            is_sustained
-            and pb.ingest_ratio is not None
-            and pb.ingest_ratio < 0.95
-            and getattr(pb, "datagen_ahead", None)
-            and pb.intake_limit == "bronze_capacity"
-        ):
-            # Continuous datagen stayed ahead of a busy bronze: the backlog
-            # is what the run measures (bronze's capacity), not a failure.
-            pass
         elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio < 0.95:
-            cause = {
-                "trickle_rate": "intake held to the trickle rate, silver did not keep pace",
-                # Bronze had idle time: a late start or a stall, not capacity.
-                "below_bronze_capacity": "bronze took in less than arrived without being at capacity",
-            }.get(pb.intake_limit or "", "pipeline saturated")
-            reasons.append(f"Ingest ratio {pb.ingest_ratio:.2f} < 0.95 ({cause})")
+            if pb.intake_limit == "trickle_rate" and pb.pipeline_saturated is False:
+                # The configured trickle bounded intake and the pipeline kept
+                # pace with it: a caveat on the ratio, not a failure.
+                warnings.append(pb.trickle_note() or "Intake held to the trickle rate")
+            elif pb.intake_limit == "trickle_rate" and pb.pipeline_saturated is None:
+                warnings.append(
+                    f"Ingest ratio {pb.ingest_ratio:.2f}: intake held to the trickle rate, "
+                    "but silver's pace was not measured, so saturation is unknown"
+                )
+            elif not (pb.datagen_ahead and pb.intake_limit == "bronze_capacity"):
+                # (Continuous datagen ahead of a busy bronze is not a failure:
+                # the backlog is what the run measures, bronze's capacity.)
+                cause = {
+                    "trickle_rate": "intake held to the trickle rate, silver did not keep pace",
+                    # Bronze had idle time: a late start or a stall, not capacity.
+                    "below_bronze_capacity": "bronze took in less than arrived without being at capacity",
+                }.get(pb.intake_limit or "", "pipeline saturated")
+                reasons.append(f"Ingest ratio {pb.ingest_ratio:.2f} < 0.95 ({cause})")
         elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio > 1.05:
             warnings.append(
                 f"Ingest ratio {pb.ingest_ratio:.2f} > 1.05 (gold re-reads exceed input)"
@@ -464,7 +450,7 @@ def compute_badge_status(
             reasons.append(f"Batch jobs failed: {', '.join(failed_jobs)}")
 
     # Benchmark query failures
-    n_failed = len(_failed_queries(metrics))
+    n_failed = len(failed_queries)
     if n_failed:
         reasons.append(f"{n_failed} benchmark queries failed")
 
@@ -472,14 +458,14 @@ def compute_badge_status(
     # mode or trickle): a warning, never a failure.
     from lakebench.metrics.requested_effective import warning_line
 
-    for key, entry in _requested_effective_mismatches(metrics).items():
+    for key, entry in mismatched.items():
         line = warning_line(key, entry)
         if line not in warnings:
             warnings.append(line)
 
     # The record gates (rows per layer, AML rules, scale ratio, query
     # answers): their reasons fail the badge as they fail the verdict.
-    for gate in record_gates(metrics).values():
+    for gate in gates.values():
         for r in gate.reasons:
             if r not in reasons:
                 reasons.append(r)
@@ -520,12 +506,6 @@ def _pipeline_gate_outcome(metrics: PipelineMetrics) -> str | None:
     return None
 
 
-#: Name prefix of the one benchmark query whose failure an in-stream round
-#: tolerates: Q9 reads the C360 gold table that gold refresh replaces while
-#: rounds run (``cli._sustained.tolerated_q9_results``).
-TOLERATED_ROUND_FAILURE_PREFIX = "Q9"
-
-
 def _rounds(metrics: PipelineMetrics) -> list[Any]:
     """A continuous run's in-stream benchmark rounds, in order ([] otherwise)."""
     return list(metrics.benchmark_rounds or []) if _is_sustained(metrics) else []
@@ -541,13 +521,11 @@ def _failed_queries(metrics: PipelineMetrics) -> list[str]:
     outcome per query."""
     rounds = _rounds(metrics)
     if rounds:
-        from lakebench.benchmark.result import is_sla_crossing
-
         # The names that succeeded in some round. A later timeout on one of
         # these is a measured SLA crossing, not a failure -- recorded, not
         # failed. This MUST match cli._run._benchmark_gate_problems so the CLI
         # exit and this (report-/verdict-recomputed) outcome cannot disagree.
-        from lakebench.metrics.collector import rounds_passed_ever
+        from lakebench.metrics.collector import rounds_passed_ever, tolerated_round_failure
 
         passed_ever = rounds_passed_ever(rounds)
         out: list[str] = []
@@ -556,13 +534,7 @@ def _failed_queries(metrics: PipelineMetrics) -> list[str]:
                 if not isinstance(q, Mapping) or q.get("success", True):
                     continue
                 name = str(q.get("name") or q.get("query_name") or "")
-                if name.startswith(TOLERATED_ROUND_FAILURE_PREFIX):
-                    continue
-                if is_sla_crossing(
-                    timed_out=bool(q.get("timed_out", False)),
-                    name=name,
-                    passed_ever=passed_ever,
-                ):
+                if tolerated_round_failure(name, bool(q.get("timed_out", False)), passed_ever):
                     continue
                 if name not in out:
                     out.append(name)
@@ -576,7 +548,7 @@ def _failed_queries(metrics: PipelineMetrics) -> list[str]:
     ]
 
 
-def _benchmark_gate_outcome(metrics: PipelineMetrics) -> str | None:
+def _benchmark_gate_outcome(metrics: PipelineMetrics, failed_queries: list[str]) -> str | None:
     """Outcome for the aggregate ``benchmark`` gate.
 
     "FAIL" when the benchmark raised or any query failed
@@ -588,7 +560,7 @@ def _benchmark_gate_outcome(metrics: PipelineMetrics) -> str | None:
         return "FAIL"
     if metrics.benchmark is None and not _rounds(metrics):
         return None
-    return "FAIL" if _failed_queries(metrics) else "PASS"
+    return "FAIL" if failed_queries else "PASS"
 
 
 def _c360_gate(metrics: PipelineMetrics) -> tuple[str | None, str | None]:
@@ -789,6 +761,16 @@ def _layer_rows_gate(metrics: PipelineMetrics) -> _GateResult:
     return res
 
 
+def _rule_rows(metrics: Any) -> list[Any] | None:
+    """The scored tick's rule status rows: what the covered scorer read
+    (``financial_scoring.covered.rules``), else the drain tick's logged
+    status. None when neither is recorded."""
+    scoring = getattr(metrics, "financial_scoring", None)
+    covered = scoring.get("covered") if isinstance(scoring, Mapping) else None
+    rows = covered.get("rules") if isinstance(covered, Mapping) else None
+    return rows if isinstance(rows, list) else _scored_tick_rule_rows(metrics)
+
+
 def scored_rule_status(metrics: Any) -> tuple[set[str], dict[str, str], dict[str, str]] | None:
     """Continuous AML: ``(ran, skipped, errored)`` from the detection status
     the covered scorer read (``financial_scoring.covered.rules``), the status
@@ -801,11 +783,7 @@ def scored_rule_status(metrics: Any) -> tuple[set[str], dict[str, str], dict[str
     left out (they are not in the continuous expected set); any status other
     than ran or skipped counts as errored.
     """
-    scoring = getattr(metrics, "financial_scoring", None)
-    covered = scoring.get("covered") if isinstance(scoring, Mapping) else None
-    rows = covered.get("rules") if isinstance(covered, Mapping) else None
-    if not isinstance(rows, list):
-        rows = _scored_tick_rule_rows(metrics)
+    rows = _rule_rows(metrics)
     if rows is None:
         return None
     ran: set[str] = set()
@@ -838,12 +816,7 @@ def continuous_excluded_rules(metrics: Any) -> frozenset[str]:
     before they joined continuous, or one that logged no status)."""
     from lakebench.config.support import AML_CONTINUOUS_SKIPPED_RULES
 
-    scoring = getattr(metrics, "financial_scoring", None)
-    covered = scoring.get("covered") if isinstance(scoring, Mapping) else None
-    rows = covered.get("rules") if isinstance(covered, Mapping) else None
-    if not isinstance(rows, list):
-        rows = _scored_tick_rule_rows(metrics)
-    rows = [r for r in rows or [] if isinstance(r, Mapping) and r.get("rule_id")]
+    rows = [r for r in _rule_rows(metrics) or [] if isinstance(r, Mapping) and r.get("rule_id")]
     out = set(AML_CONTINUOUS_SKIPPED_RULES)
     out |= {
         str(r["rule_id"])
@@ -1063,19 +1036,15 @@ def record_gates(metrics: PipelineMetrics) -> dict[str, _GateResult]:
     return {k: g for k, g in gates.items() if g.outcome is not None}
 
 
-def _recompute(record: Mapping[str, Any]) -> Verdict:
-    from lakebench.metrics.storage import MetricsStorage
-
-    return compute_verdict(MetricsStorage()._dict_to_metrics(dict(record)))
-
-
 def verdict_from_record(record: Mapping[str, Any]) -> Verdict:
     """The verdict of a stored metrics.json dict, decided from the record
     alone: the dict is loaded the way ``lakebench`` loads a stored run
     (``MetricsStorage._dict_to_metrics``) and judged by ``compute_verdict``.
     A save computes its verdict with the same function, so a fresh record
     reads back the status it was saved with."""
-    return _recompute(record)
+    from lakebench.metrics.storage import MetricsStorage
+
+    return compute_verdict(MetricsStorage()._dict_to_metrics(dict(record)))
 
 
 def save_gate_problems(metrics: PipelineMetrics) -> list[str]:
@@ -1166,14 +1135,17 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
     False.
     """
     exit_ok = bool(metrics.success)
-    badge_ok, badge_reasons, _warnings = compute_badge_status(metrics)
+    gates = record_gates(metrics)
+    failed_queries = _failed_queries(metrics)
+    mismatched = _requested_effective_mismatches(metrics)
+    badge_ok, badge_reasons, _warnings = _badge_status(metrics, gates, failed_queries, mismatched)
     success_flag = bool(metrics.success)
 
     gate_outcomes: dict[str, str] = {}
     pipeline_outcome = _pipeline_gate_outcome(metrics)
     if pipeline_outcome is not None:
         gate_outcomes["pipeline"] = pipeline_outcome
-    benchmark_outcome = _benchmark_gate_outcome(metrics)
+    benchmark_outcome = _benchmark_gate_outcome(metrics, failed_queries)
     if benchmark_outcome is not None:
         gate_outcomes["benchmark"] = benchmark_outcome
     c360_outcome, c360_reason = _c360_gate(metrics)
@@ -1182,7 +1154,6 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
     deps_reason = _deps_pods_reason(metrics)
     if deps_reason is not None:
         gate_outcomes["dependency_set"] = "FAIL"
-    gates = record_gates(metrics)
     for name, gate in gates.items():
         if gate.outcome is not None:
             gate_outcomes[name] = gate.outcome
@@ -1247,7 +1218,6 @@ def compute_verdict(metrics: PipelineMetrics) -> Verdict:
             qualifiers["c360_failed_not_gating"] = not_gating
     for gate in gates.values():
         qualifiers.update(copy.deepcopy(gate.qualifiers))
-    mismatched = _requested_effective_mismatches(metrics)
     if mismatched:
         # A request the run did not meet: labelled, never a FAIL.
         qualifiers["requested_effective"] = mismatched

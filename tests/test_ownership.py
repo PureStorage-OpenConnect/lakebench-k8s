@@ -871,24 +871,25 @@ def test_destroy_cli_expect_incarnation_mismatch(cfg_path, monkeypatch):
     assert "Destroy NOT started" in res.output
 
 
-@pytest.mark.parametrize("token", ["", "u#n#m"])
-def test_destroy_expect_incarnation_malformed_is_a_usage_error(cfg_path, token):
+@pytest.mark.parametrize(
+    ("token", "extra"),
+    [
+        # malformed tokens are a usage error ...
+        ("", []),
+        ("u#n#m", []),
+        # ... and so is a well-formed token under --local (no cluster to check).
+        ("u#n", ["--local"]),
+    ],
+    ids=["empty", "too-many-parts", "local"],
+)
+def test_destroy_expect_incarnation_is_a_usage_error(cfg_path, token, extra):
     from lakebench.cli import app
 
     with recording() as rec:
         res = CliRunner().invoke(
-            app, ["destroy", str(cfg_path), "--yes", "--expect-incarnation", token]
+            app, ["destroy", str(cfg_path), "--yes", *extra, "--expect-incarnation", token]
         )
         assert rec.calls == []
-    assert res.exit_code == 2, res.output
-
-
-def test_destroy_expect_incarnation_refuses_local(cfg_path):
-    from lakebench.cli import app
-
-    res = CliRunner().invoke(
-        app, ["destroy", str(cfg_path), "--yes", "--local", "--expect-incarnation", "u#n"]
-    )
     assert res.exit_code == 2, res.output
 
 
@@ -945,6 +946,24 @@ def test_engine_require_new_accepts_its_own_create_after_a_lost_response():
     core.return_value.create_namespace.assert_not_called()
     assert stamp.call_args.kwargs["force_legacy"] is True
     assert nonce.call_args.kwargs["nonce"] == "mine"
+
+
+def test_engine_legacy_namespace_refusal_names_the_migrate_command():
+    """An annotation-less namespace is refused with the shipped admin command
+    to claim it."""
+    from lakebench.deploy.ownership import IdentityVerdict
+
+    eng, _ = _engine(require_new=False, exists=True)
+    with (
+        patch.object(eng, "_namespace_already_using_name", return_value=None),
+        patch("lakebench.deploy.ownership.stamp_namespace") as stamp,
+        patch("kubernetes.client.CoreV1Api"),
+    ):
+        stamp.return_value = MagicMock(verdict=IdentityVerdict.ABSENT)
+        result = eng._deploy_namespace()
+    assert result.status is DeploymentStatus.FAILED
+    assert f"`lakebench admin migrate-deployment {eng.config.get_namespace()}`" in result.message
+    assert "ships" not in result.message
 
 
 def test_engine_stamps_the_recorded_nonce_not_a_fresh_one():

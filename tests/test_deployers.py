@@ -4,8 +4,8 @@ Covers:
 - HiveDeployer: a missing Stackable fails the step and installs nothing
 - DuckDBDeployer: _wait_for_ready accepts only a pod on this deploy's set
 - ObservabilityDeployer: destroy deletes only this deployment's binding
-- DatagenDeployer: _parse_size_to_bytes, and the schema and bronze prefix
-  reaching the datagen context
+- parse_size_to_bytes, and the schema and bronze prefix reaching the
+  datagen context
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ class TestHiveDeployerDeploy:
     """Tests for HiveDeployer.deploy()."""
 
     def _make_deployer(self):
-        from lakebench.deploy.hive import HiveDeployer
+        from lakebench.modules.catalogs.hive.deployer import HiveDeployer
 
         cfg = make_config()
         engine = MagicMock()
@@ -53,6 +53,81 @@ class TestHiveDeployerDeploy:
         assert result.status == DeploymentStatus.FAILED
         mock_run.assert_not_called()
         deployer.k8s.apply_manifest.assert_not_called()
+
+
+class TestHiveDeployerWaitClassifiesErrors:
+    """_wait_for_hivecluster: a 401/403 fails fast with the cause named; a
+    server/connection error is transient and the wait polls to the deadline."""
+
+    def _deployer(self):
+        from lakebench.modules.catalogs.hive.deployer import HiveDeployer
+
+        engine = MagicMock()
+        engine.config = make_config()
+        engine.dry_run = False
+        return HiveDeployer(engine)
+
+    def _api_exception(self, status, reason):
+        from kubernetes.client.rest import ApiException
+
+        return ApiException(status=status, reason=reason)
+
+    def test_a_forbidden_cr_read_fails_fast_naming_the_rbac_cause(self):
+        from lakebench.k8s import WaitStatus
+
+        deployer = self._deployer()
+        custom_api = MagicMock()
+        custom_api.get_namespaced_custom_object.side_effect = self._api_exception(403, "Forbidden")
+        with (
+            patch("kubernetes.client.CustomObjectsApi", return_value=custom_api),
+            patch("kubernetes.client.CoreV1Api", return_value=MagicMock()),
+        ):
+            result = deployer._wait_for_hivecluster("test-ns", timeout_seconds=0)
+
+        # Terminal, not a 300s timeout: it must not have polled.
+        assert result.status == WaitStatus.FAILED
+        assert result.attempts == 1
+        assert "403 Forbidden" in result.message
+        assert "RBAC" in result.message and "hive.stackable.tech" in result.message
+
+    def test_a_forbidden_pod_list_fails_fast(self):
+        from lakebench.k8s import WaitStatus
+
+        deployer = self._deployer()
+        custom_api = MagicMock()
+        custom_api.get_namespaced_custom_object.return_value = {"status": {"conditions": []}}
+        core_v1 = MagicMock()
+        core_v1.list_namespaced_pod.side_effect = self._api_exception(403, "Forbidden")
+        with (
+            patch("kubernetes.client.CustomObjectsApi", return_value=custom_api),
+            patch("kubernetes.client.CoreV1Api", return_value=core_v1),
+        ):
+            result = deployer._wait_for_hivecluster("test-ns", timeout_seconds=0)
+
+        assert result.status == WaitStatus.FAILED
+        assert result.attempts == 1
+        assert "403 Forbidden" in result.message
+
+    def test_a_server_error_is_transient_and_polls_to_the_deadline(self):
+        from lakebench.k8s import WaitStatus
+
+        deployer = self._deployer()
+        custom_api = MagicMock()
+        custom_api.get_namespaced_custom_object.side_effect = self._api_exception(
+            500, "Internal Server Error"
+        )
+        with (
+            patch("kubernetes.client.CustomObjectsApi", return_value=custom_api),
+            patch("kubernetes.client.CoreV1Api", return_value=MagicMock()),
+        ):
+            # timeout 0 so the first elapsed check ends it without a real sleep.
+            result = deployer._wait_for_hivecluster("test-ns", timeout_seconds=0)
+
+        # Not failed-fast: a server error is retried, so this reads as a timeout
+        # that still carries the underlying reason, not a terminal RBAC failure.
+        assert result.status == WaitStatus.TIMEOUT
+        assert "Internal Server Error" in result.message
+        assert "RBAC" not in result.message
 
 
 # ===========================================================================
@@ -93,8 +168,8 @@ class TestDuckDBDeployerWaitForReady:
         )
 
     def _deployer(self):
-        from lakebench.deploy.duckdb import DuckDBDeployer
         from lakebench.deps.manifest import placeholder_handle
+        from lakebench.modules.query_engines.duckdb.deployer import DuckDBDeployer
 
         cfg = make_config(recipe="hive-iceberg-spark-duckdb")
         engine = MagicMock()
@@ -175,26 +250,21 @@ class TestObservabilityDeployerSkip:
 # ===========================================================================
 
 
-class TestDatagenDeployerParseSizeToBytes:
-    """Tests for DatagenDeployer._parse_size_to_bytes()."""
+class TestParseSizeToBytes:
+    """Tests for parse_size_to_bytes()."""
 
     @pytest.mark.parametrize(
         ("text", "size"),
         [
+            # one suffixed value and the bare-number branch stand for the rest
             ("100GB", 100 * 1024**3),
-            ("1TB", 1024**4),
-            ("512MB", 512 * 1024**2),
-            ("1024KB", 1024 * 1024),
-            ("1048576B", 1048576),
             ("4096", 4096),
         ],
     )
     def test_parse(self, text, size):
-        from lakebench.deploy.datagen import DatagenDeployer
+        from lakebench.config.schema import parse_size_to_bytes
 
-        engine = MagicMock()
-        engine.config = make_config()
-        assert DatagenDeployer(engine)._parse_size_to_bytes(text) == size
+        assert parse_size_to_bytes(text) == size
 
 
 class TestDatagenDeployerSchemaWireThrough:

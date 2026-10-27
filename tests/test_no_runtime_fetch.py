@@ -56,10 +56,9 @@ def _cases():
 
 CASES = list(_cases())
 
-
-def test_every_recipe_is_rendered():
-    covered = {name.split("-customer360-")[0].split("-financial-")[0] for name, _ in CASES}
-    assert covered == {r for r in RECIPES if r != "default"}
+# Every supported recipe is covered by at least one rendered case.
+_COVERED = {name.split("-customer360-")[0].split("-financial-")[0] for name, _ in CASES}
+assert _COVERED == {r for r in RECIPES if r != "default"}
 
 
 def _handle(cfg):

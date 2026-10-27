@@ -95,6 +95,44 @@ class TestTrinoSession:
         assert cmd[cmd.index("--timezone") + 1] == "UTC"
 
 
+class TestTrinoFlushCache:
+    """flush_cache calls this deployment's catalog (there is no `iceberg`
+    catalog, so the old hard-coded call never flushed anything)."""
+
+    def _flush(self, returncode: int, stderr: str = "", times: int = 1):
+        from lakebench.modules.query_engines.trino.executor import TrinoExecutor
+
+        ex = TrinoExecutor("ns", "lakehouse")
+        ex._pod = "coord-0"
+        with patch(
+            "lakebench.modules.query_engines.trino.executor.pinned_kubectl",
+            return_value=MagicMock(returncode=returncode, stdout="", stderr=stderr),
+        ) as mock_kubectl:
+            for _ in range(times):
+                ex.flush_cache()
+        self.calls = mock_kubectl.call_count
+        return mock_kubectl.call_args[0][1]
+
+    def test_flush_targets_the_configured_catalog(self):
+        argv = self._flush(0)
+        assert argv[-1] == "CALL lakehouse.system.flush_metadata_cache()"
+
+    def test_a_failed_flush_is_logged(self, caplog):
+        with caplog.at_level("WARNING"):
+            self._flush(1, "Catalog 'iceberg' not found")
+        assert "Trino metadata cache flush failed" in caplog.text
+
+    def test_a_catalog_without_the_procedure_is_reported_once(self, caplog):
+        """Trino 483's Iceberg REST catalog (Polaris) registers no flush
+        procedure: say so once, then stop calling it every round."""
+        with caplog.at_level("WARNING"):
+            self._flush(
+                1, "Query x failed: Procedure not registered: system.flush_metadata_cache", times=3
+            )
+        assert self.calls == 1
+        assert caplog.text.count("has no flush_metadata_cache procedure") == 1
+
+
 class TestGetExecutor:
     def test_polaris_duckdb_config_creates_executor(self):
         """polaris-iceberg-spark-duckdb recipe creates DuckDBExecutor with correct S3 config."""

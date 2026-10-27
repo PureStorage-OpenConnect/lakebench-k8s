@@ -1,0 +1,10 @@
+-- Alerts whose related_txn_ids an evidence cap cut (evidence['txns_truncated']
+-- = 'true'), per rule. element_at returns NULL (not an error) on a missing
+-- key, matching Spark's getItem. Placeholders: {catalog}, {run_id},
+-- {alerts_pin}.
+SELECT a.rule_id, COUNT(*) AS capped
+FROM {catalog}.gold.alerts {alerts_pin} a
+WHERE a.run_id = '{run_id}'
+  AND ELEMENT_AT(a.evidence, 'txns_truncated') = 'true'
+GROUP BY a.rule_id
+ORDER BY a.rule_id;

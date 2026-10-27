@@ -19,8 +19,7 @@ scripts/aml_gate.py). Two independent things this script does:
    band and K-of-N summary, D2 timing mixture and D11 density. Every constant
    comes from ``aml_preregistration.json`` (packaged flat next to this script).
    Emits ``aml_gate_report.json`` (the full report) and
-   ``reference_metrics.parquet`` (one aggregate row plus one row per typology,
-   the table ``aggregate_reference_vs_rule.sql`` joins against rule recall).
+   ``reference_metrics.parquet`` (one aggregate row plus one row per typology).
 
 scikit-learn is not on the Spark image; job.py installs it per job
 (REFERENCE_PY_DEPS). Without it the report carries verdict ``no_sklearn`` and
@@ -82,8 +81,7 @@ _STRUCTURING_BANDS = {
     "KRW": (9_900_000.0, 9_999_999.0),
 }
 
-#: reference_metrics.parquet columns (aggregate_reference_vs_rule.sql reads
-#: row_kind, typology_type, verdict, precision, recall, f1).
+#: reference_metrics.parquet columns.
 _METRIC_SCHEMA = (
     "row_kind string, typology_type string, verdict string, precision double, "
     "recall double, f1 double, support long, r_precision double, ap double, ap_ci_lo double, "
@@ -116,31 +114,30 @@ def _compute_leakage_bands(spark: SparkSession, silver_txns_name: str, manifest)
         when(col("t_uetr").isNotNull(), lit(1)).otherwise(lit(0)),
     ).drop("t_uetr")
 
-    rows: list[dict] = []
-    for currency, (band_lo, band_hi) in _STRUCTURING_BANDS.items():
-        in_band = tagged.filter(
-            (col("currency") == lit(currency))
-            & (col("amount") >= lit(band_lo))
-            & (col("amount") <= lit(band_hi))
-        )
-        counts = in_band.groupBy("is_typology").agg(count_("*").alias("n")).collect()
-        baseline_n = 0
-        typology_n = 0
-        for r in counts:
-            if r["is_typology"] == 1:
-                typology_n = int(r["n"])
-            else:
-                baseline_n = int(r["n"])
-        rows.append(
-            {
-                "currency": currency,
-                "band_lo": band_lo,
-                "band_hi": band_hi,
-                "baseline_count": baseline_n,
-                "typology_count": typology_n,
-            }
-        )
-    return rows
+    bands = spark.createDataFrame(
+        [(c, lo, hi) for c, (lo, hi) in _STRUCTURING_BANDS.items()],
+        "currency string, band_lo double, band_hi double",
+    )
+    # One job for every currency: the join is not cached, and a job per
+    # currency scanned silver once each.
+    counts = (
+        tagged.join(bands.hint("broadcast"), "currency")
+        .filter((col("amount") >= col("band_lo")) & (col("amount") <= col("band_hi")))
+        .groupBy("currency", "is_typology")
+        .agg(count_("*").alias("n"))
+        .collect()
+    )
+    n = {(r["currency"], r["is_typology"]): int(r["n"]) for r in counts}
+    return [
+        {
+            "currency": currency,
+            "band_lo": band_lo,
+            "band_hi": band_hi,
+            "baseline_count": n.get((currency, 0), 0),
+            "typology_count": n.get((currency, 1), 0),
+        }
+        for currency, (band_lo, band_hi) in _STRUCTURING_BANDS.items()
+    ]
 
 
 def _capped_pull(cap_rows: int, sampling: dict):

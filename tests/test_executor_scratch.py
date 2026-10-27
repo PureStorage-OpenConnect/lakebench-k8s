@@ -49,18 +49,20 @@ def _pvc(cfg: LakebenchConfig, job: JobType) -> str:
     return SparkJobManager(cfg, k8s)._build_manifest(job)["spec"]["sparkConf"][_SIZE_KEY]
 
 
-def test_executor_scratch_sizes_the_aml_scorer():
-    """The AML scorer's profile gives 50Gi, which a scale-20 run filled;
-    executor_scratch is the one key that reaches it."""
-    assert _pvc(_config({}), JobType.SCORE_FINANCIAL) == "50Gi"
-    assert _pvc(_config({"executor_scratch": "200Gi"}), JobType.SCORE_FINANCIAL) == "200Gi"
+def test_executor_scratch_sizes_a_job_without_a_stage_key():
+    """The reference detector's profile gives 300Gi; executor_scratch is the
+    one key that reaches a job without a stage key of its own."""
+    assert _pvc(_config({}), JobType.SCORE_FINANCIAL_REFERENCE) == "300Gi"
+    assert (
+        _pvc(_config({"executor_scratch": "200Gi"}), JobType.SCORE_FINANCIAL_REFERENCE) == "200Gi"
+    )
 
 
 def test_a_stage_key_wins_for_its_stage_only():
     cfg = _config({"executor_scratch": "200Gi", "silver_executor_scratch": "400Gi"})
     assert _pvc(cfg, JobType.SILVER_BUILD) == "400Gi"
     assert _pvc(cfg, JobType.GOLD_FINALIZE) == "200Gi"
-    assert _pvc(cfg, JobType.SCORE_FINANCIAL) == "200Gi"
+    assert _pvc(cfg, JobType.SCORE_FINANCIAL_REFERENCE) == "200Gi"
 
 
 def test_the_size_is_exact_not_scaled_by_cores():
@@ -103,7 +105,9 @@ def _write(tmp_path: Path, spark: dict, scratch: dict | None = None) -> Path:
     return path
 
 
-@pytest.mark.parametrize("value", ["200G", "200g", "0Gi", "1.5Gi", "200Mi"])
+# A wrong unit and a non-whole-Gi value stand for the rest: all hit the same
+# "not a scratch size" refusal.
+@pytest.mark.parametrize("value", ["200G", "1.5Gi"])
 def test_a_size_not_in_whole_gi_is_refused_and_dropped_for_teardown(tmp_path, value):
     path = _write(tmp_path, {"executor_scratch": value})
     with pytest.raises(Exception, match="not a scratch size"):

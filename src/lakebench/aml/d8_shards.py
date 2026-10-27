@@ -1,4 +1,4 @@
-"""D8 shard plan helpers (AML-GOALS 5a D8, pre-registration scale_invariance.shard_rule).
+"""D8 shard plan helpers (pre-registration scale_invariance.shard_rule).
 
 The scale-10 corpus is split into customer shards that each look like a
 scale-2 corpus. A planted typology instance must never span shards: its crew

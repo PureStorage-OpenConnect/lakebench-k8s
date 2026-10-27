@@ -1,29 +1,22 @@
 """Delta Lake table maintenance helpers.
 
-Parallel to ``deploy/iceberg.py`` for Iceberg tables.  Provides SQL
-generation for Delta-specific maintenance operations:
-
-- VACUUM (analog of expire_snapshots + remove_orphan_files)
-- OPTIMIZE (analog of rewrite_data_files)
-- DESCRIBE DETAIL / $properties (analog of $files/$snapshots metadata queries)
-
-Engine discovery (``find_maintenance_engine``) and SQL execution
-(``exec_sql``, ``query_sql``) are format-agnostic and reused from
-``deploy/iceberg.py``.
+Parallel to ``modules/table_formats/iceberg/maintenance.py`` for Iceberg
+tables. Provides SQL generation for Delta VACUUM, OPTIMIZE and the
+``DESCRIBE DETAIL`` health probe. Engine discovery and SQL execution are
+format-agnostic and reused from the Iceberg module.
 """
 
 from __future__ import annotations
 
 import logging
-import re
+
+from lakebench.modules.table_formats.iceberg.maintenance import _parse_threshold_seconds
 
 logger = logging.getLogger(__name__)
 
 
 def parse_retention_to_hours(retention_threshold: str) -> float:
-    """Parse a Trino-style duration string to hours.
-
-    Supports ``s`` (seconds), ``m`` (minutes), ``h`` (hours), ``d`` (days).
+    """A Trino-style duration string (``s``/``m``/``h``/``d``) as hours.
 
     Examples::
 
@@ -36,17 +29,7 @@ def parse_retention_to_hours(retention_threshold: str) -> float:
         >>> parse_retention_to_hours("0s")
         0.0
     """
-    threshold = retention_threshold.strip()
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([smhd])", threshold)
-    if not match:
-        raise ValueError(
-            f"Invalid retention_threshold format: {retention_threshold!r}. "
-            "Expected a number followed by s, m, h, or d (e.g. '30m', '7d')."
-        )
-    value = float(match.group(1))
-    unit = match.group(2)
-    multipliers = {"s": 1 / 3600, "m": 1 / 60, "h": 1.0, "d": 24.0}
-    return value * multipliers[unit]
+    return _parse_threshold_seconds(retention_threshold) / 3600
 
 
 def build_delta_maintenance_sql(
@@ -106,9 +89,7 @@ def build_delta_maintenance_sql(
         # Spark refuses VACUUM below the 7-day default retention unless
         # retentionDurationCheck is off for the session. exec_sql runs each
         # list element as its own beeline connection, so the SET must travel
-        # in the same `-e` submission as the VACUUM to apply to it. (Live UAT
-        # on Delta 4.0.0 + Spark 4.0.2 did not trip the check on a fresh
-        # table; tables with real tombstone history would.)
+        # in the same `-e` submission as the VACUUM to apply to it.
         vacuum = f"VACUUM {table} RETAIN {retention_hours} HOURS"
         if retention_hours < 168.0:
             return [f"SET spark.databricks.delta.retentionDurationCheck.enabled=false; {vacuum}"]
@@ -161,10 +142,8 @@ def build_delta_table_health_sql(
 
     - Spark: ``DESCRIBE DETAIL`` returns one row whose ``numFiles`` column
       is the data file count; parse it with :func:`parse_describe_detail`.
-    - Trino: nothing (see ``DELTA_HEALTH_UNAVAILABLE``). The earlier
-      ``SELECT * FROM "t$properties"`` returned property rows, which the
-      count parser could never read, so every Delta + Trino probe logged
-      "no count in output".
+    - Trino: nothing (see ``DELTA_HEALTH_UNAVAILABLE``); the connector has no
+      metadata table that reports a data file count.
     """
     if engine == "spark-thrift":
         return {
@@ -195,12 +174,3 @@ def parse_describe_detail(stdout: str, column: str = "numFiles") -> int | None:
         value = cells[header.index(column)]
         return int(value) if value.isdigit() else None
     return None
-
-
-def build_delta_drop_table_sql(catalog: str, table: str) -> str:
-    """Build DROP TABLE SQL for a Delta table.
-
-    DROP TABLE is format-agnostic -- the same SQL works for both Iceberg
-    and Delta tables.
-    """
-    return f"DROP TABLE IF EXISTS {table}"

@@ -102,7 +102,7 @@ BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
 
 # Graph scenarios run as an advanced-analytics overlay across the whole
-# payment network (GOALS P10 stage 4), so they are declared to alert on
+# payment network, so they are declared to alert on
 # counterparties as well as customers. Every other scenario alerts on
 # customers only; an alert from one of them on a non-customer fails the
 # ``noncustomer_alerts_declared`` invariant. detection_rules restricts every
@@ -281,7 +281,7 @@ _DDL_COLUMN = re.compile(r"^\s+([a-z_0-9]+)\s+([A-Z][A-Z0-9_]*(?:\([^)]*\))?(?:<
 
 def ddl_columns(ddl: str) -> list[tuple[str, str]]:
     """(name, type) per column of a CREATE TABLE statement above."""
-    return [(n, t) for n, t in _DDL_COLUMN.findall(ddl) if n not in ("using",)]
+    return _DDL_COLUMN.findall(ddl)
 
 
 def bootstrap_tm_tables(spark) -> None:
@@ -330,6 +330,8 @@ PRIORITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
 def triage_priority(score: float) -> str:
+    """The priority band for a score. Used by the tests; production stamps the
+    band with the equivalent Spark expression."""
     for floor, name in PRIORITY_BANDS:
         if score >= floor:
             return name
@@ -383,7 +385,7 @@ HARD_CAP_MULTIPLE = 4
 # which payments bronze should hold.
 BRONZE_CHECKPOINT = env("LB_FINANCIAL_BRONZE_CHECKPOINT", "")
 
-# Alert queue aging buckets (P10.3 queue health).
+# Alert queue aging buckets (queue health).
 AGING_BUCKETS = ((0, 30, "0-30"), (31, 60, "31-60"), (61, 90, "61-90"), (91, None, "90+"))
 
 # Dispositions. Every alert row carries one (never NULL).
@@ -394,13 +396,6 @@ DISP_PENDING = "pending_l1"
 DISP_OUT_OF_SCOPE = "out_of_scope"
 DISP_OVER_CAPACITY = "over_capacity"
 WORKED_DISPOSITIONS = (DISP_ESCALATED, DISP_CLOSED, DISP_ATTACHED)
-
-
-def aging_bucket(days: int) -> str:
-    for lo, hi, name in AGING_BUCKETS:
-        if days >= lo and (hi is None or days <= hi):
-            return name
-    return "0-30"
 
 
 def draw(seed: int, name: str, key: str) -> float:
@@ -514,7 +509,7 @@ def match_alerts(current, prior, prev_as_of, as_of, cycle):
         # Shared payments with each carried alert, computed in Spark against
         # this alert's full payment list (``ext_overlap``); without it (pure
         # Python callers), the two sketches are intersected.
-        ext = c.get("ext_overlap") if "ext_overlap" in c else None
+        ext = c.get("ext_overlap")
         cs = set(c.get("txn_sketch") or ())
         for p in remaining.get(c["rule_id"]) or ():
             if p["alert_ts"] is None or not (
@@ -891,7 +886,7 @@ _PASS_THROUGH = (
 
 # Row layouts shipped to the executors (tuples, not Rows, to keep the
 # per-customer memory small).
-_CUR_FIELDS = (
+_ALERT_FIELDS = (
     "alert_id",
     "alert_key",
     "content_hash",
@@ -905,9 +900,10 @@ _CUR_FIELDS = (
     "scenario_weight",
     "crr_tier",
 )
-_PRIOR_FIELDS = _CUR_FIELDS + ("first_seen_cycle", "first_seen_as_of")
-# Current alerts also ship their overlaps with carried alerts.
-_CUR_FIELDS = _CUR_FIELDS + ("ext_overlap",)
+# Prior alerts also carry when they were first seen; current alerts carry
+# their overlaps with the carried alerts.
+_PRIOR_FIELDS = _ALERT_FIELDS + ("first_seen_cycle", "first_seen_as_of")
+_CUR_FIELDS = _ALERT_FIELDS + ("ext_overlap",)
 
 
 def apply_cap(alerts, cap, cycle):
@@ -1021,15 +1017,17 @@ def split_run_id(run_id: str, cycle: int | None = None) -> tuple[str, int]:
 # ---------------------------------------------------------------------------
 
 
-def current_snapshot_id(spark, fq_table):
-    """The table's newest snapshot id, or None (empty, or not Iceberg)."""
+def current_snapshot_id(spark, fq_table, *, unknown=None, tag="tm"):
+    """The table's current snapshot id: the head of its ``main`` branch, read
+    from the refs metadata. Commit and made-current times come from each
+    writer's clock, and writers' clocks disagree, so ordering by them can
+    name an older snapshot. None when the table has no snapshot yet;
+    ``unknown`` when the lookup failed (logged under ``tag``)."""
     try:
-        rows = spark.sql(
-            f"SELECT snapshot_id FROM {fq_table}.snapshots ORDER BY committed_at DESC LIMIT 1"
-        ).collect()
+        rows = spark.sql(f"SELECT snapshot_id FROM {fq_table}.refs WHERE name = 'main'").collect()
     except Exception as e:  # noqa: BLE001
-        log(f"[tm] snapshot of {fq_table} unavailable: {one_line(e)}")
-        return None
+        log(f"[{tag}] snapshot of {fq_table} unavailable: {one_line(e)}")
+        return unknown
     return int(rows[0][0]) if rows else None
 
 
@@ -1627,7 +1625,7 @@ def coverage_rows(spark, inputs, status_rows, manifest, rule_targets):
 
 
 # ---------------------------------------------------------------------------
-# Invariants (P10.2), evaluated on the written tables
+# Invariants evaluated on the written tables
 # ---------------------------------------------------------------------------
 
 
@@ -1972,7 +1970,7 @@ def _history_check(spark, run_id, prior_disp, prior_cases, prev_as_of, rerun=Fal
 
 
 # ---------------------------------------------------------------------------
-# Operations summary (P10.3 / P10.4 vocabulary)
+# Operations summary vocabulary
 # ---------------------------------------------------------------------------
 
 
@@ -2274,7 +2272,12 @@ def tm_pass_due(now, clock, params, window_end_s=0):
 TM_RETRY_NOT_READY_S = 30.0
 
 #: not_run reasons that mean "no data yet", not "this pass failed".
-_TM_NOT_READY = ("is empty; nothing to monitor", "no ground-truth manifest")
+#: Substrings that mark a not-run reason as "nothing to monitor yet": a pass
+#: that carries one does no work, so the continuous clock must not count it.
+#: Shared so the reason messages below cannot drift out of this match set.
+_NOT_READY_EMPTY = "is empty; nothing to monitor"
+_NOT_READY_NO_MANIFEST = "no ground-truth manifest"
+_TM_NOT_READY = (_NOT_READY_EMPTY, _NOT_READY_NO_MANIFEST)
 
 
 def tm_pass_not_ready(result) -> bool:
@@ -2307,15 +2310,13 @@ def run_tm_operations(
     continuous=False,
     params=None,
     source_rows_fn=None,
-    rule_targets=None,
-    txns_table=None,
 ):
     """Stages 1, 6, 7 and 8 for one cycle, then the invariant check.
 
     Never raises. Returns the list of (name, status, detail) invariants, or a
     single ``workflow`` entry with status ``not_run`` or ``disabled`` (with
     the reason) when the layer did not run. ``txns`` is only a fallback: the
-    silver table (``txns_table``) is read at one pinned snapshot.
+    silver transactions table is read at one pinned snapshot.
     """
     from pyspark.sql.functions import col, current_timestamp, expr, lit, timestamp_micros
     from pyspark.sql.functions import max as max_
@@ -2350,10 +2351,9 @@ def run_tm_operations(
     held = []
     wrote = False
     try:
-        if rule_targets is None:
-            from detection_rules import RULE_TARGET_TYPOLOGY
+        from detection_rules import RULE_TARGET_TYPOLOGY
 
-            rule_targets = dict(RULE_TARGET_TYPOLOGY)
+        rule_targets = dict(RULE_TARGET_TYPOLOGY)
         bootstrap_tm_tables(spark)
         ledger = _ledger_cycles(spark, base_run_id)
         tick = None
@@ -2368,12 +2368,11 @@ def run_tm_operations(
 
         # Silver at one snapshot, pinned BEFORE the source is counted: every
         # payment in it was written by datagen before the count started.
-        table = f"{CATALOG}.{txns_table or SILVER_TXNS}"
+        table = f"{CATALOG}.{SILVER_TXNS}"
         sid = current_snapshot_id(spark, table)
         if sid is not None:
-            # I10: filter the pinned snapshot against silver_batch_versions
-            # so a mid-batch crash window is invisible to the P10 monitoring
-            # layer. The versions table is pinned ``VERSION AS OF`` the
+            # Filter the pinned snapshot against silver_batch_versions so a
+            # mid-batch crash window is invisible to the monitoring layer. The versions table is pinned ``VERSION AS OF`` the
             # snapshot captured right after the transactions snapshot, so
             # every action on this frame -- the in-flight watermark, the
             # reconciliation count and the case activity scan -- sees the one
@@ -2382,7 +2381,7 @@ def run_tm_operations(
             # earlier action and as sealed by a later one, so reconciliation
             # overshoots by that batch. The pin may hide txns rows whose
             # versions row landed after the pin; those become visible on the
-            # next pass, which is the same bound I10 already accepts.
+            # next pass, which is the same bound the sealed filter accepts.
             vsid = current_snapshot_id(spark, f"{CATALOG}.{SILVER_BATCH_VERSIONS}")
             pinned = read_at_snapshot(spark, table, sid)
             try:
@@ -2392,12 +2391,12 @@ def run_tm_operations(
                 txns = sealed_txns_filter(spark, pinned, CATALOG, SILVER_BATCH_VERSIONS)
         else:
             log(f"[tm] {table} has no snapshot to pin; reading the frame as passed")
-            # I10: apply the same filter to the caller-supplied fallback
-            # frame so a caller that passed the raw table gets sealed rows only.
+            # Apply the same filter to the caller-supplied fallback frame so a
+            # caller that passed the raw table gets sealed rows only.
             txns = sealed_txns_filter(spark, txns, CATALOG, SILVER_BATCH_VERSIONS)
         newest = txns.agg(max_(col("txn_timestamp")).alias("m")).collect()[0]["m"]
         if newest is None:
-            reason = f"{table} is empty; nothing to monitor"
+            reason = f"{table} {_NOT_READY_EMPTY}"
             _status("not_run", cycle_no, reason)
             return [("workflow", "not_run", reason)]
         as_of = newest.date() + timedelta(days=1)
@@ -2405,7 +2404,7 @@ def run_tm_operations(
         manifest = _read_manifest(spark)
         if manifest is None:
             reason = (
-                f"no ground-truth manifest ({MANIFEST_TABLE}); dispositions cannot be simulated"
+                f"{_NOT_READY_NO_MANIFEST} ({MANIFEST_TABLE}); dispositions cannot be simulated"
             )
             _status("not_run", cycle_no, reason)
             return [("workflow", "not_run", reason)]

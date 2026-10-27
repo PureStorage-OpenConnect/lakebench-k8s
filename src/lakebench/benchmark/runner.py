@@ -168,6 +168,21 @@ class BenchmarkResult:
         return d
 
 
+def power_qph(results: list[QueryResult]) -> float:
+    """Queries per hour of a power run: successful queries over their own time.
+
+    Failed-query wall time (typically a full query timeout) stays out of the
+    denominator, and a failed query is not counted as answered; otherwise one
+    timeout moves QpH by an order of magnitude, which is a policy artifact,
+    not a benchmark score.
+    """
+    successful = [r for r in results if r.success]
+    successful_seconds = sum(r.elapsed_seconds for r in successful)
+    if not successful or successful_seconds <= 0:
+        return 0
+    return (len(successful) / successful_seconds) * 3600
+
+
 class BenchmarkRunner:
     """Runs the query benchmark suite against the configured engine."""
 
@@ -327,18 +342,8 @@ class BenchmarkRunner:
             query_timeout=query_timeout,
         )
 
-        successful = [r for r in results if r.success]
         total_seconds = sum(r.elapsed_seconds for r in results)
-        # QpH divides successful count by SUCCESSFUL wall time, not total.
-        # Including failed-query wall time (typically a full query_timeout)
-        # in the denominator lets one timeout drop QpH by an order of
-        # magnitude, which is not a benchmark score -- it's a policy artifact.
-        successful_seconds = sum(r.elapsed_seconds for r in successful)
-        qph = (
-            (len(successful) / successful_seconds) * 3600
-            if successful_seconds > 0 and successful
-            else 0
-        )
+        qph = power_qph(results)
 
         return BenchmarkResult(
             engine=self._engine_name(),
@@ -638,9 +643,7 @@ class BenchmarkRunner:
 
         The first failed execution ends the repeats and fails the query: a
         timed-out sample is the timeout, not a measurement, and repeating a
-        timeout would cost another full ``query_timeout`` each time. Before
-        this, the median mixed failed and successful timings and the result
-        took the success flag of the last repeat only.
+        timeout would cost another full ``query_timeout`` each time.
         """
         times: list[float] = []
         sources: list[str] = []

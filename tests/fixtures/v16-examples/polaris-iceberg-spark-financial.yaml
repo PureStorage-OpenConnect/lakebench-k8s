@@ -1,5 +1,5 @@
 # examples/polaris-iceberg-spark-financial.yaml at v1.6.0 (b774dad1), for tests/test_init_from.py.
-# Recipe: polaris-iceberg-spark-thrift  (schema: financial)
+# Recipe: polaris-iceberg-spark-trino  (schema: financial)
 #
 # Full-cluster Financial (FinServ-Crime, AML) workload against Polaris +
 # Iceberg + Spark Thrift Server. Same reference cluster as Customer 360
@@ -16,7 +16,7 @@
 # polaris-iceberg-spark-financial-local.yaml.
 
 name: polaris-iceberg-financial
-recipe: polaris-iceberg-spark-thrift
+recipe: polaris-iceberg-spark-trino
 
 images:
   spark: apache/spark:4.0.2-python3
@@ -80,7 +80,7 @@ architecture:
     gold_daily_dashboards: gold.daily_dashboards
 
   query_engine:
-    type: spark-thrift
+    type: trino
 
 workload:
   schema: financial              # <-- routes datagen + pipeline scripts

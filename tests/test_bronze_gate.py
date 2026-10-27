@@ -119,21 +119,22 @@ class TestGate:
             assert _clearing(rec)
             rec.assert_recorded(api="s3", method="list_multipart_uploads")
 
-    def test_adopted_nonempty_refuses(self):
-        """An unowned bucket with objects: refused, named, nothing deleted."""
+    @pytest.mark.parametrize(
+        ("regenerate", "objects"),
+        [
+            # an unowned bucket with objects is refused, named, nothing deleted
+            (False, [f"{PREFIX}/part-0"]),
+            # --regenerate never empties a bucket this deployment did not create
+            (True, [f"{PREFIX}/part-0", "theirs/data"]),
+        ],
+        ids=["no-regenerate", "regenerate"],
+    )
+    def test_unowned_nonempty_refuses_and_deletes_nothing(self, regenerate, objects):
         with recording() as rec:
-            cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"])
-            got = _gate(cfg)
+            cfg = _seed(rec, owned=False, objects=objects)
+            got = _gate(cfg, regenerate=regenerate)
             assert not got.proceed and got.message
-            assert list(rec.buckets_store[BRONZE]) == [f"{PREFIX}/part-0"]
-
-    def test_regenerate_on_unowned_deletes_nothing(self):
-        """--regenerate never empties a bucket this deployment did not create."""
-        with recording() as rec:
-            cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0", "theirs/data"])
-            got = _gate(cfg, regenerate=True)
-            assert not got.proceed and got.message
-            assert sorted(rec.buckets_store[BRONZE]) == [f"{PREFIX}/part-0", "theirs/data"]
+            assert sorted(rec.buckets_store[BRONZE]) == sorted(objects)
             assert not [c for c in rec.mutations() if c.api == "s3"]
 
     def test_allow_flag_recorded(self):
@@ -164,16 +165,6 @@ class TestGate:
             cfg = _seed(rec, owned=owned, objects=objects)
             got = _gate(cfg)
             assert got.proceed and not got.stale_allowed
-
-    def test_regenerate_empty_prefix_refused(self):
-        with recording() as rec:
-            cfg = _seed(rec, owned=True, objects=["x/part-0"])
-            # The layout is fixed per workload now; the guard stays for a
-            # prefix that ever comes back empty.
-            with patch("lakebench.deploy.datagen.bronze_datagen_prefix", return_value="/"):
-                got = _gate(cfg, regenerate=True)
-            assert not got.proceed and got.message
-            assert list(rec.buckets_store[BRONZE]) == ["x/part-0"]
 
     def test_listing_failure_refuses(self):
         with recording() as rec:
@@ -218,15 +209,37 @@ class TestDeployerCycleZero:
         engine.config = cfg
         return DatagenDeployer(engine, allow_stale_bronze=allow)
 
-    def test_multicycle_cycle0_unowned_refuses(self):
-        """Fails reverted: the clear skipped an unowned bucket with an INFO line."""
+    @pytest.mark.parametrize(
+        ("label", "setup", "extra"),
+        [
+            # plain unowned bucket (fails reverted: clear skipped with an INFO line)
+            ("plain-unowned", None, None),
+            # SAF-10: 1.6's adopted-empty record does not prove this cluster's claim
+            ("adopted-empty-record", "adopted_empty", None),
+            # Row 4: our name tag, no cluster stamp, not in the record
+            ("unproven-legacy", "legacy_name_tag", "reclaim-bucket"),
+        ],
+    )
+    def test_cycle0_unowned_refuses(self, label, setup, extra):
         from lakebench.deploy.datagen import StaleBronzeRefused
 
         with recording() as rec:
-            cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"])
+            created_record = setup is None
+            cfg = _seed(
+                rec, owned=False, objects=[f"{PREFIX}/part-0"], created_record=created_record
+            )
+            if setup == "adopted_empty":
+                rec.s3_tagging = False
+                ns = rec.store[("namespaces", None, NS)]
+                ns.metadata.annotations["lakebench.deployment/adopted-empty-buckets"] = BRONZE
+            elif setup == "legacy_name_tag":
+                rec.tags_store[BRONZE] = {TAG_DEPLOYMENT_NAME: NS}
             with pytest.raises(StaleBronzeRefused):
                 self._deployer(cfg)._clear_bronze_prefix_if_fresh(0, PREFIX)
-            assert list(rec.buckets_store[BRONZE]) == [f"{PREFIX}/part-0"]
+            assert list(rec.buckets_store[BRONZE]) == [f"{PREFIX}/part-0"], label
+            if extra is not None:
+                got = _gate(cfg, regenerate=True)
+                assert not got.proceed and extra in got.message, label
 
     def test_allowed_stale_proceeds_without_clearing(self):
         with recording() as rec:
@@ -244,20 +257,6 @@ class TestDeployerCycleZero:
             assert sorted(rec.buckets_store[BRONZE]) == sorted([OWNER_MARKER_KEY, SERIES_KEY])
             assert _clearing(rec)
 
-    def test_a_16_adopted_empty_record_does_not_count_as_owned(self):
-        """SAF-10: only the created record (or an owner marker) proves this
-        cluster's claim; 1.6's adopted-empty record does not."""
-        from lakebench.deploy.datagen import StaleBronzeRefused
-
-        with recording() as rec:
-            cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"], created_record=False)
-            rec.s3_tagging = False
-            ns = rec.store[("namespaces", None, NS)]
-            ns.metadata.annotations["lakebench.deployment/adopted-empty-buckets"] = BRONZE
-            with pytest.raises(StaleBronzeRefused):
-                self._deployer(cfg)._clear_bronze_prefix_if_fresh(0, PREFIX)
-            assert list(rec.buckets_store[BRONZE]) == [f"{PREFIX}/part-0"]
-
     def test_marker_claim_counts_as_owned(self):
         import json
 
@@ -270,18 +269,6 @@ class TestDeployerCycleZero:
             }
             self._deployer(cfg)._clear_bronze_prefix_if_fresh(0, PREFIX)
             assert sorted(rec.buckets_store[BRONZE]) == sorted([OWNER_MARKER_KEY, SERIES_KEY])
-
-    def test_unproven_legacy_bucket_is_not_owned(self):
-        """Row 4: our name tag, no cluster stamp, not in the record."""
-        from lakebench.deploy.datagen import StaleBronzeRefused
-
-        with recording() as rec:
-            cfg = _seed(rec, owned=False, objects=[f"{PREFIX}/part-0"], created_record=False)
-            rec.tags_store[BRONZE] = {TAG_DEPLOYMENT_NAME: NS}
-            with pytest.raises(StaleBronzeRefused):
-                self._deployer(cfg)._clear_bronze_prefix_if_fresh(0, PREFIX)
-            got = _gate(cfg, regenerate=True)
-            assert not got.proceed and "reclaim-bucket" in got.message
 
 
 def test_stale_bronze_in_metrics_and_badge():

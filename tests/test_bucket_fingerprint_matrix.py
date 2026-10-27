@@ -71,6 +71,9 @@ ROWS = [
         IdentityVerdict.FOREIGN_CLUSTER,
     ),
     ("3", NS, None, FP, True, IdentityVerdict.LEGACY_PROVEN, IdentityVerdict.LEGACY_PROVEN),
+    # 3b: no stamp at all but in the record (a FlashBlade bucket 1.6 created,
+    # no marker). Tagged has nothing to read (ABSENT); tagless is legacy-proven.
+    ("3b", None, None, FP, True, IdentityVerdict.ABSENT, IdentityVerdict.LEGACY_PROVEN),
     ("4", NS, None, FP, False, IdentityVerdict.LEGACY_UNPROVEN, IdentityVerdict.LEGACY_UNPROVEN),
     # 5: the CA rotated, so this cluster's fingerprint changed under its own stamp.
     (
@@ -110,14 +113,6 @@ def test_matrix_row(row, deployment, cluster, mine, recorded, want_tagged, want_
         )
         assert v.verdict is (want_tagged if tagged else want_tagless), v.hint
         assert v.tagged is tagged
-
-
-def test_tagless_marker_without_stamp_in_record_is_legacy_proven():
-    """A FlashBlade bucket 1.6 created: no marker, in the created record."""
-    with recording(NS) as rec:
-        _seed(rec, tagged=False, deployment=None, cluster=None)
-        v = verify_bucket_ownership(_boto(), B, NS, expected_cluster=FP, created_record={B})
-        assert v.verdict is IdentityVerdict.LEGACY_PROVEN and not v.tagged
 
 
 def test_corrupt_marker_is_never_read_as_no_claim():
@@ -261,18 +256,30 @@ def _bucket_result(results: list):
     return next(r for r in results if r.component == "s3-buckets")
 
 
+def _seed_destroy_bucket(rec, *, tagged, cluster):
+    """One bucket holding data, stamped for deployment NS with ``cluster``."""
+    if tagged:
+        rec.add_bucket(B, ["data/part-0"], tags={TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: cluster})
+    else:
+        rec.s3_tagging = False
+        marker = json.dumps({"deployment": NS, "cluster": cluster}).encode()
+        rec.add_bucket(B, {"data/part-0": b"x", OWNER_MARKER_KEY: marker})
+
+
 class TestDestroy:
-    def test_another_clusters_bucket_is_kept(self):
-        """Row 2: fails reverted (destroy emptied it on the name tag)."""
+    @pytest.mark.parametrize("tagged", [True, False], ids=["tagged", "tagless"])
+    def test_another_clusters_bucket_is_kept(self, tagged):
+        """Row 2: a foreign cluster's stamp keeps its data safe even when this
+        namespace's record lists the name (fails reverted: destroy emptied it
+        on the name tag alone)."""
         with recording() as rec:
-            rec.add_bucket(
-                B, ["data/part-0"], tags={TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: OTHER_FP}
-            )
-            results = _destroy(rec)
-            assert rec.buckets_store[B] == {"data/part-0": b"x"}
+            _seed_destroy_bucket(rec, tagged=tagged, cluster=OTHER_FP)
+            results = _destroy(rec, annotations={"lakebench.deployment/created-buckets": B})
+            assert "data/part-0" in rec.buckets_store[B]
             res = _bucket_result(results)
             assert res.status.value == "failed"
-            assert "claimed from another cluster" in res.message
+            if tagged:
+                assert "claimed from another cluster" in res.message
 
     def test_unproven_legacy_bucket_is_kept(self):
         with recording() as rec:
@@ -299,40 +306,21 @@ class TestDestroy:
             assert "Destroy NOT completed: this cluster has no fingerprint" in res.message
             assert res.details.get("refusal") == "destroy.unverified_cluster"
 
-    def test_own_stamped_bucket_is_emptied_and_deleted(self):
+    @pytest.mark.parametrize("tagged", [True, False], ids=["tagged", "tagless"])
+    def test_own_stamped_bucket_is_emptied_and_deleted(self, tagged):
         with recording() as rec:
-            rec.add_bucket(
-                B,
-                ["data/part-0"],
-                tags={TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: FP, "lakebench.created": "true"},
-            )
+            if tagged:
+                rec.add_bucket(
+                    B,
+                    ["data/part-0"],
+                    tags={TAG_DEPLOYMENT_NAME: NS, TAG_CLUSTER: FP, "lakebench.created": "true"},
+                )
+            else:
+                _seed_destroy_bucket(rec, tagged=False, cluster=FP)
             results = _destroy(rec, annotations={"lakebench.deployment/created-buckets": B})
-            assert _bucket_result(results).status.value == "success", _bucket_result(
-                results
-            ).message
+            res = _bucket_result(results)
+            assert res.status.value == "success", res.message
             assert B not in rec.buckets_store
-
-    def test_tagless_own_marker_is_emptied_and_deleted_when_created(self):
-        with recording() as rec:
-            rec.s3_tagging = False
-            marker = json.dumps({"deployment": NS, "cluster": FP}).encode()
-            rec.add_bucket(B, {"data/part-0": b"x", OWNER_MARKER_KEY: marker})
-            results = _destroy(rec, annotations={"lakebench.deployment/created-buckets": B})
-            assert _bucket_result(results).status.value == "success", _bucket_result(
-                results
-            ).message
-            assert B not in rec.buckets_store
-
-    def test_tagless_foreign_cluster_marker_is_kept(self):
-        """Row 2 on FlashBlade: the other cluster's marker keeps its data safe even
-        when this namespace's record lists the name."""
-        with recording() as rec:
-            rec.s3_tagging = False
-            marker = json.dumps({"deployment": NS, "cluster": OTHER_FP}).encode()
-            rec.add_bucket(B, {"data/part-0": b"x", OWNER_MARKER_KEY: marker})
-            results = _destroy(rec, annotations={"lakebench.deployment/created-buckets": B})
-            assert "data/part-0" in rec.buckets_store[B]
-            assert _bucket_result(results).status.value == "failed"
 
 
 # ---------------------------------------------------------------------------

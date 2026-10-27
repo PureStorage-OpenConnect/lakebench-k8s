@@ -154,33 +154,33 @@ def handlers():
         signal.signal(s, h)
 
 
-def test_install_and_restore(handlers):
+def test_install_restores_the_handler_it_found(handlers):
+    # Default handler: install replaces it, restore puts it back.
     before = signal.getsignal(signal.SIGTERM)
     ri = RunInterrupt("ns")
     ri.install()
-    assert signal.getsignal(signal.SIGTERM) == ri._on_signal
+    assert signal.getsignal(signal.SIGTERM) == ri._on_signal, "install did not take"
     ri.restore()
-    assert signal.getsignal(signal.SIGTERM) == before
+    assert signal.getsignal(signal.SIGTERM) == before, "restore did not put it back"
 
-
-def test_ignored_signal_stays_ignored(handlers):
+    # An ignored signal stays ignored across install and restore.
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     ri = RunInterrupt("ns")
     ri.install()
-    assert signal.getsignal(signal.SIGTERM) == signal.SIG_IGN
+    assert signal.getsignal(signal.SIGTERM) == signal.SIG_IGN, "install clobbered SIG_IGN"
     ri.restore()
-    assert signal.getsignal(signal.SIGTERM) == signal.SIG_IGN
+    assert signal.getsignal(signal.SIGTERM) == signal.SIG_IGN, "restore clobbered SIG_IGN"
 
-
-def test_a_leaked_instance_is_replaced_not_chained(handlers):
-    before = signal.getsignal(signal.SIGTERM)
+    # A leaked instance (install without restore) is replaced, not chained:
+    # the second install saves the handler the first found, not the first's.
+    signal.signal(signal.SIGTERM, before)
     first = RunInterrupt("ns")
     first.install()  # never restored: an error in its run's finally
     second = RunInterrupt("ns")
     second.install()
-    assert second._saved[signal.SIGTERM] == before
+    assert second._saved[signal.SIGTERM] == before, "second chained the first's handler"
     second.restore()
-    assert signal.getsignal(signal.SIGTERM) == before
+    assert signal.getsignal(signal.SIGTERM) == before, "leaked handler not restored"
 
 
 def test_first_raises_second_skips_third_stops(handlers, capsys):
@@ -318,7 +318,10 @@ def test_submit_job_returns_the_created_uid():
     k8s = FakeK8s()
     mgr = SparkJobManager(_cfg(), k8s)
     assert mgr.deploy_scripts_configmap() is True
+    from kubernetes.client.rest import ApiException
+
     api = MagicMock()
+    api.get_namespaced_custom_object.side_effect = ApiException(status=404)
     api.create_namespaced_custom_object.return_value = {"metadata": {"uid": "abc-123"}}
     with patch("kubernetes.client.CustomObjectsApi", return_value=api):
         status = mgr.submit_job(JobType.SILVER_BUILD)

@@ -121,24 +121,19 @@ def _spark_intervals(
         if not w and not r:
             continue
         out.append(
-            {
-                "source": "spark",
-                "stage": stage,
-                "label": stage,
-                "query": None,
-                "start": _iso(start + write[k - 1][0]),
-                "end": _iso(start + write[k][0]),
-                "clock": "host",
-                "read_bytes": int(r) if r is not None else None,
-                "write_bytes": int(w),
-                "read_basis": BASIS_SPARK_READ if reads else None,
-                "write_basis": BASIS_SPARK_WRITE,
-                "complete": True,
-                "paths": {
+            _interval(
+                stage,
+                _iso(start + write[k - 1][0]),
+                _iso(start + write[k][0]),
+                read=int(r) if r is not None else None,
+                write=int(w),
+                write_basis=BASIS_SPARK_WRITE,
+                read_basis=BASIS_SPARK_READ if reads else None,
+                paths={
                     "read": f"platform_metrics.spark_io.stages.{stage}.read" if reads else None,
                     "write": f"platform_metrics.spark_io.stages.{stage}.write",
                 },
-            }
+            )
         )
     return out
 
@@ -200,12 +195,11 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
 
     short = 0
     # Engines that report their own per-query read bytes (``queries[*].io``):
-    # Trino via system.runtime.tasks, DuckDB via the httpfs filesystem log,
-    # Spark Thrift via the Spark REST SQL metrics. An engine with no io block
-    # on any query is marked not measured.
-    # Engines that report their own per-query read bytes. Spark Thrift does not:
-    # its real read bytes are the executor s3 filesystem counter, which is not
-    # collected per query, so it is marked engine_not_instrumented.
+    # Trino via system.runtime.tasks, DuckDB via the httpfs filesystem log.
+    # Spark Thrift does not: its real read bytes are the executor s3
+    # filesystem counter, not collected per query, so it is marked
+    # engine_not_instrumented. An engine with no io block on any query is
+    # marked not measured.
     read_basis_for = {
         "trino": BASIS_TRINO_READ,
         "duckdb": "duckdb_filesystem_read",
@@ -303,9 +297,6 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
             }
         )
 
-    stage_names = {
-        s.get("stage_name") for s in (record.get("pipeline_benchmark") or {}).get("stages") or []
-    }
     spark_io = (record.get("platform_metrics") or {}).get("spark_io")
     spark_stages = (spark_io or {}).get("stages") or {}
     iceberg = str((record.get("config_snapshot") or {}).get("table_format") or "") == "iceberg"
@@ -315,6 +306,7 @@ def build_io(record: Mapping[str, Any]) -> dict[str, Any] | None:
         for s in (record.get("pipeline_benchmark") or {}).get("stages") or []
         if isinstance(s, Mapping)
     }
+    stage_names = set(stage_rows)
     driver = _driver_writes(record)
     for name in _SPARK_STAGES:
         if name not in stage_names:

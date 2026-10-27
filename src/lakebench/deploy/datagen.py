@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import yaml
 
 from lakebench.config.datagen_seed import config_perturbation, config_seed
+from lakebench.config.schema import parse_size_to_bytes
 from lakebench.config.seed_secret import (
     SEED_REF_ANNOTATION,
     SEED_SECRET_COMPONENT,
@@ -93,26 +94,6 @@ def _clear_clock_best_effort(cfg: Any) -> None:
     except Exception as e:  # noqa: BLE001
         if getattr(e, "status", None) != 404:
             logger.warning("could not clear the bronze data clock: %s", e)
-
-
-def parse_size_to_bytes(size_str: str) -> int:
-    """Bytes in a size string such as "64MB" or "1TB" (bytes without a suffix)."""
-    size_str = size_str.strip().upper()
-    multipliers = {
-        "B": 1,
-        "KB": 1024,
-        "MB": 1024**2,
-        "GB": 1024**3,
-        "TB": 1024**4,
-    }
-
-    for suffix, multiplier in sorted(multipliers.items(), key=lambda x: -len(x[0])):
-        if size_str.endswith(suffix):
-            value = float(size_str[: -len(suffix)])
-            return int(value * multiplier)
-
-    # Assume bytes if no suffix
-    return int(size_str)
 
 
 class DatagenRefused(RuntimeError):
@@ -418,6 +399,21 @@ def wait_for_datagen_pods_stopped(
         time.sleep(poll_s)
 
 
+def _delete_datagen_job_call(namespace: str, request_timeout: int | None = 30) -> None:
+    """Delete the lakebench-datagen Job with Background propagation: its pods
+    outlive it by their grace period. API and transport errors raise, 404
+    included."""
+    from kubernetes import client as k8s_client
+
+    timeout = {} if request_timeout is None else {"_request_timeout": request_timeout}
+    k8s_client.BatchV1Api().delete_namespaced_job(
+        name="lakebench-datagen",
+        namespace=namespace,
+        body=k8s_client.V1DeleteOptions(propagation_policy="Background"),
+        **timeout,
+    )
+
+
 def stop_previous_datagen(cfg: Any) -> None:
     """Delete an earlier lakebench-datagen Job and wait for its pods to stop.
 
@@ -429,17 +425,11 @@ def stop_previous_datagen(cfg: Any) -> None:
     (``wait_for_datagen_pods_stopped``). Raises ``DatagenPodsStillRunning``
     or ``DatagenPodsUnknown``; a failed delete is ``DatagenPodsUnknown``.
     """
-    from kubernetes import client as k8s_client
     from kubernetes.client.rest import ApiException
 
     namespace = cfg.get_namespace()
     try:
-        k8s_client.BatchV1Api().delete_namespaced_job(
-            name="lakebench-datagen",
-            namespace=namespace,
-            body=k8s_client.V1DeleteOptions(propagation_policy="Background"),
-            _request_timeout=30,
-        )
+        _delete_datagen_job_call(namespace)
     except ApiException as e:
         if e.status != 404:
             raise DatagenPodsUnknown(
@@ -462,16 +452,10 @@ DATAGEN_STOP_KEY = "_corpus/stop"
 
 def _delete_datagen_job(cfg: Any) -> bool:
     """Delete the lakebench-datagen Job (its pods with it); True when gone."""
-    from kubernetes import client as k8s_client
     from kubernetes.client.rest import ApiException
 
     try:
-        k8s_client.BatchV1Api().delete_namespaced_job(
-            name="lakebench-datagen",
-            namespace=cfg.get_namespace(),
-            body=k8s_client.V1DeleteOptions(propagation_policy="Background"),
-            _request_timeout=30,
-        )
+        _delete_datagen_job_call(cfg.get_namespace())
     except ApiException as e:
         if e.status != 404:
             logger.warning("Could not delete the datagen Job: HTTP %s %s", e.status, e.reason)
@@ -520,18 +504,9 @@ def _refusal_details(e: BaseException) -> dict[str, Any]:
 
 
 def _s3_client_for(cfg: Any) -> Any:
-    from lakebench.s3 import S3Client
+    from lakebench.s3 import s3_client_from_config
 
-    s3_cfg = cfg.platform.storage.s3
-    return S3Client(
-        endpoint=s3_cfg.endpoint,
-        access_key=s3_cfg.access_key,
-        secret_key=s3_cfg.secret_key,
-        region=s3_cfg.region,
-        path_style=s3_cfg.path_style,
-        ca_cert=s3_cfg.ca_cert,
-        verify_ssl=s3_cfg.verify_ssl,
-    )
+    return s3_client_from_config(cfg.platform.storage.s3)
 
 
 def deployment_may_empty(cfg: Any, bucket: str, s3: Any = None, *, strict: bool = False) -> bool:
@@ -639,8 +614,7 @@ def bronze_prefix_gate(
     ======  =========  ======================  ====================================
 
     ``--regenerate`` deletes only the datagen prefix, aborting its incomplete
-    multipart uploads (GOTCHAS 2); an empty prefix is refused, never widened
-    to the bucket. A read failure refuses. The caller exits with the
+    multipart uploads; it never widens to the bucket. A read failure refuses. The caller exits with the
     result's ``exit_code``. Every "proceed" means bronze is about to be
     replaced, so the silver-state data clock is cleared.
 
@@ -651,7 +625,7 @@ def bronze_prefix_gate(
     """
     bucket = cfg.platform.storage.s3.buckets.bronze
     prefix = bronze_datagen_prefix(cfg).strip("/")
-    shown = f"s3://{bucket}/{prefix}" if prefix else f"s3://{bucket}"
+    shown = f"s3://{bucket}/{prefix}"
 
     def refuse(
         message: str, owned: bool, n: int = 0, code: ExitCode = ExitCode.REFUSED
@@ -670,9 +644,7 @@ def bronze_prefix_gate(
         if not s3.bucket_exists(bucket):
             _clear_clock_best_effort(cfg)
             return BronzeGateResult(True, bucket, prefix, owned=False)
-        nonempty = (
-            _holds_corpus(cfg, s3, bucket, prefix) if prefix else s3.has_user_objects(bucket, "")
-        )
+        nonempty = _holds_corpus(cfg, s3, bucket, prefix)
     except Exception as e:  # noqa: BLE001
         return refuse(f"could not list {shown}: {e}", owned=False, code=ExitCode.PREREQUISITE)
     if not nonempty:
@@ -688,19 +660,12 @@ def bronze_prefix_gate(
             code=ExitCode.PREREQUISITE,
         )
     try:
-        info = s3.get_bucket_size(bucket, prefix=prefix + "/" if prefix else "")
+        info = s3.get_bucket_size(bucket, prefix=prefix + "/")
         n = int(info.object_count or 0)
         size_gb = (info.size_bytes or 0) / (1024**3)
     except Exception:  # noqa: BLE001 -- the count is for the message only
         n, size_gb = 0, 0.0
     held = f"{shown} holds {n} object(s) ({size_gb:.2f} GB)"
-    if regenerate and not prefix:
-        return refuse(
-            f"{held}, and the datagen prefix is empty: --regenerate clears only the "
-            "datagen prefix and never a whole bucket. Clear the bucket yourself.",
-            owned,
-            n,
-        )
     if owned:
         if not regenerate:
             return refuse(
@@ -791,11 +756,6 @@ class DatagenDeployer:
         self.renderer = engine.renderer
         self.context = engine.context
 
-    # Payload size was a template context knob feeding --payload-kb; dropped
-    # with the CLI arg 2026-09-28. The Rust binary now
-    # hardcodes 2 KiB. Kept here as documentation of what the fixed value is.
-    _PAYLOAD_SIZE_BYTES = 2048  # 2 KiB hex payloads for compression profiling
-
     def _build_datagen_context(self) -> dict[str, Any]:
         """Build context for datagen template."""
         cfg = self.config
@@ -804,7 +764,7 @@ class DatagenDeployer:
 
         # Derive dimensions from scale factor
         dims = cfg.get_scale_dimensions()
-        file_size_bytes = self._parse_size_to_bytes(datagen.file_size)
+        file_size_bytes = parse_size_to_bytes(datagen.file_size)
         file_size_mb = file_size_bytes // (1024 * 1024)
 
         # Target in TB for CLI args interface
@@ -850,14 +810,12 @@ class DatagenDeployer:
                 # every multi-cycle cycle draws from the same customers.
                 "datagen_customer_id_max": dims.customers,
                 "datagen_file_size_mb": file_size_mb,
-                # datagen_payload_kb context var dropped 2026-09-28; template
-                # no longer renders --payload-kb; Rust hardcodes 2 KiB.
                 "datagen_path_prefix": path_prefix,
                 "datagen_schema": schema_value,
                 # From config, or the pre-registration's calibration seed for
                 # financial (config/datagen_seed.py); spent seeds are refused.
                 # A registered corpus's seed is in the Secret instead, never
-                # in the Job's arguments (owner, 10-03).
+                # in the Job's arguments.
                 "datagen_seed": None if uses_seed_secret(cfg) else config_seed(cfg),
                 "datagen_seed_secret": seed_secret_name(cfg) if uses_seed_secret(cfg) else "",
                 "datagen_seed_secret_key": SEED_SECRET_KEY,
@@ -888,13 +846,6 @@ class DatagenDeployer:
             if schema_value == "financial":
                 context["datagen_corpus_months"] = CONTINUOUS_EPOCH_MONTHS
 
-        # datagen_duration context var dropped 2026-09-28 (Wave 2 D8). The
-        # entrypoint.py argparse layer silently discarded --duration; the Rust
-        # binary never read it; a continuous / sustained pipeline is driven by
-        # the pipeline side trickle-reading a pre-written finite corpus
-        # or, in a future release, by a producer-driven delivery mode
-        # (--delivery-mode). Passing --duration was misleading.
-
         # Live observability: point datagen pods at the per-deployment
         # Pushgateway. Best-effort -- the Rust binary no-ops when the env is
         # unset. Only when observability + the pushgateway are enabled. LB_RUN_ID
@@ -908,10 +859,6 @@ class DatagenDeployer:
             context["run_id"] = os.environ.get("LB_RUN_ID", "")
 
         return context
-
-    def _parse_size_to_bytes(self, size_str: str) -> int:
-        """``parse_size_to_bytes``."""
-        return parse_size_to_bytes(size_str)
 
     @staticmethod
     def _cycle_timestamp_range(
@@ -961,9 +908,9 @@ class DatagenDeployer:
             )
             context["datagen_timestamp_start"] = ts_start
             context["datagen_timestamp_end"] = ts_end
-            # Each cycle gets its own seed stream / time slice and object keys
-            # (WORKPLAN B4); without these every cycle rewrote cycle 0's files
-            # with the same seed.
+            # Each cycle gets its own seed stream / time slice and object keys;
+            # without these every cycle would rewrite cycle 0's files with the
+            # same seed.
             context["datagen_cycle"] = cycle_index
             context["datagen_cycles"] = total_cycles
 
@@ -974,20 +921,7 @@ class DatagenDeployer:
             target_tb = (dims.datagen_target_gb / total_cycles) / 1024.0
             context["datagen_target_tb"] = f"{target_tb:.6f}"
 
-            self.stop_previous_job()
-            self._prepare_generator_inputs()
-
-            # Cycle 0 is a fresh write: clear stale files a prior generate left,
-            # after the previous job's pods have stopped so nothing writes
-            # mid-clear. Append cycles (n > 0) keep the earlier cycles' files.
-            self._clear_bronze_prefix_if_fresh(cycle_index, context["datagen_path_prefix"])
-            if cycle_index == 0:
-                self._begin_series(total_cycles)
-
-            for template_name in self.TEMPLATES:
-                yaml_content = self.renderer.render(template_name, context)
-                manifest = yaml.safe_load(yaml_content)
-                self.k8s.apply_manifest(manifest, namespace=namespace)
+            self._submit(context, cycle_index, total_cycles)
 
             return DeploymentResult(
                 component="datagen",
@@ -1019,6 +953,23 @@ class DatagenDeployer:
                 details=_refusal_details(e),
             )
 
+    def _submit(self, context: dict[str, Any], cycle_index: int, total_cycles: int) -> None:
+        """Stop the previous Job, write the new one's inputs, and apply it.
+
+        Cycle 0 is a fresh write: stale files a prior generate left are
+        cleared after the previous Job's pods have stopped, so nothing writes
+        mid-clear, and the series marker is written. Append cycles (n > 0)
+        keep the earlier cycles' files.
+        """
+        self.stop_previous_job()
+        self._prepare_generator_inputs()
+        self._clear_bronze_prefix_if_fresh(cycle_index, context["datagen_path_prefix"])
+        if cycle_index == 0:
+            self._begin_series(total_cycles)
+        for template_name in self.TEMPLATES:
+            manifest = yaml.safe_load(self.renderer.render(template_name, context))
+            self.k8s.apply_manifest(manifest, namespace=self.config.get_namespace())
+
     def _clear_bronze_prefix_if_fresh(self, cycle_index: int, path_prefix: str) -> None:
         """Before cycle 0: clear stale datagen files, or refuse to write over them.
 
@@ -1029,7 +980,7 @@ class DatagenDeployer:
         files. On a bucket this deployment may empty
         (``deployment_may_empty``) the datagen prefix is cleared, scoped by
         ``delete_prefix`` with its incomplete uploads aborted; a failure
-        raises and fails the generate (invariant 3). On any other bucket a
+        raises and fails the generate. On any other bucket a
         non-empty prefix raises ``StaleBronzeRefused`` unless the deployer was
         built with ``allow_stale_bronze`` (the defence for a caller
         that skipped the CLI's ``bronze_prefix_gate``).
@@ -1045,19 +996,6 @@ class DatagenDeployer:
                 f"fresh generate: {s3._init_error}"
             )
         if not s3.bucket_exists(bucket):
-            return
-        if not prefix:
-            # Nothing to scope a clear to: a whole bucket is never cleared here.
-            if s3.has_user_objects(bucket) and not self.allow_stale_bronze:
-                raise StaleBronzeRefused(
-                    f"s3://{bucket} holds objects and the datagen prefix is empty, so "
-                    "they cannot be cleared before a fresh generate. Clear the bucket "
-                    + (
-                        "yourself."
-                        if self.continuous
-                        else "yourself, or pass --allow-stale-bronze."
-                    )
-                )
             return
         if deployment_may_empty(self.config, bucket, s3):
             n = s3.delete_prefix(
@@ -1134,21 +1072,7 @@ class DatagenDeployer:
 
         try:
             context = self._build_datagen_context()
-
-            self.stop_previous_job()
-            self._prepare_generator_inputs()
-
-            # A single-cycle generate is a fresh write: clear stale files after
-            # the previous job's pods have stopped, so nothing writes into the
-            # prefix mid-clear.
-            self._clear_bronze_prefix_if_fresh(0, context["datagen_path_prefix"])
-            self._begin_series(1)
-
-            # Render and apply job template
-            for template_name in self.TEMPLATES:
-                yaml_content = self.renderer.render(template_name, context)
-                manifest = yaml.safe_load(yaml_content)
-                self.k8s.apply_manifest(manifest, namespace=namespace)
+            self._submit(context, 0, 1)
 
             return DeploymentResult(
                 component="datagen",
@@ -1195,20 +1119,10 @@ class DatagenDeployer:
         the K8s API itself hung (datagen timeout handler) does not block
         indefinitely on the delete.
         """
-        from kubernetes import client as k8s_client
         from kubernetes.client.rest import ApiException
 
-        batch_v1 = k8s_client.BatchV1Api()
-
         try:
-            kwargs: dict = {
-                "name": "lakebench-datagen",
-                "namespace": namespace,
-                "body": k8s_client.V1DeleteOptions(propagation_policy="Background"),
-            }
-            if request_timeout is not None:
-                kwargs["_request_timeout"] = request_timeout
-            batch_v1.delete_namespaced_job(**kwargs)
+            _delete_datagen_job_call(namespace, request_timeout)
             # Wait for job to be deleted
             time.sleep(2)
         except ApiException as e:
@@ -1330,7 +1244,7 @@ class DatagenDeployer:
             # Get pod logs for progress
             pods = core_v1.list_namespaced_pod(
                 namespace,
-                label_selector="app=lakebench-datagen",
+                label_selector=DATAGEN_POD_SELECTOR,
             )
 
             pod_status = []

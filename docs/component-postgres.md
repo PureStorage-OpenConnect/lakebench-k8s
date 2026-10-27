@@ -4,27 +4,23 @@ Reference: configure the PostgreSQL metadata backend: config keys, credentials, 
 
 ## What it does
 
-PostgreSQL is the metadata backend for every recipe. Hive Metastore and Apache Polaris store their catalog metadata (table definitions, partition info, Iceberg snapshots) in it.
+PostgreSQL is the metadata backend for every recipe. Hive Metastore and Apache Polaris store their catalog metadata (table definitions and each table's location or current Iceberg metadata pointer) in it; snapshots and partition data live on S3.
 
 - One instance per deployment, as a StatefulSet with a PersistentVolumeClaim, so metadata survives pod restarts.
 - Service DNS: `lakebench-postgres.<namespace>.svc.cluster.local:5432`.
 - Databases: `hive` (user `hive`); Polaris uses its own `polaris` database on the same instance.
-
-## Version and image
-
-`images.postgres` sets the image. Default and tested versions: [version matrix](compatibility-matrix.md#component-version-matrix).
 
 ## Configuration keys
 
 | Key | Default | Effect |
 |---|---|---|
 | `images.postgres` | [matrix](compatibility-matrix.md#component-version-matrix) | Container image |
-| `platform.compute.postgres.storage` | `10Gi` | PVC size for the data directory. Catalog metadata is compact. |
+| `platform.compute.postgres.storage` | `10Gi` | PVC size for the data directory |
 | `platform.compute.postgres.storage_class` | `""` | PVC StorageClass. Empty uses the cluster default. |
 
 ### Choosing a StorageClass
 
-Recommended: a replicated class such as `px-csi-db` (Portworx `repl=3`). Do not use a scratch class: losing this volume loses every table definition and partition record.
+Recommended: a replicated class such as `px-csi-db` (Portworx `repl=3`). Do not use a scratch class: losing this volume loses every table registration.
 
 ## Credentials
 
@@ -32,7 +28,7 @@ Each deployment gets its own passwords, generated once and stored in Secrets in 
 
 | Secret | Holds |
 |---|---|
-| `lakebench-postgres-secret` (key `password`) | The `hive` role password. PostgreSQL reads it only at initdb, so a stored value wins. With no Secret but an existing `data-lakebench-postgres-0` PVC, the 1.6 default is kept. |
+| `lakebench-postgres-secret` (key `password`) | The `hive` role password. With no Secret but an existing `data-lakebench-postgres-0` PVC, the 1.6 password is kept. |
 | `lakebench-polaris-db` | The `polaris` role password. With no Secret, an existing `polaris` role (a 1.6 deployment) keeps its 1.6 password. |
 
 - User `hive` and database `hive` are fixed.
@@ -51,14 +47,14 @@ Each deployment gets its own passwords, generated once and stored in Secrets in 
 7. Query engine (Trino, Spark Thrift Server or DuckDB)
 8. Observability stack (if enabled)
 
-Every catalog needs a running PostgreSQL. The deployer waits for two signals: the StatefulSet reports all replicas ready, and `pg_isready` against the `hive` database on pod `lakebench-postgres-0` succeeds.
+The deployer waits for two signals: the StatefulSet reports all replicas ready, and `pg_isready` against the `hive` database on pod `lakebench-postgres-0` succeeds.
 
 ## Destroy
 
 - `lakebench destroy` removes PostgreSQL after the catalog and query engine, before the namespace ([destroy order](deployment.md#destroy-order)).
 - The StatefulSet, the Service and the data PVC are deleted by name.
 - The PVC comes from the volumeClaimTemplate and carries no labels, so destroy matches `data-lakebench-postgres-<n>` exactly. Another application's claim in the namespace is never selected.
-- The PVC and its metadata are deleted also with `platform.kubernetes.create_namespace: false`, so the next deploy starts with an empty metastore. Before 1.7 the PVC survived such a destroy.
+- With `platform.kubernetes.create_namespace: false` the PVC is deleted too, so the next deploy starts with an empty metastore.
 
 ## Troubleshooting
 

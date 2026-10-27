@@ -1,7 +1,8 @@
 # Lakebench Documentation
 
-Documentation for configuring, executing and interpreting Lakebench
-workload experiments.
+Lakebench evaluates lakehouse architectures through the workloads they
+execute. The measurements are the product; these pages show how to run a
+workload and read its results.
 
 ## Getting Started
 

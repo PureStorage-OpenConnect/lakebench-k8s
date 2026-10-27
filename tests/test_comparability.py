@@ -63,10 +63,38 @@ class TestStamping:
         assert e["schema"] == "exp1"
         assert e["corpus"]["id_v2_unavailable"] == ci.NOT_OBSERVED
 
-    def test_no_system_identity_stamps_exp1(self):
-        e = _fresh(system=False).to_dict()["experiment"]
-        assert e["schema"] == "exp1" and e["v2_unavailable"] == ["system identity"]
-        assert "system_identity" not in e
+    def test_unobserved_system_identity_stamps_exp1(self):
+        from lakebench.metrics import system_identity as si
+
+        def _stub():
+            run = _fresh()
+            run.config_snapshot["experiment_inputs"]["system_identity"] = si._unobserved_identity(
+                "cluster", "x"
+            )
+            return run
+
+        def _config_only():
+            run = _fresh()
+            ident = copy.deepcopy(SYSID)
+            ident["parts"] = {
+                "api_server_ca": {"not_observed": "no Kubernetes client"},
+                "storage_endpoint": "10.0.1.50:80",
+            }
+            run.config_snapshot["experiment_inputs"]["system_identity"] = ident
+            return run
+
+        # Each is a system identity that is not an observed one: exp1, and the
+        # system identity is named as the reason v2 is unavailable.
+        for label, run in [
+            ("missing", _fresh(system=False)),
+            ("stub", _stub()),
+            ("config-only", _config_only()),
+        ]:
+            e = run.to_dict()["experiment"]
+            assert e["schema"] == "exp1", label
+            assert "system identity" in e["v2_unavailable"], label
+        # With no identity block at all it is dropped entirely.
+        assert "system_identity" not in _fresh(system=False).to_dict()["experiment"]
 
     def test_v16_inputs_never_exp2(self):
         """Inputs written before 1.7 carry no identity_version: exp1 and no
@@ -132,9 +160,7 @@ def _caller_read_first(m):
     from lakebench.reports.generator import ReportGenerator
 
     with tempfile.TemporaryDirectory() as tmp:
-        html = ReportGenerator(metrics_dir=tmp)._generate_read_first_panel(
-            m, passed=True, warnings=[], fail_reasons=[], n_runs=1
-        )
+        html = ReportGenerator(metrics_dir=tmp)._generate_read_first_panel(m)
     return ("plantedcorpu" in html, ex.identity_hash(m.experiment) in html), (True, True)
 
 
@@ -287,7 +313,8 @@ class TestExp1Derivations:
         assert "dependency pinset" not in c.keys(cmp.ARCHITECTURE)
         assert c.notes == ["lakebench version unreadable"]
 
-    def test_exp1_derives_overrides(self):
+    def test_exp1_derives_overrides_and_cycles(self):
+        # A spark executor override is derived into the architecture group.
         a = sr.load_record("5105a0")
         b = sr.load_record("5105a0")
         b["config_snapshot"]["spark"]["executor_overrides"]["silver"] = 12
@@ -295,11 +322,10 @@ class TestExp1Derivations:
         diffs = cmp.diff_group(ca, cb, cmp.ARCHITECTURE)
         assert [(d.key, d.b) for d in diffs] == [("spark executor overrides", {"silver": 12})]
 
-    def test_exp1_derives_cycles(self):
-        a = sr.load_record("5105a0")
+        # Cycle count is derived into the corpus group.
         b = sr.load_record("5105a0")
         b["cycles"] = [{}, {}, {}]
-        ca, cb = cmp.classify(a["experiment"], a), cmp.classify(b["experiment"], b)
+        cb = cmp.classify(b["experiment"], b)
         assert [(d.key, d.b) for d in cmp.diff_group(ca, cb, cmp.CORPUS)] == [("cycles", 3)]
 
 
@@ -447,18 +473,6 @@ def _condition_keys(a, b):
     return [d.key for d in cmp.diff_group(ca, cb, cmp.CONDITIONS)]
 
 
-class TestRelationFolding:
-    def test_stub_identity_is_not_v2(self):
-        from lakebench.metrics import system_identity as si
-
-        run = _fresh()
-        run.config_snapshot["experiment_inputs"]["system_identity"] = si._unobserved_identity(
-            "cluster", "x"
-        )
-        e = run.to_dict()["experiment"]
-        assert e["schema"] == "exp1" and "system identity" in e["v2_unavailable"]
-
-
 def test_local_identity_does_not_block_exp2():
     from lakebench.metrics import system_identity as si
 
@@ -481,20 +495,6 @@ def test_optional_key_absent_from_the_baseline_is_a_difference():
     assert added == {"spark executor overrides"}
 
 
-def test_config_only_identity_is_not_v2():
-    """A cluster run whose Kubernetes client failed has only config-derived
-    parts: not an observed system identity."""
-    run = _fresh()
-    ident = copy.deepcopy(SYSID)
-    ident["parts"] = {
-        "api_server_ca": {"not_observed": "no Kubernetes client"},
-        "storage_endpoint": "10.0.1.50:80",
-    }
-    run.config_snapshot["experiment_inputs"]["system_identity"] = ident
-    e = run.to_dict()["experiment"]
-    assert e["schema"] == "exp1" and "system identity" in e["v2_unavailable"]
-
-
 class TestDerivedBenchmarkRounds:
     """Owner decision 10-01 (EVD-7 P2): continuous records that do not store
     limits.benchmark_rounds have it derived at read time."""
@@ -508,21 +508,26 @@ class TestDerivedBenchmarkRounds:
         assert ex.identity_hash(sr.load_record("011043-e338c5")["experiment"]) == before
 
     def test_rounds_without_qph_do_not_count(self):
+        def rounds(rec):
+            return cmp.classify(rec["experiment"], rec).keys(cmp.CONDITIONS)["benchmark rounds"]
+
+        # A round with zero qph does not count.
         rec = sr.load_record("011043-e338c5")
         rec["pipeline_benchmark"]["benchmark_rounds"][0]["qph"] = 0
-        assert cmp.classify(rec["experiment"], rec).keys(cmp.CONDITIONS)["benchmark rounds"] == 4
+        assert rounds(rec) == 4
+
+        # No rounds at all counts zero.
+        rec = sr.load_record("011043-e338c5")
+        rec["pipeline_benchmark"].pop("benchmark_rounds")
+        assert rounds(rec) == 0
+
+        # Only the parseable, positive qph rounds count.
+        rec["pipeline_benchmark"]["benchmark_rounds"] = [{"qph": "12.5"}, {"qph": "x"}, "bad"]
+        assert rounds(rec) == 1
 
     def test_no_record_no_derivation(self):
         exp = sr.load_record("011043-e338c5")["experiment"]
         assert cmp.classify(exp).keys(cmp.CONDITIONS)["benchmark rounds"] is None
-
-
-def test_derived_rounds_zero_and_odd_values():
-    rec = sr.load_record("011043-e338c5")
-    rec["pipeline_benchmark"].pop("benchmark_rounds")
-    assert cmp.classify(rec["experiment"], rec).keys(cmp.CONDITIONS)["benchmark rounds"] == 0
-    rec["pipeline_benchmark"]["benchmark_rounds"] = [{"qph": "12.5"}, {"qph": "x"}, "bad"]
-    assert cmp.classify(rec["experiment"], rec).keys(cmp.CONDITIONS)["benchmark rounds"] == 1
 
 
 class TestSkippedMaintenance:

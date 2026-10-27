@@ -17,7 +17,7 @@ import shutil
 import subprocess
 import time
 
-from lakebench.runtime.protocol import ComponentSpec, RuntimeKind
+from lakebench.runtime.protocol import ComponentSpec
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +55,7 @@ def detect_container_cli() -> str:
 class ContainerRuntime:
     """Runs components as containers via podman or docker.
 
-    Implements the ``Runtime`` protocol. Unlike ``K8sRuntime``, which is a
-    pass-through to the Kubernetes client, this one does real work: it is the
-    substrate for local mode.
+    Implements the ``Runtime`` protocol; it is the substrate for local mode.
     """
 
     def __init__(self, cli: str = "", namespace: str = "lakebench") -> None:
@@ -76,9 +74,6 @@ class ContainerRuntime:
 
     # -- protocol -----------------------------------------------------------
 
-    def kind(self) -> RuntimeKind:
-        return RuntimeKind.CONTAINER
-
     def apply(self, spec: ComponentSpec, replace: bool = False) -> None:
         """Create the container, or reuse a running one with the same spec.
 
@@ -87,12 +82,9 @@ class ContainerRuntime:
         ``apply()`` twice would silently reset the component's state. An
         already-running container with an identical ComponentSpec is left
         alone; anything else (different image, env, ports, mounts, args, or
-        command) forces a recreate.
-
-        The identity check used to compare image alone: a redeploy
-        that changed only the S3 endpoint or bucket kept the running Garage
-        container with its old config and quietly diverged. Fingerprinting
-        the whole spec closes that.
+        command) forces a recreate. The whole spec is fingerprinted, not just
+        the image, so a redeploy that changes only the S3 endpoint or bucket
+        does not keep a container running with the old config.
 
         Args:
             spec: Component to create.
@@ -232,40 +224,22 @@ class ContainerRuntime:
         bound it to cannot use ``host_port`` to find a running instance,
         because doing so needs the answer they are looking for.
         """
-        result = subprocess.run(  # noqa: S603
-            [self.cli, "inspect", self._qualified(name), "--format", "{{json .NetworkSettings}}"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            return []
+        ports = self._port_bindings(name)
         try:
-            ports = (json.loads(result.stdout) or {}).get("Ports") or {}
-            found = []
-            for bindings in ports.values():
-                for binding in bindings or []:
-                    found.append(int(binding["HostPort"]))
-            return sorted(set(found))
-        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            found = {
+                int(b["HostPort"]) for bindings in (ports or {}).values() for b in bindings or []
+            }
+        except (KeyError, ValueError, TypeError):
             return []
+        return sorted(found)
 
     def host_port(self, name: str, container_port: int) -> int | None:
         """Return the host port mapped to a container port, if any."""
-        result = subprocess.run(  # noqa: S603
-            [self.cli, "inspect", self._qualified(name), "--format", "{{json .NetworkSettings}}"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            return None
         try:
-            ports = (json.loads(result.stdout) or {}).get("Ports") or {}
-            for key, bindings in ports.items():
+            for key, bindings in (self._port_bindings(name) or {}).items():
                 if key.startswith(f"{container_port}/") and bindings:
                     return int(bindings[0]["HostPort"])
-        except (json.JSONDecodeError, KeyError, ValueError, TypeError, IndexError):
+        except (KeyError, ValueError, TypeError, IndexError):
             return None
         return None
 
@@ -274,14 +248,20 @@ class ContainerRuntime:
     def _qualified(self, name: str) -> str:
         return f"{self.namespace}-{name}"
 
-    def _image_of(self, qualified: str) -> str:
+    def _port_bindings(self, name: str) -> dict | None:
+        """The container's ``NetworkSettings.Ports`` map, or None when it cannot be read."""
         result = subprocess.run(  # noqa: S603
-            [self.cli, "inspect", qualified, "--format", "{{.Config.Image}}"],
+            [self.cli, "inspect", self._qualified(name), "--format", "{{json .NetworkSettings}}"],
             capture_output=True,
             text=True,
             check=False,
         )
-        return result.stdout.strip() if result.returncode == 0 else ""
+        if result.returncode != 0:
+            return None
+        try:
+            return (json.loads(result.stdout) or {}).get("Ports") or {}
+        except (ValueError, TypeError):
+            return None
 
     def _label_of(self, qualified: str, key: str) -> str:
         # Read one label from a running container. Missing container or

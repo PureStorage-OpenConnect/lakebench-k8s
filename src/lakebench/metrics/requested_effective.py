@@ -38,8 +38,7 @@ labelled in ``limits.bound``.
 A mismatch is an entry whose request was explicit and not met, or an
 "auto" request that resolved to a value labelled even when chosen
 automatically (``LABEL_WHEN_AUTO``: incremental gold, which aggregates part
-of silver; the gold scripts no longer choose it automatically, so this
-guards against that returning). Incremental gold chosen by Lakebench for
+of silver). Incremental gold chosen by Lakebench for
 cycles 2+ of a multi-cycle run (source ``cycle``) is by design and not a
 mismatch. The entries are stored facts; which of them are mismatches is
 decided when the record is read, so a later rule applies to an older
@@ -82,21 +81,10 @@ KNOWN_SITES: dict[tuple[str, str], str] = {
     ("spark/scripts/gold_finalize_delta.py", "select_gold_strategy"): (
         "returns into: determine_gold_strategy"
     ),
-    ("spark/scripts/silver_build.py", "determine_silver_strategy"): (
+    ("spark/scripts/common.py", "determine_silver_strategy"): (
         "exempt: every silver strategy runs the same transforms over the same "
         "bronze and differs only in how it writes; the choice is logged on the "
         "Strategy line"
-    ),
-    ("spark/scripts/silver_build.py", "select_silver_strategy"): (
-        "returns into: determine_silver_strategy"
-    ),
-    ("spark/scripts/silver_build_delta.py", "determine_silver_strategy"): (
-        "exempt: every silver strategy runs the same transforms over the same "
-        "bronze and differs only in how it writes; the choice is logged on the "
-        "Strategy line"
-    ),
-    ("spark/scripts/silver_build_delta.py", "select_silver_strategy"): (
-        "returns into: determine_silver_strategy"
     ),
 }
 

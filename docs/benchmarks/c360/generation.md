@@ -38,18 +38,19 @@ loyalty lookup (`Rng::new(seed)`) and one RNG per file
   `DG_COMPRESSION`, so snappy applies unless the Job is edited by hand.
 - The payload size is fixed at 2 KiB; the file size at 64 MB
   (`datagen.file_size` refuses any other value).
-- Each pod of the Kubernetes Indexed Job gets a `JOB_COMPLETION_INDEX`. File
-  `N` goes to pod `N % total_nodes`.
-- A file's content depends only on the seed, file id, rows per file, customer
-  id space, dirty ratio and timestamp window, so pod count does not change
-  the corpus.
-- There is no checkpoint-resume: an interrupted generate starts again from
-  the beginning.
+- Datagen is a Kubernetes Indexed Job; file `N` goes to the pod with index
+  `N % pods`.
+- In batch generation a file's content depends only on the seed, file id,
+  rows per file, customer id space, dirty ratio and timestamp window, so pod
+  count does not change the corpus. There is no checkpoint-resume: an
+  interrupted generate starts again from the beginning. Continuous
+  generation differs on both points (below).
 
 **Row model.**
 
 - Sessions of 5 to 20 rows: one customer, one `session_id`, a timestamp anchor
-  drawn uniformly in the window, rows within 30 minutes of it.
+  drawn uniformly in `[start, end - 30 min)` of the file's window, rows within
+  30 minutes after it.
 - Customer ids (1-based) from a truncated Zipf sampler: the 500 lowest ids
   receive 40% of sessions with Zipf(1.2) weights, the rest uniform over the
   remaining ids.
@@ -126,6 +127,16 @@ close), `auto` = `continuous`; the entrypoint forwards it to the generator.
 Row content is byte-identical across delivery modes at a fixed seed (Rust
 row-identity tests). Delivery mode is independent of pipeline mode.
 
+**Continuous generation** (`pipeline.mode: continuous` or `run --continuous`,
+including `generate`). Datagen gets `--deliver-until` (Job submission time
+plus setup lead plus window length) and every pod writes until that deadline
+or the stop marker the CLI writes when the window ends or the run stops early.
+A pod's files run in epochs, named `part-eNNNN-NNNNNN.parquet`; each round of
+`pods` consecutive files covers the next slice (`window x pods / files`) of the
+timestamp window, so event time passes the window end after epoch 0 and
+content depends on pod count. A restarted pod resumes after its files already
+in the prefix.
+
 **Fresh generate** (`deploy/datagen.py`, `cli/_helpers.py`,
 `cli/_run_args.py`).
 
@@ -140,16 +151,16 @@ row-identity tests). Delivery mode is independent of pipeline mode.
 | `--regenerate` without `--generate` or `--generate-only`, on a local run, or on a continuous run other than `--generate-only` | refused (exit 2) |
 | `--allow-stale-bronze` on any run other than one that generates into bronze (`--generate`, `--generate-only` or a multi-cycle batch run) | refused (exit 2) |
 
-Continuous runs other than `--generate-only` skip the CLI gate: their
-preflight clears raw data unless `--skip-generate`
+Continuous runs other than `--generate-only` skip the CLI gate (and refuse
+`--allow-stale-bronze`): their preflight clears raw data unless
+`--skip-generate`
 ([4.2](pipeline.md#42-continuous-mode-pipelinemode-continuous-or-run---continuous)).
 If objects land in the prefix after that reset on a bucket this deployment
 cannot prove it owns, datagen refuses to start (exit 3).
-`--allow-stale-bronze` does not apply to a continuous run other than
-`--generate-only`.
 
 **Corpus series marker.** Every generate writes
-`customer/interactions/_corpus/series.json` (`deploy/corpus.py`). It holds:
+`customer/interactions/_corpus/series.json` (`deploy/corpus.py`), unfinished
+when the generate starts and completed cycle by cycle. It holds:
 
 - the cycle count, the cycles whose datagen Job finished, and each cycle's
   window;
@@ -157,13 +168,9 @@ cannot prove it owns, datagen refuses to start (exit 3).
   target size per cycle, dirty ratio, image, window bounds);
 - the image digest the datagen pods ran.
 
-- It is written unfinished when the generate starts and completed cycle by
-  cycle. Every clear of the prefix first writes a marker saying a clear is
-  under way, and keeps it.
-- A batch run that reuses bronze (`--skip-generate`, or one cycle without
-  `--generate`) is refused (exit 3, `run.series_mismatch`) when the marker is
-  unfinished or names another cycle count, window or generation than the
-  config's.
-- A single-cycle run over a corpus with no marker proceeds, unless the
-  prefix holds later-cycle files.
-- No stage reads `_corpus/`.
+Every clear of the prefix first writes a marker saying a clear is under way,
+and keeps it. A batch run that reuses bronze (`--skip-generate`, or one cycle
+without `--generate`) is refused (exit 3, `run.series_mismatch`) when the
+marker is unfinished or names another cycle count, window or generation than
+the config's. A single-cycle run over a corpus with no marker proceeds unless
+the prefix holds later-cycle files. No stage reads `_corpus/`.

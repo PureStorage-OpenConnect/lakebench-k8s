@@ -51,7 +51,10 @@ def _run(engine, force_legacy: bool):
         patch("kubernetes.client.BatchV1Api"),
         patch("lakebench.deploy.destroy.logger"),
         patch("lakebench.s3.S3Client") as s3_cls,
-        patch("lakebench.deploy.iceberg.find_maintenance_engine", return_value=(None, None, None)),
+        patch(
+            "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
+            return_value=(None, None, None),
+        ),
     ):
         results = destroy_all(engine, force_legacy=force_legacy, clean_buckets=True)
     return results, s3_cls
@@ -121,7 +124,10 @@ def test_namespace_kept_when_bucket_step_fails():
         patch("kubernetes.client.BatchV1Api"),
         patch("lakebench.deploy.destroy.logger"),
         patch("lakebench.s3.S3Client", return_value=s3),
-        patch("lakebench.deploy.iceberg.find_maintenance_engine", return_value=(None, None, None)),
+        patch(
+            "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
+            return_value=(None, None, None),
+        ),
         patch("lakebench.spark.SparkOperatorManager") as op,
     ):
         results = destroy_all(engine, clean_buckets=True)

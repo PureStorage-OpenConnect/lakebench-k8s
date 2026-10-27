@@ -41,11 +41,13 @@ ICEBERG_41 = {"spark": "4.1", "table_format_version": "1.12.0"}
 # -- declarations -----------------------------------------------------------
 
 
-def test_matrix_covers_every_workload_recipe_mode_and_refuses_only_aml_on_delta():
+def test_matrix_covers_every_workload_recipe_mode_and_refuses_only_aml_off_iceberg_trino():
     rows = support.support_matrix(record={})
     for r in rows:
-        fmt = support.components_of(r["recipe"])[1]
-        refused = r["workload"] == "financial" and fmt == "delta"
+        _, fmt, _, engine = support.components_of(r["recipe"])
+        # AML runs on Iceberg with a Trino query engine only (the scorer is
+        # SQL on Trino); every other cell is merely unverified.
+        refused = r["workload"] == "financial" and (fmt == "delta" or engine != "trino")
         assert (r["state"] == support.UNSUPPORTED) is refused, r
         if not refused:
             assert r["state"] == support.UNVERIFIED, r
@@ -122,11 +124,19 @@ def test_record_refuses_entries_that_would_stamp_supported_wrongly(tmp_path):
             support.load_validation_record(_record(tmp_path, body))
 
 
-def test_unreadable_record_never_promotes(tmp_path):
+def test_a_malformed_record_never_promotes(tmp_path):
+    """A record that cannot be read leaves single lookups UNVERIFIED and the
+    whole matrix degraded, never SUPPORTED, and says so in the basis."""
     bad = _record(tmp_path, _entry(workload="financial", recipe="hive-delta-spark-trino"))
     with mock.patch.object(support, "VALIDATION_RECORD", bad):
         s = support.support_state("customer360", "hive", "iceberg", "spark", "trino", "batch")
     assert s["state"] == support.UNVERIFIED and "unreadable" in s["basis"]
+
+    worse = _record(tmp_path, "validated: {not: a list}\n")
+    with mock.patch.object(support, "VALIDATION_RECORD", worse):
+        rows = support.support_matrix()
+    assert rows and all(r["state"] != support.SUPPORTED for r in rows)
+    assert any("unreadable" in r["basis"] for r in rows)
 
 
 def test_local_runs_are_never_supported(tmp_path):
@@ -178,14 +188,6 @@ def test_local_mode_refuses_aml_and_continuous():
     check_local_supported(c360)
     with pytest.raises(LocalModeError):
         check_local_supported(c360, continuous=True)
-
-
-def test_matrix_degrades_when_the_record_is_malformed(tmp_path):
-    bad = _record(tmp_path, "validated: {not: a list}\n")
-    with mock.patch.object(support, "VALIDATION_RECORD", bad):
-        rows = support.support_matrix()
-    assert rows and all(r["state"] != support.SUPPORTED for r in rows)
-    assert any("unreadable" in r["basis"] for r in rows)
 
 
 # -- the key carries the component versions (K5) ----------------------------

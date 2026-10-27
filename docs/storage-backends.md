@@ -1,7 +1,5 @@
 # S3 storage
 
-Reference: S3 store setup: credentials, permissions, FlashBlade settings, supported stores, the conformance check and bucket tagging.
-
 S3-compatible object storage holds all pipeline data in three buckets: bronze (raw), silver (cleaned and enriched) and gold (aggregated). Every recipe uses it.
 
 - The CLI uses [boto3](https://boto3.amazonaws.com/v1/documentation/api/latest/index.html) (`src/lakebench/s3/client.py`) to test connectivity, validate credentials, and create, size and empty buckets.
@@ -41,8 +39,8 @@ These apply to every provider (AWS, FlashBlade, MinIO, Ceph).
 | `s3:HeadBucket` | CLI | Check whether buckets exist before creating them |
 | `s3:ListBucket` | CLI, Spark (S3A), Trino, DuckDB | List objects for verification, cleanup and query reads |
 | `s3:GetObject` | Spark, Trino, DuckDB | Read data files from all layers |
-| `s3:PutObject` | Spark | Write silver and gold data files and Iceberg/Delta metadata |
-| `s3:DeleteObject` | CLI, Spark | Cleanup in `lakebench destroy`, Iceberg orphan file removal |
+| `s3:PutObject` | Datagen, Spark, Trino, Spark Thrift, CLI | Datagen writes raw files to bronze; Spark writes bronze, silver and gold data files and Iceberg/Delta metadata; Trino or Spark Thrift commit maintenance; the CLI writes the `.lakebench/` ownership marker at deploy, datagen markers and the scorer's files under gold `scoring/` |
+| `s3:DeleteObject` | CLI, Spark, Trino, Spark Thrift | Cleanup in `destroy`, `clean` and continuous resets; Iceberg `expire_snapshots`/`remove_orphan_files` (Trino or Spark Thrift); Delta VACUUM (Trino only); Spark jobs' reset PURGE and checkpoint cleanup |
 | `s3:PutBucketTagging` | CLI | Stamp the `lakebench.deployment` ownership tag on every bucket in `lakebench deploy` |
 | `s3:GetBucketTagging` | CLI | Read the tag back after deploy, and check ownership before `destroy` or `clean` empties a bucket |
 | `s3:ListMultipartUploadParts` | CLI | Find parts of incomplete uploads |
@@ -108,7 +106,7 @@ Works on AWS S3, MinIO and any store with AWS-style IAM policies:
 ```
 
 - Match the `Resource` ARNs to your bucket names. A deployment named `my-project` uses `my-project-bronze`, `-silver` and `-gold`, and the pattern must cover them.
-- **FlashBlade:** manage policies in the FlashBlade UI or CLI under the S3 account settings. FlashBlade typically grants full S3 access per account; the account needs read, write and delete on the target buckets.
+- **FlashBlade:** the S3 account needs read, write and delete on the target buckets; manage access in the FlashBlade UI or CLI.
 - **MinIO:** create and attach a policy with `mc admin policy`.
 
 ## FlashBlade settings
@@ -171,8 +169,6 @@ The checks are graded. A failure blocks only when it breaks a Lakebench code pat
 
 ### Required
 
-A backend that fails any of these cannot run Lakebench.
-
 | Check | Operations | What breaks without it |
 |---|---|---|
 | `connectivity` | `list_buckets` | Nothing else can run. |
@@ -189,14 +185,11 @@ Recorded because it changes how Lakebench configures itself, not as a defect.
 | `region-strictness` | Whether the backend validates the sigv4 region scope | Sets `spark.hadoop.fs.s3a.endpoint.region` from `s3.region` on every job. Automatic. |
 | `bucket-tagging` | Whether `GetBucketTagging` / `PutBucketTagging` work at all | Uses tags for cross-team ownership when available; falls back to bucket-name matching on backends that return `NotImplemented`. |
 
-FlashBlade accepts any region; Garage rejects a mismatch. Setting the region
-explicitly makes both work.
-
 ### Bucket tagging
 
 Destroy rules for every backend: [Bucket ownership](deployment.md#bucket-ownership). What differs by backend:
 
-- Lakebench tags every bucket it creates with `lakebench.deployment`. On backends with bucket tagging (AWS S3, MinIO, Garage) the tag is the authoritative check: `destroy` refuses to empty another deployment's bucket.
+- Lakebench tags every bucket it creates with `lakebench.deployment`. On backends with bucket tagging (AWS S3, MinIO) the tag is the authoritative check: `destroy` refuses to empty another deployment's bucket.
 - FlashBlade returns HTTP 501 `NotImplemented` for `GetBucketTagging` and `PutBucketTagging`. Lakebench detects this at runtime.
 - `lakebench deploy` logs a warning once per run when it takes the fallback below. `lakebench config storage` reports tagging support in the `bucket-tagging` ADVISORY row.
 
@@ -227,13 +220,14 @@ lakebench config storage lakebench.yaml --no-full
 ```
 
 By default the check creates a temporary bucket `lb-conformance-<random>`,
-exercises it and deletes it. This needs create-bucket permission.
+exercises it and deletes it.
 
 ### If you cannot create buckets
 
 A denied `CreateBucket` is a permissions limit, not a backend defect, and is not a failure.
 
-- `--no-full` runs read-only checks against the configured bronze bucket.
+- When `CreateBucket` is denied, the run falls back to read-only checks against
+  the configured bronze bucket. `--no-full` skips the create attempt.
 - Write and multipart checks are reported as **skipped**, not failed, and the
   output says coverage was partial:
 
@@ -251,10 +245,10 @@ A denied `CreateBucket` is a permissions limit, not a backend defect, and is not
 | Code | Meaning |
 |---|---|
 | 0 | No required check failed. Safe to deploy. |
-| 1 | A required check failed, or the config could not be loaded. |
+| 1 | A required check failed, or the config could not be read. |
+| 2 | The config failed to load or validate, or has no S3 endpoint. |
 
-The command is diagnostic. **It does not gate `deploy` or `run`.** An unknown
-backend is checked and reported on, never refused.
+The command is diagnostic. **It does not gate `deploy` or `run`.**
 
 ## Interpreting output
 
@@ -266,7 +260,7 @@ backend is checked and reported on, never refused.
   return it`. Its impact line: "Bucket enumeration is silently broken.
   Connectivity checks report success with an empty bucket list, and destroy
   cannot reliably clean up. This is the SeaweedFS failure mode."
-- A known backend's notes follow the table.
+- An AWS endpoint (`amazonaws.com`) gets a backend note after the table.
 - The last line is one of:
   - `Backend supported. <n> passed, 0 failed, <n> skipped`
   - `No blocking failures, but coverage was partial.` (degraded run)
@@ -280,9 +274,8 @@ A pass means Lakebench's code paths work against the store. It is not a performa
   benchmark against.
 - **Durability and consistency are not tested.** Single-node test deployments
   pass the same checks as a production cluster.
-- **Backend-specific behaviour is not covered.** FlashBlade's asynchronous
-  multipart cleanup (ghost object counts in its UI after an abort) is handled
-  by a retry loop in `empty_bucket()`, which the check does not exercise.
+- **Backend-specific behaviour is not covered**, such as the FlashBlade
+  multipart retry loop in `empty_bucket()`.
 
 ## Local mode: bundled Garage
 
@@ -295,7 +288,7 @@ from lakebench.runtime.container import ContainerRuntime
 from lakebench.deploy.garage import GarageDeployer
 
 runtime = ContainerRuntime(namespace="lakebench")
-creds = GarageDeployer(runtime, config_dir="~/.lakebench/garage").deploy()
+creds = GarageDeployer(runtime, config_dir="/var/tmp/lakebench/garage").deploy()
 # creds.endpoint, creds.access_key, creds.secret_key, creds.region
 ```
 
@@ -322,9 +315,6 @@ Two Garage behaviours the deployer handles:
    fails.
 2. Add an entry to `KNOWN_BACKENDS` in `src/lakebench/s3/conformance.py` with
    the validation date, region strictness and anything a user needs to know.
-
-The registry is advisory metadata for better messages. An entry does not grant
-access, and a missing one does not deny it.
 
 ## Troubleshooting
 

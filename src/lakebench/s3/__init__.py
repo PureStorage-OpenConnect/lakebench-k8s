@@ -6,10 +6,8 @@ from .client import (
     S3BucketError,
     S3BucketVanished,
     S3Client,
-    S3ConnectionError,
-    S3ConnectionInfo,
-    S3Credentials,
     S3Error,
+    s3_client_from_config,
     test_s3_connectivity,
 )
 from .conformance import (
@@ -31,13 +29,11 @@ __all__ = [
     "detect_backend",
     "run_conformance",
     "S3Client",
-    "S3Credentials",
-    "S3ConnectionInfo",
     "BucketInfo",
     "S3Error",
-    "S3ConnectionError",
     "S3AuthError",
     "S3BucketError",
     "S3BucketVanished",
+    "s3_client_from_config",
     "test_s3_connectivity",
 ]

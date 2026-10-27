@@ -157,23 +157,17 @@ def test_deploy_applies_every_role_reads_back_and_drops_legacy():
     assert prov["files_sha256"]["aml_preregistration.json"] == hashlib.sha256(prereg).hexdigest()
 
 
-def test_deploy_fails_on_read_back_mismatch():
+def _tamper_bad_annotation():
     bad = {
         "labels": {"app.kubernetes.io/instance": "sd8"},
         "annotations": {sm.SCRIPTS_SHA256_ANNOTATION: "0" * 64},
         "data": {},
     }
-    k8s = FakeK8s(overrides={"lakebench-scripts-aml-gate": bad})
-    mgr = SparkJobManager(_cfg(), k8s)
-    with pytest.raises(sm.ScriptsApplyError, match=r"reads back changed"):
-        mgr.deploy_scripts_configmap()
-    assert k8s.deleted == [], "the legacy map stays until the new maps read back"
-    assert mgr.scripts_provenance is None
+    return FakeK8s(overrides={"lakebench-scripts-aml-gate": bad}), r"reads back changed"
 
 
-def test_deploy_fails_when_data_does_not_match_its_annotation():
-    """The read-back hashes the returned data, not only the annotation."""
-
+def _tamper_data_not_matching_annotation():
+    # The read-back hashes the returned data, not only the annotation.
     class Tamper(FakeK8s):
         def get_configmap(self, name, namespace=None):
             got = super().get_configmap(name, namespace)
@@ -181,16 +175,31 @@ def test_deploy_fails_when_data_does_not_match_its_annotation():
                 got = {**got, "data": {**got["data"], "synthetic_corridors.json": "{}"}}
             return got
 
-    with pytest.raises(
-        sm.ScriptsApplyError, match=r"lakebench-scripts-aml-data reads back changed"
-    ):
-        SparkJobManager(_cfg(), Tamper()).deploy_scripts_configmap()
+    return Tamper(), r"lakebench-scripts-aml-data reads back changed"
 
 
-def test_deploy_fails_when_a_map_is_missing_on_read_back():
-    k8s = FakeK8s(overrides={"lakebench-scripts-common": None})
-    with pytest.raises(sm.ScriptsApplyError, match=r"lakebench-scripts-common reads back changed"):
-        SparkJobManager(_cfg(), k8s).deploy_scripts_configmap()
+def _tamper_missing_map():
+    return (
+        FakeK8s(overrides={"lakebench-scripts-common": None}),
+        r"lakebench-scripts-common reads back changed",
+    )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [_tamper_bad_annotation, _tamper_data_not_matching_annotation, _tamper_missing_map],
+    ids=["bad-annotation", "data-not-matching-annotation", "missing-map"],
+)
+def test_deploy_fails_on_read_back_mismatch(tamper):
+    """A map that reads back changed, has data not matching its annotation, or
+    is missing on read-back fails the deploy, keeps the legacy map and records
+    no provenance."""
+    k8s, match = tamper()
+    mgr = SparkJobManager(_cfg(), k8s)
+    with pytest.raises(sm.ScriptsApplyError, match=match):
+        mgr.deploy_scripts_configmap()
+    assert k8s.deleted == [], "the legacy map stays until the new maps read back"
+    assert mgr.scripts_provenance is None
 
 
 def test_foreign_legacy_map_is_kept():
@@ -200,20 +209,23 @@ def test_foreign_legacy_map_is_kept():
     assert LEGACY in k8s.store
 
 
-def test_legacy_map_kept_while_a_live_app_mounts_it(monkeypatch):
-    monkeypatch.setattr(
-        SparkJobManager, "_live_apps_mounting", lambda self, cm: ["lakebench-silver-stream"]
-    )
-    k8s = FakeK8s()
-    assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is True
-    assert k8s.deleted == []
+def _mounts_live_app(self, cm):
+    return ["lakebench-silver-stream"]
 
 
-def test_legacy_map_kept_when_apps_cannot_be_listed(monkeypatch):
-    def boom(self, cm):
-        raise RuntimeError("403 forbidden")
+def _mounts_cannot_list(self, cm):
+    raise RuntimeError("403 forbidden")
 
-    monkeypatch.setattr(SparkJobManager, "_live_apps_mounting", boom)
+
+@pytest.mark.parametrize(
+    "live_apps_mounting",
+    [_mounts_live_app, _mounts_cannot_list],
+    ids=["a-live-app-mounts-it", "apps-cannot-be-listed"],
+)
+def test_legacy_map_kept_when_it_may_still_be_in_use(monkeypatch, live_apps_mounting):
+    """The legacy map is kept when a live app still mounts it, or when the
+    apps cannot be listed to prove it is unused."""
+    monkeypatch.setattr(SparkJobManager, "_live_apps_mounting", live_apps_mounting)
     k8s = FakeK8s()
     assert SparkJobManager(_cfg(), k8s).deploy_scripts_configmap() is True
     assert k8s.deleted == []
@@ -325,7 +337,10 @@ def test_submit_refuses_when_scripts_changed_after_apply():
     assert mgr.deploy_scripts_configmap() is True
     assert mgr.scripts_changed_since_apply(JobType.SILVER_BUILD) is None
     k8s.store["lakebench-scripts-common"]["annotations"][sm.SCRIPTS_SHA256_ANNOTATION] = "f" * 64
+    from kubernetes.client.rest import ApiException
+
     created = MagicMock()
+    created.get_namespaced_custom_object.side_effect = ApiException(status=404)
     with patch("kubernetes.client.CustomObjectsApi", return_value=created):
         status = mgr.submit_job(JobType.SILVER_BUILD)
     assert status.state.name == "FAILED"
@@ -341,7 +356,9 @@ def test_financial_command_exits_when_not_submitted():
     from lakebench.cli import _financial
     from lakebench.modules.pipeline_engines.spark.job import JobState, JobStatus
 
-    status = JobStatus(name="lakebench-score-financial", state=JobState.FAILED, message="why")
+    status = JobStatus(
+        name="lakebench-score-financial-reference", state=JobState.FAILED, message="why"
+    )
     with pytest.raises(typer.Exit) as ei:
         _financial._require_submitted(status)
     assert ei.value.exit_code == 1

@@ -296,32 +296,6 @@ def test_thrift_pod_memory_counts_its_overhead():
     assert co_resident_request(odd, False).memory_gb == 30 + 5 + 2  # lb-deps
 
 
-def test_duckdb_recipes_leave_memory_to_the_autosizer():
-    """A recipe does not mark the DuckDB memory user-set: it is autosized per
-    schema, and a value the user sets is kept."""
-    from lakebench.config.autosizer import resolve_auto_sizing
-    from tests.conftest import make_config
-
-    for recipe in ("hive-iceberg-spark-duckdb", "polaris-iceberg-spark-duckdb"):
-        aml = make_config(recipe=recipe, architecture={"workload": {"schema": "financial"}})
-        resolve_auto_sizing(aml)
-        c360 = make_config(recipe=recipe)
-        resolve_auto_sizing(c360)
-        assert (
-            aml.architecture.query_engine.duckdb.memory
-            != c360.architecture.query_engine.duckdb.memory
-        ), recipe
-        user = make_config(
-            recipe=recipe,
-            architecture={
-                "workload": {"schema": "financial"},
-                "query_engine": {"duckdb": {"memory": "7g"}},
-            },
-        )
-        resolve_auto_sizing(user)
-        assert user.architecture.query_engine.duckdb.memory == "7g", recipe
-
-
 @pytest.mark.parametrize(
     "field,value,delta",
     [
@@ -489,10 +463,13 @@ def test_recommend_agrees_with_the_preflight_on_the_reference_cluster():
 def test_config_recommend_sizes_the_config_itself(tmp_path, monkeypatch):
     """config recommend sizes the user's config (its query engine and
     datagen), not a default config of the same mode."""
+    # DuckDB scores Customer 360 only (financial is Trino-only), so the
+    # user's config is a Customer 360 DuckDB config; the point is unchanged:
+    # recommend sizes it, not a default recipe of the same mode.
     path = tmp_path / "duck.yaml"
     path.write_text(
         "name: duck\nrecipe: hive-iceberg-spark-duckdb\n"
-        "workload:\n  schema: financial\n  datagen:\n    scale: 1\n"
+        "workload:\n  schema: customer360\n  datagen:\n    scale: 1\n"
     )
     from lakebench.config import load_config
 
@@ -509,7 +486,7 @@ def test_config_recommend_sizes_the_config_itself(tmp_path, monkeypatch):
         return check_capacity(c, cap).admitted
 
     best = largest_fitting_scale(admitted, upper=800)
-    default_best = largest_fitting_scale(_admitted_at("financial", "batch", cap), upper=800)
+    default_best = largest_fitting_scale(_admitted_at("customer360", "batch", cap), upper=800)
     assert best != default_best  # the DuckDB config is not the default recipe
     res = CliRunner().invoke(app, ["config", "recommend", str(path)], env={"COLUMNS": "300"})
     assert res.exit_code == 0, res.output

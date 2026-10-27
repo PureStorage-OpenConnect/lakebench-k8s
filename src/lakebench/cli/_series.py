@@ -64,18 +64,21 @@ LATER_REPETITION = {
 
 class _Stop(Exception):
     """The series stops here with *code*; *reason* goes into the manifest.
-    *corpus* marks a stop this module raised because bronze or the corpus
-    differs (exit 3, ``series.corpus_changed``)."""
+    *corpus* marks a stop raised because bronze or the corpus differs (exit
+    3, ``series.corpus_changed``). *kind* names the stop for the handler:
+    ``corpus_rep1`` (bronze moved while repetition 1 read it) or
+    ``no_verified_corpus`` (repetition 1 left nothing to reuse)."""
 
-    def __init__(self, code: int, reason: str, *, corpus: bool = False) -> None:
+    def __init__(self, code: int, reason: str, *, corpus: bool = False, kind: str = "") -> None:
         super().__init__(reason)
         self.code = code
         self.reason = reason
         self.corpus = corpus
+        self.kind = kind
 
 
-def _corpus_stop(reason: str) -> _Stop:
-    return _Stop(ExitCode.REFUSED, f"series.corpus_changed: {reason}", corpus=True)
+def _corpus_stop(reason: str, *, kind: str = "") -> _Stop:
+    return _Stop(ExitCode.REFUSED, f"series.corpus_changed: {reason}", corpus=True, kind=kind)
 
 
 def bronze_listing(cfg: Any) -> tuple[str | None, int, int, str]:
@@ -85,18 +88,10 @@ def bronze_listing(cfg: Any) -> tuple[str | None, int, int, str]:
     ``listing_sha256``; None for an empty scope). Errors propagate."""
     from lakebench.corpus_digest import datagen_scope, list_scope, listing_sha256
     from lakebench.deploy.datagen import bronze_datagen_prefix
-    from lakebench.s3 import S3Client
+    from lakebench.s3 import s3_client_from_config
 
     s3 = cfg.platform.storage.s3
-    client = S3Client(
-        endpoint=s3.endpoint,
-        access_key=s3.access_key,
-        secret_key=s3.secret_key,
-        region=s3.region,
-        path_style=s3.path_style,
-        ca_cert=s3.ca_cert,
-        verify_ssl=s3.verify_ssl,
-    ).raw_client
+    client = s3_client_from_config(s3).raw_client
     if client is None:
         raise RuntimeError("the S3 client did not initialise")
     scope = datagen_scope(bronze_datagen_prefix(cfg))
@@ -139,6 +134,12 @@ def _unfinished_apps(cfg: Any) -> list[str] | None:
     from kubernetes import client as k8s_client
 
     import lakebench.k8s
+    from lakebench.cli._cluster_ops import (
+        FINISHING_APP_STATES,
+        SPARK_GROUP,
+        SPARK_PLURAL,
+        SPARK_VERSION,
+    )
 
     # Before repetition 1 nothing has loaded the kubeconfig yet: the
     # K8sClient pins this process to the deployment's context and configures
@@ -149,10 +150,10 @@ def _unfinished_apps(cfg: Any) -> list[str] | None:
     )
     try:
         resp = k8s_client.CustomObjectsApi().list_namespaced_custom_object(
-            group="sparkoperator.k8s.io",
-            version="v1beta2",
+            group=SPARK_GROUP,
+            version=SPARK_VERSION,
             namespace=cfg.get_namespace(),
-            plural="sparkapplications",
+            plural=SPARK_PLURAL,
             _request_timeout=(5, 30),
         )
     except Exception as e:  # noqa: BLE001 -- unknown is not "none running"
@@ -163,12 +164,7 @@ def _unfinished_apps(cfg: Any) -> list[str] | None:
         name = str(((item or {}).get("metadata") or {}).get("name") or "")
         state = (((item or {}).get("status") or {}).get("applicationState") or {}).get("state")
         # SUCCEEDING and FAILING are the monitor's terminal states too.
-        if name.startswith("lakebench-") and state not in (
-            "COMPLETED",
-            "FAILED",
-            "SUCCEEDING",
-            "FAILING",
-        ):
+        if name.startswith("lakebench-") and state not in FINISHING_APP_STATES:
             out.append(name)
     return out
 
@@ -327,6 +323,7 @@ def run_series(
                     raise _Stop(
                         ExitCode.FAILED,
                         "repeat.no_verified_corpus: repetition 1's bronze-verify did not pass",
+                        kind="no_verified_corpus",
                     )
                 if not stage_succeeded(record, "silver-build"):
                     raise _Stop(
@@ -340,6 +337,7 @@ def run_series(
                         ExitCode.FAILED,
                         f"repeat.no_verified_corpus: the datagen Job is {state}, so bronze "
                         "may still be changing",
+                        kind="no_verified_corpus",
                     )
                 inherited = inherited_corpus_from(record)
                 d1 = inherited.get("bronze_listing_sha256")
@@ -348,9 +346,10 @@ def run_series(
                         ExitCode.FAILED,
                         "repeat.no_verified_corpus: repetition 1's record carries no observed "
                         "corpus to reuse",
+                        kind="no_verified_corpus",
                     )
                 if not generates and d0 != d1:
-                    raise _corpus_stop("bronze changed during repetition 1")
+                    raise _corpus_stop("bronze changed during repetition 1", kind="corpus_rep1")
                 now, objects, size, scope = _listing_or_stop(pristine, "after repetition 1")
                 if now != d1:
                     raise _corpus_stop("bronze changed after repetition 1 was saved")
@@ -381,7 +380,7 @@ def run_series(
         stop = s_
         manifest.stopped_reason = s_.reason
         code = int(s_.code)
-        if s_.corpus and manifest.runs and "during repetition 1" in s_.reason:
+        if s_.kind == "corpus_rep1" and manifest.runs:
             # Repetition 1 read a corpus that did not hold still: not a member.
             manifest.runs[0]["member"] = False
             manifest.runs[0]["corpus_changed"] = True
@@ -412,7 +411,7 @@ def run_series(
             next="regenerate the corpus or start a new series",
             path="series.corpus_changed",
         )
-    if stop is not None and stop.reason.startswith("repeat.no_verified_corpus"):
+    if stop is not None and stop.kind == "no_verified_corpus":
         raise LakebenchError(
             "no verified corpus to reuse; the series stopped after repetition 1",
             why=stop.reason,

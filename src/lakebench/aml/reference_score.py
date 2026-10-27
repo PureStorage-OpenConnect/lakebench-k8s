@@ -1,9 +1,7 @@
 """AML band leakage gate.
 
-One of two checks that answer the standing rule
-"distribution checks do not prove semantics -- must run reference
-detector + leakage check" (recorded in the maintainer's MEMORY as
-`feedback_distribution_checks_dont_prove_semantics`).
+Distribution checks do not prove that the planted typologies mean what
+they claim; this gate and the reference detector are the two checks that do.
 
 **Leakage gate.** The AML audit found that datagen writes typology
 "structuring" transactions into a narrow currency-specific band
@@ -29,13 +27,9 @@ want to explain the number read ``hint``.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any
-
-logger = logging.getLogger(__name__)
-
 
 # ---------------------------------------------------------------------------
 # Verdicts
@@ -90,10 +84,8 @@ class LeakageReport:
         affect the verdict: they carry no leakage claim. An empty
         report -- or one where every row is NO_TYPOLOGY -- does NOT
         pass. The correct answer to "no data seen" is "nothing
-        scored", not "OK". P2 fix from PR-A adversarial review: the
-        previous version returned True for an empty rows tuple,
-        which would silently hide a datagen regression that stops
-        planting structuring transactions in any band.
+        scored", not "OK": a datagen regression that stops planting
+        structuring transactions in any band must not read as a pass.
         """
         scored = [r for r in self.rows if r.verdict is not LeakageVerdict.NO_TYPOLOGY]
         if not scored:
@@ -197,13 +189,3 @@ def compute_leakage_gate(
             )
         )
     return LeakageReport(threshold_ratio=threshold_ratio, rows=tuple(rows))
-
-
-def _sklearn_available() -> bool:
-    """True iff scikit-learn is importable in this process."""
-    try:  # pragma: no cover -- environment probe
-        import sklearn  # noqa: F401
-
-        return True
-    except ImportError:
-        return False

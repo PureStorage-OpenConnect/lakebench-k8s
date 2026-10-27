@@ -13,10 +13,9 @@ new Polaris and keeps it in the deployment's namespace. Before anything is
 written the text is validated in-process, so ``init`` never leaves a file
 that does not load.
 
-The guided wizard (``init_wizard.py``) is removed. ``--interactive``, ``-i``
-and ``--advanced`` print one line saying so and write the default config;
-``--access-key`` and ``--secret-key`` are refused, without echoing the
-values.
+``--interactive``, ``-i`` and ``--advanced`` print a one-line notice and
+write the default config; ``--access-key`` and ``--secret-key`` are refused,
+without echoing the values.
 """
 
 from __future__ import annotations
@@ -115,34 +114,7 @@ def _scalar(value: Any) -> str:
         except yaml.YAMLError:
             pass
     # A JSON string is a valid YAML double-quoted scalar.
-    import json
-
     return json.dumps(text)
-
-
-def emit(tree: dict[str, Any], comments: dict[str, str] | None = None) -> list[str]:
-    """Block-style YAML for a nested dict of scalars, with end-of-line comments.
-
-    *comments* maps a dotted key path to the comment written after it.
-    """
-    comments = comments or {}
-    lines: list[str] = []
-
-    def walk(node: dict[str, Any], depth: int, prefix: tuple[str, ...]) -> None:
-        for key, value in node.items():
-            path = ".".join((*prefix, key))
-            pad = "  " * depth
-            if isinstance(value, dict):
-                lines.append(f"{pad}{key}:")
-                walk(value, depth + 1, (*prefix, key))
-                continue
-            line = f"{pad}{key}: {_scalar(value)}"
-            if path in comments:
-                line = f"{line}  # {comments[path]}"
-            lines.append(line)
-
-    walk(tree, 0, ())
-    return lines
 
 
 def first_day_dict(
@@ -405,12 +377,10 @@ def _template_tree(
             node = node.setdefault(part, {})
         if path in active:
             seen.add(path)
-            description = ""
-            node[parts[-1]] = (path, _scalar(active[path]), comments.get(path, ""), description)
+            node[parts[-1]] = (path, _scalar(active[path]), comments.get(path, ""))
             continue
         if path in owned:
-            description = "Set by the recipe; if written out, it must agree with it."
-            node[parts[-1]] = (path, owned[path], "", description)
+            node[parts[-1]] = (path, owned[path], "")
             continue
         note = _type_text(field.annotation)
         bounds = _range_text(field)
@@ -418,9 +388,8 @@ def _template_tree(
             note = bounds
         elif not note.startswith("one of"):
             note = ""  # the value shows the type
-        description = ""
         text = derived.get(path) or _default_text(field)
-        node[parts[-1]] = (path, text, note, description)
+        node[parts[-1]] = (path, text, note)
     missing = set(active) - seen
     if missing:
         raise ValueError(f"init writes keys the schema does not have: {sorted(missing)}")
@@ -474,7 +443,7 @@ def _template_lines(tree: dict[str, Any], active_paths: set[str]) -> list[str]:
                 lines.append(header if live(path) else f"# {header}")
                 walk(child, depth + 1, f"{path}.")
                 continue
-            _, text, note, _description = child
+            _, text, note = child
             line = f"{pad}{key}: {text}"
             if note:
                 line = f"{line}  # {note}"
@@ -581,11 +550,6 @@ def _validate_text(text: str, credentials_env: str) -> tuple[Any, str | None]:
             problems.append(f"{loc}: {msg}" if loc else msg)
         return None, "; ".join(problems)
     return cfg, None
-
-
-def config_problem(text: str, credentials_env: str) -> str | None:
-    """Why *text* would not load under a command that changes data, or None."""
-    return _validate_text(text, credentials_env)[1]
 
 
 def _refuse(message: str, code: ExitCode = ExitCode.USAGE) -> NoReturn:
@@ -779,19 +743,14 @@ def init(
         print_info("Use --overwrite to replace it")
         raise typer.Exit(ExitCode.USAGE)
     replacing = overwrite and output.is_file()
-    old_cfg, old_problem = _load_replaced(output) if replacing else (None, None)
-    old_name = old_cfg.name if old_cfg is not None else _name_of(_replaced_config(output))
+    old_cfg, old_problem, old_name = _replaced(output) if replacing else (None, None, None)
     if old_name and ("${" in old_name or _UNSET in old_name):
         old_name = None  # an unresolved reference names no deployment
     kept_name = None if name else old_name
     if replacing and not name and not kept_name:
-        from lakebench.config.deploy_state import legacy_names
-
         # v1.6 gave every nameless config in a directory one name, so it may
-        # be this file's deployment or a sibling's. Through a symbolic link
-        # both the link's directory and the target's are read: the file
-        # replaced is the target, which either may have deployed.
-        recorded = sorted(set(legacy_names(output).values()))
+        # be this file's deployment or a sibling's.
+        recorded = _legacy_names(output)
         if recorded:
             legacy = recorded[0]
             _refuse(
@@ -807,21 +766,21 @@ def init(
         _refuse(f"unknown workload {workload!r}; valid: {', '.join(workloads())}")
 
     if local:
+        if workload == "financial":
+            _refuse(
+                "nothing written: --local runs DuckDB, and the financial workload needs "
+                "Trino; drop --local and use a trino recipe, or pick --workload customer360"
+            )
         # 1 is the cluster default; a laptop gets 0.1 unless a scale was given.
-        local_text = _local_config_text(
-            output,
-            name or kept_name or "local-lakehouse",
-            0.1 if scale is None else scale,
-            workload_schema=workload,
-        )
-        problem = config_problem(local_text, credentials_env)
+        local_scale = 0.1 if scale is None else scale
+        local_name = name or kept_name or "local-lakehouse"
+        local_text = _local_config_text(output, local_name, local_scale, workload_schema=workload)
+        local_cfg, problem = _validate_text(local_text, credentials_env)
         if problem:
             _refuse(f"nothing written: this config would not load: {problem}")
-        if old_name and old_name == (name or kept_name or "local-lakehouse"):
-            _refuse_if_target_moves(
-                output, old_cfg, old_problem, _validate_text(local_text, credentials_env)[0]
-            )
-        _write_local_config(output, local_text, 0.1 if scale is None else scale)
+        if old_name and old_name == local_name:
+            _refuse_if_target_moves(output, old_cfg, old_problem, local_cfg)
+        _write_local_config(output, local_text, local_scale)
         return
 
     recipe = recipe or DEFAULT_RECIPE
@@ -851,13 +810,11 @@ def init(
         credentials_env=credentials_env,
         namespace=namespace,
     )
-    problem = config_problem(text, credentials_env)
+    new_cfg, problem = _validate_text(text, credentials_env)
     if problem:
         _refuse(f"nothing written: this config would not load: {problem}")
     if old_name and old_name == name:
-        _refuse_if_target_moves(
-            output, old_cfg, old_problem, _validate_text(text, credentials_env)[0]
-        )
+        _refuse_if_target_moves(output, old_cfg, old_problem, new_cfg)
     output.write_text(text)
 
     _say(f"wrote {output}")
@@ -994,14 +951,9 @@ def _refuse_if_overwrite_moves(output: Path, new_file: Path) -> None:
     not keep: a nameless file in a directory 1.6 recorded a name for (it may
     be that deployment's only config), or a file that resolves, with this
     shell's variables, to the new file's name in another place."""
-    replaced_cfg, replaced_problem = _load_replaced(output)
-    replaced_name = (
-        replaced_cfg.name if replaced_cfg is not None else _name_of(_replaced_config(output))
-    )
+    replaced_cfg, replaced_problem, replaced_name = _replaced(output)
     if not replaced_name:
-        from lakebench.config.deploy_state import legacy_names
-
-        recorded = sorted(set(legacy_names(output).values()))
+        recorded = _legacy_names(output)
         if recorded:
             _refuse(
                 f"{output} has no name, and 1.6 recorded '{recorded[0]}' for nameless "
@@ -1056,8 +1008,8 @@ _LOCAL_CONFIG_TEMPLATE = """\
 name: {name}
 recipe: hive-iceberg-spark-duckdb
 
-# Workload lives at the top level (D12 workload move). The deprecated
-# architecture.workload block still loads but emits a warning.
+# Workload lives at the top level. The deprecated architecture.workload
+# block still loads but emits a warning.
 workload:{schema_line}
   datagen:
     # 1 unit is roughly 10 GB of bronze, so {scale} is about {approx_gb:.1f} GB.
@@ -1094,6 +1046,23 @@ def _replaced_config(path: Path) -> dict[str, Any] | None:
 def _name_of(data: dict[str, Any] | None) -> str | None:
     value = (data or {}).get("name")
     return value if isinstance(value, str) and value else None
+
+
+def _replaced(path: Path) -> tuple[Any, str | None, str | None]:
+    """The config about to be overwritten (``_load_replaced``), the reason it
+    does not load, and its deployment name, read from the raw YAML when it
+    does not load."""
+    cfg, problem = _load_replaced(path)
+    return cfg, problem, cfg.name if cfg is not None else _name_of(_replaced_config(path))
+
+
+def _legacy_names(path: Path) -> list[str]:
+    """The names v1.6 recorded for nameless configs beside *path*. Through a
+    symbolic link both the link's directory and the target's are read: the
+    file replaced is the target, which either may have deployed."""
+    from lakebench.config.deploy_state import legacy_names
+
+    return sorted(set(legacy_names(path).values()))
 
 
 #: Stands in for a variable the replaced file references but this shell has

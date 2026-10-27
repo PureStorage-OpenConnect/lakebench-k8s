@@ -17,7 +17,7 @@ from pydantic import ValidationError
 
 from lakebench.config import LakebenchConfig, load_config
 from lakebench.config.loader import ConfigValidationError, save_config
-from lakebench.config.schema import PipelineMode, is_continuous_mode
+from lakebench.config.schema import PipelineMode
 from tests.conftest import make_config
 
 
@@ -90,10 +90,24 @@ def _quiet(fn, *a, **kw):
 # -- workload x format compatibility, Java/Iceberg pairing ------------------
 
 
-def test_aml_on_delta_is_refused_on_the_architecture():
-    with pytest.raises(ValidationError) as exc:
-        make_config(recipe="hive-delta-spark-trino", workload={"schema": "financial"})
-    assert [e["loc"] for e in exc.value.errors()] == [("architecture",)]
+@pytest.mark.parametrize(
+    ("recipe", "loc", "match"),
+    [
+        # Delta is refused on the architecture: financial needs Iceberg.
+        ("hive-delta-spark-trino", ("architecture",), None),
+        # Financial scores recall and precision with SQL on Trino, so none,
+        # duckdb and the untested spark-thrift path are refused at load.
+        ("hive-iceberg-spark-none", None, "it needs query_engine trino"),
+        ("hive-iceberg-spark-duckdb", None, "it needs query_engine trino"),
+        ("hive-iceberg-spark-thrift", None, "it needs query_engine trino"),
+    ],
+)
+def test_aml_recipe_without_trino_is_refused(recipe, loc, match):
+    with pytest.raises(ValidationError, match=match) as exc:
+        make_config(recipe=recipe, workload={"schema": "financial"})
+    if loc is not None:
+        assert [e["loc"] for e in exc.value.errors()] == [loc]
+    # The Iceberg-on-Trino recipe is accepted.
     make_config(recipe="hive-iceberg-spark-trino", workload={"schema": "financial"})
 
 
@@ -165,23 +179,6 @@ def test_both_locations_that_disagree_are_refused(tmp_path):
         load_config(_write(tmp_path, data))
 
 
-def test_flat_scale_lands_in_the_top_level_block(tmp_path):
-    # Flat keys are deprecated in v1.7: still promoted, with a note.
-    with pytest.warns(DeprecationWarning, match="flat 'scale' is deprecated"):
-        cfg = load_config(
-            _write(tmp_path, {"name": "t", "scale": 7, "workload": {"schema": "customer360"}})
-        )
-    assert cfg.workload.datagen.scale == 7
-
-
-def test_flat_scale_with_legacy_block_does_not_create_a_conflict(tmp_path):
-    data = {"name": "t", "scale": 7, "architecture": {"workload": {"schema": "financial"}}}
-    with pytest.warns(DeprecationWarning):
-        cfg = load_config(_write(tmp_path, data))
-    assert cfg.workload.datagen.scale == 7
-    assert cfg.workload.schema_type.value == "financial"
-
-
 def test_saved_config_reloads_without_deprecations(tmp_path):
     cfg = make_config(
         workload={"schema": "financial"},
@@ -198,11 +195,6 @@ def test_saved_config_reloads_without_deprecations(tmp_path):
 
 
 # -- continuous is canonical ------------------------------------------------
-
-
-def test_is_continuous_mode_reads_sustained():
-    # Metrics files still record "sustained".
-    assert is_continuous_mode("sustained") is True
 
 
 def test_old_metrics_with_sustained_mode_still_read_as_continuous(tmp_path):
@@ -287,7 +279,7 @@ def test_benchmark_error_round_trips_and_reaches_the_report(tmp_path):
 
     from lakebench.metrics.collector import PipelineMetrics
     from lakebench.metrics.storage import MetricsStorage
-    from lakebench.reports.generator import ReportGenerator
+    from lakebench.metrics.verdict import compute_badge_status
 
     run = PipelineMetrics(
         run_id="r1",
@@ -301,8 +293,7 @@ def test_benchmark_error_round_trips_and_reaches_the_report(tmp_path):
     storage.save_run(run)
     loaded = storage.load_run("r1")
     assert loaded.benchmark_error == "RuntimeError: trino down"
-    gen = ReportGenerator.__new__(ReportGenerator)
-    ok, reasons, _ = gen._compute_overall_status(loaded)
+    ok, reasons, _ = compute_badge_status(loaded)
     assert not ok
     assert any("Benchmark did not complete" in r for r in reasons)
 

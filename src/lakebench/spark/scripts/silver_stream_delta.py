@@ -9,12 +9,12 @@ This is the continuous-pipeline equivalent of silver_build.py for Delta Lake.
 Where silver_build processes all data in a single batch pass, silver_stream
 processes micro-batches as new rows arrive in bronze_raw.
 
-Replay idempotency (E3): each micro-batch is one Delta commit written with
+Replay idempotency: each micro-batch is one Delta commit written with
 Delta's idempotent-write options (txnAppId = stream + query id, txnVersion =
 batch id). A batch replayed after a driver restart carries a txnVersion Delta
 has already recorded, so the second write commits nothing. The count
 returned for the write is read from THIS attempt's own row in
-``DeltaTable.forName(...).history(20)`` (I8), matched by a per-attempt
+``DeltaTable.forName(...).history(100)``, matched by a per-attempt
 unique ``userMetadata`` tag: original and replay share the same
 ``(txnAppId, txnVersion)``, so a lookup by ``txnAppId`` alone would find
 the original's row on a replay and wrongly report non-zero. If no row
@@ -26,7 +26,7 @@ and break a before / after-version bracket. Startup refuses a fresh
 checkpoint over a non-empty silver table, which would re-read all of
 bronze into it a second time.
 
-Startup race (B4): the not-exists branch is split into a metadata-only
+Startup race: the not-exists branch is split into a metadata-only
 ``CREATE TABLE IF NOT EXISTS`` and the same ``append`` write the exists
 branch uses. Delta does not serialise two concurrent creates: both try to
 commit the table's first version and the loser's create fails
@@ -46,7 +46,7 @@ retry waits (at most 15 s) and the create loser's wait (at most 30 s) fall
 inside the micro-batch's time; a retry and a wait that found the table are
 logged.
 
-Debug columns (I6): every write projects ``_stream_id STRING`` and
+Debug columns: every write projects ``_stream_id STRING`` and
 ``_batch_id BIGINT`` in the silver row shape, matching the Iceberg stream
 (``silver_stream.py``). Delta's native ``txnAppId``/``txnVersion`` handles
 exactly-once; the columns give operators the same by-eye debugging signal
@@ -59,7 +59,6 @@ Environment variables (set by job.py):
     LB_BRONZE_URI        - s3a://bronze-bucket/
     LB_SILVER_URI        - s3a://silver-bucket/
     LB_ICEBERG_CATALOG   - catalog name (e.g., "lakehouse")
-    CATALOG_NAME         - same as LB_ICEBERG_CATALOG
     CHECKPOINT_LOCATION  - s3a://silver-bucket/checkpoints/silver-stream/
     TRIGGER_INTERVAL     - e.g., "0 seconds" (back to back)
 """
@@ -67,12 +66,10 @@ Environment variables (set by job.py):
 from __future__ import annotations
 
 import os
-import threading
 import time
 import uuid
 
 from common import (
-    SilverAbort,
     apply_silver_transformations_anchored,
     assert_progress,
     await_stream,
@@ -86,16 +83,14 @@ from common import (
     refuse_fresh_checkpoint_over_data,
     resolve_data_clock,
     set_utc_session,
+    silver_stream_accumulator,
     streaming_query_id,
     table_exists,
+    wait_for_bronze_table,
     write_delta_table,
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
-
-_TABLE_WAIT_INTERVAL = 15  # seconds between checks
-# A3 (silver-plan): see silver_stream.py for rationale.
-_TABLE_WAIT_MAX = int(os.environ.get("LB_SILVER_BRONZE_WAIT_SECONDS", "1800"))
 
 
 def _rows_from_own_commit(spark, silver_tbl, attempt_tag):
@@ -116,16 +111,12 @@ def _rows_from_own_commit(spark, silver_tbl, attempt_tag):
         this attempt via its ``(appId, version)`` dedup, or the write did
         not reach the log; either way, this attempt committed nothing.
 
-    Window is 100 rather than 20: concurrent OPTIMIZE / VACUUM / a second
-    writer to the same table can push our commit past a small window
-    between our write and our history read, and returning ``None`` on a
-    real commit would silently under-count against A1's accumulator
-    (invariant 5 label drift, not corruption -- rows are still written).
-    100 is a cheap Delta metadata scan and covers realistic maintenance
-    burst rates.
-
-    Immune to interleaved compaction/vacuum commits that would displace the
-    write from the head of history and break a before/after-version bracket.
+    The window is 100, not a handful: a concurrent OPTIMIZE, VACUUM or
+    second writer can push this commit past a small window between the write
+    and the history read, and returning ``None`` on a real commit would
+    under-count the row total (the rows are still written). 100 is a cheap
+    metadata scan and covers realistic maintenance burst rates, and it does
+    not depend on this commit sitting at the head of history.
     """
     from delta.tables import DeltaTable
 
@@ -135,7 +126,7 @@ def _rows_from_own_commit(spark, silver_tbl, attempt_tag):
         # cannot distinguish a replay from a real commit, so refuse.
         raise RuntimeError(
             "DeltaTable.history() has no userMetadata column; the deployment is "
-            "on a Delta build too old for the I8 read-own-commit guard"
+            "on a Delta build too old to read a write's own commit back"
         )
     matches = hist.where(hist["userMetadata"] == attempt_tag).limit(1).collect()
     if not matches:
@@ -213,7 +204,7 @@ def _create_silver_table_if_not_exists(spark, schema, silver_tbl, silver_bucket)
     winner's table, then returns. A failure that leaves no table is raised.
     Both then take the append branch with their own ``txnAppId``, so both
     racers' rows land -- neither is lost to an overwrite (which is what the
-    pre-B4 not-exists branch used to do, and which would have removed the
+    pre-split not-exists branch used to do, and which would have removed the
     winner's data files on the loser's second call).
     """
     from delta.tables import DeltaTable
@@ -295,7 +286,7 @@ def write_silver_batch(batch_df, batch_id, silver_tbl, silver_bucket, data_clock
     log(f"Batch {batch_id}: read {count:,} bronze rows")
     anchor = data_clock if data_clock is not None else data_clock_date(batch_df)
     stream_id = streaming_query_id(spark)
-    # I6: project the same debug columns the Iceberg path emits so operators
+    # Project the same debug columns the Iceberg path emits so operators
     # can trace a row back to its stream+batch, even though Delta's own
     # (txnAppId, txnVersion) is authoritative for replay correctness.
     enriched = (
@@ -317,7 +308,7 @@ def write_silver_batch(batch_df, batch_id, silver_tbl, silver_bucket, data_clock
         write_options = {"userMetadata": attempt_tag, **txn}
 
         if not table_exists(spark, silver_tbl):
-            # B4: split the not-exists branch into a metadata-only CREATE IF
+            # Split the not-exists branch into a metadata-only CREATE IF
             # NOT EXISTS followed by the same append the exists branch uses.
             # The loser of a create race waits for the winner's table and
             # falls through to append. Never do an overwrite here: the
@@ -344,14 +335,6 @@ def write_silver_batch(batch_df, batch_id, silver_tbl, silver_bucket, data_clock
     return committed
 
 
-def _exists_or_false(spark, table):
-    try:
-        return table_exists(spark, table)
-    except Exception as e:  # noqa: BLE001
-        log(f"Bronze table probe error: {type(e).__name__}: {e}")
-        return False
-
-
 def main() -> None:
     catalog = env("LB_ICEBERG_CATALOG", "ice")
     silver_uri = env("LB_SILVER_URI", "s3a://lb-silver/")
@@ -371,10 +354,9 @@ def main() -> None:
     log(f"Target table: {silver_tbl}")
     log(f"Checkpoint:   {checkpoint_location}")
     log(f"Trigger:      {trigger_interval}")
-    # G5: label the imposed scale envelope so downstream reports never
-    # present a Lakebench-bounded number as infrastructure performance
-    # (invariant 6). v1.6 profile: measured up to scale 10; larger scales
-    # run but the cap is labelled, not hidden.
+    # Label the imposed scale envelope so a report never presents a
+    # Lakebench-bounded number as infrastructure performance. Measured up to
+    # scale 10; larger scales run, but the cap is labelled, not hidden.
     emit_stream_scale_admission(measured_envelope_scale=10)
 
     log("Creating namespace...")
@@ -385,46 +367,27 @@ def main() -> None:
     except Exception as e:
         log(f"Namespace creation note: {str(e)}")
 
-    # I6: reused silver table without the debug columns (batch-built, or an
+    # Reused silver table without the debug columns (batch-built, or an
     # older release): add them before the first micro-batch references them.
     if table_exists(spark, silver_tbl):
         ensure_column(spark, silver_tbl, "_stream_id", "STRING")
         ensure_column(spark, silver_tbl, "_batch_id", "BIGINT")
     refuse_fresh_checkpoint_over_data(spark, checkpoint_location, silver_tbl)
-    # C1 (silver-plan): silver C360 stream mains use strict=True. C2 always
-    # exports LB_DATA_CLOCK in the silver env bundle, so a missing env here
-    # is a plumbing break, not a legitimate greenfield.
+    # strict: the job always exports LB_DATA_CLOCK, so a missing clock here
+    # is a configuration error.
     data_clock = resolve_data_clock(df_fallback=None, strict=True)
 
-    # Bronze-ingest creates bronze_raw on its first batch; silver-stream
-    # starts concurrently. Any probe error only means "wait longer".
-    waited = 0
-    while not _exists_or_false(spark, bronze_tbl):
-        if waited >= _TABLE_WAIT_MAX:
-            log(f"Bronze table {bronze_tbl} not found after {waited}s, giving up")
-            spark.stop()
-            raise SilverAbort(f"bronze did not appear in wait window ({_TABLE_WAIT_MAX}s)")
-        log(f"Waiting for {bronze_tbl} to be created ({waited}s elapsed)...")
-        time.sleep(_TABLE_WAIT_INTERVAL)
-        waited += _TABLE_WAIT_INTERVAL
-    log(f"Bronze table {bronze_tbl} exists (waited {waited}s)")
+    wait_for_bronze_table(spark, bronze_tbl)
 
-    # B5: bronze-checkpoint-reset guard. See common.check_bronze_fingerprint
-    # for the failure this defends against; ``source_format="delta"`` reads
-    # the bronze commit version from Delta history instead of an Iceberg
-    # snapshot id, and the sidecar JSON records the format so the guard
-    # never confuses the two formats' fingerprints on a mixed-catalog upgrade.
+    # Bronze-checkpoint-reset guard. See common.check_bronze_fingerprint for
+    # the failure this defends against; source_format="delta" reads the
+    # bronze commit version from Delta history, and the sidecar records the
+    # format so the guard never confuses the two formats' fingerprints.
     check_bronze_fingerprint(spark, bronze_tbl, checkpoint_location, source_format="delta")
 
-    # A1: driver-side accumulator; see silver_stream.py for the rationale.
-    rows_written_total = 0
-    rows_written_lock = threading.Lock()
-
-    def _foreach_batch(df, bid):
-        written = write_silver_batch(df, bid, silver_tbl, silver_uri, data_clock)
-        with rows_written_lock:
-            nonlocal rows_written_total
-            rows_written_total += int(written or 0)
+    _foreach_batch, read_total = silver_stream_accumulator(
+        lambda df, bid: write_silver_batch(df, bid, silver_tbl, silver_uri, data_clock)
+    )
 
     stream = spark.readStream.format("delta").table(bronze_tbl)
     query = (
@@ -436,8 +399,7 @@ def main() -> None:
 
     log("Streaming query started, awaiting termination...")
     await_stream(spark, query)
-    with rows_written_lock:
-        total = rows_written_total
+    total = read_total()
     log(f"Silver stream stopped; total rows written across all batches: {total}")
     assert_progress(total, "silver-stream")
     spark.stop()

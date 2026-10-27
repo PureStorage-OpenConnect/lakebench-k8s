@@ -51,15 +51,6 @@ def test_two_new_deployments_get_distinct_secrets():
         assert len(a[i]) >= 32, what
 
 
-def test_v16_polaris_redeploy_keeps_password():
-    """A v1.6 Polaris (role exists, no Secret) keeps the v1.6 DB password; a
-    generator that ignored the role would lock Polaris out of its metastore."""
-    core = FakeCore()
-    pw = ds.ensure_polaris_db_password(core, _cfg(), "a", role_exists=True)
-    assert pw == ds.LEGACY_POLARIS_DB_PASSWORD
-    assert core.secrets[("a", ds.POLARIS_DB_SECRET)]["password"] == pw
-
-
 def test_stored_polaris_password_is_reused():
     core = FakeCore({("a", ds.POLARIS_DB_SECRET): {"password": "stored-pw"}})
     assert ds.ensure_polaris_db_password(core, _cfg(), "a", role_exists=True) == "stored-pw"
@@ -106,19 +97,19 @@ def test_config_client_secret_is_stored_for_a_fresh_polaris():
 
 
 def test_config_cannot_change_a_bootstrapped_client_secret():
-    """Polaris keeps only a hash of the bootstrap secret: replacing the
-    Secret would lose the only copy and lock every client out."""
+    """Polaris keeps only a hash of the bootstrap secret: a config value that
+    differs is refused (replacing the Secret would lose the only copy and lock
+    every client out); a config value that matches is accepted unchanged."""
+    # A different value is refused and the stored secret is untouched.
     core = FakeCore({("a", ds.POLARIS_CLIENT_SECRET): {"clientSecret": "bootstrapped"}})
     with pytest.raises(ds.DeploymentSecretError, match="differs from the secret Polaris"):
         ds.ensure_polaris_client_secret(core, _cfg(client_secret="other"), "a", fresh=False)
     assert core.secrets[("a", ds.POLARIS_CLIENT_SECRET)]["clientSecret"] == "bootstrapped"
     assert core.replaces == []
-
-
-def test_matching_config_on_a_bootstrapped_polaris_is_fine():
-    core = FakeCore({("a", ds.POLARIS_CLIENT_SECRET): {"clientSecret": "same"}})
+    # The same value is accepted.
+    same = FakeCore({("a", ds.POLARIS_CLIENT_SECRET): {"clientSecret": "same"}})
     assert (
-        ds.ensure_polaris_client_secret(core, _cfg(client_secret="same"), "a", fresh=False)
+        ds.ensure_polaris_client_secret(same, _cfg(client_secret="same"), "a", fresh=False)
         == "same"
     )
 
@@ -407,20 +398,28 @@ def test_create_race_falls_through_to_sync():
 # -- empty stored values -------------------------------------------------------
 
 
-@pytest.mark.parametrize("fresh", [True, False])
-def test_an_empty_stored_client_secret_is_refused_not_used(fresh):
-    """A tampered Secret holding "" must never bootstrap Polaris or be synced
-    to the role."""
-    core = FakeCore({("a", ds.POLARIS_CLIENT_SECRET): {ds.POLARIS_CLIENT_KEY: ""}})
-    with pytest.raises(ds.DeploymentSecretError, match="empty"):
+def test_an_empty_stored_secret_is_refused_not_used():
+    """A tampered Secret holding "" must never bootstrap Polaris, be synced to
+    the role, or be used as the DB password, whichever secret is stored
+    empty and (for the client secret) whether or not this is a fresh deploy."""
+
+    def client(core, fresh):
         ds.ensure_polaris_client_secret(core, _cfg(), "a", fresh=fresh)
-    assert core.creates == [] and core.replaces == []
 
-
-def test_an_empty_stored_db_password_is_refused():
-    core = FakeCore({("a", ds.POLARIS_DB_SECRET): {ds.POLARIS_DB_KEY: ""}})
-    with pytest.raises(ds.DeploymentSecretError, match="empty"):
+    def db(core, _fresh):
         ds.ensure_polaris_db_password(core, _cfg(), "a", role_exists=True)
+
+    cases = [
+        # (secret key, stored value, call, fresh)
+        ((ds.POLARIS_CLIENT_SECRET, ds.POLARIS_CLIENT_KEY), client, True),
+        ((ds.POLARIS_CLIENT_SECRET, ds.POLARIS_CLIENT_KEY), client, False),
+        ((ds.POLARIS_DB_SECRET, ds.POLARIS_DB_KEY), db, False),
+    ]
+    for (secret_name, key), call, fresh in cases:
+        core = FakeCore({("a", secret_name): {key: ""}})
+        with pytest.raises(ds.DeploymentSecretError, match="empty"):
+            call(core, fresh)
+        assert core.creates == [] and core.replaces == [], (secret_name, fresh)
 
 
 @pytest.mark.parametrize(

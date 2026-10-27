@@ -186,29 +186,24 @@ def test_deploy_serves_verifies_and_writes_the_annotation_last(recording_k8s, mo
     # Every mutation is in the config's namespace.
     assert all(c.scope == OWN for c in rec.mutations()), [c.describe() for c in rec.mutations()]
     assert {c.namespace for c in rec.mutations()} <= {NS, None}
-    labels = rec.store[("deployments", NS, m.SERVER_NAME)].metadata.labels
-    assert labels["lakebench.io/deployment"] == "dep-a"
-
-
-def test_tools_configmap_holds_exactly_the_hashed_bytes(recording_k8s, monkeypatch):
-    rec = recording_k8s
-    cfg = _cfg()
-    engine = _setup(rec, cfg)
-    request = req.select_request(cfg)
-    Controller(rec, monkeypatch)
-    _show(rec, lambda sha: fake_shown(request))
-    assert DependencyServerDeployer(engine).deploy().status == DeploymentStatus.SUCCESS
+    dep = rec.store[("deployments", NS, m.SERVER_NAME)]
+    assert dep.metadata.labels["lakebench.io/deployment"] == "dep-a"
+    # The tools ConfigMap holds exactly the hashed bytes the server env names.
+    import hashlib
 
     tools = rec.store[("configmaps", NS, m.tools_configmap_name(request.request_sha256))]
     assert tools.immutable is True
-    import hashlib
-
-    dep = rec.store[("deployments", NS, m.SERVER_NAME)]
     env = {e.name: e.value for e in dep.spec.template.spec.containers[0].env}
-    raw = tools.data["request.json"].encode()
-    assert hashlib.sha256(raw).hexdigest() == env["LB_DEPS_REQUEST_SHA256"]
+    assert (
+        hashlib.sha256(tools.data["request.json"].encode()).hexdigest()
+        == (env["LB_DEPS_REQUEST_SHA256"])
+    )
     assert hashlib.sha256(tools.data["lb_deps.py"].encode()).hexdigest() == request.tools_sha256
     assert tools.data["lb_deps.py"].encode() == req.TOOLS_PATH.read_bytes()
+    # The manifest records the images that ran.
+    images = json.loads(cm.data["server-images.json"])
+    assert set(images) == {"serve", "resolve-spark"}
+    assert "image_id" in images["serve"]
 
 
 def test_same_config_redeploy_renders_an_identical_deployment(recording_k8s, monkeypatch):
@@ -250,13 +245,22 @@ def test_dry_run_makes_no_cluster_call(recording_k8s):
 
 
 def test_a_set_whose_entries_do_not_hash_fails_and_writes_nothing(recording_k8s, monkeypatch):
+    """A printed pinset that does not match the request fails the deploy and
+    writes nothing. Another deploy of the namespace wrote the annotation while
+    this one ran and then lost its server to this rollout, so the stray
+    annotation must be cleared too."""
     rec = recording_k8s
     cfg = _cfg()
     engine = _setup(rec, cfg)
     request = req.select_request(cfg)
     Controller(rec, monkeypatch)
-    _show(rec, lambda sha: fake_shown(request, pinset_sha256="e" * 64))
 
+    def concurrent_write(sha):
+        ns = rec.store[("namespaces", None, NS)]
+        ns.metadata.annotations = {**ns.metadata.annotations, m.ANNOTATION_DEPS_SET: "d" * 64}
+        return fake_shown(request, pinset_sha256="e" * 64)  # this deploy's check fails
+
+    _show(rec, concurrent_write)
     result = DependencyServerDeployer(engine).deploy()
 
     assert result.status == DeploymentStatus.FAILED
@@ -509,42 +513,4 @@ def test_a_tools_map_with_other_bytes_is_refused(recording_k8s):
     assert result.status == DeploymentStatus.FAILED
     assert ("deployments", NS, m.SERVER_NAME) not in rec.store
     assert ("configmaps", NS, m.MANIFEST_CONFIGMAP) not in rec.store
-    assert m.ANNOTATION_DEPS_SET not in _ns_annotations(rec)
-
-
-def test_the_manifest_records_the_images_that_ran(recording_k8s, monkeypatch):
-    rec = recording_k8s
-    cfg = _cfg()
-    engine = _setup(rec, cfg)
-    request = req.select_request(cfg)
-    Controller(rec, monkeypatch)
-    _show(rec, lambda sha: fake_shown(request))
-    assert DependencyServerDeployer(engine).deploy().status == DeploymentStatus.SUCCESS
-    images = json.loads(
-        rec.store[("configmaps", NS, m.MANIFEST_CONFIGMAP)].data["server-images.json"]
-    )
-    assert set(images) == {"serve", "resolve-spark"}
-    assert "image_id" in images["serve"]
-
-
-# --- brief-pass fixes ----------------------------------------------------------------
-
-
-def test_a_failed_step_clears_an_annotation_written_meanwhile(recording_k8s, monkeypatch):
-    """Another deploy of the namespace may write the annotation while this one
-    runs and then lose its server to this one's rollout."""
-    rec = recording_k8s
-    cfg = _cfg()
-    engine = _setup(rec, cfg)
-    request = req.select_request(cfg)
-    Controller(rec, monkeypatch)
-
-    def concurrent_write(sha):
-        ns = rec.store[("namespaces", None, NS)]
-        ns.metadata.annotations = {**ns.metadata.annotations, m.ANNOTATION_DEPS_SET: "d" * 64}
-        return fake_shown(request, pinset_sha256="e" * 64)  # this deploy's check fails
-
-    _show(rec, concurrent_write)
-    result = DependencyServerDeployer(engine).deploy()
-    assert result.status == DeploymentStatus.FAILED
     assert m.ANNOTATION_DEPS_SET not in _ns_annotations(rec)

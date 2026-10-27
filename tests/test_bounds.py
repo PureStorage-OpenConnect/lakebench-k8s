@@ -50,55 +50,98 @@ def test_record_and_run_agree():
         ), run_id
 
 
-def test_batch_record_not_bounded():
-    assert bounds.trickle_bound(_rec("231711-6dd3bc")) is None
+def _batch_record():
+    return _rec("231711-6dd3bc")
 
 
-def test_legacy_record_pace_not_measured():
-    tb = bounds.trickle_bound(_rec("215221-65567b"))
-    assert tb is not None and tb["kept_pace"] is None and tb["not_measured"]
-
-
-def test_fell_behind_not_bounded():
+def _fell_behind():
     rec = _rec()
     _scores(rec)["ingest_ratio"] = 0.90
-    assert bounds.trickle_bound(rec) is None
+    return rec
 
 
-def test_no_trickle_not_bounded():
+def _no_trickle():
     rec = _rec()
     rec["continuous"]["trickle"]["value"] = None
     rec["config_snapshot"]["sustained"]["max_files_per_trigger"] = None
     rec["config_snapshot"]["experiment_inputs"].setdefault("config_limits", {})[
         "max_files_per_trigger"
     ] = None
-    assert bounds.trickle_bound(rec) is None
+    return rec
 
 
-def test_lag_over_one_trigger_not_bounded():
+def _lag_over_one_trigger():
     rec = _rec()
     bronze = next(s for s in rec["streaming"] if s["job_type"] == "bronze-ingest")
     bronze["last_write_offset_seconds"] = 1800.0 - 31.0  # 30 s trigger
-    assert bounds.trickle_bound(rec) is None
-    bronze["last_write_offset_seconds"] = 1800.0 - 30.04  # within the 0.1 s rounding
+    return rec
+
+
+def _within_one_batch_but_lag_over_one_trigger():
+    rec = _rec()
+    _scores(rec)["ingest_ratio"] = 0.985
+    bronze = next(s for s in rec["streaming"] if s["job_type"] == "bronze-ingest")
+    bronze["last_write_offset_seconds"] = 1800.0 - 45.0
+    return rec
+
+
+def test_not_bounded_cases():
+    cases = [
+        ("batch-record", _batch_record),
+        ("fell-behind", _fell_behind),
+        ("no-trickle", _no_trickle),
+        ("lag-over-one-trigger", _lag_over_one_trigger),
+        ("within-one-batch-but-lag-over-one-trigger", _within_one_batch_but_lag_over_one_trigger),
+    ]
+    for label, build in cases:
+        assert bounds.trickle_bound(build()) is None, label
+    # A lag within the 0.1 s rounding of one trigger still keeps pace.
+    rec = _rec()
+    bronze = next(s for s in rec["streaming"] if s["job_type"] == "bronze-ingest")
+    bronze["last_write_offset_seconds"] = 1800.0 - 30.04
     assert bounds.trickle_bound(rec)["kept_pace"] is True
 
 
-def test_corpus_fallback_ratio_is_not_read_as_falling_behind():
-    """Without released_rows the collector's ingest_ratio is the corpus
-    share (0.76 here), which says nothing about pace."""
+def _legacy_record():
+    # not_measured must be truthy for the legacy record
+    return _rec("215221-65567b"), True
+
+
+def _corpus_fallback_ratio():
     rec = _rec()
     _scores(rec)["released_rows"] = None
     _scores(rec)["ingest_ratio"] = _scores(rec)["corpus_ingest_ratio"]
-    tb = bounds.trickle_bound(rec)
-    assert tb is not None and tb["kept_pace"] is None
+    return rec, None
 
 
-def test_unparseable_trigger_pace_not_measured():
+def _unparseable_trigger():
     rec = _rec()
     rec["config_snapshot"]["sustained"]["bronze_trigger_interval"] = "soon"
-    tb = bounds.trickle_bound(rec)
-    assert tb is not None and tb["kept_pace"] is None
+    return rec, None
+
+
+def _intake_limit_trickle_rate():
+    rec = _rec()
+    _scores(rec)["ingest_ratio"] = 0.93
+    _scores(rec)["intake_limit"] = "trickle_rate"
+    return rec, "intake_limit"
+
+
+def test_pace_not_measured_cases():
+    cases = [
+        ("legacy-record", _legacy_record),
+        ("corpus-fallback-ratio", _corpus_fallback_ratio),
+        ("unparseable-trigger", _unparseable_trigger),
+        ("intake-limit-trickle-rate", _intake_limit_trickle_rate),
+    ]
+    for label, build in cases:
+        rec, not_measured = build()
+        tb = bounds.trickle_bound(rec)
+        assert tb is not None and tb["kept_pace"] is None, label
+        if not_measured is True:
+            assert tb["not_measured"], label
+        elif not_measured is not None:
+            assert not_measured in tb["not_measured"], label
 
 
 def test_corpus_taken_skips_the_lag():
@@ -140,24 +183,6 @@ def test_the_ratio_is_ingested_over_released(ratio, state):
     assert tb["ratio"] == ratio and tb["offered_rows"] == _scores(rec)["released_rows"]
     if state == "unmeasured":
         assert tb["not_measured"]
-
-
-def test_within_one_batch_needs_the_lag_within_one_trigger():
-    rec = _rec()
-    _scores(rec)["ingest_ratio"] = 0.985
-    bronze = next(s for s in rec["streaming"] if s["job_type"] == "bronze-ingest")
-    bronze["last_write_offset_seconds"] = 1800.0 - 45.0
-    assert bounds.trickle_bound(rec) is None
-
-
-def test_intake_limit_trickle_rate_is_not_shown_as_capacity():
-    """The collector says the trickle held intake (intake_limit trickle_rate)
-    while the ratio is under 0.99: labelled, pace not shown either way."""
-    rec = _rec()
-    _scores(rec)["ingest_ratio"] = 0.93
-    _scores(rec)["intake_limit"] = "trickle_rate"
-    tb = bounds.trickle_bound(rec)
-    assert tb is not None and tb["kept_pace"] is None and "intake_limit" in tb["not_measured"]
 
 
 def test_an_unreadable_continuous_record_is_not_capacity():
@@ -319,7 +344,7 @@ def test_report_labels_intake_cards_only():
         re.S,
     )
     assert avg and "BOUNDED BY" in (avg.group(0))
-    pipeline = gen._generate_pipeline_benchmark_section(m)
+    pipeline = gen._generate_pipeline_benchmark_section(m, "PASSED")
     summary = re.search(r"Throughput: <strong>(.*?)</strong>", pipeline, re.S).group(1)
     assert "BOUNDED BY" in summary
 

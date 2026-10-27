@@ -22,6 +22,7 @@ Pure parsing: no cluster or Spark access.
 
 from __future__ import annotations
 
+import json
 import re
 import statistics
 from collections.abc import Iterable, Mapping
@@ -41,6 +42,9 @@ _TT_RECORD = re.compile(
     r"run=(\S+)\s*$"
 )
 _COMMITTED = re.compile(r"Cycle (\d+): committed alerts=(\S+) status=(\S+) run=(\S+)\s*$")
+#: The alert-set line carries a JSON tail (``{"run": ..., "alert_set": ...}``),
+#: so the run id is matched inside the JSON, not by a trailing ``run=`` token.
+_ALERT_SET = re.compile(r"Cycle (\d+): alert-set (\{.*\})\s*$")
 _RULE_STATUS = re.compile(r"Cycle (\d+): rule-status ((?:\S+=\S+ )*)run=(\S+)\s*$")
 _COMPLETED = re.compile(r"Cycle (\d+): completed run=(\S+)\s*$")
 
@@ -110,6 +114,7 @@ def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
                 "completed_at": None,
                 "tt": None,
                 "rule_status": None,
+                "alert_set": None,
             }
             order.append(key)
         return ticks[key]
@@ -152,6 +157,15 @@ def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
             t["committed_alerts"] = _token(m.group(2))
             t["committed_status"] = _token(m.group(3))
             continue
+        m = _ALERT_SET.search(line)
+        if m:
+            try:
+                blob = json.loads(m.group(2))
+            except ValueError:
+                continue
+            if blob.get("run") == run_id:
+                tick(int(m.group(1)))["alert_set"] = blob.get("alert_set")
+            continue
         m = _COMPLETED.search(line)
         if m and m.group(2) == run_id:
             ts = _LOG_TS.search(line)
@@ -167,7 +181,7 @@ def parse_tick_records(logs: str | None, run_id: str) -> dict[str, Any]:
 
 
 def ticks_unpinned(ticks: list[dict[str, Any]]) -> int:
-    """Ticks whose logged ``txns`` or ``versions`` token is not an int (d3):
+    """Ticks whose logged ``txns`` or ``versions`` token is not an int:
     detection ran on them without the pinned sealed read."""
     return sum(
         1 for t in ticks if not (is_pin(t.get("pinned_txns")) and is_pin(t.get("pinned_versions")))
@@ -231,7 +245,15 @@ def time_travel_ticks(ticks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # after pinning, or was still running when the log was read, still
         # recorded the snapshot it read).
         out.append(
-            {"start": t["start"], "cycle": t["cycle"], **tt, "completed": bool(t.get("completed"))}
+            {
+                "start": t["start"],
+                "cycle": t["cycle"],
+                **tt,
+                # The gold.alerts snapshot the tick committed, so the
+                # retention point read can bind the alerts table at the tick.
+                "committed_alerts": t.get("committed_alerts"),
+                "completed": bool(t.get("completed")),
+            }
         )
     return out
 

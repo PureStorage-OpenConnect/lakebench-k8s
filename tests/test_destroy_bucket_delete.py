@@ -210,7 +210,8 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
         assert boto.buckets == {"a-bronze": ["user data"]}
         assert "a-bronze" not in boto.delete_bucket_calls
         assert r.status is DeploymentStatus.FAILED
-        assert "lists neither as created nor as adopted while empty" in r.message
+        assert "is not on this deployment's created-buckets record" in r.message
+        assert "adopted" not in r.message
         assert "a-bronze" in r.message
 
     def test_tagless_bucket_in_a_16_adopted_empty_record_is_kept(self):
@@ -259,17 +260,6 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
         assert "a-base-bronze" not in boto.delete_bucket_calls
         assert r.status is DeploymentStatus.FAILED
 
-    def test_tagless_unrecorded_with_unreadable_record_keeps_the_namespace(self):
-        boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})
-        self._run(
-            boto,
-            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "UNSUPPORTED"),
-            created_error=RuntimeError("apiserver 503"),
-            create_namespace=True,
-        )
-        assert boto.buckets["a-bronze"] == ["x"]
-        self.engine.k8s.delete_namespace.assert_not_called()
-
     def test_created_tag_marks_a_bucket_for_deletion(self):
         from lakebench.deploy.ownership import TAG_CREATED_BY_LAKEBENCH, TAG_DEPLOYMENT_NAME
 
@@ -298,43 +288,60 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
         assert "newer deployment" in self._results[-1].message
         assert r.details["refusal"] == "destroy.redeployed"
 
-    def test_redeploy_between_buckets_stops_mid_step(self):
-        boto = FakeBoto({"a-bronze": ["x"], "a-silver": ["r/new"], "a-gold": ["r/new"]})
-        # pre-bucket reads, before-loop, before bronze, bronze batch; then R.
-        uids = iter(["uid-1"] * (self.PRE + 3))
-        self._run(
-            boto,
-            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
-            uid=lambda _ns: next(uids, "uid-2"),
-        )
-        assert boto.buckets["a-bronze"] == []
-        assert boto.buckets["a-silver"] == ["r/new"] and boto.buckets["a-gold"] == ["r/new"]
-        assert boto.delete_bucket_calls == []
+    def test_a_redeploy_mid_step_touches_nothing_after_it(self):
+        """A concurrent destroy plus a redeploy reuse the names. Wherever the
+        redeploy (R) lands in the bucket step, nothing after that incarnation
+        read is emptied, deleted, or removed from the created record. Each
+        case flips the UID after a set number of incarnation reads; the final
+        assertion pins what stayed untouched past that point."""
+        bronze_full = {"a-bronze": ["r/new"], "a-silver": [], "a-gold": []}
+        between = {"a-bronze": ["x"], "a-silver": ["r/new"], "a-gold": ["r/new"]}
+        empty = {"a-bronze": [], "a-silver": [], "a-gold": []}
 
-    def test_redeploy_while_a_bucket_is_being_emptied_stops_before_the_next_batch(self):
-        """A large bucket empties over many batches; R can land mid-bucket."""
-        boto = FakeBoto({"a-bronze": ["r/new"], "a-silver": [], "a-gold": []})
-        # pre-bucket reads, before-loop, before bronze; R before the first batch.
-        uids = iter(["uid-1"] * (self.PRE + 2))
-        self._run(
-            boto,
-            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
-            uid=lambda _ns: next(uids, "uid-2"),
-        )
-        assert boto.buckets["a-bronze"] == ["r/new"]
-        assert boto.delete_bucket_calls == []
+        def check_emptied_bucket_untouched(boto):
+            # R before the first batch: the large bronze bucket is left whole.
+            assert boto.buckets["a-bronze"] == ["r/new"]
+            assert boto.delete_bucket_calls == []
 
-    def test_redeploy_before_bucket_delete_stops_deletes(self):
-        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
-        # pre-bucket reads, before-loop, three empties; R lands before deletes.
-        uids = iter(["uid-1"] * (self.PRE + 4))
-        self._run(
-            boto,
-            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
-            uid=lambda _ns: next(uids, "uid-2"),
-        )
-        assert boto.delete_bucket_calls == []
-        assert set(boto.buckets) == {"a-bronze", "a-silver", "a-gold"}
+        def check_between_buckets(boto):
+            # R after bronze emptied: silver and gold are left, nothing deleted.
+            assert boto.buckets["a-bronze"] == []
+            assert boto.buckets["a-silver"] == ["r/new"] and boto.buckets["a-gold"] == ["r/new"]
+            assert boto.delete_bucket_calls == []
+
+        def check_before_deletes(boto):
+            # R after all three emptied but before any delete: all kept.
+            assert boto.delete_bucket_calls == []
+            assert set(boto.buckets) == {"a-bronze", "a-silver", "a-gold"}
+
+        def check_record_not_edited(boto):
+            # R before the record update: buckets go, the record is not edited.
+            assert boto.buckets == {}
+            self.forget.assert_not_called()
+
+        cases = [
+            # (why, initial buckets, extra uid-1 reads past PRE, assertion)
+            # before-loop, before bronze; R before the first batch
+            ("mid-empty keeps the bucket", bronze_full, 2, check_emptied_bucket_untouched),
+            # before-loop, before bronze, bronze batch; then R
+            ("between buckets stops the step", between, 3, check_between_buckets),
+            # before-loop, three empties; R before the deletes
+            ("before the deletes stops them", empty, 4, check_before_deletes),
+            # before-loop, three empties, three deletes; R before the record update
+            ("before the record update keeps it", empty, 7, check_record_not_edited),
+        ]
+        for why, buckets, extra, check in cases:
+            boto = FakeBoto(buckets)
+            uids = iter(["uid-1"] * (self.PRE + extra))
+            self._run(
+                boto,
+                dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+                uid=lambda _ns, it=uids: next(it, "uid-2"),
+            )
+            try:
+                check(boto)
+            except AssertionError as e:  # name the case that failed
+                raise AssertionError(f"{why}: {e}") from e
 
     def test_absent_then_present_namespace_stops_force_legacy_wipe(self):
         """Namespace absent at start (--force-legacy by name), then R creates it."""

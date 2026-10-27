@@ -37,7 +37,7 @@ dependencies = [
     "click>=8.3.3",
     "pydantic>=2.5.0",
     "pyyaml>=6.0",
-    "boto3>=1.35.2",  # botocore 1.35.2 adds IfNoneMatch on PutObject (SAF-10 owner marker)
+    "boto3>=1.35.2",  # botocore 1.35.2 adds IfNoneMatch on PutObject (the owner marker)
     "rich>=13.7.0",
     "jinja2>=3.1.6",
     # Below 37: kubernetes 37 makes its models validated pydantic models and
@@ -78,7 +78,6 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov==7.0.0",
     "coverage==7.13.2",
-    "pytest-asyncio>=0.23.0",
     # Parallel unit tier (make check-fast, the CI unit legs). Pinned like
     # ruff: a new release can change how tests are scheduled.
     "pytest-xdist==3.8.0",
@@ -93,7 +92,6 @@ dev = [
     # scripts/check_version.py
     "packaging>=23.0",
     "tomli>=2.0; python_version < '3.11'",
-    "moto>=5.0.0",  # AWS mocking for tests
     # tests/test_provenance_record.py builds the wheel the way CI does
     # (python -m build --no-isolation), so the build hook runs in the suite.
     "build>=1.0",
@@ -133,12 +131,10 @@ exclude = [
     "/datagen_rs/",
     "tests/",
     "conftest.py",
-    "test-config*.yaml",
     "lakebench.spec",
     "Makefile",
     "install.sh",
     "docs/internal/",
-    "docs/lakebench050sped.md",
 ]
 
 [tool.ruff]
@@ -157,7 +153,6 @@ select = [
 ]
 ignore = [
     "E501",  # line too long (handled by formatter)
-    "B008",  # do not perform function calls in argument defaults
 ]
 
 [tool.ruff.lint.isort]
@@ -208,12 +203,9 @@ pythonpath = ["src"]
 python_files = ["test_*.py"]
 addopts = "--tb=short -m 'not e2e and not integration'"
 markers = [
-    "unit: Unit tests (no external dependencies, fast)",
     "integration: Integration tests (require K8s/S3 connectivity)",
     "e2e: End-to-end tests (full deploy/run/destroy workflow)",
     "slow: Slow tests (skip with -m 'not slow')",
-    "extended: Extended scale tests (scales 1, 10, 50, 100)",
-    "stress: Stress tests at large scales (250, 500, 1000)",
     "real_deps: the SparkJobManager keeps the production default of no dependency set",
-    "tool_pin: sees cli_args() pin the current context on a first tool call (SAF-7)",
+    "tool_pin: sees cli_args() pin the current context on a first tool call",
 ]

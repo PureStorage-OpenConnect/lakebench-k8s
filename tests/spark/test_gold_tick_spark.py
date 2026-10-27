@@ -285,6 +285,19 @@ def _check(spark):
     tt1 = rec[0]["tt"]
     assert tt1["snapshot"] == rec[0]["pinned_txns"] and tt1["table"] == "silver.transactions"
     assert tt1["total_records"] == len(_rows(1)) and tt1["count_source"] == "summary", tt1
+    # The tick records the alert-set fingerprint of its run's gold.alerts, so
+    # the covered score reads it back instead of a second pass after the
+    # window. It must equal alert_set_fingerprint of the committed table.
+    from common import alert_set_fingerprint
+    from pyspark.sql.functions import col as _col
+
+    want_fp = alert_set_fingerprint(
+        spark.table("lakehouse.gold.alerts").where(_col("run_id") == "run-tick")
+    )
+    got_fp = rec[0]["alert_set"]
+    assert got_fp is not None, rec[0]
+    assert got_fp["rows"] == want_fp["rows"] and got_fp["h"] == want_fp["h"], (got_fp, want_fp)
+    assert got_fp["cols_sha"] == want_fp["cols_sha"], (got_fp, want_fp)
     order = [
         i
         for i, ln in enumerate(lines)
@@ -356,6 +369,19 @@ def _check(spark):
             raise AssertionError("second consecutive baseline failure did not raise")
         except RuntimeError as e:
             assert "consecutive" in str(e), e
+        # Also on a tick whose operations pass found nothing to monitor yet.
+        real_tm = (g.TM_PARAMS, g.tm_pass_due, g.run_tm_operations, g.tm_pass_not_ready)
+        g.TM_PARAMS = {**g.TM_PARAMS, "enabled": True}
+        g.tm_pass_due = lambda *_a, **_k: True
+        g.run_tm_operations = lambda *_a, **_k: []
+        g.tm_pass_not_ready = lambda _r: True
+        try:
+            g.run_tick(spark, state, 5)
+            raise AssertionError("a baseline failure on a not-ready tick did not raise")
+        except RuntimeError as e:
+            assert "consecutive" in str(e), e
+        finally:
+            g.TM_PARAMS, g.tm_pass_due, g.run_tm_operations, g.tm_pass_not_ready = real_tm
     finally:
         g.build_baseline_dashboards, g.MAX_CONSECUTIVE_FAILURES = real_baseline, real_max
 

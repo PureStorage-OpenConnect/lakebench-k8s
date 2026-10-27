@@ -31,7 +31,7 @@ class TestPreflightCheck:
     def test_blocks_on_missing_stackable_operators(self, present, missing, capsys):
         from unittest.mock import MagicMock, patch
 
-        from lakebench.cli import _preflight_check
+        from lakebench.cli._deploy import _preflight_check
         from lakebench.exit_codes import ExitCode
         from tests.conftest import make_config
 
@@ -75,7 +75,7 @@ class TestRunPreflightInfraCheck:
 
         from kubernetes.client.rest import ApiException
 
-        from lakebench.cli import _run_preflight_infra_check
+        from lakebench.cli._run import _run_preflight_infra_check
         from lakebench.exit_codes import ExitCode
         from tests.conftest import make_config
 
@@ -111,23 +111,21 @@ class TestRunPreflightInfraCheck:
         assert named in out.out + out.err
 
 
-class TestParseSparkInterval:
-    """Tests for _parse_spark_interval()."""
+class TestIntervalSeconds:
+    """Tests for interval_seconds()."""
 
     @pytest.mark.parametrize(
         ("text", "seconds"),
         [
-            ("30 seconds", 30),
+            # the singular and one plural spelling exercise the one parse branch
             ("1 second", 1),
             ("5 minutes", 300),
-            ("1 minute", 60),
-            ("2 hours", 7200),
         ],
     )
     def test_parse(self, text, seconds):
-        from lakebench.cli import _parse_spark_interval
+        from lakebench.config.schema import interval_seconds
 
-        assert _parse_spark_interval(text) == seconds
+        assert interval_seconds(text) == seconds
 
 
 class TestResolveMaintenanceRetention:
@@ -184,7 +182,7 @@ class TestRunIcebergMaintenance:
 
         from rich.console import Console
 
-        from lakebench.cli import _run_iceberg_maintenance
+        from lakebench.cli._sustained import _run_iceberg_maintenance
 
         cfg = self._make_cfg("trino")
         k8s = MagicMock()

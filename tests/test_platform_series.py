@@ -18,23 +18,25 @@ def _res(pod: str, points: dict[int, float], jitter: float = 0.0) -> dict:
     }
 
 
-def test_pods_fall_into_their_stage_or_component_group() -> None:
-    assert group_of("lb-bronze-ingest-financial-00d4-exec-3") == "bronze"
-    assert group_of("lakebench-silver-build-driver") == "silver"
-    assert group_of("lakebench-datagen-2-xyz") == "datagen"
-    assert group_of("lakebench-trino-worker-1") == "engine"
-    assert group_of("lakebench-postgres-0") == "catalog"
-    assert group_of("something-else") == "other"
-
-
-def test_the_deployments_own_tooling_is_not_the_workload() -> None:
+def test_pods_fall_into_their_group_or_are_not_the_workload() -> None:
+    # Workload pods map to a stage or component group ...
+    for pod, group in [
+        ("lb-bronze-ingest-financial-00d4-exec-3", "bronze"),
+        ("lakebench-silver-build-driver", "silver"),
+        ("lakebench-datagen-2-xyz", "datagen"),
+        ("lakebench-trino-worker-1", "engine"),
+        ("lakebench-postgres-0", "catalog"),
+        ("something-else", "other"),
+    ]:
+        assert group_of(pod) == group, pod
+    # ... while the deployment's own tooling is None (not the workload).
     for pod in (
         "lakebench-prometheus-5d59",
         "lakebench-grafana-x",
         "lakebench-pushgateway-9",
         "lb-deps-78",
     ):
-        assert group_of(pod) is None
+        assert group_of(pod) is None, pod
 
 
 def test_sums_per_group_and_a_finished_pod_adds_nothing_afterward() -> None:
@@ -52,15 +54,12 @@ def test_sums_per_group_and_a_finished_pod_adds_nothing_afterward() -> None:
     assert [v for _, v in out["pods"]["silver"]] == [2, 2, 2, 1, 1]
 
 
-def test_timestamps_prometheus_rounded_still_land_on_their_step() -> None:
+def test_series_offsets_and_rounded_timestamps_land_on_their_step() -> None:
+    # Prometheus-rounded timestamps still land on their 15 s step ...
     cpu = [_res("lb-gold-x-exec-1", {0: 1.0, 15: 2.0, 30: 3.0}, jitter=0.0004)]
     out = build_series(cpu, [], [], [], T0, T1)
     assert [v for _, v in out["cpu_cores"]["gold"]][:3] == [1.0, 2.0, 3.0]
-
-
-def test_offsets_are_seconds_from_the_start() -> None:
-    cpu = [_res("lb-gold-x-exec-1", {0: 1.0, 15: 2.0})]
-    out = build_series(cpu, [], [], [], T0, T1)
+    # ... and offsets are whole seconds from the start.
     assert [o for o, _ in out["cpu_cores"]["gold"]] == [0.0, 15.0, 30.0, 45.0, 60.0]
     assert out["start"] == T0.isoformat() and out["step_seconds"] == 15
 

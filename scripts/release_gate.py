@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Release gate: every check a release needs, in one command (GOALS P9.6).
+"""Release gate: every check a release needs, in one command.
 
 Runs each check, prints one line per check, and exits non-zero if any check
 failed. A check that cannot run here (gitleaks not installed) is reported as
@@ -237,21 +237,7 @@ def check_gitleaks() -> Result:
     )
 
 
-def _is_shallow(root: Path) -> bool | None:
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--is-shallow-repository"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        return None
-    return out == "true"
-
-
-#: The history scanner, shared with the secrets-history CI job.
+#: The history scanner, run here and by `make rc-gate`.
 _HISTORY_SCAN = Path(__file__).resolve().parent / "gitleaks_history.py"
 
 
@@ -263,21 +249,10 @@ def check_gitleaks_history() -> Result:
         return Result(
             "gitleaks-history", SKIP, "gitleaks not installed (set GITLEAKS or add to PATH)"
         )
-    shallow = _is_shallow(ROOT)
-    if shallow is None:
-        return Result("gitleaks-history", FAIL, "not a git checkout; the history cannot be scanned")
-    if shallow:
-        return Result(
-            "gitleaks-history",
-            FAIL,
-            "shallow clone: only part of the history would be scanned (git fetch --unshallow)",
-        )
-    if not (ROOT / ".gitleaksignore").is_file():
-        return Result("gitleaks-history", FAIL, ".gitleaksignore (the history baseline) is missing")
-    # The scanner CI's secrets-history job runs: every commit with
-    # --remerge-diff (a merge commit's own change), commit and tag messages,
-    # no inline allow, and a failure when gitleaks scanned nothing. The
-    # baseline is this release worktree's own.
+    # The scanner refuses a shallow clone and a missing baseline itself, and
+    # scans every commit with --remerge-diff (a merge commit's own change),
+    # the commit and tag messages, with no inline allow, and fails when
+    # gitleaks scanned nothing. Its exit-2 FAIL carries the reason here.
     return command_check(
         "gitleaks-history",
         [

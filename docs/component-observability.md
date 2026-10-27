@@ -11,7 +11,7 @@ Reference: the optional per-deployment Prometheus, Grafana and Pushgateway stack
 ## Version and image
 
 - Images are tag-pinned: `observability.prometheus_image`, `observability.grafana_image`, `observability.pushgateway_image`. Each also accepts a `name:tag@sha256:...` value. See the [version matrix](compatibility-matrix.md#component-version-matrix).
-- The JMX exporter sidecar image is `images.jmx_exporter`, tag-pinned.
+- The JMX exporter agent jar comes from `images.jmx_exporter`, tag-pinned.
 
 ## Configuration keys
 
@@ -32,7 +32,7 @@ Reference: the optional per-deployment Prometheus, Grafana and Pushgateway stack
 | `pushgateway_storage` | `"1Gi"` | Pushgateway PVC size. |
 | `pushgateway_storage_class` | `"px-csi-scratch"` | Pushgateway PVC StorageClass. |
 
-- Removed keys (`chart_version`, `storage_class`) are listed under 1.7.2 in the [changelog](../CHANGELOG.md).
+- Removed keys are listed in the [changelog](../CHANGELOG.md). Commands that change data refuse a config that still sets one (unless it holds its old default); destroy and read-only commands drop it with a note.
 
 ## Deploy and destroy
 
@@ -55,13 +55,16 @@ Prometheus runs with a scrape config that targets this deployment only:
 
 - The Pushgateway in this namespace (`honor_labels: true` so pushed `run_id`, `stage` and `job` labels survive).
 - Trino coordinator and workers in this namespace (JMX exporter on port 9090).
+- Spark executors in this namespace (JMX exporter agent on port 9404, every 5 s, job `spark-executors`): task output bytes and filesystem read bytes (`s3a` for raw files and Delta, `s3` for Iceberg tables via S3FileIO). The run's end stores them in the record's `platform_metrics.spark_io`. The agent is added only when `observability.enabled` is `true`.
 - The kubelet cAdvisor endpoint on every node, filtered at relabel time to this namespace. The per-pod CPU, memory, network and filesystem families are kept; the rest is dropped.
 
-Spark jobs run with the Spark UI off, which also turns off Spark's Prometheus endpoint, so no Spark engine metrics (GC, shuffle, spill) are collected; executor and driver series come from cAdvisor. Each executor also runs the JMX exporter agent (`images.jmx_exporter`); the stack scrapes its task output bytes and filesystem read bytes (schemes `s3a` for raw files and Delta, `s3` for Iceberg tables via S3FileIO) every 5 s (job `spark-executors`), and the run's end stores them in the record's `platform_metrics.spark_io`. Iceberg read bytes are correct only from Iceberg 1.12.0 (the S3FileIO read counter was fixed in [PR #17236](https://github.com/apache/iceberg/pull/17236)). Spark stages report rows, bytes and elapsed time through the Pushgateway and `metrics.json`.
+Iceberg read bytes are correct only from Iceberg 1.12.0 (the S3FileIO read counter was fixed in [PR #17236](https://github.com/apache/iceberg/pull/17236)).
+
+Spark jobs run with the Spark UI off, which also turns off Spark's Prometheus endpoint, so no Spark engine metrics (GC, shuffle, spill) are collected; executor and driver series come from cAdvisor.
 
 ### Pushgateway
 
-Each deployment gets a Deployment, a Service, a 1Gi PVC on `px-csi-scratch` by default, in its own namespace. The deployment's Prometheus scrapes it with `honor_labels: true`.
+Each deployment gets its own Pushgateway (Deployment, Service and PVC) in its namespace.
 
 - Datagen pods push live progress, because a batch pod can finish between two Prometheus scrapes.
 - Spark stages that push their metrics: AML bronze-verify, silver-build, gold-finalize and silver-stream; Customer 360 gold-finalize.
@@ -70,17 +73,16 @@ Each deployment gets a Deployment, a Service, a 1Gi PVC on `px-csi-scratch` by d
 
 ## Grafana
 
-- The dashboard is applied when `dashboards_enabled` is `true`; Grafana runs either way.
 - User `admin`. Deploy generates a per-deployment password into the Secret `lakebench-grafana` (key `admin-password`).
 - `deploy` prints the Grafana URL and the login when it finishes.
-- On OpenShift, deploy creates a TLS Route (`lakebench-grafana`, edge termination, HTTP redirected to HTTPS) and prints its `https://` URL. Set `grafana_route: false` to skip it. The Route goes with the namespace. Prometheus and the Pushgateway have no login and never get a Route.
+- On OpenShift, deploy creates a TLS Route (`lakebench-grafana`, edge termination, HTTP redirected to HTTPS) and prints its `https://` URL. Set `grafana_route: false` to skip it. The Route goes with the namespace.
 - Elsewhere deploy prints the port-forward:
 
 ```bash
 kubectl port-forward -n <namespace> svc/lakebench-grafana 3000:3000   # then http://localhost:3000
 ```
 
-- To query Prometheus, use Grafana: Explore, data source **Prometheus**. Prometheus has no login and no URL; `kubectl port-forward -n <namespace> svc/lakebench-prometheus 9090:9090` reaches its raw UI.
+- Prometheus and the Pushgateway have no login and never get a Route. Query Prometheus from Grafana (Explore, data source **Prometheus**); `kubectl port-forward -n <namespace> svc/lakebench-prometheus 9090:9090` reaches its raw UI.
 - To read the password again:
 
 ```bash
@@ -94,7 +96,7 @@ The **Lakebench Overview** dashboard is provisioned from a ConfigMap in the depl
 - **Datagen** (Pushgateway): throughput, rows written, bytes written and elapsed seconds per pod.
 - **Pipeline stages** (Pushgateway): stage rows in and out, stage input size, silver per-table row counts, stage elapsed seconds.
 
-The pipeline-stage panels stay empty in a continuous run, and the datagen and pipeline panels are empty with `pushgateway_enabled: false`. The `run_id` variable comes from the pipeline stage series, so on a fresh deployment the datagen panels stay empty until the first Spark stage reports.
+The pipeline-stage panels show only the [stages that push](#pushgateway), so they stay empty in a Customer 360 continuous run; the datagen and pipeline panels are empty with `pushgateway_enabled: false`. The `run_id` variable comes from the pipeline stage series, so on a fresh deployment the datagen panels stay empty until the first Spark stage reports.
 
 ## Local metrics
 
@@ -109,7 +111,7 @@ Every `lakebench run` writes `lakebench-output/runs/run-<id>/metrics.json`. It h
 
 ### Platform metrics
 
-After a run, `PlatformCollector` queries the deployment's Prometheus (`http://lakebench-prometheus.<namespace>.svc:9090`) over the run window for CPU and memory per pod and Trino completed and failed queries. It also stores `platform_metrics.series`: CPU cores, memory bytes, pod network bytes per second (receive and transmit) and the number of pods running, summed per group of pods (each Spark stage, datagen, the query engine, the catalog, other) every 15 s. The deployment's own Prometheus, Grafana and Pushgateway pods are left out. Pod network includes executor-to-executor shuffle, so it is not storage traffic. The report's replay draws the lanes from it. The report's Platform Metrics section shows them, or why they were not collected (observability off, Prometheus unreachable, kubelet role not bound, or no pod series).
+After a run, `PlatformCollector` reads the deployment's Prometheus (`lakebench-prometheus.<namespace>.svc:9090`, or a port-forward when that is unreachable) over the run window: CPU and memory per pod, Trino completed and failed queries, and `platform_metrics.series`. The series holds CPU cores, memory bytes, pod network receive and transmit bytes per second and pods running, summed every 15 s per group (bronze, silver, gold, datagen, query engine, catalog, other); the observability pods and the dependency server are left out. Pod network includes executor shuffle, so it is not storage traffic. The report's replay draws its lanes from the series; the Platform Metrics section shows them, or why they were not collected.
 
 ### Storage I/O
 

@@ -111,21 +111,22 @@ class TestJournal:
         assert sessions[1]["closed"] is True
         assert "deploy" in sessions[1]["commands"]
 
-    def test_purge_deletes_all(self, tmp_path: Path) -> None:
-        j = Journal(journal_dir=tmp_path)
-        j.open_session(config_name="test-1")
-        j.close_session()
-        j.open_session(config_name="test-2")
-        j.close_session()
+    def test_session_end_counts_commands_across_resumes(self, tmp_path: Path) -> None:
+        j1 = Journal(journal_dir=tmp_path)
+        j1.open_session(config_name="bench")
+        j1.begin_command(CommandName.DEPLOY)
+        j1.end_command(success=True)
 
-        files_before = list(tmp_path.glob("session-*.jsonl"))
-        assert len(files_before) == 2
+        j2 = Journal(journal_dir=tmp_path)
+        j2.open_session(config_name="bench")
+        j2.begin_command(CommandName.RUN)
+        j2.end_command(success=True)
+        j2.close_session()
 
-        deleted = j.purge()
-        assert deleted == 2
-
-        files_after = list(tmp_path.glob("session-*.jsonl"))
-        assert len(files_after) == 0
+        (archived,) = tmp_path.glob("session-bench-*.jsonl")
+        end = json.loads(archived.read_text().splitlines()[-1])
+        assert end["event_type"] == EventType.SESSION_END.value
+        assert end["details"]["commands_run"] == 2
 
     def test_config_hash_for_drift_detection(self, tmp_path: Path) -> None:
         def session_hash(directory: Path, content: str) -> str:

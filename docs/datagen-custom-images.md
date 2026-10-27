@@ -2,7 +2,6 @@
 
 Reference: building, testing and configuring a custom data generator image, and how its corpora are identified.
 
-- The generator runs as a container image on Kubernetes.
 - Default image: `docker.io/sillidata/lb-datagen:latest`, built from `datagen_rs/` (Rust). It floats: the corpus can change when a new image is pushed. Set `images.datagen` to a versioned tag such as `1.7.1`, or add a `@sha256:...` suffix, to pin a run.
 - It produces the Customer360 schema ([Customer 360 data model](benchmarks/c360/data-model.md#21-bronze-columns-41-arrow-schema-customer360_schema))
   and the Financial `pacs.008` schema, chosen by `--schema`.
@@ -19,7 +18,7 @@ Reference: building, testing and configuring a custom data generator image, and 
 
 - **podman** (recommended on RHEL/OpenShift) or **docker**.
 - A container registry (Docker Hub, private, or the OpenShift internal registry) and a login (`podman login` or `docker login`).
-- A Rust toolchain only to run `cargo test` before building; the Dockerfile compiles the binary.
+- A Rust toolchain only to test locally (`cargo test`, `cargo run`); the Dockerfile compiles the binary.
 
 ## Build and Push
 
@@ -43,25 +42,23 @@ With Docker, substitute `docker` for `podman`.
 
 - A private registry with a self-signed certificate: add `--tls-verify=false`
   to the login and push commands.
-- OpenShift: reference the image by its internal service URL in the config.
 
 ## Configure Lakebench to Use the Custom Image
 
 ```yaml
 images:
   datagen: your-registry/lb-datagen:custom
-  pull_policy: Always  # Forces Kubernetes to pull the image again
 ```
 
-- Set `pull_policy: Always` after pushing a new image under an existing tag, or a node may use its cached image. A new, immutable tag per build is better.
+- `images.pull_policy` defaults to `Always`, so a push under an existing tag reaches every node. A new, immutable tag per build is better.
 
 **AML comparability.**
 
-- A custom image is not the AML generator the registered looks use
-  (`datagen-v2-rs-0.3`).
-- The registered v1.7 looks pin `lb-datagen:2a36ae21` (digest
-  `sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`),
-  which 1.7.0 shipped as its default.
+- The registered v1.7 looks pin `lb-datagen:2a36ae21`, the 1.7.0 default
+  (model `datagen-v2-rs-0.3`, digest
+  `sha256:0502b700299948f43bb1b999d7ba29262a509306658b4e5f7c48738f88d31f04`).
+  This tree builds model `datagen-v2-rs-0.4`; any rebuilt image, whatever its
+  model, has its own digest and is not the look generator.
 - The default `latest` has no lineage row, so its corpora get a corpus
   id of their own.
 - The run records the configured image reference. AML results from a modified
@@ -141,7 +138,7 @@ the tracked copy, or the binary exits 2:
 ```bash
 LB_HELDOUT_HASHES=../src/lakebench/spark/data/aml/heldout_hashes.json \
 DG_LOCAL_DIR=/tmp/lb-datagen cargo run --release --bin generate -- \
-  --bucket test-bronze --seed 43 --scale 0.01 --threads 1
+  --schema financial --bucket test-bronze --seed 43 --scale 0.01 --threads 1
 ```
 
 Inspect the Customer 360 output with PyArrow:
@@ -174,11 +171,12 @@ print(table.to_pandas().head())
 **Build commit.** The build refuses to run without
 `--build-arg LB_BUILD_COMMIT=$(git rev-parse HEAD)`. That commit appears in:
 
-- the OCI labels `org.opencontainers.image.revision`, `.source`, `.version`
-  and `io.lakebench.model-version`;
+- the OCI label `org.opencontainers.image.revision`;
 - `generate --version`, and `podman run <image> --version`, which prints
   `datagen_rs <model version> <commit>`;
 - every per-node marker.
+
+The image also carries the model version in `io.lakebench.model-version`.
 
 **`--print-resolved-args`**, added to a Job's arguments, prints the resolved
 corpus arguments and their hash as JSON and writes nothing. For the financial

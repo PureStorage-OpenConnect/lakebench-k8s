@@ -41,8 +41,8 @@ DEFAULT_S3_PORT = 3900
 _CONTAINER_S3_PORT = 3900
 
 # Host ports tried when the preferred one is taken, so two local stacks can
-# coexist. Starts above the RPC port to avoid confusion, though the container
-# side no longer moves.
+# coexist. The search starts at the configured port (3900); the container
+# side does not move.
 _PORT_SEARCH_RANGE = 20
 COMPONENT = "garage"
 
@@ -232,10 +232,11 @@ class GarageDeployer:
 
         ``deploy()`` would also return them, but it starts containers and runs
         bootstrap. Callers that are only asking a question -- ``status``, for
-        instance -- must not have that side effect.
+        instance -- must not start containers. The access key is created if
+        the running Garage has none yet (``_create_key``).
 
         Raises:
-            GarageDeployError: if Garage is not running or has no key yet.
+            GarageDeployError: if Garage is not running.
         """
         return self._create_key()
 

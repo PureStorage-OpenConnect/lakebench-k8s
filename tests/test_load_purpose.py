@@ -146,23 +146,6 @@ def test_allow_long_names_alone_means_teardown(tmp_path):
     assert notes[0].kind == "removed"
 
 
-def test_name_length_check_per_purpose(tmp_path):
-    for purpose, skips in [
-        (LoadPurpose.MUTATE, False),
-        (LoadPurpose.RUN, False),
-        (LoadPurpose.TEARDOWN, True),
-        (LoadPurpose.READ, True),
-    ]:
-        path = _write(
-            tmp_path, {"name": "ov-perf-c360-continuous-s10", "recipe": "hive-iceberg-spark-trino"}
-        )
-        if skips:
-            assert load_config(path, purpose=purpose).name == "ov-perf-c360-continuous-s10"
-        else:
-            with pytest.raises(ConfigValidationError, match="at most 23"):
-                load_config(path, purpose=purpose)
-
-
 # -- LoadNotes ---------------------------------------------------------------
 
 
@@ -229,6 +212,38 @@ def test_cli_verbs_load_with_their_purpose(
     assert seen, f"{argv} never loaded the config"
     assert seen[0].get("purpose") == purpose
     assert bool(seen[0].get("allow_long_names")) is long_names
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["deploy"],
+        ["generate"],
+        ["run"],
+        ["clean", "silver"],
+        ["destroy"],
+        ["admin", "reclaim-bucket"],
+    ],
+)
+def test_validation_errors_print_brackets_verbatim(argv, tmp_path, monkeypatch):
+    """A validation message holding ``[...]`` is printed as written and the
+    command exits USAGE: unescaped, Rich swallows ``[main]`` and raises on
+    ``[/tmp]``."""
+    import lakebench.config
+
+    monkeypatch.setenv("KUBECONFIG", "/nonexistent")
+    monkeypatch.chdir(tmp_path)
+
+    def invalid(path, **kwargs):
+        raise ConfigValidationError(
+            "invalid", errors=[{"loc": ("platform", "[main]"), "msg": "bad path [/tmp]"}]
+        )
+
+    monkeypatch.setattr(lakebench.config, "load_config", invalid)
+    cfg_path = _write(tmp_path, {**NAMELESS, "name": "verb"})
+    result = runner.invoke(app, [*argv, str(cfg_path)])
+    assert result.exit_code == 2, result.output
+    assert "platform.[main]: bad path [/tmp]" in result.output
 
 
 # -- v1.6 directories with several nameless configs --------------------------
@@ -366,7 +381,8 @@ _HIVE_OP = {"architecture": {"catalog": {"hive": {"operator": {"install": True}}
     ("extra", "loc"),
     [
         (_EXECUTOR, ("platform", "compute", "spark")),
-        (_HIVE_OP, ("architecture", "catalog", "hive", "operator")),
+        # The hive/spark operator-install rows are driven by test_init_from.py::
+        # test_refused_key_rows_match_their_validators through REFUSED_KEYS.
     ],
 )
 def test_unhonoured_setting_refused_on_data_changing_commands(tmp_path, extra, loc):

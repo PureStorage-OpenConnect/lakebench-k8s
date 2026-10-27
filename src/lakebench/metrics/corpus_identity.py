@@ -52,7 +52,7 @@ Known limits:
   object deleted or added under the scope by hand leaves every marker in
   place, so the id is unchanged; ``bronze_listing_sha256`` in the
   observation changes, and object completeness against the markers is a
-  later check (v1.8).
+  later check.
 * Two images under one mutable tag, both without an observed digest, read
   as one ``declared:<tag>`` lineage; ``lineage_observed`` false says so.
 * A record without an observation (every v1.6 record, and v1.7 records
@@ -208,18 +208,10 @@ def record_corpus_observation(run: Any, cfg: Any, s3: Any = None) -> None:
         if not isinstance(inputs, dict):
             return
         if s3 is None:
-            from lakebench.s3 import S3Client
+            from lakebench.s3 import s3_client_from_config
 
             s3c = cfg.platform.storage.s3
-            s3 = S3Client(
-                endpoint=s3c.endpoint,
-                access_key=s3c.access_key,
-                secret_key=s3c.secret_key,
-                region=s3c.region,
-                path_style=s3c.path_style,
-                ca_cert=s3c.ca_cert,
-                verify_ssl=s3c.verify_ssl,
-            )
+            s3 = s3_client_from_config(s3c)
         inputs["corpus_observation"] = observe_corpus(cfg, s3)
     except Exception as e:  # noqa: BLE001 -- evidence, never a save failure
         if not isinstance(inputs, dict):
@@ -310,7 +302,7 @@ def corpus_id_v2(
 
     id = ``_short_hash({"args": corpus_series_sha256, "model_version": ...,
     "lineage": ..., "cycles": N})``, with ``cycles`` present only when the
-    markers' cycle count is above 1 (K7)."""
+    markers' cycle count is above 1."""
     if not obs:
         return None, NOT_OBSERVED
     markers = obs.get("markers") or {}
@@ -425,11 +417,9 @@ def _dev_seed_refs(case: str) -> set[str]:
     seed = COMPARE_CASES[case]
     refs = {str(seed)}
     try:
-        from lakebench.config import datagen_seed
+        from lakebench.config.datagen_seed import seed_ref
 
-        ref = getattr(datagen_seed, "seed_ref", None)
-        if ref is not None:
-            refs.add(str(ref("financial" if case.startswith("F") else "customer360", seed)))
+        refs.add(str(seed_ref("financial" if case.startswith("F") else "customer360", seed)))
     except Exception:  # noqa: BLE001 -- the plaintext form still applies
         pass
     return refs
@@ -691,10 +681,10 @@ def inherited_corpus_from(record: Mapping[str, Any]) -> dict[str, Any]:
 
 
 #: Declared corpus keys compared with ``series.json``'s ``generation`` for
-#: the display warning. The ``--skip-generate`` rule 2 refuses a run
-#: whose config disagrees with the whole generation block; this warning
-#: covers the keys the experiment block declares, for the runs rule 2 does
-#: not see (a single cycle with no series.json is not compared at all).
+#: the display warning. ``--skip-generate`` already refuses a run whose
+#: config disagrees with the whole generation block; this warning covers the
+#: keys the experiment block declares, for the runs that refusal does not see
+#: (a single cycle with no series.json is not compared at all).
 _DECLARED_VS_SERIES = (
     ("scale", "scale"),
     ("generator_image", "image"),
@@ -725,8 +715,8 @@ def _declared_differs(declared: Mapping[str, Any], series: Any) -> list[str]:
 
 
 def _inheritance(inherited: Mapping[str, Any], digest: Any) -> tuple[bool, list[str]]:
-    """Step 3: the inherited block is usable only when it is in the contract
-    shape and both listing digests are observed and equal."""
+    """The inherited block is usable only when it is in the contract shape
+    and both listing digests are observed and equal."""
     if inherited.get("format") != INHERITED_FORMAT or not isinstance(
         inherited.get("corpus"), Mapping
     ):
@@ -759,8 +749,7 @@ def corpus_v2_fields(
     fleet_digest: str | None = None,
     fleet: Mapping[str, Any] | None = None,
 ) -> CorpusV2 | None:
-    """Series corpus identity steps 3 and 4, from persisted
-    inputs only.
+    """Series corpus identity from persisted inputs only.
 
     *declared* is the config's corpus block (``experiment_inputs.corpus``);
     *obs* the persisted ``corpus_observation``; *inherited* the persisted

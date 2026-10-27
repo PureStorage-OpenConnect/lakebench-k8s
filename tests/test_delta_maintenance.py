@@ -7,7 +7,7 @@ Covers:
 
 import pytest
 
-from lakebench.deploy.delta_maintenance import (
+from lakebench.modules.table_formats.delta.maintenance import (
     build_delta_maintenance_sql,
     parse_retention_to_hours,
 )

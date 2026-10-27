@@ -82,13 +82,7 @@ def iter_user_objects(boto_client: Any, bucket: str, prefix: str = "") -> Iterat
 def list_user_objects(boto_client: Any, bucket: str, prefix: str) -> list[dict[str, Any]]:
     """Every ``list_objects_v2`` entry under ``prefix`` (key, size, ETag and
     the rest) except Lakebench's own keys. Raises on listing errors."""
-    out: list[dict[str, Any]] = []
-    paginator = boto_client.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents") or []:
-            if not is_lakebench_key(str(obj.get("Key", ""))):
-                out.append(dict(obj))
-    return out
+    return [dict(obj) for obj in iter_user_objects(boto_client, bucket, prefix)]
 
 
 def list_user_keys(boto_client: Any, bucket: str, prefix: str = "", limit: int = 50) -> list[str]:
@@ -109,12 +103,6 @@ def list_user_keys(boto_client: Any, bucket: str, prefix: str = "", limit: int =
 
 class S3Error(Exception):
     """Base exception for S3 errors."""
-
-    pass
-
-
-class S3ConnectionError(S3Error):
-    """Raised when S3 endpoint is unreachable."""
 
     pass
 
@@ -140,26 +128,6 @@ class S3BucketError(S3Error):
     """Raised when bucket operations fail."""
 
     pass
-
-
-@dataclass
-class S3Credentials:
-    """S3 credentials container."""
-
-    access_key: str
-    secret_key: str
-
-
-@dataclass
-class S3ConnectionInfo:
-    """S3 connection information."""
-
-    endpoint: str
-    region: str
-    path_style: bool
-    credentials: S3Credentials
-    ca_cert: str = ""  # Path to PEM CA bundle for HTTPS
-    verify_ssl: bool = True  # Set False to skip SSL verification
 
 
 @dataclass
@@ -233,7 +201,7 @@ class S3Client:
         try:
             self._client = boto3.client("s3", **client_kwargs)
             self._init_error: str | None = None
-        except (ValueError, Exception) as e:
+        except Exception as e:
             self._client = None  # type: ignore[assignment]
             self._init_error = str(e)
 
@@ -248,19 +216,6 @@ class S3Client:
         client init does not have to chase every ``_client`` accessor.
         """
         return self._client
-
-    @classmethod
-    def from_connection_info(cls, info: S3ConnectionInfo) -> S3Client:
-        """Create client from connection info dataclass."""
-        return cls(
-            endpoint=info.endpoint,
-            access_key=info.credentials.access_key,
-            secret_key=info.credentials.secret_key,
-            region=info.region,
-            path_style=info.path_style,
-            ca_cert=info.ca_cert,
-            verify_ssl=info.verify_ssl,
-        )
 
     def _check_client(self) -> None:
         """Verify that the boto client initialized successfully.
@@ -350,10 +305,8 @@ class S3Client:
                 return False
             if error_code in ("403", "AccessDenied"):
                 # 403 is a permissions problem, not proof of non-existence.
-                # Treating it as False previously caused `empty_bucket` to
-                # short-circuit and destroy to report "cleaned 0 objects"
-                # forever on a bucket that was actually growing. Raise so
-                # the caller sees the permission failure.
+                # Reading it as False would let `empty_bucket` report
+                # "cleaned 0 objects" on a bucket that still holds data.
                 raise S3BucketError(
                     f"Access denied checking bucket {bucket_name}: "
                     "credentials cannot HeadBucket, so existence cannot "
@@ -414,55 +367,12 @@ class S3Client:
         self._check_client()
         return has_user_objects(self._client, bucket_name, prefix)
 
-    def get_bucket_info(self, bucket_name: str) -> BucketInfo:
-        """Get information about a bucket.
-
-        Args:
-            bucket_name: Name of the bucket
-
-        Returns:
-            BucketInfo with bucket details
-        """
-        exists = self.bucket_exists(bucket_name)
-
-        if not exists:
-            return BucketInfo(name=bucket_name, exists=False)
-
-        # Try to get object count (may fail on large buckets)
-        object_count = None
-        size_bytes = None
-
-        try:
-            # List first 1000 objects to estimate
-            response = self._client.list_objects_v2(Bucket=bucket_name, MaxKeys=1000)
-            objects = [
-                o for o in response.get("Contents", []) if not is_lakebench_key(o.get("Key", ""))
-            ]
-            object_count = len(objects)
-            size_bytes = sum(obj.get("Size", 0) for obj in objects)
-
-            # If truncated, we only have a sample
-            if response.get("IsTruncated", False):
-                object_count = None  # Unknown, too many
-                size_bytes = None
-        except ClientError as e:
-            logger.warning("Could not get bucket details for %s: %s", bucket_name, e)
-
-        return BucketInfo(
-            name=bucket_name,
-            exists=True,
-            object_count=object_count,
-            size_bytes=size_bytes,
-        )
-
     def get_bucket_size(
         self, bucket_name: str, prefix: str = "", exclude_prefix: str = ""
     ) -> BucketInfo:
-        """Get accurate bucket size by paginating all objects.
+        """Total size and count of every object, paginating the whole listing.
 
-        Unlike :meth:`get_bucket_info`, this paginates through ALL
-        objects to return an accurate total size and count. Lakebench's own
-        ``.lakebench/`` keys are not counted.
+        Lakebench's own ``.lakebench/`` keys are not counted.
 
         Args:
             bucket_name: Name of the bucket
@@ -479,20 +389,11 @@ class S3Client:
         total_bytes = 0
 
         try:
-            paginator = self._client.get_paginator("list_objects_v2")
-            paginate_args: dict[str, Any] = {"Bucket": bucket_name}
-            if prefix:
-                paginate_args["Prefix"] = prefix
-
-            for page in paginator.paginate(**paginate_args):
-                objects = [
-                    o
-                    for o in page.get("Contents", [])
-                    if not is_lakebench_key(o.get("Key", ""))
-                    and not (exclude_prefix and o.get("Key", "").startswith(exclude_prefix))
-                ]
-                total_objects += len(objects)
-                total_bytes += sum(obj.get("Size", 0) for obj in objects)
+            for obj in iter_user_objects(self._client, bucket_name, prefix):
+                if exclude_prefix and obj.get("Key", "").startswith(exclude_prefix):
+                    continue
+                total_objects += 1
+                total_bytes += obj.get("Size", 0)
 
             return BucketInfo(
                 name=bucket_name,
@@ -519,7 +420,7 @@ class S3Client:
         stream checkpoints, and emptying a whole bucket is ``empty_bucket``.
         Also refuses a prefix under ``.lakebench/`` (Lakebench's own keys).
         ``abort_multipart`` also aborts incomplete multipart uploads under the
-        prefix (FlashBlade keeps them as ghosts otherwise, GOTCHAS 2); they
+        prefix (FlashBlade keeps them as ghosts otherwise); they
         are not counted in the return value. Keys in ``keep_keys`` are left
         in place (the corpus series marker that says a clear is under way).
         """
@@ -693,11 +594,9 @@ class S3Client:
                     return deleted_count
 
                 # Not yet empty -- FlashBlade may need time to sync. Once
-                # the wait budget is exhausted, RAISE rather than returning
-                # the running deleted count as if the bucket were clean.
-                # A silent success here caused destroys to report success
-                # while ghost objects remained, and the next deploy then
-                # inherited stale bronze data with no signal at all.
+                # the wait budget is exhausted, raise rather than return the
+                # deleted count as if the bucket were clean: the next deploy
+                # would otherwise inherit stale data without a signal.
                 if time.monotonic() - start > max_wait:
                     raise S3BucketError(
                         f"empty_bucket({bucket_name}) timed out after "
@@ -726,7 +625,7 @@ class S3Client:
         deployment's; this method only removes it. ``BucketNotEmpty`` is
         retried within ``max_wait``: FlashBlade garbage-collects aborted
         multipart uploads asynchronously and can refuse the delete for a
-        while after ``empty_bucket`` verified the listing empty (gotcha 2). The
+        while after ``empty_bucket`` verified the listing empty. The
         bucket is deliberately NOT re-emptied here: if it filled up again,
         the writer may be a redeploy that re-created the name, and its data
         is not ours to delete.
@@ -774,6 +673,27 @@ class S3Client:
         for name in bucket_names:
             results[name] = self.create_bucket(name)
         return results
+
+
+def s3_client_from_config(s3_cfg: Any) -> S3Client:
+    """An ``S3Client`` for a config's ``platform.storage.s3`` block.
+
+    The class is looked up on the ``lakebench.s3`` package at call time, so
+    a test that patches ``lakebench.s3.S3Client`` replaces the client every
+    caller builds here.
+    """
+    from lakebench import s3
+
+    client: S3Client = s3.S3Client(
+        endpoint=s3_cfg.endpoint,
+        access_key=s3_cfg.access_key,
+        secret_key=s3_cfg.secret_key,
+        region=s3_cfg.region,
+        path_style=s3_cfg.path_style,
+        ca_cert=s3_cfg.ca_cert,
+        verify_ssl=s3_cfg.verify_ssl,
+    )
+    return client
 
 
 def test_s3_connectivity(

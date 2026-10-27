@@ -255,16 +255,11 @@ def error_for(exc: BaseException) -> LakebenchError | None:
             code=ExitCode.USAGE,
         )
 
+    from kubernetes.config import ConfigException
+
     from lakebench.k8s import K8sConnectionError
 
-    k8s_config_exc: tuple[type[BaseException], ...] = ()
-    try:
-        from kubernetes.config import ConfigException
-
-        k8s_config_exc = (ConfigException,)
-    except ImportError:  # pragma: no cover -- kubernetes is a hard dependency
-        pass
-    if isinstance(exc, K8sConnectionError) or (k8s_config_exc and isinstance(exc, k8s_config_exc)):
+    if isinstance(exc, (K8sConnectionError, ConfigException)):
         return LakebenchError(
             f"Cannot reach the Kubernetes cluster: {_first_line(str(exc))}",
             next="Check `kubectl config current-context` and that the API server answers.",
@@ -300,12 +295,9 @@ def quiet_urllib3() -> None:
         return  # LAKEBENCH_DEBUG=1 keeps the retry trace for diagnosis
     logging.getLogger("urllib3").setLevel(logging.ERROR)
     warnings.filterwarnings("ignore", module="urllib3")
-    try:
-        import urllib3
+    import urllib3
 
-        urllib3.disable_warnings()
-    except ImportError:  # pragma: no cover -- a dependency of kubernetes and boto3
-        pass
+    urllib3.disable_warnings()
 
 
 def _report(exc: BaseException, err: LakebenchError) -> None:

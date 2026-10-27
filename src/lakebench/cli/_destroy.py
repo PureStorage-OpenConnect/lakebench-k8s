@@ -1,7 +1,4 @@
-"""Destroy command for Lakebench CLI.
-
-Extracted from cli/__init__.py -- tears down lakehouse infrastructure.
-"""
+"""The ``destroy`` command: tears down lakehouse infrastructure."""
 
 from __future__ import annotations
 
@@ -13,13 +10,7 @@ import typer
 from rich.panel import Panel
 
 from lakebench.cli._exit import note_exit_paths, refusal_paths, refused_result_code
-from lakebench.config import (
-    ConfigError,
-    ConfigFileNotFoundError,
-    ConfigValidationError,
-    LoadPurpose,
-    load_config,
-)
+from lakebench.config import LoadPurpose
 from lakebench.exit_codes import ExitCode, UsageError
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
@@ -31,6 +22,7 @@ from ._helpers import (
     deprecated_short_f_force,
     esc,
     journal_open,
+    load_config_or_exit,
     print_error,
     print_info,
     print_success,
@@ -294,29 +286,10 @@ def _destroy_impl(
     """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
-    if expected_incarnation is not None and local:
-        raise UsageError(
-            "--expect-incarnation does not apply to --local: a local stack has no "
-            "namespace to check"
-        )
-
     # Load configuration
-    try:
-        # A namespace too long to finish deploying still has to be
-        # destroyable, so the derived-name length check is skipped here.
-        cfg = load_config(config_file, purpose=LoadPurpose.TEARDOWN, name_override=name)
-    except ConfigFileNotFoundError as e:
-        print_error(f"File not found: {e}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
-    except ConfigValidationError as e:
-        print_error("Config validation failed:")
-        for err in e.errors:
-            loc = ".".join(str(x) for x in err["loc"])
-            console.print(f"  [red]*[/red] {loc}: {err['msg']}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
-    except ConfigError as e:
-        print_error(f"Config error: {e}")
-        raise typer.Exit(ExitCode.USAGE)  # noqa: B904
+    # A namespace too long to finish deploying still has to be
+    # destroyable, so the derived-name length check is skipped here.
+    cfg = load_config_or_exit(config_file, purpose=LoadPurpose.TEARDOWN, name_override=name)
 
     if local:
         _destroy_local_mode(cfg, workdir, remove_data, force)

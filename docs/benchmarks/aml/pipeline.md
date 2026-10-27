@@ -9,13 +9,13 @@ See also: rules in [4.2](rules.md#42-detection-rules).
 | # | Stage | Input | Transformation | Output |
 |---|---|---|---|---|
 | 1 | datagen, only with `--generate` | seed, scale | [3](generation.md) | raw corpus |
-| 2 | bronze-verify | `pacs008/` Parquet, manifest | schema and null checks; zero-copy Iceberg registration (`add_files`) of the files; CTAS of the manifest as `bronze.manifest` (missing manifest: a warning); writes the bronze data clock (max settlement date) | bronze table, `bronze.manifest` |
+| 2 | bronze-verify | `pacs008/` Parquet, manifest, account master | schema and null checks; zero-copy Iceberg registration (`add_files`) of the files; CTAS of the manifest as `bronze.manifest` and of the account master's holder and IBAN columns as `bronze.accounts` (a missing file: a warning); writes the bronze data clock (max settlement date) | bronze table, `bronze.manifest`, `bronze.accounts` |
 | 3 | silver-build | bronze, party, account | full rebuild each cycle, listed below; then a sealed marker | six silver tables plus `silver_batch_versions` |
 | 4 | gold-finalize | sealed silver | baseline dashboard; nine detection rules; the W1 and W4 projections (`gold.entity_clusters`, `gold.risk_scores`, best effort); TM operations | gold tables ([2.4](data-model.md#24-gold-tables)) |
-| 5 | score-financial | `gold.alerts`, `gold.detection_status`, manifest | recall and false-positive scoring ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)) | `recall.parquet`, `recall.json` |
+| 5 | scoring | `gold.alerts`, `gold.detection_status`, silver, `bronze.manifest`, `bronze.accounts` | recall and false-positive scoring as SQL on Trino ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)) | `recall.json` |
 | 6 | AML batch gate, TM verdict | driver logs, `recall.json` | [5](correctness.md#5-correctness-contract) | pass or fail |
-| 7 | pre-compaction benchmark (scale below 50, maintenance on) | silver, gold | warm-up pass, then FQ1 to FQ8 | `pre_compaction_qph` |
-| 8 | table maintenance | maintained tables | expire snapshots and orphan removal, compaction on silver and gold only (never bronze), under policy `m2-2026-09-26` and one shared 1,800 s budget; DuckDB recipes run none | `maintenance_outcomes` |
+| 7 | pre-compaction benchmark (scale below 50, maintenance on) | silver, gold | warm-up pass, then the same set as step 9 | `pre_compaction_qph` |
+| 8 | table maintenance | maintained tables | expire snapshots and orphan removal, compaction on silver and gold only (never bronze), under policy `m2-2026-09-26` and one shared 1,800 s budget | `maintenance_outcomes` |
 | 9 | settle wait (skipped when no maintenance statement ran), then the scored benchmark | silver, gold | 12 queries when TM operations gave a `pass` or `fail` verdict, else FQ1 to FQ8; power mode, hot, `benchmark.iterations` samples per query | QpH, per-query row counts |
 
 - Bronze-verify falls back from `add_files` to CTAS (doubles bronze storage)
@@ -124,7 +124,7 @@ in bronze.
      recreates it empty from `pacs008_schema.json` plus `ingest_ts`;
    - drops all eight silver tables (the seven batch ones and
      `silver.counterparty_pairs`);
-   - drops and re-registers `bronze.manifest`;
+   - drops and re-registers `bronze.manifest` and `bronze.accounts`;
    - drops the TM operations tables and the gold tables `alerts`,
      `risk_scores`, `entity_clusters`, `daily_dashboards` and
      `detection_status`.
@@ -182,13 +182,13 @@ in bronze.
 
    The applied retention is in `continuous.retention`.
 7. **Tick records and score** ([4.5](#45-continuous-tick-records)).
-   - If the run passed every gate, `score-financial` runs in covered mode over
+   - If the run passed every gate, the scorer runs in covered mode over
      exactly the snapshots the last completed tick inside the window read
      ([8.4](scoring.md#84-aml-scoring-reported-a-batch-run-without-a-result-fails)).
-   - On the same condition `time-travel-financial` then re-reads every
-     `silver.transactions` snapshot the ticks recorded
-     ([8.2](continuous-metrics.md#82-continuous)). It runs with the streams
-     stopped, outside every measured interval, and never fails the run.
+   - On the same condition the time-travel check reads back every
+     `silver.transactions` snapshot the ticks recorded, through the query
+     engine ([8.2](continuous-metrics.md#82-continuous)). It runs with the
+     streams stopped, outside every measured interval, and never fails the run.
 8. **Gates**: the continuous window gate, the AML continuous gate, the TM
    verdict and the record gates ([5](correctness.md#5-correctness-contract)).
    The continuous balance check is advisory: an unbalanced stage is recorded

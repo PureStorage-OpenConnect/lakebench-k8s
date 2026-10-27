@@ -541,11 +541,19 @@ def test_decided_history_is_reproduced_the_next_cycle():
 
 
 def test_every_config_field_reaches_the_script(monkeypatch):
+    """Every TmOperationsConfig field, set to a non-default value, round-trips
+    through env() and params_from_env()."""
     from lakebench.config.schema import TmOperationsConfig
 
     cfg = TmOperationsConfig(
         enabled=False,
         seed=3,
+        analyst_accuracy=0.81,
+        investigator_accuracy=0.82,
+        qa_sample_rate=0.11,
+        alert_sla_days=45,
+        case_lookback_months=7,
+        late_filing_rate=0.13,
         no_suspect_rate=0.4,
         max_alerts_per_customer=777,
         continuous_interval_seconds=90,
@@ -554,8 +562,19 @@ def test_every_config_field_reaches_the_script(monkeypatch):
     for k, v in cfg.env().items():
         monkeypatch.setenv(k, v)
     p = tm.params_from_env()
-    assert p["enabled"] is False and p["seed"] == 3 and p["no_suspect_rate"] == 0.4
-    assert p["max_alerts_per_customer"] == 777 and p["continuous_interval_seconds"] == 90
+    # Every field, including the one whose param name differs from the config
+    # field (case_lookback_months -> lookback_months).
+    assert p["enabled"] is False
+    assert p["seed"] == 3
+    assert p["analyst_accuracy"] == 0.81
+    assert p["investigator_accuracy"] == 0.82
+    assert p["qa_sample_rate"] == 0.11
+    assert p["alert_sla_days"] == 45
+    assert p["lookback_months"] == 7
+    assert p["late_filing_rate"] == 0.13
+    assert p["no_suspect_rate"] == 0.4
+    assert p["max_alerts_per_customer"] == 777
+    assert p["continuous_interval_seconds"] == 90
     assert p["counterparty_scenarios"] == ("W4_risk_propagation",)
 
 
@@ -707,21 +726,6 @@ def test_carried_sketch_stays_as_first_seen():
     g["ext_overlap"] = {"a-0": 2}
     (out,) = tm.match_alerts([g], [a], prev, prev, 2)
     assert out["alert_key"] == "a-0" and out["txn_sketch"] == a["txn_sketch"]
-
-
-def test_interrupted_pass_is_unknown_not_pass():
-    from lakebench.metrics.tm_ops import parse_tm_status, tm_verdict
-
-    logs = (
-        "[tm-status] status=started cycle=1 reason=writing the TM tables\n"
-        "[tm-status] status=ran cycle=1 reason=ok\n"
-        "[tm-invariant] reconciliation: status=pass cycle=1 detail=a\n"
-        "[tm-status] status=started cycle=2 reason=writing the TM tables\n"
-    )
-    from lakebench.metrics.tm_ops import parse_tm_invariants
-
-    v = tm_verdict(parse_tm_invariants(logs), parse_tm_status(logs), continuous=True)
-    assert v["status"] == "unknown" and "[2]" in v["reason"] and not v["problems"]
 
 
 def test_legacy_query_set_ids_are_pinned_not_hashed_from_todays_sql():

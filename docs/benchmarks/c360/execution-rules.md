@@ -87,16 +87,17 @@ like-for-like (`metrics/maintenance_policy.py`,
 
 ### 7.3 Permitted tuning (still publishable)
 
-None of these changes the Workload or Corpus identity keys, so runs differing
+None of these changes a Workload or Corpus identity key, so runs differing
 only here stay comparable. State them beside a published comparison.
 
 | Difference | Identity effect |
 |---|---|
-| Component or version | Architecture (with a System difference too, no difference can be put down to either) |
+| Component or version, dependency pinset | Architecture; if System differs too, neither can be named as the cause |
 | Cluster | System |
-| Explicit Spark executor overrides, driver overrides, user Spark conf | Architecture keys when set; an executor override below the profile's ask also enters as bound kind `*: executor override`, a condition |
-| Trino, Thrift or DuckDB sizing, storage classes, datagen execution, continuous trigger intervals | not in the identity: equal identities, unless a larger `gold_refresh_interval` raises the floor of the benchmark warmup and interval and changes the in-stream round count (a condition) |
-| Conditions of [10](comparability.md#10-comparability), the dependency pinset | not like-for-like |
+| Explicit Spark executor overrides, driver overrides, user Spark conf | Architecture keys when set; an executor override below the profile's ask also adds the Conditions bound kind `*: executor override` |
+| Trino, Thrift or DuckDB sizing, storage classes, datagen execution | none |
+| Continuous trigger intervals | none, unless a larger `gold_refresh_interval` raises the warmup and interval floor and changes the in-stream round count (Conditions) |
+| Conditions of [10](comparability.md#10-comparability) | not like-for-like |
 
 What may be tuned:
 
@@ -130,7 +131,7 @@ What may be tuned:
 
 **Refused.**
 
-- At deploy, generate and run: a scale above the datagen ceiling
+- At `deploy`, `generate` and `run`: a scale above the datagen ceiling
   ([11](../C360.md#11-supported-compositions)).
 - At config load or run start:
   - an unsupported composition (`_SUPPORTED_COMBINATIONS`,
@@ -173,6 +174,8 @@ What may be tuned:
 - Otherwise it is exp1 and lists what was missing in
   `experiment.v2_unavailable`.
 
+**Not caught by the identity**:
+
 - `datagen.file_size` is fixed at `64mb`, so it cannot move the corpus.
 - The codec (`DG_COMPRESSION`) changes every file's rows but is reachable only
   by editing the datagen Job by hand. An exp1 corpus id does not see it; do
@@ -185,7 +188,7 @@ What may be tuned:
 
 | Cap | Value | Reported |
 |---|---|---|
-| Executor ceiling | 28 (`_MAX_EXECUTORS_SAFE`); per job: bronze-verify 20, silver-build 28, gold-finalize 28, bronze-ingest 10, silver-stream 20, gold-refresh 10. Batch counts are constant up to scale 10 (4 / 8 / 4) | `experiment.limits.executors[].cap_hit` and `limits.bound` when the scale asks for more |
+| Executor ceiling | 28 (`_MAX_EXECUTORS_SAFE`); per job: bronze-verify 20, silver-build 28, gold-finalize 28, bronze-ingest 10, silver-stream 20, gold-refresh 10. Up to scale 10 the batch jobs ask a flat 4 / 8 / 4 | `experiment.limits.executors[].cap_hit` and `limits.bound` when the scale asks for more |
 | Continuous concurrent executor budget | 90% of the cluster CPU (and memory) left after the always-on pods, datagen and the stream drivers; each executor to the stream with the smallest share of its need | `limits.executors[].budget_cap`, `limits.bound` |
 | Streaming trigger intervals | back to back by default; any interval set in the config | `limits.trigger_bound`, beside freshness (not a bound kind: the interval is in the config) |
 | [Trickle](../../glossary.md#trickle) (`max_files_per_trigger`, files per micro-batch) | auto, under `--skip-generate` only: `int(files x trigger_s / (1.2 x run_duration))`, clamped to 1 to 50 files per trigger. Files is the nominal corpus at 64 MB (10 x scale x 1024 / 64); 50 files per trigger when the corpus size cannot be read | `config_limits.max_files_per_trigger`, `continuous.trickle`, `intake_limit: trickle_rate` |

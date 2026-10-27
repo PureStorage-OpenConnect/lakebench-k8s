@@ -9,8 +9,7 @@ This is the continuous-pipeline equivalent of silver_build.py. Where
 silver_build processes all data in a single batch pass, silver_stream
 processes micro-batches as new rows arrive in bronze_raw.
 
-Replay idempotency (E3, the replay protocol of silver_stream_financial,
-scoped to the stream): Structured Streaming re-runs a micro-batch with the
+Replay idempotency: Structured Streaming re-runs a micro-batch with the
 same batchId when the driver dies after the table commit but before the
 checkpoint commit, and a plain append wrote it twice. Every silver row
 carries `_stream_id` (the streaming query id) and `_batch_id`. Only the
@@ -38,21 +37,17 @@ Environment variables (set by job.py):
     LB_BRONZE_URI        - s3a://bronze-bucket/
     LB_SILVER_URI        - s3a://silver-bucket/
     LB_ICEBERG_CATALOG   - Iceberg catalog name (e.g., "lakehouse")
-    CATALOG_NAME         - same as LB_ICEBERG_CATALOG
     CHECKPOINT_LOCATION  - s3a://silver-bucket/checkpoints/silver-stream/
     TRIGGER_INTERVAL     - e.g., "0 seconds" (back to back)
 """
 
 from __future__ import annotations
 
-import os
-import threading
 import time
 
 from common import (
     METADATA_DELETE_AFTER_COMMIT,
     METADATA_PREVIOUS_VERSIONS_MAX,
-    SilverAbort,
     apply_silver_transformations_anchored,
     assert_progress,
     await_stream,
@@ -67,18 +62,13 @@ from common import (
     replay_possible,
     resolve_data_clock,
     set_utc_session,
+    silver_stream_accumulator,
     streaming_query_id,
     table_exists,
+    wait_for_bronze_table,
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
-
-_TABLE_WAIT_INTERVAL = 15  # seconds between checks
-# A3 (silver-plan): capped from run_duration / 4 by job.py so the wait loop
-# cannot spend the whole window before the empty-rows gate fires. Fallback 1800 is
-# only used when job.py did not export the env var (test harness, older
-# deployments), matching the previous hardcoded default.
-_TABLE_WAIT_MAX = int(os.environ.get("LB_SILVER_BRONZE_WAIT_SECONDS", "1800"))
 
 
 def write_silver_batch(
@@ -152,14 +142,6 @@ def _delete_earlier_attempt(spark, silver_tbl, stream_id, batch_id):
         spark.sql(f"DELETE FROM {silver_tbl} WHERE {key}")
 
 
-def _exists_or_false(spark, table):
-    try:
-        return table_exists(spark, table)
-    except Exception as e:  # noqa: BLE001
-        log(f"Bronze table probe error: {type(e).__name__}: {e}")
-        return False
-
-
 def main() -> None:
     catalog = env("LB_ICEBERG_CATALOG", "ice")
     silver_uri = env("LB_SILVER_URI", "s3a://lb-silver/")
@@ -183,10 +165,9 @@ def main() -> None:
     log(f"Target table: {silver_tbl}")
     log(f"Checkpoint:   {checkpoint_location}")
     log(f"Trigger:      {trigger_interval}")
-    # G5: label the imposed scale envelope so downstream reports never
-    # present a Lakebench-bounded number as infrastructure performance
-    # (invariant 6). v1.6 profile: measured up to scale 10; larger scales
-    # run but the cap is labelled, not hidden.
+    # Label the imposed scale envelope so a report never presents a
+    # Lakebench-bounded number as infrastructure performance. Measured up to
+    # scale 10; larger scales run, but the cap is labelled, not hidden.
     emit_stream_scale_admission(measured_envelope_scale=10)
 
     log("Creating Iceberg namespace...")
@@ -204,50 +185,25 @@ def main() -> None:
         ensure_column(spark, silver_tbl, "_batch_id", "BIGINT")
     refuse_fresh_checkpoint_over_data(spark, checkpoint_location, silver_tbl)
 
-    # C1 (silver-plan): silver C360 stream mains use strict=True. C2 always
-    # exports LB_DATA_CLOCK in the silver env bundle (with a today fallback
-    # for greenfield deployments), so a missing env here is a plumbing break,
-    # not a legitimate absence -- the pre-C2 behaviour ("anchored per
-    # micro-batch") silently broke same-bronze reproducibility across
-    # restarts, exactly what recency scoring must not do.
+    # strict: the job always exports LB_DATA_CLOCK (with a today fallback),
+    # so a missing clock here is a configuration error. Anchoring per
+    # micro-batch instead would break same-bronze reproducibility across
+    # restarts, which recency scoring must not do.
     data_clock = resolve_data_clock(df_fallback=None, strict=True)
 
-    # Bronze-ingest creates bronze_raw on its first batch; silver-stream
-    # starts concurrently and would crash with NoSuchTableException.
-    # Any error here only means "wait longer", so a transient catalog error
-    # is retried rather than fatal.
-    waited = 0
-    while not _exists_or_false(spark, bronze_tbl):
-        if waited >= _TABLE_WAIT_MAX:
-            log(f"Bronze table {bronze_tbl} not found after {waited}s, giving up")
-            spark.stop()
-            raise SilverAbort(f"bronze did not appear in wait window ({_TABLE_WAIT_MAX}s)")
-        log(f"Waiting for {bronze_tbl} to be created ({waited}s elapsed)...")
-        time.sleep(_TABLE_WAIT_INTERVAL)
-        waited += _TABLE_WAIT_INTERVAL
-    log(f"Bronze table {bronze_tbl} exists (waited {waited}s)")
+    wait_for_bronze_table(spark, bronze_tbl)
 
-    # B5: refuse resume when bronze snapshot lineage was replaced under the
-    # old checkpoint. First start fails open and writes the sidecar; every
-    # subsequent start compares and raises SilverAbort on a mismatch. Runs
-    # only after the wait above so the snapshot lookup is not defeated by
-    # the "bronze not created yet" race.
+    # Refuse resume when the bronze snapshot lineage was replaced under the
+    # old checkpoint. The first start writes the sidecar; later starts
+    # compare and raise on a mismatch. After the wait, so the snapshot
+    # lookup is not defeated by the "bronze not created yet" race.
     check_bronze_fingerprint(spark, bronze_tbl, checkpoint_location, source_format="iceberg")
 
-    # A1: driver-side accumulator. write_silver_batch returns the rows the
-    # micro-batch committed; the foreachBatch wrapper folds each return into
-    # a lock-protected counter so a stream that saw zero non-empty batches
-    # can be caught after await_stream returns. Spark's async ListenerBus
-    # swallows Python listener exceptions, so this must run on the driver
-    # thread that main() blocks on, not inside a StreamingQueryListener.
-    rows_written_total = 0
-    rows_written_lock = threading.Lock()
-
-    def _foreach_batch(df, bid):
-        written = write_silver_batch(df, bid, silver_tbl, target_file_size_bytes, data_clock)
-        with rows_written_lock:
-            nonlocal rows_written_total
-            rows_written_total += int(written or 0)
+    # Fold each batch's committed rows into a total read after await_stream,
+    # so a stream that saw no non-empty batch is caught.
+    _foreach_batch, read_total = silver_stream_accumulator(
+        lambda df, bid: write_silver_batch(df, bid, silver_tbl, target_file_size_bytes, data_clock)
+    )
 
     reader = spark.readStream.format("iceberg")
     # A micro-batch takes the next whole data file, then stops adding files
@@ -265,8 +221,7 @@ def main() -> None:
 
     log("Streaming query started, awaiting termination...")
     await_stream(spark, query)
-    with rows_written_lock:
-        total = rows_written_total
+    total = read_total()
     log(f"Silver stream stopped; total rows written across all batches: {total}")
     assert_progress(total, "silver-stream")
     spark.stop()

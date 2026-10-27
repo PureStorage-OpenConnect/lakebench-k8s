@@ -58,6 +58,8 @@ def test_a_spent_seed_is_a_reference(held):
 
 
 def test_unreadable_held_out_record_withholds(monkeypatch):
+    from lakebench.metrics.experiment import _observed_corpus
+
     def gone():
         raise FileNotFoundError(2, "No such file", "heldout_hashes.json")
 
@@ -69,6 +71,13 @@ def test_unreadable_held_out_record_withholds(monkeypatch):
         "experiment": {"workload": {"name": "financial"}, "corpus": {"seed": {"seed_ref": None}}}
     }
     assert lg.protected_record_reason(rec) == "its seed is withheld"
+    # Withheld forms never compare equal: an observed-corpus check cannot
+    # decide seed agreement when the held-out record is unreadable.
+    _, problems = _observed_corpus({"seed": 999}, {"seed": 1000})
+    assert problems == [
+        "the config seed and the seed the datagen pods ran cannot be checked "
+        "(the held-out record cannot be read)"
+    ]
 
 
 def test_experiment_inputs_never_record_a_held_out_seed(tmp_path, held):
@@ -122,20 +131,6 @@ def test_observed_corpus_disagreement_names_no_seed(held):
     out, problems = _observed_corpus({"seed": pc.EV}, {"seed": pc.EV})
     assert problems == [] and out["seed"]["role"] == "evaluation"
     _no_seed(json.dumps(out, default=str), pc.EV)
-
-
-def test_withheld_forms_never_compare_equal(monkeypatch):
-    from lakebench.metrics.experiment import _observed_corpus
-
-    def gone():
-        raise FileNotFoundError(2, "No such file", "heldout_hashes.json")
-
-    monkeypatch.setattr(ds, "_heldout", gone)
-    _, problems = _observed_corpus({"seed": 999}, {"seed": 1000})
-    assert problems == [
-        "the config seed and the seed the datagen pods ran cannot be checked "
-        "(the held-out record cannot be read)"
-    ]
 
 
 def test_an_old_sidecar_seed_is_recorded_by_the_rule(held):

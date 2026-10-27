@@ -21,6 +21,10 @@ from lakebench.k8s import (
 
 logger = logging.getLogger(__name__)
 
+# Label selector for the coordinator pod, used for deploy readiness and by
+# Iceberg maintenance to find an engine pod.
+COORDINATOR_SELECTOR = "app=lakebench-trino,component=coordinator"
+
 if TYPE_CHECKING:
     from lakebench.deploy.engine import DeploymentEngine
 
@@ -109,7 +113,7 @@ class TrinoDeployer:
             core_v1 = k8s_client.CoreV1Api()
             pods = core_v1.list_namespaced_pod(
                 namespace,
-                label_selector="app=lakebench-trino,component=coordinator",
+                label_selector=COORDINATOR_SELECTOR,
             )
 
             if not pods.items:
@@ -166,9 +170,3 @@ class TrinoDeployer:
                 message=f"Trino deployment failed: {e}",
                 elapsed_seconds=time.time() - start,
             )
-
-    def get_jdbc_url(self, schema: str = "silver") -> str:
-        """Get Trino JDBC URL."""
-        namespace = self.config.get_namespace()
-        catalog = self.config.architecture.query_engine.trino.catalog_name
-        return f"jdbc:trino://lakebench-trino.{namespace}.svc.cluster.local:8080/{catalog}/{schema}"

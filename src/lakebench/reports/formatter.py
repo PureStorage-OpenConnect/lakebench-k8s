@@ -12,22 +12,15 @@ through :func:`format_measurement`. It attaches, next to the number:
   repeated (invariant 7).
 - A support-state pill (``supported`` / ``unverified`` / ``unsupported``)
   when set, so a figure from an unsupported combination reads as such.
-
-The lint at ``scripts/lint_capped_bare_numbers.py`` scans the report
-generator for bare ``rows_per_s`` / ``qph`` prints that would bypass this
-formatter and paint a capped or single-run figure as headline evidence.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from html import escape as _html_escape
 
-_SUPPORT_STATE_LABEL = {
-    "supported": "supported",
-    "unverified": "unverified",
-    "unsupported": "unsupported",
-}
+from lakebench.reports.front_matter import safe_experiment
 
 
 def _cap_short_name(cap_line: str) -> str:
@@ -43,8 +36,6 @@ def _cap_short_name(cap_line: str) -> str:
     wrong cap number would mislabel which cap held the run and breach
     invariant 6.
     """
-    import re as _re
-
     text = str(cap_line)
     if text.startswith("trickle"):
         # The bound line ("trickle: max_files_per_trigger 2 ...") and the
@@ -54,7 +45,7 @@ def _cap_short_name(cap_line: str) -> str:
             return "trickle (not a capacity)"
         return "trickle (offered load, not capacity)"
     if "executor cap" in text:
-        m = _re.search(r"executor cap\s+(\d+)", text)
+        m = re.search(r"executor cap\s+(\d+)", text)
         cap = m.group(1) if m else "?"
         return f"_MAX_EXECUTORS_SAFE={cap}"
     if "concurrent executor budget" in text:
@@ -81,7 +72,6 @@ def format_measurement(
     *,
     caps_bound: Sequence[str] | None = None,
     n_runs: int | None = None,
-    spread: float | None = None,
     support_state: str | None = None,
     samples: int | None = None,
     rounds: int | None = None,
@@ -104,9 +94,6 @@ def format_measurement(
         rounds: In-stream benchmark rounds inside the run. The tag reads
             ``n=1 run, 4 rounds``; *rounds_html*, when given, is the same
             count already rendered (a derived count) and is shown instead.
-        spread: Optional coefficient of variation, as a decimal fraction
-            (``0.008`` for 0.8%). Ignored today; kept in the signature so
-            the confidence chip can grow into it without a fan-out change.
         support_state: When set, one of ``supported``, ``unverified``,
             ``unsupported``. Any other value is passed through as-is.
 
@@ -115,7 +102,6 @@ def format_measurement(
         qualifiers render as small muted spans so they sit under the
         headline number without competing with it.
     """
-    _ = spread  # signature-only; see docstring
     parts: list[str] = [f"{_html_escape(str(value))}"]
     if unit:
         parts.append(f" {_html_escape(unit)}")
@@ -147,7 +133,6 @@ def format_measurement(
         )
 
     if support_state:
-        label = _SUPPORT_STATE_LABEL.get(support_state, support_state)
         state_color = {
             "supported": "var(--success)",
             "unverified": "var(--warning)",
@@ -155,7 +140,7 @@ def format_measurement(
         }.get(support_state, "var(--text-muted)")
         tags.append(
             f'<span class="qual qual-support" style="color: {state_color}; '
-            f'font-size: 0.55em; margin-left: 0.4em;">{_html_escape(label)}</span>'
+            f'font-size: 0.55em; margin-left: 0.4em;">{_html_escape(support_state)}</span>'
         )
 
     parts.extend(tags)
@@ -182,9 +167,9 @@ def confidence_chip(n_runs: int | None, spread: float | None = None) -> str:
     return f"replicated_n={n}"
 
 
-def confidence_chip_html(n_runs: int | None, spread: float | None = None) -> str:
-    """The chip as an HTML span, coloured by strength."""
-    label = confidence_chip(n_runs, spread)
+def confidence_chip_html(n_runs: int | None) -> str:
+    """The chip as an HTML span, coloured by strength (no spread is known)."""
+    label = confidence_chip(n_runs)
     color = {
         "single_run": "var(--warning)",
         "high": "var(--success)",
@@ -204,17 +189,7 @@ def caps_bound_from(metrics: object, *, include_trickle: bool = False) -> list[s
     The trickle line is left out unless *include_trickle*: the trickle bounds
     intake only (the throughput and efficiency cards add it with
     ``trickle_caps_from``), not every number of the run."""
-    exp_block = getattr(metrics, "experiment_block", None)
-    if not callable(exp_block):
-        return []
-    try:
-        exp = exp_block()
-    except Exception:  # noqa: BLE001 -- formatting must not raise on a bad record
-        return []
-    if not isinstance(exp, dict):
-        return []
-    limits = exp.get("limits") or {}
-    bound = limits.get("bound") or []
+    bound = (safe_experiment(metrics).get("limits") or {}).get("bound") or []
     from lakebench.metrics.bounds import TRICKLE_LINE_PREFIX
 
     return [
@@ -227,12 +202,8 @@ def caps_bound_from(metrics: object, *, include_trickle: bool = False) -> list[s
 def trigger_caps_from(metrics: object) -> list[str]:
     """``limits.trigger_bound``: the streams on a timer, which bound the
     freshness numbers only (``bounds.trigger_lines``)."""
-    exp_block = getattr(metrics, "experiment_block", None)
-    try:
-        exp = exp_block() if callable(exp_block) else None
-    except Exception:  # noqa: BLE001 -- formatting must not raise on a bad record
-        exp = None
-    return [str(x) for x in (((exp or {}).get("limits") or {}).get("trigger_bound") or [])]
+    limits = safe_experiment(metrics).get("limits") or {}
+    return [str(x) for x in limits.get("trigger_bound") or []]
 
 
 def trickle_caps_from(metrics: object) -> list[str]:
@@ -250,49 +221,13 @@ def trickle_caps_from(metrics: object) -> list[str]:
 
 def n_runs_of(metrics: object) -> int | None:
     """Runs behind this record (repetitions.runs when present)."""
-    exp_block = getattr(metrics, "experiment_block", None)
-    if callable(exp_block):
-        try:
-            exp = exp_block()
-        except Exception:  # noqa: BLE001
-            exp = None
-        if isinstance(exp, dict):
-            rep = exp.get("repetitions") or {}
-            runs = rep.get("runs")
-            if isinstance(runs, int) and runs > 0:
-                return runs
-    return None
-
-
-def qph_samples_of(metrics: object) -> int | None:
-    """The number of samples per query behind a QpH (benchmark or rounds)."""
-    bench = getattr(metrics, "benchmark", None)
-    if bench is not None:
-        iters = getattr(bench, "iterations", None)
-        if isinstance(iters, int) and iters > 0:
-            return iters
-    rounds = getattr(metrics, "benchmark_rounds", None)
-    if rounds:
-        try:
-            return len([r for r in rounds if getattr(r, "qph", 0) > 0])
-        except TypeError:
-            return None
-    return None
+    runs = (safe_experiment(metrics).get("repetitions") or {}).get("runs")
+    return runs if isinstance(runs, int) and runs > 0 else None
 
 
 def support_state_of(metrics: object) -> str | None:
     """Support state from the experiment block, when set."""
-    exp_block = getattr(metrics, "experiment_block", None)
-    if not callable(exp_block):
-        return None
-    try:
-        exp = exp_block()
-    except Exception:  # noqa: BLE001
-        return None
-    if not isinstance(exp, dict):
-        return None
-    sup = exp.get("support") or {}
-    state = sup.get("state")
+    state = (safe_experiment(metrics).get("support") or {}).get("state")
     if isinstance(state, str) and state and state != "unknown":
         return state
     return None

@@ -11,9 +11,9 @@ A metrics.json without the field was recorded under the legacy policy.
 Policy history:
 
 - ``m1-legacy``: everything recorded before the id was stamped. That lumps
-  two real policies: before f63cb38 Iceberg expire_snapshots and
+  two real policies: an earlier one where Iceberg expire_snapshots and
   remove_orphan_files never succeeded on either engine, so only compaction
-  ran; from f63cb38 they did. The two cannot be told apart.
+  ran, and a later one where they did. The two cannot be told apart.
 - ``m2-2026-09-26``: fixed statement forms (Trino SET SESSION
   min-retention in the same submission, Spark TIMESTAMP literal); continuous
   expiry floored at 1 h and orphan removal at 24 h 10 min on every path;
@@ -82,8 +82,8 @@ SKIPPED_BY_USER = "skipped_by_user"
 FAILED = "failed"
 NOT_RUN = "not_run"
 
-#: Owner decision #46: Delta continuous ships in v1.6 with no effective
-#: maintenance, and the evidence says so.
+#: Recorded text (shown by cli/_sustained): Delta continuous runs with no
+#: effective table maintenance.
 DELTA_CONTINUOUS_LIMITATION = (
     "known v1.6 limitation (owner decision #46): Delta continuous runs with no "
     "effective table maintenance (no OPTIMIZE; VACUUM, where it runs, keeps the 7 d "

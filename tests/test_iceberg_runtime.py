@@ -12,17 +12,18 @@ from lakebench.modules.pipeline_engines.spark.job import validate_iceberg_java_r
 class TestJava17Requirement:
     """Iceberg 1.11.0 ships bytecode major 61; 1.10.x shipped 55."""
 
-    def test_java11_spark35_image_is_refused(self):
-        with pytest.raises(ValueError, match="java17"):
-            validate_iceberg_java_runtime("apache/spark:3.5.4-python3", "1.11.0")
-
-    def test_java17_spark35_image_is_accepted(self):
-        validate_iceberg_java_runtime("apache/spark:3.5.9-java17-python3", "1.11.0")
-
-    def test_older_iceberg_on_java11_stays_valid(self):
-        """The guard must not break the combination that works today."""
-        validate_iceberg_java_runtime("apache/spark:3.5.4-python3", "1.10.1")
-
-    @pytest.mark.parametrize("image", ["apache/spark:4.0.2-python3", "apache/spark:4.1.1-python3"])
-    def test_spark_4_images_ship_java17_already(self, image):
-        validate_iceberg_java_runtime(image, "1.11.0")
+    def test_java17_runtime_is_required_for_iceberg_1_11(self):
+        cases = [
+            # (image, iceberg version, refused with "java17")
+            ("apache/spark:3.5.4-python3", "1.11.0", True),  # Java 11 image, 1.11
+            ("apache/spark:3.5.9-java17-python3", "1.11.0", False),  # Java 17 image
+            ("apache/spark:3.5.4-python3", "1.10.1", False),  # older Iceberg stays valid
+            ("apache/spark:4.0.2-python3", "1.11.0", False),  # Spark 4 ships Java 17
+            ("apache/spark:4.1.1-python3", "1.11.0", False),
+        ]
+        for image, version, refused in cases:
+            if refused:
+                with pytest.raises(ValueError, match="java17"):
+                    validate_iceberg_java_runtime(image, version)
+            else:
+                validate_iceberg_java_runtime(image, version)  # must not raise

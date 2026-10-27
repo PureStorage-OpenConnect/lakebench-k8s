@@ -1,12 +1,12 @@
 """The deploy timeout inside every wait.
 
-``deploy_all`` used to check ``--timeout`` only between steps, while each
-wait inside a step kept its own timeout (Thrift 300 s, DuckDB 900 s, Polaris
-600 s plus 600 s, operator rollouts), so a deploy could run far past the
-timeout the user asked for. ``deploy_all`` now calls :func:`start`; every
-wait bounds its own timeout with :func:`clamp`, and a wait that the deploy
-deadline (not its own timeout) cut short raises :class:`DeployTimeout`,
-which names the component and what it was waiting for.
+``deploy_all`` runs under the :func:`deploy_deadline` context manager, which
+sets ``--timeout`` seconds from now. Every wait inside a step bounds its own
+timeout with :func:`clamp`, and a wait that the deploy deadline (not its own
+timeout) cut short raises :class:`DeployTimeout`, which names the component
+and what it was waiting for. Without this the step-internal waits (Thrift,
+DuckDB, Polaris, operator rollouts) could together run far past the timeout
+the user asked for.
 
 Outside ``deploy`` (destroy, ``run``, admin) no deadline is set, ``clamp``
 returns its argument unchanged and ``check`` never raises.
@@ -21,7 +21,7 @@ import math
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from contextvars import ContextVar, Token
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 
@@ -69,26 +69,19 @@ class DeployTimeout(Exception):
         )
 
 
-def start(timeout: float) -> Token:
-    """Set the deadline ``timeout`` seconds from now (``<= 0``: none).
-    Returns the token for :func:`reset`."""
-    if timeout and timeout > 0:
-        now = time.monotonic()
-        return DEPLOY_DEADLINE.set(_Deadline(now, float(timeout), now + float(timeout)))
-    return DEPLOY_DEADLINE.set(None)
-
-
-def reset(token: Token) -> None:
-    DEPLOY_DEADLINE.reset(token)
-
-
 @contextmanager
 def deploy_deadline(timeout: float) -> Iterator[None]:
-    token = start(timeout)
+    """Set the deadline ``timeout`` seconds from now for the block (``<= 0``:
+    none), then clear it."""
+    if timeout and timeout > 0:
+        now = time.monotonic()
+        token = DEPLOY_DEADLINE.set(_Deadline(now, float(timeout), now + float(timeout)))
+    else:
+        token = DEPLOY_DEADLINE.set(None)
     try:
         yield
     finally:
-        reset(token)
+        DEPLOY_DEADLINE.reset(token)
 
 
 @contextmanager

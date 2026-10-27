@@ -169,18 +169,20 @@ class TestRecord:
 
 class TestCompare:
     def test_diff_lines(self):
+        reordered = copy.deepcopy(ASET)
+        reordered["by_rule"] = dict(reversed(list(reordered["by_rule"].items())))
         for b, expected in [
             ({**ASET, "spec": "as2"}, "different definitions"),
             ({**ASET, "cols_sha": "f" * 16}, "different columns"),
             (_aset(W1_connected_components=(3, "-12"), W2_structuring=(6, "907")), "5 alert(s)"),
+            # by_rule order is not a difference
+            (reordered, None),
         ]:
             out = als.diff_alert_sets(ASET, b)
-            assert len(out) == 1 and expected in out[0]
-
-    def test_diff_ignores_order_of_by_rule(self):
-        b = copy.deepcopy(ASET)
-        b["by_rule"] = dict(reversed(list(b["by_rule"].items())))
-        assert als.diff_alert_sets(ASET, b) == []
+            if expected is None:
+                assert out == [], out
+            else:
+                assert len(out) == 1 and expected in out[0], (expected, out)
 
 
 # ---------------------------------------------------------------------------

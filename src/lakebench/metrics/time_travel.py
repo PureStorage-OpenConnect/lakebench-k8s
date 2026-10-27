@@ -1,12 +1,13 @@
 """Time-travel reads of a continuous AML run (``continuous.time_travel``).
 
-After the window, ``cli/_aml_post.run_time_travel`` submits
-``time_travel_financial.py`` over the transactions snapshots the gold-refresh
-ticks recorded (``metrics/tick_records.time_travel_ticks``). This module
-turns its result into the record: each tick's state, the maintenance round
-that expired an expired snapshot (``continuous.retention.rounds``), the
-retention policy the result is read under, and the time-travel check's
-verdict. The check never fails the run; it is shown beside the verdict.
+After the window, ``aml/time_travel_queries.retention_record`` checks the
+transactions snapshots the gold-refresh ticks recorded
+(``metrics/tick_records.time_travel_ticks``) through the query engine. This
+module holds the shared pieces of that record: the maintenance round that
+expired an expired snapshot (``expired_by``, over ``continuous.retention.
+rounds``), the retention policy it is read under (``policy``), the per-tick
+verdict (``verdict_of``), the not-run record and the one-line summary. The
+check never fails the run; it is shown beside the verdict.
 
 Pure: no cluster or Spark access.
 """
@@ -16,10 +17,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
-
-#: Columns the time-travel hash leaves out: the batch-version sentinels, so
-#: the hash covers the business columns.
-SENTINEL_COLUMNS = frozenset({"_batch_id", "_stream_id", "ingest_ts", "committed_at"})
 
 #: Record states of a snapshot read back intact (``pass`` also needs at
 #: least one ``verified``).
@@ -64,25 +61,21 @@ def expired_by(
     A round explains it when it ran ``expire_snapshots`` on the tick's table
     (the statement finished or timed out, so it may have run) and the
     snapshot was committed (writer clock, in the cluster) before the round's
-    latest possible cutoff minus the retention it applied. Trino takes the
-    cutoff on its own clock during the round, so the latest is the round's
-    end (this host's clock) moved to the cluster clock by *clock_offset_s*
-    (cluster minus host), when known. Spark Thrift's cutoff is a literal
-    this host computed before the round started, so the latest is the
-    round's start, on this host's clock. The
-    entry names the earliest round that could have expired the snapshot
+    latest possible cutoff minus the retention it applied. Trino, which runs
+    AML maintenance, takes the cutoff on its own clock during the round, so
+    the latest is the round's end (this host's clock) moved to the cluster
+    clock by *clock_offset_s* (cluster minus host), when known. The entry
+    names the earliest round that could have expired the snapshot
     (``basis``); ``ran_at`` is that round's end on this host's clock."""
     committed = _utc(tick.get("committed_at"))
     if committed is None:
         return None
     table = _bare_table(tick.get("table"))
+    shift = timedelta(seconds=clock_offset_s or 0.0)
     for r in rounds:
-        # Spark Thrift's older_than literal is this host's time; Trino's is its own.
-        on_host = r.get("engine") == "spark-thrift"
-        shift = timedelta(seconds=0.0 if on_host else (clock_offset_s or 0.0))
         if table not in {_bare_table(t) for t in r.get("expired_tables") or ()}:
             continue
-        ended = _utc(r.get("started_at") if on_host else r.get("ended_at"))
+        ended = _utc(r.get("ended_at"))
         applied_s = _seconds(r.get("applied_expire"))
         if ended is None or applied_s is None:
             continue
@@ -162,69 +155,6 @@ def not_run(continuous: dict, reason: str, pol: dict[str, Any], verdict: str = "
     tt = continuous.setdefault("time_travel", {})
     tt.setdefault("ticks", [])
     tt.update({"verdict": verdict, "reason": reason, "policy": pol})
-    return tt
-
-
-def merge(
-    continuous: dict,
-    result: Mapping[str, Any],
-    pol: dict[str, Any],
-    budget: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """``continuous.time_travel`` from the job's ``time_travel.json``: each
-    recorded tick gains its state, read time, rows and matches; an expired
-    snapshot is attributed to the maintenance round that expired it
-    (``expired_by``) or reads ``missing_unexplained``; then the verdict."""
-    tt = continuous.setdefault("time_travel", {})
-    recorded = list(tt.get("ticks") or [])
-    by_key = {(r.get("start"), r.get("cycle")): r for r in result.get("ticks") or []}
-    rounds = (continuous.get("retention") or {}).get("rounds") or []
-    offset = (continuous.get("window") or {}).get("cluster_clock_offset_seconds")
-    merged = []
-    for t in recorded:
-        got = by_key.get((t.get("start"), t.get("cycle")))
-        if got is None:
-            entry = {**t, "state": "error", "reason": "no result for this tick"}
-        else:
-            entry = {
-                **t,
-                **{
-                    k: got.get(k)
-                    for k in ("state", "read_s", "rows", "fp_match", "count_match", "reason")
-                    if k in got
-                },
-            }
-        if entry.get("state") == "expired":
-            by = expired_by(t, rounds, pol.get("configured"), offset)
-            if by is None:
-                entry["state"] = "missing_unexplained"
-                entry["reason"] = (
-                    "expired, but no Lakebench maintenance round that ran expire_snapshots "
-                    "on this table could have expired it"
-                )
-            else:
-                entry["expired_by"] = by
-        merged.append(entry)
-    verdict, reason = verdict_of(merged, bool(result.get("incomplete")))
-    if result.get("status") == "not_supported" and verdict != "fail":
-        verdict, reason = "fail", str(result.get("reason") or "not supported")
-    tt["ticks"] = merged
-    tt["current_read_s"] = (result.get("current") or {}).get("read_s")
-    tt["current"] = result.get("current")
-    tt["policy"] = pol
-    if result.get("excluded_columns"):
-        tt["hashed_columns"] = {
-            "basis": "business columns: every column of the snapshot schema less the "
-            "batch-version sentinels (those it has)",
-            "excluded": result.get("excluded_columns"),
-        }
-    if budget is not None:
-        tt["budget"] = dict(budget)
-    tt["verdict"] = verdict
-    if reason:
-        tt["reason"] = reason
-    else:
-        tt.pop("reason", None)
     return tt
 
 

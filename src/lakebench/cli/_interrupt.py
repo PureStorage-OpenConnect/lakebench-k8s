@@ -43,6 +43,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from lakebench._clock import utc_now
+from lakebench.cli._cluster_ops import DATAGEN_JOB, SPARK_GROUP, SPARK_PLURAL, SPARK_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -51,11 +52,6 @@ INTERRUPT_SIGNALS: tuple[int, ...] = (signal.SIGINT, signal.SIGTERM)
 
 SPARK_APPLICATION = "SparkApplication"
 JOB = "Job"
-DATAGEN_JOB_NAME = "lakebench-datagen"
-#: The SparkApplication API, as ``SparkJobManager.submit_job`` creates them.
-SPARK_GROUP = "sparkoperator.k8s.io"
-SPARK_VERSION = "v1beta2"
-SPARK_PLURAL = "sparkapplications"
 
 #: Seconds the whole cleanup may take. Each API call's read timeout is cut
 #: to what is left of it, and the cleanup's client does not retry, so an
@@ -303,7 +299,7 @@ class RunInterrupt:
             from kubernetes import client as k8s_client
 
             job = k8s_client.BatchV1Api().read_namespaced_job(
-                DATAGEN_JOB_NAME,
+                DATAGEN_JOB,
                 self.namespace,
                 _request_timeout=(CLEANUP_CONNECT_TIMEOUT_S, CLEANUP_READ_TIMEOUT_S),
             )
@@ -312,7 +308,7 @@ class RunInterrupt:
             logger.warning("Could not read the datagen Job's uid: %s", e)
         self.created(
             JOB,
-            DATAGEN_JOB_NAME,
+            DATAGEN_JOB,
             uid if isinstance(uid, str) else None,
             note="uid unknown: it could not be read after the create",
         )

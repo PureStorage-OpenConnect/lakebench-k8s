@@ -1,0 +1,27 @@
+-- Global alert counts over the full manifest: total alerts, and true
+-- positives (alerts touching any planted payment). The assembler computes
+-- fp_alerts = total - tp_global and fp_rate = fp_alerts / total (None when
+-- total is 0). Integer counts only.
+-- Placeholders: {catalog}, {run_id}, {alerts_pin}, {manifest_pin}.
+-- Memory shape: the exploded alerts are the probe side of the join to the
+-- manifest uetrs (build side); the only DISTINCT is over matched alert ids.
+WITH alerts AS (
+  SELECT a.alert_id, a.related_txn_ids
+  FROM {catalog}.gold.alerts {alerts_pin} a
+  WHERE a.run_id = '{run_id}'
+),
+manifest_all AS (
+  SELECT DISTINCT u.uetr
+  FROM {catalog}.bronze.manifest {manifest_pin} m
+  CROSS JOIN UNNEST(m.participant_uetrs) AS u(uetr)
+  WHERE u.uetr IS NOT NULL
+),
+tp AS (
+  SELECT DISTINCT a.alert_id
+  FROM alerts a
+  CROSS JOIN UNNEST(a.related_txn_ids) AS u(uetr)
+  JOIN manifest_all ma ON ma.uetr = u.uetr
+)
+SELECT
+  (SELECT COUNT(*) FROM alerts) AS total_alerts,
+  (SELECT COUNT(*) FROM tp) AS tp_global;

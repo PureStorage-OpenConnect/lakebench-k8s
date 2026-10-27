@@ -16,24 +16,16 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from .loader import _FLAT_FIELD_MAP
+
 CUTOFF = 0.75
 # The whole-schema pass looks for a key written in the wrong section, so it
 # asks for a closer match: at 0.75, 'schema_version' would be pointed at
 # 'observability.pushgateway_storage_class'.
 ELSEWHERE_CUTOFF = 0.85
 
-# Keys load_config promotes from the top level (loader._FLAT_FIELD_MAP),
-# kept in step by test_flat_keys_are_known_top_level_keys.
-FLAT_KEYS = (
-    "endpoint",
-    "access_key",
-    "secret_key",
-    "scale",
-    "namespace",
-    "mode",
-    "cycles",
-    "spark_image",
-)
+# Keys load_config promotes from the top level.
+FLAT_KEYS = tuple(_FLAT_FIELD_MAP)
 
 # Field name -> the key the user writes, per model, where they differ.
 _SPELLING = {
@@ -137,8 +129,6 @@ def unknown_key_hint(loc: tuple[Any, ...], user_loc: tuple[Any, ...]) -> str | N
         if near:
             # A flat spelling is accepted but deprecated: offer the nested key.
             if parent is _root() and near[0] in FLAT_KEYS:
-                from lakebench.config.loader import _FLAT_FIELD_MAP
-
                 return f"did you mean `{'.'.join(_FLAT_FIELD_MAP[near[0]])}`?"
             return f"did you mean `{near[0]}`?"
     by_leaf: dict[str, list[str]] = {}

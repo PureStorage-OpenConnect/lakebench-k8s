@@ -27,8 +27,8 @@ FROM python:3.14-slim@sha256:7bf6c3111fe094f8ee1a1cbcdc63c4cfb345b0e3df42d5aa9a9
 ARG LB_BUILD_COMMIT=unknown
 LABEL org.opencontainers.image.revision="${LB_BUILD_COMMIT}" \
       org.opencontainers.image.source="https://github.com/PureStorage-OpenConnect/lakebench-k8s" \
-      org.opencontainers.image.version="datagen-v2-rs-0.3" \
-      io.lakebench.model-version="datagen-v2-rs-0.3"
+      org.opencontainers.image.version="datagen-v2-rs-0.4" \
+      io.lakebench.model-version="datagen-v2-rs-0.4"
 WORKDIR /app
 COPY --from=build /build/target/release/generate /app/datagen_rs
 COPY entrypoint.py /app/entrypoint.py

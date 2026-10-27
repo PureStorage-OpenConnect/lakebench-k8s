@@ -129,5 +129,7 @@ def test_pod_floor_leaves_small_scale_and_c360_alone(schema, scale):
 def test_clamp_note_explains_thread_cut():
     _, ceiling = DATAGEN_SCALE_BANDS["financial"]
     note = a._datagen_clamp_note(_cfg("financial", ceiling), "32")
-    assert note
+    # The note names the reduced thread count the memory cap forces, not just
+    # that a cut happened.
+    assert "8 generator threads" in note
     assert a._datagen_clamp_note(_cfg("financial", 100), "8") == ""

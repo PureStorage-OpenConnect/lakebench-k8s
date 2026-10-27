@@ -114,9 +114,8 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
             # The command starts python, imports duckdb and loads two
-            # extensions: 1.38 s measured in a running pod (2026-09-27). The
-            # 1 s default failed it at random, restarting the container twice
-            # and stretching one deploy to 892 s.
+            # extensions, which takes more than a second in a running pod. The
+            # 1 s default failed it at random and restarted the container.
             timeoutSeconds: 15
             failureThreshold: 30
           readinessProbe:

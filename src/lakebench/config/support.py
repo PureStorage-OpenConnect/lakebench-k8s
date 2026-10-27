@@ -33,28 +33,8 @@ MODES: tuple[str, ...] = ("batch", "continuous")
 #: The release validation record. Package data: shipped in the wheel.
 VALIDATION_RECORD = Path(__file__).with_name("validated_combinations.yaml")
 
-#: The release matrix: (workload, mode, recipe, scale) of every release row.
-RELEASE_MATRIX: tuple[tuple[str, str, str, float], ...] = (
-    ("customer360", "batch", "hive-iceberg-spark-trino", 1),
-    ("customer360", "batch", "polaris-iceberg-spark-trino", 1),
-    ("customer360", "batch", "hive-delta-spark-trino", 1),
-    ("customer360", "batch", "hive-delta-spark-thrift", 1),
-    ("customer360", "batch", "hive-iceberg-spark-thrift", 1),
-    ("customer360", "batch", "polaris-iceberg-spark-thrift", 1),
-    ("customer360", "batch", "hive-iceberg-spark-duckdb", 1),
-    ("customer360", "batch", "polaris-iceberg-spark-duckdb", 1),
-    ("customer360", "batch", "hive-iceberg-spark-none", 1),
-    ("customer360", "continuous", "hive-iceberg-spark-trino", 1),
-    ("customer360", "continuous", "hive-delta-spark-trino", 1),
-    ("financial", "batch", "hive-iceberg-spark-trino", 1),
-    ("financial", "batch", "polaris-iceberg-spark-trino", 1),
-    ("financial", "continuous", "hive-iceberg-spark-trino", 1),
-    ("financial", "continuous", "polaris-iceberg-spark-trino", 1),
-    ("financial", "batch", "hive-iceberg-spark-trino", 10),
-)
-
-#: The release matrix's Spark minor and table format version per row, by
-#: (workload, mode, recipe). The support record is keyed by them
+#: The release matrix: the Spark minor and table format version of every
+#: release row, by (workload, mode, recipe). The support record is keyed by them
 #: (config/support.py), so a row's runs must use these versions.
 _ICEBERG, _SPARK41 = "1.12.0", "4.1"
 RELEASE_MATRIX_VERSIONS: dict[tuple[str, str, str], tuple[str, str]] = {
@@ -209,18 +189,12 @@ def recipe_names() -> list[str]:
 
 def components_of(recipe: str) -> tuple[str, str, str, str] | None:
     """(catalog, table_format, pipeline_engine, query_engine) of a recipe."""
-    from lakebench.config.recipes import RECIPES
+    from lakebench.config.recipes import RECIPES, recipe_components
 
-    r = RECIPES.get(recipe)
-    if r is None:
+    if recipe not in RECIPES:
         return None
-    arch = r.get("architecture") or {}
-    return (
-        str((arch.get("catalog") or {}).get("type")),
-        str((arch.get("table_format") or {}).get("type")),
-        str(arch.get("pipeline_engine") or "spark"),
-        str((arch.get("query_engine") or {}).get("type")),
-    )
+    catalog, table_format, engine, query_engine = recipe_components(recipe).values()
+    return catalog, table_format, engine, query_engine
 
 
 def recipe_for(
@@ -260,6 +234,13 @@ def compatibility_problem(
         )
     if workload not in WORKLOAD_TABLE_FORMATS:
         return f"workload {workload!r} declares no supported architecture."
+    if workload == "financial" and query_engine != "trino":
+        # The same rule config load applies (ArchitectureConfig
+        # .validate_financial_has_a_query_engine): scoring is SQL on Trino.
+        return (
+            "the financial workload scores recall and precision with SQL on Trino, "
+            f"so it needs query_engine trino, not {query_engine}."
+        )
     return workload_compatibility_problem(workload, table_format, canonical_mode(mode))
 
 
@@ -548,8 +529,7 @@ def support_state(
     state, basis = band
     out["scale_note"] = basis
     if state == UNSUPPORTED or out["state"] == SUPPORTED:
-        for k in ("validation_runs",):
-            out.pop(k, None)
+        out.pop("validation_runs", None)
         out.update(state=state, basis=basis)
     return out
 
@@ -663,8 +643,7 @@ def withdraw_if_code_changed(
         or not end.get("code_changed_during_run")
     ):
         return out
-    for k in ("validation_runs",):
-        out.pop(k, None)
+    out.pop("validation_runs", None)
     out.update(
         state=UNVERIFIED,
         basis=(
@@ -730,7 +709,7 @@ def _matrix_cell(
             + "; any other Spark minor or table format version is unverified",
         )
         return row
-    in_matrix = any(r[:3] == (workload, mode, recipe) for r in RELEASE_MATRIX)
+    in_matrix = (workload, mode, recipe) in RELEASE_MATRIX_VERSIONS
     row["basis"] = (
         "in this release's validation matrix; no validation run is listed yet"
         if in_matrix
@@ -871,22 +850,18 @@ GENERATED_BLOCKS: dict[str, Callable[[], str]] = {
 #: docs file (relative to the repo root) -> generated blocks it carries.
 DOCS_WITH_BLOCKS: dict[str, tuple[str, ...]] = {
     "docs/compatibility-matrix.md": ("recipe-components", "support-states"),
-    "docs/recipes.md": ("support-states",),
-    "docs/architecture.md": ("recipe-components",),
 }
 
 
-def expected_block(name: str) -> str:
-    return "\n".join(
-        [
-            _BEGIN.format(name=name),
-            _REGEN,
-            "",
-            GENERATED_BLOCKS[name](),
-            "",
-            _END.format(name=name),
-        ]
-    )
+def expected_block(
+    name: str,
+    blocks: Mapping[str, Callable[[], str]] | None = None,
+    regen: str = _REGEN,
+) -> str:
+    """The full generated block *name* from *blocks* (this module's when
+    None), markers and the *regen* instruction included."""
+    render = (GENERATED_BLOCKS if blocks is None else blocks)[name]
+    return "\n".join([_BEGIN.format(name=name), regen, "", render(), "", _END.format(name=name)])
 
 
 def block_in(text: str, name: str) -> str | None:
@@ -915,3 +890,10 @@ def regenerate_docs(root: Path) -> list[str]:
             p.write_text(new)
             changed.append(rel)
     return changed
+
+
+if __name__ == "__main__":
+    import sys
+
+    for rel in regenerate_docs(Path(sys.argv[1] if len(sys.argv) > 1 else ".")):
+        print(f"regenerated {rel}")

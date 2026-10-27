@@ -1,0 +1,8 @@
+-- (typology_id, seed) for every manifest row, for the assembler's two guards
+-- run before any scoring: the protected-corpus refusal
+-- (datagen_seed.manifest_protected_reason over all rows) and the duplicate
+-- typology_id check (check_manifest). Returns every row (not distinct), so a
+-- repeat is visible. Placeholders: {catalog}, {manifest_pin}.
+SELECT typology_id, CAST(seed AS BIGINT) AS seed
+FROM {catalog}.bronze.manifest {manifest_pin}
+ORDER BY typology_id;

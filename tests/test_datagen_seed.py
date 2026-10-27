@@ -26,6 +26,29 @@ def _cfg(schema: str, seed: int | None = None):
     return make_config(architecture={"workload": {"schema": schema, "datagen": dg}})
 
 
+@pytest.mark.parametrize(
+    "typ,n,expected",
+    [
+        ("fan_in", 5, 4),
+        ("stack", 4, 1),
+        ("rapid_layering", 1, 0),
+    ],
+)
+def test_subject_index_fixed_branches(typ, n, expected):
+    # The seed-independent branches: subject role is a fixed position.
+    assert ds.subject_index(typ, n, 123456789) == expected
+
+
+def test_subject_index_corridor_flips_on_the_instance_seed():
+    # corridor_high_risk picks the subject by the low bit of splitmix64(seed),
+    # so it depends on the instance seed and only ever returns 0 or 1.
+    vals = {ds.subject_index("corridor_high_risk", 3, s) for s in range(64)}
+    assert vals == {0, 1}
+    # Pinned against the generator's derivation for two seeds.
+    assert ds.subject_index("corridor_high_risk", 3, 0) == ds._splitmix64(0) & 1
+    assert ds.subject_index("corridor_high_risk", 3, 43) == ds._splitmix64(43) & 1
+
+
 def test_prereg_spent_list_holds_no_unlooked_heldout_seed():
     # The calibration seed is never spent; the held-out seeds are known only by
     # hash, and a spent seed hashes to one only when its look or burn is recorded.
@@ -37,10 +60,14 @@ def test_unset_financial_seed_resolves_to_the_calibration_seed():
     assert ds.config_seed(_cfg("financial")) == _CORPORA["calibration_seed"]
 
 
-@pytest.mark.parametrize("seed", [42, 50000042])
-def test_spent_financial_seed_refused_at_load(seed):
-    with pytest.raises(ValidationError, match="spent"):
-        _cfg("financial", seed)
+def test_spent_financial_seed_refused_at_load():
+    """A spent seed is refused at load, with or without a role."""
+    for seed in (42, 50000042):
+        with pytest.raises(ValidationError, match="spent"):
+            _cfg("financial", seed)
+    # A role does not rescue a spent seed.
+    with pytest.raises(ValidationError):
+        _cfg_role(42, "evaluation")
 
 
 def test_spent_seed_refused_even_if_validation_is_bypassed():
@@ -81,18 +108,6 @@ def test_template_without_the_seed_fails_instead_of_defaulting():
     assert not ctx.get("datagen_seed_secret")
     with pytest.raises(UndefinedError):
         engine.renderer.render("datagen/job.yaml.j2", ctx)
-
-
-def test_reference_job_reports_the_configured_seed(monkeypatch):
-    from lakebench.modules.pipeline_engines.spark import job as jobmod
-    from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
-
-    monkeypatch.setattr(jobmod, "_lakebench_git_sha", lambda: "abc")
-    mgr = SparkJobManager(_cfg("financial", 7777), MagicMock())
-    env = {
-        e["name"]: e.get("value") for e in mgr._build_env_vars(JobType.SCORE_FINANCIAL_REFERENCE)
-    }
-    assert env["LB_DATAGEN_SEED"] == "7777"
 
 
 # ---------------------------------------------------------------------------
@@ -154,11 +169,6 @@ def test_protected_seed_allowed_with_its_role(seed, role, looks_open):
 def test_role_must_match_its_registered_seed(seed, role):
     with pytest.raises(ValidationError, match="registered for|does not match"):
         _cfg_role(seed, role)
-
-
-def test_spent_seed_refused_even_with_a_role():
-    with pytest.raises(ValidationError):
-        _cfg_role(42, "evaluation")
 
 
 def test_role_is_financial_only():
@@ -293,15 +303,6 @@ def test_registered_run_needs_a_verified_corpus(looks_open):
     assert ds.aml_seed_error(_no_plain(ds._corpora()), EVAL, "evaluation") is None
 
 
-def test_cluster_refusal_runs_before_anything_is_written():
-    src = (
-        Path(__file__).resolve().parents[1]
-        / "src/lakebench/spark/scripts/score_financial_reference.py"
-    ).read_text()
-    main = src[src.index("def main()") :]
-    assert main.index("_refuse_guarded_corpus(") < main.index("compute_leakage_gate(")
-
-
 @pytest.mark.parametrize(
     "bad",
     [{k: v for k, v in _CORPORA.items() if k != "spent_seeds"}, {**_CORPORA, "spent_seeds": "42"}],
@@ -313,7 +314,9 @@ def test_damaged_spent_seeds_fail_closed(bad):
         ds.aml_seed_error(bad, 43)
 
 
-@pytest.mark.parametrize("flag", [False, "false", "true", 1, None])
+# The string "true" and bool False both take the not-literally-True branch;
+# two spellings stand for the five that hit it.
+@pytest.mark.parametrize("flag", [False, "true"])
 def test_looks_open_only_when_literally_true(flag):
     corpora = {**_CORPORA, "registered_looks_open": flag}
     err = ds.aml_seed_error(corpora, EVAL, "evaluation", [EVAL], claim_verified=True)

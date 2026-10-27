@@ -14,6 +14,7 @@ from typing import Any
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
+from lakebench.k8s.lease_state import LeaseHoldExceeded
 from lakebench.k8s.target import ClusterTarget, ContextConflictError
 
 logger = logging.getLogger(__name__)
@@ -27,8 +28,9 @@ _BASE_DELAY = 1.0  # seconds
 def retry_k8s_api(func):
     """Retry decorator for K8s API calls with exponential backoff and jitter.
 
-    Retries on transient ApiException (429/5xx), ConnectionError, and
-    TimeoutError. 3 retries with 1s/2s/4s base delay + random jitter.
+    Retries on transient ApiException (429/5xx), a K8sResourceError raised
+    from one, ConnectionError, and TimeoutError. 3 retries with 1s/2s/4s base
+    delay + random jitter. The last exception is re-raised unchanged.
     """
 
     @functools.wraps(func)
@@ -39,6 +41,13 @@ def retry_k8s_api(func):
                 return func(*args, **kwargs)
             except ApiException as e:
                 if e.status not in _RETRYABLE_STATUS_CODES:
+                    raise
+                last_exc = e
+            except K8sResourceError as e:
+                cause = e.__cause__
+                if not (
+                    isinstance(cause, ApiException) and cause.status in _RETRYABLE_STATUS_CODES
+                ):
                     raise
                 last_exc = e
             except (ConnectionError, TimeoutError) as e:
@@ -109,6 +118,21 @@ _NAMESPACE_BLOCKING_CONDITIONS = (
     "NamespaceDeletionDiscoveryFailure",
     "NamespaceDeletionGroupVersionParsingFailure",
 )
+
+
+# Kinds applied by read, then replace or create: kind -> (API client
+# attribute, API method suffix, namespaced).
+_REPLACEABLE: dict[str, tuple[str, str, bool]] = {
+    "Secret": ("_core_v1", "secret", True),
+    "ConfigMap": ("_core_v1", "config_map", True),
+    "ServiceAccount": ("_core_v1", "service_account", True),
+    "Role": ("_rbac_v1", "role", True),
+    "RoleBinding": ("_rbac_v1", "role_binding", True),
+    "ClusterRole": ("_rbac_v1", "cluster_role", False),
+    "ClusterRoleBinding": ("_rbac_v1", "cluster_role_binding", False),
+    "Deployment": ("_apps_v1", "deployment", True),
+    "StatefulSet": ("_apps_v1", "stateful_set", True),
+}
 
 
 @dataclass
@@ -262,6 +286,7 @@ class K8sClient:
         self._batch_v1 = client.BatchV1Api()
         self._custom = client.CustomObjectsApi()
         self._storage_v1 = client.StorageV1Api()
+        self._crd_cache: dict[tuple[str, str], tuple[str, bool]] = {}
 
     @property
     def namespace(self) -> str:
@@ -409,8 +434,6 @@ class K8sClient:
 
     def wait_for_namespace_deleted(self, name: str, timeout: float = 120) -> None:
         """Wait for a namespace to be fully deleted."""
-        import time
-
         deadline = time.time() + timeout
         while time.time() < deadline:
             if not self.namespace_exists(name):
@@ -471,14 +494,11 @@ class K8sClient:
         except ApiException as e:
             if e.status == 409:  # Already exists
                 return False
-            raise K8sResourceError(f"Failed to create namespace: {e}")  # noqa: B904
+            raise K8sResourceError(f"Failed to create namespace: {e}") from e
 
     @retry_k8s_api
     def delete_namespace(self, name: str, uid: str | None = None) -> bool:
         """Delete a namespace.
-
-        Args:
-            name: Namespace name
 
         Args:
             name: Namespace name
@@ -519,7 +539,7 @@ class K8sClient:
                 raise NamespaceTerminatingError(  # noqa: B904
                     f"Namespace '{name}' is already being deleted"
                 )
-            raise K8sResourceError(f"Failed to delete namespace: {e}")  # noqa: B904
+            raise K8sResourceError(f"Failed to delete namespace: {e}") from e
 
     def secret_exists(self, name: str, namespace: str | None = None) -> bool:
         """Check if a secret exists.
@@ -588,28 +608,15 @@ class K8sClient:
         try:
             if kind == "Namespace":
                 return self._apply_namespace(manifest)
-            elif kind == "Secret":
-                return self._apply_secret(manifest, ns)
-            elif kind == "ConfigMap":
-                return self._apply_configmap(manifest, ns)
+            elif kind in _REPLACEABLE:
+                api_attr, resource, namespaced = _REPLACEABLE[kind]
+                return self._replace_or_create(
+                    getattr(self, api_attr), resource, manifest, ns if namespaced else None
+                )
             elif kind == "PersistentVolumeClaim":
                 return self._apply_pvc(manifest, ns)
-            elif kind == "ServiceAccount":
-                return self._apply_serviceaccount(manifest, ns)
-            elif kind == "Role":
-                return self._apply_role(manifest, ns)
-            elif kind == "RoleBinding":
-                return self._apply_rolebinding(manifest, ns)
-            elif kind == "ClusterRole":
-                return self._apply_clusterrole(manifest)
-            elif kind == "ClusterRoleBinding":
-                return self._apply_clusterrolebinding(manifest)
             elif kind == "Service":
                 return self._apply_service(manifest, ns)
-            elif kind == "Deployment":
-                return self._apply_deployment(manifest, ns)
-            elif kind == "StatefulSet":
-                return self._apply_statefulset(manifest, ns)
             elif kind == "Job":
                 return self._apply_job(manifest, ns)
             else:
@@ -619,7 +626,7 @@ class K8sClient:
                     return self._apply_custom_resource(manifest, ns)
                 raise K8sResourceError(f"Unsupported resource kind: {kind}")
         except ApiException as e:
-            raise K8sResourceError(f"Failed to apply {kind}/{name}: {e}")  # noqa: B904
+            raise K8sResourceError(f"Failed to apply {kind}/{name}: {e}") from e
 
     def _apply_namespace(self, manifest: dict[str, Any]) -> bool:
         """Apply a Namespace manifest."""
@@ -638,30 +645,27 @@ class K8sClient:
         self._core_v1.create_namespace(ns)
         return True
 
-    def _apply_secret(self, manifest: dict[str, Any], namespace: str) -> bool:
-        """Apply a Secret manifest."""
-        name = manifest["metadata"]["name"]
-        manifest["metadata"]["namespace"] = namespace
-        try:
-            self._core_v1.read_namespaced_secret(name, namespace)
-            self._core_v1.replace_namespaced_secret(name, namespace, manifest)
-        except ApiException as e:
-            if e.status == 404:
-                self._core_v1.create_namespaced_secret(namespace, manifest)
-            else:
-                raise
-        return True
+    def _replace_or_create(
+        self, api: Any, resource: str, manifest: dict[str, Any], namespace: str | None
+    ) -> bool:
+        """Replace ``resource`` if it exists, else create it.
 
-    def _apply_configmap(self, manifest: dict[str, Any], namespace: str) -> bool:
-        """Apply a ConfigMap manifest."""
+        ``resource`` is the API method suffix (``config_map``, ``cluster_role``);
+        a ``namespace`` of None means the resource is cluster-scoped.
+        """
         name = manifest["metadata"]["name"]
-        manifest["metadata"]["namespace"] = namespace
+        where: tuple[str, ...] = ()
+        if namespace is None:
+            scope = ""
+        else:
+            manifest["metadata"]["namespace"] = namespace
+            scope, where = "namespaced_", (namespace,)
         try:
-            self._core_v1.read_namespaced_config_map(name, namespace)
-            self._core_v1.replace_namespaced_config_map(name, namespace, manifest)
+            getattr(api, f"read_{scope}{resource}")(name, *where)
+            getattr(api, f"replace_{scope}{resource}")(name, *where, manifest)
         except ApiException as e:
             if e.status == 404:
-                self._core_v1.create_namespaced_config_map(namespace, manifest)
+                getattr(api, f"create_{scope}{resource}")(*where, manifest)
             else:
                 raise
         return True
@@ -683,74 +687,6 @@ class K8sClient:
                 self._core_v1.create_namespaced_persistent_volume_claim(namespace, manifest)
                 return True
             raise
-
-    def _apply_serviceaccount(self, manifest: dict[str, Any], namespace: str) -> bool:
-        """Apply a ServiceAccount manifest."""
-        name = manifest["metadata"]["name"]
-        manifest["metadata"]["namespace"] = namespace
-        try:
-            self._core_v1.read_namespaced_service_account(name, namespace)
-            self._core_v1.replace_namespaced_service_account(name, namespace, manifest)
-        except ApiException as e:
-            if e.status == 404:
-                self._core_v1.create_namespaced_service_account(namespace, manifest)
-            else:
-                raise
-        return True
-
-    def _apply_role(self, manifest: dict[str, Any], namespace: str) -> bool:
-        """Apply a Role manifest."""
-        name = manifest["metadata"]["name"]
-        manifest["metadata"]["namespace"] = namespace
-        try:
-            self._rbac_v1.read_namespaced_role(name, namespace)
-            self._rbac_v1.replace_namespaced_role(name, namespace, manifest)
-        except ApiException as e:
-            if e.status == 404:
-                self._rbac_v1.create_namespaced_role(namespace, manifest)
-            else:
-                raise
-        return True
-
-    def _apply_rolebinding(self, manifest: dict[str, Any], namespace: str) -> bool:
-        """Apply a RoleBinding manifest."""
-        name = manifest["metadata"]["name"]
-        manifest["metadata"]["namespace"] = namespace
-        try:
-            self._rbac_v1.read_namespaced_role_binding(name, namespace)
-            self._rbac_v1.replace_namespaced_role_binding(name, namespace, manifest)
-        except ApiException as e:
-            if e.status == 404:
-                self._rbac_v1.create_namespaced_role_binding(namespace, manifest)
-            else:
-                raise
-        return True
-
-    def _apply_clusterrole(self, manifest: dict[str, Any]) -> bool:
-        """Apply a ClusterRole manifest (cluster-scoped)."""
-        name = manifest["metadata"]["name"]
-        try:
-            self._rbac_v1.read_cluster_role(name)
-            self._rbac_v1.replace_cluster_role(name, manifest)
-        except ApiException as e:
-            if e.status == 404:
-                self._rbac_v1.create_cluster_role(manifest)
-            else:
-                raise
-        return True
-
-    def _apply_clusterrolebinding(self, manifest: dict[str, Any]) -> bool:
-        """Apply a ClusterRoleBinding manifest (cluster-scoped)."""
-        name = manifest["metadata"]["name"]
-        try:
-            self._rbac_v1.read_cluster_role_binding(name)
-            self._rbac_v1.replace_cluster_role_binding(name, manifest)
-        except ApiException as e:
-            if e.status == 404:
-                self._rbac_v1.create_cluster_role_binding(manifest)
-            else:
-                raise
-        return True
 
     def _apply_service(self, manifest: dict[str, Any], namespace: str) -> bool:
         """Apply a Service manifest.
@@ -782,39 +718,9 @@ class K8sClient:
             return True
         raise K8sResourceError(f"Service {name} was created and deleted under apply")
 
-    def _apply_deployment(self, manifest: dict[str, Any], namespace: str) -> bool:
-        """Apply a Deployment manifest."""
-        name = manifest["metadata"]["name"]
-        manifest["metadata"]["namespace"] = namespace
-        try:
-            self._apps_v1.read_namespaced_deployment(name, namespace)
-            self._apps_v1.replace_namespaced_deployment(name, namespace, manifest)
-        except ApiException as e:
-            if e.status == 404:
-                self._apps_v1.create_namespaced_deployment(namespace, manifest)
-            else:
-                raise
-        return True
-
-    def _apply_statefulset(self, manifest: dict[str, Any], namespace: str) -> bool:
-        """Apply a StatefulSet manifest."""
-        name = manifest["metadata"]["name"]
-        manifest["metadata"]["namespace"] = namespace
-        try:
-            self._apps_v1.read_namespaced_stateful_set(name, namespace)
-            self._apps_v1.replace_namespaced_stateful_set(name, namespace, manifest)
-        except ApiException as e:
-            if e.status == 404:
-                self._apps_v1.create_namespaced_stateful_set(namespace, manifest)
-            else:
-                raise
-        return True
-
     def _apply_job(self, manifest: dict[str, Any], namespace: str) -> bool:
-        """Apply a Job manifest.
-
-        Note: Jobs are immutable, so we delete and recreate if already exists.
-        """
+        """Apply a Job manifest. Jobs are immutable, so an existing one is
+        deleted and the new one created after a 2 s pause."""
         name = manifest["metadata"]["name"]
         manifest["metadata"]["namespace"] = namespace
         try:
@@ -825,9 +731,6 @@ class K8sClient:
                 namespace,
                 body=client.V1DeleteOptions(propagation_policy="Background"),
             )
-            # Wait briefly for deletion
-            import time
-
             time.sleep(2)
             self._batch_v1.create_namespaced_job(namespace, manifest)
         except ApiException as e:
@@ -853,13 +756,8 @@ class K8sClient:
 
         group, version = api_version.split("/", 1)
 
-        # Look up the actual plural form from the API
-        plural = self._get_crd_plural(group, version, kind)
-
-        # Check if resource is cluster-scoped
-        is_cluster_scoped = self._is_cluster_scoped_crd(group, version, kind)
-
-        custom_api = client.CustomObjectsApi()
+        plural, is_cluster_scoped = self._crd_names(group, kind)
+        custom_api = self._custom
 
         if is_cluster_scoped:
             # Cluster-scoped resource (like SecretClass)
@@ -953,10 +851,8 @@ class K8sClient:
             True if deleted, False if not found
         """
         ns = namespace or self.namespace
-        custom_api = client.CustomObjectsApi()
-
         try:
-            custom_api.delete_namespaced_custom_object(
+            self._custom.delete_namespaced_custom_object(
                 group=group,
                 version=version,
                 namespace=ns,
@@ -971,54 +867,29 @@ class K8sClient:
                 f"Failed to delete {group}/{version}/{plural}/{name}: {e}"
             )
 
-    def _get_crd_plural(self, group: str, version: str, kind: str) -> str:
-        """Get the plural name of a CRD.
+    def _crd_names(self, group: str, kind: str) -> tuple[str, bool]:
+        """``(plural, cluster_scoped)`` of the CRD for ``group``/``kind``.
 
-        Args:
-            group: API group
-            version: API version
-            kind: Resource kind
-
-        Returns:
-            Plural name for the resource
+        A CRD found in the cluster is cached for this client. When it is not
+        found (or the lookup fails) the plural is guessed from the kind and the
+        resource is taken as namespaced; that guess is not cached, so a CRD
+        installed later in the process is still found.
         """
+        key = (group, kind)
+        if key in self._crd_cache:
+            return self._crd_cache[key]
         try:
-            api_ext = client.ApiextensionsV1Api()
-            crds = api_ext.list_custom_resource_definition()
+            crds = client.ApiextensionsV1Api().list_custom_resource_definition()
             for crd in crds.items:
                 if crd.spec.group == group and crd.spec.names.kind == kind:
-                    return crd.spec.names.plural
+                    found = (crd.spec.names.plural, crd.spec.scope == "Cluster")
+                    self._crd_cache[key] = found
+                    return found
         except Exception as e:
-            logger.debug("Could not look up CRD plural for %s/%s: %s", group, kind, e)
+            logger.debug("Could not look up CRD for %s/%s: %s", group, kind, e)
 
-        # Fallback: simple pluralization
         kind_lower = kind.lower()
-        if kind_lower.endswith("s"):
-            return kind_lower + "es"
-        return kind_lower + "s"
-
-    def _is_cluster_scoped_crd(self, group: str, version: str, kind: str) -> bool:
-        """Check if a CRD is cluster-scoped.
-
-        Args:
-            group: API group
-            version: API version
-            kind: Resource kind
-
-        Returns:
-            True if cluster-scoped, False if namespaced
-        """
-        try:
-            api_ext = client.ApiextensionsV1Api()
-            crds = api_ext.list_custom_resource_definition()
-            for crd in crds.items:
-                if crd.spec.group == group and crd.spec.names.kind == kind:
-                    return crd.spec.scope == "Cluster"
-        except Exception as e:
-            logger.debug("Could not check CRD scope for %s/%s: %s", group, kind, e)
-
-        # Default to namespaced
-        return False
+        return (kind_lower + "es" if kind_lower.endswith("s") else kind_lower + "s"), False
 
     def get_cluster_capacity(self) -> ClusterCapacity | None:
         """Get aggregate allocatable resources across worker nodes.
@@ -1262,6 +1133,10 @@ class K8sClient:
 
         Returns:
             Tuple of (exit_code, stdout, stderr)
+
+        Raises:
+            ContextConflictError, LeaseHoldExceeded: refusals from the pinned
+                kubectl helper; they are not command failures.
         """
         ns = namespace or self.namespace
 
@@ -1287,6 +1162,8 @@ class K8sClient:
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:
             return 1, "", "Command timed out"
+        except (ContextConflictError, LeaseHoldExceeded):
+            raise
         except Exception as e:
             return 1, "", str(e)
 

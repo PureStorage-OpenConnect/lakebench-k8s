@@ -31,7 +31,7 @@ STREAM_SILVER = (
     "silver.silver_batch_versions",
 )
 # The gold tables gold-refresh writes besides the TM ones the reset already
-# dropped; a reader (score_financial) would take their rows as this run's.
+# dropped; a reader (the scorer) would take their rows as this run's.
 STREAM_GOLD = (
     "gold.alerts",
     "gold.risk_scores",
@@ -71,9 +71,11 @@ def test_reset_drops_every_table_the_continuous_run_writes(spark, load_script, m
         tables = tuple(bvf.CONTINUOUS_SILVER_TABLES)
         assert set(STREAM_SILVER) <= set(tables)
     else:
-        # Until gold-refresh's first tick, the previous run's alerts and
-        # detection status would read as this run's.
-        tables = STREAM_GOLD
+        # The script's own set, so a gold table added there is populated and
+        # checked too; until gold-refresh's first tick, the previous run's
+        # alerts and detection status would read as this run's.
+        tables = tuple(bvf.CONTINUOUS_GOLD_TABLES)
+        assert set(STREAM_GOLD) <= set(tables)
     _populate(spark, tables)
     bvf._continuous_reset(spark, spark.createDataFrame([("x",)], "msg_id string"))
     left = [t for t in tables if _exists(spark, t)]
@@ -90,6 +92,36 @@ def test_fresh_checkpoint_refuses_any_populated_stream_table(spark, load_script,
     _populate(spark, ["silver.account_statements"])
     with pytest.raises(common.SilverAbort):
         ssf.refuse_reused_silver(spark, str(tmp_path / "fresh-ckpt"))
+
+
+def test_register_accounts_keeps_the_holder_map_only(spark, load_script, monkeypatch, tmp_path):
+    """bronze.accounts holds (holder_entity_id, iban) from account.parquet; a
+    missing file registers nothing and reports False."""
+    bvf = load_script("bronze_verify_financial")
+    path = tmp_path / "account.parquet"
+    spark.createDataFrame(
+        [(1, "DE01", "BIC1", "EUR"), (2, "DE02", "BIC2", "EUR")],
+        "holder_entity_id bigint, iban string, bank_bic string, currency string",
+    ).write.parquet(str(path))
+    monkeypatch.setattr(bvf, "ACCOUNT_URI", str(path))
+    spark.sql(f"DROP TABLE IF EXISTS {CAT}.bronze.accounts")
+    assert bvf.register_accounts(spark) is True
+    rows = spark.table(f"{CAT}.bronze.accounts")
+    assert rows.columns == ["holder_entity_id", "iban"]
+    assert rows.count() == 2
+
+    monkeypatch.setattr(bvf, "ACCOUNT_URI", str(tmp_path / "missing.parquet"))
+    assert bvf.register_accounts(spark) is False
+
+
+def test_reset_drops_the_previous_runs_account_map(spark, load_script, monkeypatch):
+    monkeypatch.setenv("LB_CATALOG_TYPE", "polaris")
+    bvf = load_script("bronze_verify_financial")
+    _populate(spark, ["bronze.accounts", "bronze.manifest"])
+    bvf._continuous_reset(spark, spark.createDataFrame([("x",)], "msg_id string"))
+    # Both re-register from files that do not exist here, so both are gone.
+    assert not _exists(spark, "bronze.accounts")
+    assert not _exists(spark, "bronze.manifest")
 
 
 def test_refuse_no_op_when_all_tables_empty(spark, load_script, tmp_path):

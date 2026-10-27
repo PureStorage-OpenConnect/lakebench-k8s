@@ -308,11 +308,17 @@ def test_init_from_never_in_place(tmp_path, monkeypatch):
     assert old.read_bytes() == before
 
 
-def test_init_from_needs_overwrite_for_an_existing_file(tmp_path, monkeypatch):
+def test_init_from_existing_file_needs_overwrite(tmp_path, monkeypatch):
+    # Without --overwrite an existing target is refused and left untouched ...
     (tmp_path / "new.yaml").write_text("keep me\n")
     old, new, r = _convert(tmp_path, monkeypatch, FLAT_V12)
     assert r.exit_code == 2 and "--overwrite" in r.output
     assert new.read_text() == "keep me\n"
+    # ... and with --overwrite, overwriting the same deployment succeeds.
+    (tmp_path / "new.yaml").write_text(FLAT_V12)
+    old, new, r = _convert(tmp_path, monkeypatch, FLAT_V12, "--overwrite")
+    assert r.exit_code == 0, r.output
+    assert yaml.safe_load(new.read_text())["name"] == "flat12"
 
 
 def test_init_from_overwrite_that_moves_the_deployment_is_refused(tmp_path, monkeypatch):
@@ -322,13 +328,6 @@ def test_init_from_overwrite_that_moves_the_deployment_is_refused(tmp_path, monk
     assert "namespace 'other-ns' -> 'flat12-ns'" in " ".join(r.output.split())
     assert "other-ns" in new.read_text()
     assert not list(tmp_path.glob(".new.yaml.*"))  # no temporary file left
-
-
-def test_init_from_overwrite_of_the_same_deployment(tmp_path, monkeypatch):
-    (tmp_path / "new.yaml").write_text(FLAT_V12)
-    old, new, r = _convert(tmp_path, monkeypatch, FLAT_V12, "--overwrite")
-    assert r.exit_code == 0, r.output
-    assert yaml.safe_load(new.read_text())["name"] == "flat12"
 
 
 # -- the name and the buckets ---------------------------------------------------------
@@ -588,17 +587,6 @@ def test_init_from_through_a_link_refuses_a_name_only_beside_the_target(tmp_path
     assert yaml.safe_load((tmp_path / "new.yaml").read_text())["name"] == "lb-target"
 
 
-def test_init_from_overwrite_guard_sees_a_reference_name(tmp_path, monkeypatch):
-    """OLD names its deployment through ${LB_NAME}; the file being replaced
-    resolves to that same name in another namespace: refused."""
-    monkeypatch.setenv("LB_NAME", "p9")
-    (tmp_path / "new.yaml").write_text(FLAT_V12.replace("flat12", "p9").replace("p9-ns", "prod-ns"))
-    text = FLAT_V12.replace("name: flat12", "name: ${LB_NAME}").replace("flat12-ns", "p9")
-    old, new, r = _convert(tmp_path, monkeypatch, text, "--overwrite")
-    assert r.exit_code == 3, r.output
-    assert "prod-ns" in new.read_text()
-
-
 def test_init_from_typed_reference_converts_with_the_shells_value(tmp_path, monkeypatch):
     monkeypatch.setenv("LB_SCALE", "2")
     text = FLAT_V12.replace("scale: 2", "scale: ${LB_SCALE}")
@@ -668,19 +656,29 @@ def test_init_from_takes_back_a_recipe_that_changes_settings(tmp_path, monkeypat
     assert "recipe" not in yaml.safe_load(new.read_text())
 
 
-@pytest.mark.parametrize("unset_side", ["old", "replaced"])
-def test_init_from_overwrite_guard_refuses_an_unset_reference_name(
-    tmp_path, monkeypatch, unset_side
-):
-    monkeypatch.delenv("LB_NAME", raising=False)
+@pytest.mark.parametrize("scenario", ["set-moves-namespace", "unset-old", "unset-replaced"])
+def test_init_from_overwrite_guard_sees_a_reference_name(tmp_path, monkeypatch, scenario):
+    """The overwrite guard resolves ${LB_NAME} references. A set value that
+    moves the deployment to another namespace is refused; an unset value
+    (whether in OLD or in the file being replaced) is refused too. Either way
+    the file on disk is left untouched."""
     ref = FLAT_V12.replace("name: flat12", "name: ${LB_NAME}")
-    replaced = ref if unset_side == "replaced" else FLAT_V12.replace("flat12-ns", "other-ns")
+    if scenario == "set-moves-namespace":
+        monkeypatch.setenv("LB_NAME", "p9")
+        replaced = FLAT_V12.replace("flat12", "p9").replace("p9-ns", "prod-ns")
+        old_text = ref.replace("flat12-ns", "p9")
+        needle = "keeps the name 'p9'"
+    else:
+        monkeypatch.delenv("LB_NAME", raising=False)
+        unset_side = "replaced" if scenario == "unset-replaced" else "old"
+        replaced = ref if unset_side == "replaced" else FLAT_V12.replace("flat12-ns", "other-ns")
+        old_text = FLAT_V12 if unset_side == "replaced" else ref
+        needle = "has not set"
     (tmp_path / "new.yaml").write_text(replaced)
-    old_text = FLAT_V12 if unset_side == "replaced" else ref
     old, new, r = _convert(tmp_path, monkeypatch, old_text, "--overwrite")
     assert r.exit_code == 3, r.output
-    assert "has not set" in " ".join(r.output.split())
-    assert new.read_text() == replaced
+    assert needle in " ".join(r.output.split()), scenario
+    assert new.read_text() == replaced  # the file is left untouched
 
 
 def test_spark_secret_references_are_not_credentials():

@@ -123,15 +123,17 @@ def _stats(logs: dict[str, str]) -> dict:
 
 
 def test_discovery_window_fails_the_continuous_gate():
-    probs = window_gate_problems(_stats(DISCOVERY))
+    stats = _stats(DISCOVERY)
+    probs = window_gate_problems(stats)
     text = "\n".join(probs)
     assert "before the window opened" in text  # drained pre-window
     assert "silver committed 1" in text
     assert "gold refreshed on new silver data 1" in text
-
-
-def test_healthy_window_passes_the_continuous_gate():
-    assert window_gate_problems(_stats(HEALTHY)) == []
+    # The pre-window rows are not window rows.
+    b = stats["bronze-ingest"]
+    assert b["window_input_rows"] == 0
+    assert b["pre_window_input_rows"] == 2_478_560
+    assert b["last_write_offset_seconds"] is None
 
 
 def test_idle_gold_cycles_do_not_count_as_continuous():
@@ -158,13 +160,6 @@ def test_gold_freshness_must_be_measured_inside_the_window():
 
 
 # ---------------------------------------------------------------- item 2
-
-
-def test_rows_before_the_window_are_not_window_rows():
-    b = _stats(DISCOVERY)["bronze-ingest"]
-    assert b["window_input_rows"] == 0
-    assert b["pre_window_input_rows"] == 2_478_560
-    assert b["last_write_offset_seconds"] is None
 
 
 def test_arrival_stops_one_trigger_after_the_last_write_of_a_drained_corpus():
@@ -203,7 +198,8 @@ def _stage(name, **kw):
 
 
 def test_throughput_counts_only_window_rows_over_arrival_time():
-    # The discovery shape: 2,478,560 rows, all before the window.
+    # Discovery shape: 2,478,560 rows, all before the window. Throughput over
+    # the window is zero (was 2,478,560 / 600 = 4,130.9).
     pb = _pb(
         [
             _stage(
@@ -217,12 +213,11 @@ def test_throughput_counts_only_window_rows_over_arrival_time():
         ],
         datagen_rows=2_478_560,
     )
-    assert pb.sustained_throughput_rps == 0.0  # was 2,478,560 / 600 = 4,130.9
+    assert pb.sustained_throughput_rps == 0.0
     assert pb.arrival_seconds == 0.0
     assert pb.pre_window_rows == 2_478_560
 
-
-def test_a_corpus_that_drains_mid_window_is_not_averaged_over_idle_time():
+    # A corpus that drains mid-window is not averaged over the idle tail.
     pb = _pb(
         [
             _stage(
@@ -242,8 +237,7 @@ def test_a_corpus_that_drains_mid_window_is_not_averaged_over_idle_time():
     scores = pb.to_dict()["scores"]
     assert scores["arrival_seconds"] == 300 and scores["pre_window_rows"] == 100_000
 
-
-def test_a_record_without_a_window_is_scored_as_before():
+    # A record without a window is scored the old way (no arrival).
     pb = _pb([_stage("bronze", input_rows=600_000)], datagen_rows=0)
     assert pb.sustained_throughput_rps == pytest.approx(1000.0)
     assert pb.arrival_seconds is None
@@ -280,6 +274,98 @@ def test_stage_fields_are_measured_or_absent():
     assert silver.committed_rows == 2_478_560
     assert silver.output_rows == 2_428_561
     assert gold.output_rows == 14
+
+
+@pytest.mark.parametrize("job", sorted(HEALTHY))
+def test_duplicated_lines_from_a_resumed_capture_count_once(job):
+    """A capture resumed after the kubelet severed it re-fetches an overlap:
+    the repeated lines add no rows and no batch times."""
+    lines = HEALTHY[job].splitlines()
+    cut = len(lines) // 2
+    resumed = "\n".join(lines[:cut] + lines[cut - 4 :]) + "\n"
+    c = MetricsCollector()
+    once, twice = c.parse_streaming_logs(HEALTHY[job], job), c.parse_streaming_logs(resumed, job)
+    for key in (
+        "total_rows_processed",
+        "total_batches",
+        "batch_size",
+        "micro_batch_duration_ms",
+        "median_batch_duration_ms",
+        "batch_span_seconds",
+    ):
+        assert getattr(twice, key) == getattr(once, key), key
+
+
+def _handoff_lags_by_scan(events_by_job, at):
+    """A plain linear-scan reference for handoff_lags, for the bisect
+    implementation to match."""
+    from lakebench.metrics.continuous_window import HANDOFFS, _epoch
+
+    bronze = events_by_job.get("bronze-ingest") or []
+    silver = events_by_job.get("silver-stream") or []
+    gold = events_by_job.get("gold-refresh") or []
+    out = {name: None for name, _, _ in HANDOFFS}
+    landed = [e for e in bronze if e.kind == "landing" and e.at <= at and e.value is not None]
+    if landed:
+        out["datagen->bronze"] = max(0.0, _epoch(at) - max(e.value or 0.0 for e in landed))
+
+    def waiting(upstream, consumer, start):
+        commits = sorted(e.at for e in upstream if e.kind == "commit" and e.at <= at)
+        if not commits:
+            return None
+        starts = [e.at for e in consumer if e.kind == start and e.at <= at]
+        last = max(starts) if starts else None
+        pending = [c for c in commits if last is None or c > last]
+        return max(0.0, (at - pending[0]).total_seconds()) if pending else 0.0
+
+    out["bronze->silver"] = waiting(bronze, silver, "transform")
+    out["silver->gold"] = waiting(silver, gold, "aggregate")
+    return out
+
+
+def _big_logs(window_s, bronze_every, silver_every, gold_every):
+    b, s, g, i, t = [], [], [], 0, 0.0
+    while t < window_s:
+        b.append(_line(t, f"[landing] batch={i} oldest={t + 1e9 - 2:.1f} newest={t + 1e9:.1f}"))
+        b.append(_line(t, f"Batch {i}: writing {26000 + i:,} rows to ice.bronze.raw"))
+        b.append(_line(t + 3, f"Batch {i}: committed in 3.0s"))
+        i, t = i + 1, t + bronze_every
+    i, t = 0, 5.0
+    while t < window_s:
+        s.append(_line(t, f"Batch {i}: transforming {52000 + (i % 7) * 100:,} rows"))
+        s.append(_line(t + 8, f"Batch {i}: committed to ice.silver.t in 8.0s"))
+        i, t = i + 1, t + silver_every
+    c, t, prev = 1, 20.0, 0
+    while t < window_s:
+        prev += 1000 if c % 3 else 0
+        tag = " (silver idle)" if c % 4 == 0 else ""
+        g.append(_line(t + 1, f"Cycle {c}: aggregating {prev:,} Silver records"))
+        g.append(_line(t + 5, f"Cycle {c}: data freshness {40 + c % 9}.0s{tag}"))
+        g.append(_line(t + 6, f"Cycle {c}: refreshed ice.gold.g in 6.0s (14 KPI records)"))
+        c, t = c + 1, t + gold_every
+    return {
+        "bronze-ingest": "\n".join(b) + "\n",
+        "silver-stream": "\n".join(s) + "\n",
+        "gold-refresh": "\n".join(g) + "\n",
+    }
+
+
+@pytest.mark.parametrize(
+    "logs",
+    [DISCOVERY, HEALTHY, _big_logs(3600, 10, 20, 60)],
+    ids=["discovery", "healthy", "big"],
+)
+def test_handoff_lags_bisect_matches_a_linear_scan(logs):
+    """The bisect handoff_lags (and the index balance/_phase_samples share)
+    returns exactly what a plain scan does, at every sample offset, on the
+    fixtures and a long synthetic run."""
+    from lakebench.metrics.continuous_window import handoff_lags
+
+    events = {job: parse_events(log, job) for job, log in logs.items()}
+    span = max((e.at - W0).total_seconds() for evs in events.values() for e in evs if evs)
+    for off in range(0, int(span) + 90, 3):
+        at = W0 + timedelta(seconds=off)
+        assert handoff_lags(events, at) == _handoff_lags_by_scan(events, at)
 
 
 def test_gold_freshness_comes_from_cycles_inside_the_window():
@@ -337,10 +423,11 @@ def test_submission_failures_are_reported_while_the_operator_retries():
     assert watch.running_at is not None
 
 
-def test_a_stream_not_running_at_window_end_fails():
+def test_end_of_window_problems_catch_a_stream_that_did_not_run_the_window():
     from lakebench.cli._sustained import end_of_window_problems
     from lakebench.spark.job import JobState, JobStatus
 
+    # A stream not RUNNING at window end fails.
     jm = MagicMock()
     jm.get_job_status.side_effect = lambda name: JobStatus(
         name=name,
@@ -349,6 +436,32 @@ def test_a_stream_not_running_at_window_end_fails():
     )
     probs = end_of_window_problems(jm, ["bronze-ingest", "silver-stream", "gold-refresh"])
     assert len(probs) == 1 and "gold-refresh was FAILED" in probs[0]
+
+    # A stream restarted inside the window (a new driver pod) fails.
+    jm = MagicMock()
+    jm.get_job_status.side_effect = lambda name: JobStatus(
+        name=name, state=JobState.RUNNING, message="", driver_pod=f"{name}-driver-2"
+    )
+    opened = {"silver-stream": ("lakebench-silver-stream-driver-1", 1, None)}
+    probs = end_of_window_problems(jm, ["silver-stream"], opened)
+    assert len(probs) == 1 and "restarted inside the window" in probs[0]
+
+    # A rerun with the same pod name is caught by submission time; the same
+    # submission time is not a problem.
+    jm = MagicMock()
+    jm.get_job_status.side_effect = lambda name: JobStatus(
+        name=name,
+        state=JobState.RUNNING,
+        message="",
+        driver_pod="lakebench-silver-stream-driver",
+        submission_attempts=1,
+        start_time="2026-09-27T04:14:00Z",
+    )
+    opened = {"silver-stream": ("lakebench-silver-stream-driver", 1, "2026-09-27T04:03:00Z")}
+    probs = end_of_window_problems(jm, ["silver-stream"], opened)
+    assert len(probs) == 1 and "resubmitted inside the window" in probs[0]
+    same = {"silver-stream": ("lakebench-silver-stream-driver", 1, "2026-09-27T04:14:00Z")}
+    assert end_of_window_problems(jm, ["silver-stream"], same) == []
 
 
 # ---------------------------------------------------------------- item 5
@@ -645,19 +758,6 @@ def test_stage_rate_is_windowed_after_compute_derived():
     assert st.throughput_rows_per_second == pytest.approx(1000.0)
 
 
-def test_a_stream_restarted_inside_the_window_fails():
-    from lakebench.cli._sustained import end_of_window_problems
-    from lakebench.spark.job import JobState, JobStatus
-
-    jm = MagicMock()
-    jm.get_job_status.side_effect = lambda name: JobStatus(
-        name=name, state=JobState.RUNNING, message="", driver_pod=f"{name}-driver-2"
-    )
-    opened = {"silver-stream": ("lakebench-silver-stream-driver-1", 1, None)}
-    probs = end_of_window_problems(jm, ["silver-stream"], opened)
-    assert len(probs) == 1 and "restarted inside the window" in probs[0]
-
-
 def test_a_window_too_short_for_two_gold_refreshes_is_refused():
     from lakebench.cli._sustained import short_window_problem
     from tests.conftest import make_config
@@ -750,26 +850,6 @@ def test_a_c360_run_with_no_in_stream_round_fails(monkeypatch, tmp_path):
     # The only reason: the window itself passed.
     assert len(saved.failure_reasons) == 1
     assert "no in-stream benchmark round ran" in saved.failure_reasons[0]
-
-
-def test_a_rerun_with_the_same_pod_name_is_caught_by_submission_time():
-    from lakebench.cli._sustained import end_of_window_problems
-    from lakebench.spark.job import JobState, JobStatus
-
-    jm = MagicMock()
-    jm.get_job_status.side_effect = lambda name: JobStatus(
-        name=name,
-        state=JobState.RUNNING,
-        message="",
-        driver_pod="lakebench-silver-stream-driver",
-        submission_attempts=1,
-        start_time="2026-09-27T04:14:00Z",
-    )
-    opened = {"silver-stream": ("lakebench-silver-stream-driver", 1, "2026-09-27T04:03:00Z")}
-    probs = end_of_window_problems(jm, ["silver-stream"], opened)
-    assert len(probs) == 1 and "resubmitted inside the window" in probs[0]
-    same = {"silver-stream": ("lakebench-silver-stream-driver", 1, "2026-09-27T04:14:00Z")}
-    assert end_of_window_problems(jm, ["silver-stream"], same) == []
 
 
 # ------------------------------------------- default path keeps data arriving
@@ -872,10 +952,11 @@ def _trickle_pb(bronze_rows, trickle_start, datagen_rows=1_000_000, files=100, m
     return pb
 
 
-def test_a_trickle_that_has_not_released_the_corpus_is_not_saturation():
+def test_trickle_saturation_against_what_was_released():
     # A default-shaped run: the trickle (2 files per 30 s from t=0) had
     # released 61 x 2 = 122 of 150 files (1,220,000 rows) by the window's
-    # end, and bronze took all of them: 81% of the corpus, 100% of arrival.
+    # end. Bronze taking all of them is 81% of the corpus, 100% of arrival:
+    # not saturation.
     pb = _trickle_pb(1_220_000, 0.0, datagen_rows=1_500_000, files=150)
     assert pb.corpus_ingest_ratio == pytest.approx(0.8133, abs=1e-3)
     assert pb.released_rows == 1_220_000
@@ -884,14 +965,12 @@ def test_a_trickle_that_has_not_released_the_corpus_is_not_saturation():
     scores = pb.to_dict()["scores"]
     assert scores["corpus_ingest_ratio"] == pytest.approx(0.8133, abs=1e-3)
 
-
-def test_bronze_behind_what_was_released_is_saturation():
+    # Bronze behind what was released is saturation.
     pb = _trickle_pb(900_000, 0.0, datagen_rows=1_500_000, files=150)
     assert pb.ingest_ratio == pytest.approx(900_000 / 1_220_000)
     assert pb.pipeline_saturated is True
 
-
-def test_without_a_file_count_the_corpus_ratio_stands():
+    # Without a file count there is no released figure: the corpus ratio stands.
     pb = _trickle_pb(1_220_000, 0.0, datagen_rows=1_500_000, files=0)
     assert pb.released_rows is None
     assert pb.ingest_ratio == pytest.approx(pb.corpus_ingest_ratio)
@@ -933,10 +1012,9 @@ def _datagen_pb(bronze_rows, datagen_rows, datagen_elapsed_s):
     return pb
 
 
-def test_continuous_datagen_bronze_one_trigger_behind_kept_up():
-    # Datagen wrote 21.75M rows over 906.6 s; bronze's last trigger and the
-    # seconds before the pods saw the stop marker left 1.25M rows untaken.
-    # Against datagen's total that read 0.94, a saturated pipeline.
+def test_continuous_datagen_backlog_versus_kept_up():
+    # Datagen wrote 21.75M rows over 906.6 s; bronze one trigger behind left
+    # 1.25M rows untaken, which against the released total is 0.982: kept up.
     pb = _datagen_pb(20_494_593, 21_749_364, 906.625)
     assert pb.released_rows == round(21_749_364 / 906.625 * 870)
     assert pb.ingest_ratio == pytest.approx(0.982, abs=1e-3)
@@ -944,8 +1022,7 @@ def test_continuous_datagen_bronze_one_trigger_behind_kept_up():
     assert pb.datagen_ahead is False
     assert pb.backlog_rows == 21_749_364 - 20_494_593
 
-
-def test_continuous_datagen_a_real_backlog_is_still_ahead():
+    # A real backlog is still ahead of bronze.
     pb = _datagen_pb(15_000_000, 21_749_364, 906.625)
     assert pb.ingest_ratio < 0.95
     assert pb.datagen_ahead is True

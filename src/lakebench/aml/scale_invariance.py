@@ -1,5 +1,4 @@
-"""AML D8: scale invariance (AML-GOALS 5a D8, section 9 #45; pre-registration
-3.6.0 ``scale_invariance``).
+"""AML D8: scale invariance (pre-registration 3.6.0 ``scale_invariance``).
 
 D8 asks whether the generator's difficulty moves with scale. It is a
 registered decision rule with simulated operating characteristics
@@ -843,6 +842,9 @@ def _evaluate(s2_reports, s10_reports, prereg_path, endpoint, jobs) -> dict[str,
     out["typologies"] = per_t
 
     # ---- Per-feature distribution match (pooled s2 vs pooled s10) ----------
+    # One read per run of every feature and the weight: unit_features is one
+    # row per customer, so holding them all is cheap next to F x R reads.
+    units: dict = {}
     weights: dict = {}
     units_ok = True
     for s, i, run in all_runs:
@@ -850,9 +852,8 @@ def _evaluate(s2_reports, s10_reports, prereg_path, endpoint, jobs) -> dict[str,
         missing = [c for c in [*features, "weight"] if c not in cols]
         if missing:
             raise ValueError(f"{s}[{i}]: unit_features lacks columns {missing}")
-        w = read_parquet_columns(unit_uri[(s, i)], ["weight"], endpoint)["weight"].to_numpy(
-            dtype=float
-        )
+        units[(s, i)] = read_parquet_columns(unit_uri[(s, i)], [*features, "weight"], endpoint)
+        w = units[(s, i)]["weight"].to_numpy(dtype=float)
         weights[(s, i)] = w
         if len(w) != run["report"].get("n_scored_units"):
             errors.append(f"{s}[{i}]: unit_features rows disagree with report n_scored_units")
@@ -870,9 +871,7 @@ def _evaluate(s2_reports, s10_reports, prereg_path, endpoint, jobs) -> dict[str,
             col: dict = {}
             fp_ok = True
             for s, i, run in all_runs:
-                col[(s, i)] = read_parquet_columns(unit_uri[(s, i)], [f], endpoint)[f].to_numpy(
-                    dtype=float
-                )
+                col[(s, i)] = units[(s, i)][f].to_numpy(dtype=float)
                 if _fingerprints(run, "unit_features").get(f) != fingerprint(
                     pd.DataFrame({f: col[(s, i)]}), [f]
                 ):

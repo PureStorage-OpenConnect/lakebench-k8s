@@ -28,7 +28,7 @@ spec:
       initContainers:
         - name: import-ca-cert
           image: {{ polaris_image }}
-          command: ['bash', '-c', 'keytool -import -trustcacerts -alias custom-ca -file /etc/ssl/certs/custom-ca/ca.crt -keystore /truststore/truststore.jks -storepass changeit -noprompt 2>/dev/null || true']
+          command: ['bash', '-c', 'rm -f /truststore/truststore.jks && keytool -import -trustcacerts -alias custom-ca -file /etc/ssl/certs/custom-ca/ca.crt -keystore /truststore/truststore.jks -storepass changeit -noprompt']
           volumeMounts:
             - name: ca-cert
               mountPath: /etc/ssl/certs/custom-ca
@@ -39,7 +39,7 @@ spec:
       containers:
         - name: polaris
           image: {{ polaris_image }}
-          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          imagePullPolicy: {{ image_pull_policy }}
           ports:
             - containerPort: 8181
               name: rest

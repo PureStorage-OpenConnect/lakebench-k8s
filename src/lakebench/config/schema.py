@@ -1,8 +1,4 @@
-"""Pydantic models for Lakebench configuration.
-
-This module defines the complete configuration schema for Lakebench,
-matching the specification in lakebench-spec.md Section 4.
-"""
+"""Pydantic models for the Lakebench configuration file."""
 
 from __future__ import annotations
 
@@ -23,6 +19,7 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
+from . import recipes as _recipes
 from ._load_context import CHANGES_DATA, LoadPurpose, emit_note, purpose_from_context
 
 logger = logging.getLogger(__name__)
@@ -57,9 +54,8 @@ def _matches_old_default(value: object, default: object) -> bool:
 class ConfigModel(BaseModel):
     """Base for every user-facing config model: unknown keys are errors.
 
-    A misspelt or misplaced key used to be dropped silently, so the run went
-    ahead on the default and the user never learned their setting was
-    ignored. Deprecated spellings stay accepted because each is migrated by a
+    A misspelt or misplaced key dropped silently would run on the default
+    without the user learning their setting was ignored. Deprecated spellings stay accepted because each is migrated by a
     ``mode="before"`` validator, which runs before the extra-key check.
     """
 
@@ -79,7 +75,7 @@ class ConfigModel(BaseModel):
     # RUN) refuses them with that text; the teardown and read commands drop
     # them with a note, so an old config can still be destroyed, inspected
     # and converted. A model built without a purpose drops them with a
-    # DeprecationWarning, as before v1.7.
+    # DeprecationWarning.
     _removed_keys: ClassVar[dict[str, str]] = {}
 
     # Removed keys whose old default changed nothing, mapped to that default
@@ -133,30 +129,6 @@ class ConfigModel(BaseModel):
                 kind="removed",
             )
         return data
-
-    # Fields that load but that nothing in lakebench reads (D19). Setting one
-    # to anything other than its default emits a warning that it has no
-    # effect; the field is removed in v1.7. Comparing against the default
-    # rather than "was the key written" keeps a saved config that carries
-    # every field (save_config) from warning on reload. Maps field -> note.
-    _dead_fields: ClassVar[dict[str, str]] = {}
-
-    @model_validator(mode="after")
-    def _warn_dead_fields(self) -> Any:
-        dead = type(self)._dead_fields
-        if not dead:
-            return self
-        fields = type(self).model_fields
-        for name, note in dead.items():
-            default = fields[name].get_default(call_default_factory=True)
-            if getattr(self, name) == default:
-                continue
-            msg = (
-                f"'{name}' ({type(self).__name__}) has no effect: nothing in lakebench "
-                f"reads it. It will be removed in v1.7; delete it from the config. {note}"
-            ).rstrip()
-            emit_note(msg, kind="dead")
-        return self
 
 
 # =============================================================================
@@ -235,7 +207,7 @@ class SilverWriteMode(str, Enum):
 class BenchmarkMode(str, Enum):
     """Benchmark execution mode.
 
-    ``standard`` and ``extended`` are the user-facing names from the spec.
+    ``standard`` and ``extended`` are the user-facing names.
     ``power``, ``throughput``, and ``composite`` are TPC-style internal modes.
     The runner maps standard → power and extended → power (with iterations > 1).
     """
@@ -265,35 +237,23 @@ class WorkloadSchema(str, Enum):
 
 
 class DatagenMode(str, Enum):
-    """Datagen delivery mode (redefined 2026-09-28, Wave 2 D1).
+    """Datagen delivery mode: how one corpus is delivered to S3, not what it
+    contains. Row content is identical across modes at a fixed seed
+    (datagen_rs/tests/cycles.rs, the ``*_row_identity_across_delivery_modes``
+    tests).
 
-    One corpus per (workload, seed) -- deterministic and layout-invariant;
-    mode is how the same corpus is DELIVERED to S3, not what it contains.
-    Row content is byte-for-byte identical across modes at fixed seed
-    (verified by tests/cycles.rs::c360_row_identity_across_delivery_modes
-    and aml_row_identity_across_delivery_modes).
+    - continuous (default, matches PipelineMode.CONTINUOUS): streams each
+      bronze parquet file through S3 multipart as row-groups close. RSS is
+      bounded by MPU_MAX_CONCURRENT_PARTS x 5 MiB plus one row-group buffer
+      per worker; that buffer is the whole file, because the parquet crate
+      defaults to 1M-row groups and no shipped config crosses that. The
+      DG_ROW_GROUP environment override (datagen_rs/src/writer.rs) writes
+      smaller row groups; the row-identity tests use it.
+    - batch: buffers the whole file in memory, then one S3 PUT per file.
+      Higher peak RSS and bursty network, single-PUT retry semantics.
+    - auto: resolves to continuous.
 
-    - continuous (default per owner D18, matches PipelineMode.CONTINUOUS):
-      streams each bronze parquet file through S3 multipart as row-groups
-      close. Files arrive in S3 progressively rather than in bursts.
-      RSS bound is MPU_MAX_CONCURRENT_PARTS x 5 MiB plus one row-group
-      buffer per worker; the row-group buffer is the whole file today
-      because the parquet crate defaults to 1M-row groups and no shipping
-      config crosses that. A DG_ROW_GROUP env override in
-      datagen_rs/src/writer.rs enables multi-row-group streaming (used by
-      the row-identity tests); production tuning to bound RSS is a
-      follow-up sprint task with live-scale measurement.
-    - batch: buffers the whole file in memory then does one S3 PUT per
-      file. Higher peak RSS (whole file per worker), bursty network,
-      simpler failure semantics (single-PUT retry loop). Kept for stress
-      tests, whole-file atomicity, and to preserve the pre-2026-09-28
-      regression pins.
-    - auto: resolves to continuous. No scale-based split today; the choice
-      affects per-worker RSS, not correctness.
-
-    CPU and memory are sized by scale via the autosizer, independently of
-    delivery mode. Pre-2026-09-28 semantics used this enum for a
-    resource-profile tier; that role has moved into scale-based sizing.
+    CPU and memory are sized by scale in the autosizer, whatever the mode.
     """
 
     BATCH = "batch"
@@ -310,8 +270,7 @@ class PipelineMode(str, Enum):
       periodic gold recomputation (bronze-ingest + silver-stream +
       gold-refresh)
 
-    ``continuous`` is the canonical name (owner decision D18, v1.6).
-    ``sustained`` is the transitional alias: ``PipelineMode.SUSTAINED`` is the
+    ``continuous`` is the canonical name. ``sustained`` is the alias: ``PipelineMode.SUSTAINED`` is the
     same member as ``PipelineMode.CONTINUOUS``, ``PipelineMode("sustained")``
     resolves to it, and a config that writes ``mode: sustained`` loads with a
     DeprecationWarning. Metrics files still record ``pipeline_mode="sustained"``
@@ -339,10 +298,6 @@ def is_continuous_mode(mode: object) -> bool:
     return isinstance(value, str) and value.strip().lower() in ("continuous", "sustained")
 
 
-#: Query engines that run the investigator sessions (AML continuous).
-INVESTIGATOR_QUERY_ENGINES = ("trino", "spark-thrift")
-
-
 def investigator_sessions_problem(
     arch: Any, run_mode: str | None = None, *, check_mode: bool = True
 ) -> str | None:
@@ -367,22 +322,14 @@ def investigator_sessions_problem(
     if workload.schema_type.value == "financial" and not workload.tm_operations.enabled:
         missing.append("workload.tm_operations.enabled is false")
     engine = arch.query_engine.type.value
-    if engine not in INVESTIGATOR_QUERY_ENGINES:
-        missing.append(f"the query engine is {engine}, not trino or spark-thrift")
+    if engine != "trino":
+        missing.append(f"the query engine is {engine}, not trino")
     if not missing:
         return None
     return (
         f"architecture.benchmark.investigator_sessions ({n}) runs only on an AML continuous run "
-        "with TM operations on a trino or spark-thrift query engine: " + "; ".join(missing)
+        "with TM operations on a trino query engine: " + "; ".join(missing)
     )
-
-
-class ReportFormat(str, Enum):
-    """Supported report output formats."""
-
-    HTML = "html"
-    JSON = "json"
-    BOTH = "both"
 
 
 # =============================================================================
@@ -469,7 +416,7 @@ class ImagesConfig(ConfigModel):
     """
     # Bitnami moved versioned tags to the bitnamilegacy repo; `bitnami/jmx-exporter`
     # itself now only publishes `:latest`. The default names a versioned tag from
-    # bitnamilegacy (verified pullable 2026-10-12) so a run is reproducible
+    # bitnamilegacy so a run is reproducible
     # without baking a digest the registry may garbage-collect.
     jmx_exporter: str = "bitnamilegacy/jmx-exporter:1.4.0"
     """JMX exporter image for the metrics sidecars, used when observability is enabled.
@@ -482,7 +429,7 @@ class ImagesConfig(ConfigModel):
     @classmethod
     def _validate_spark_image(cls, v: str) -> str:
         """Validate that the Spark image tag contains a supported version."""
-        from lakebench.spark.job import _parse_spark_major
+        from lakebench.modules.pipeline_engines.spark.job import _parse_spark_major
 
         _parse_spark_major(v)  # raises ValueError for unsupported versions
         return v
@@ -629,12 +576,21 @@ class StorageConfig(ConfigModel):
     """Scratch storage for Spark shuffle."""
 
 
-def _refuse_operator_install(model: ConfigModel, info: ValidationInfo, key: str, fix: str) -> None:
+def _refuse_or_note(text: str, info: ValidationInfo, suffix: str, kind: str = "removed") -> None:
+    """Raise *text* for a command that changes data or a load without a
+    purpose; otherwise emit it with *suffix* as a note."""
+    purpose = purpose_from_context(info.context)
+    if purpose is None or purpose in CHANGES_DATA:
+        raise ValueError(text)
+    emit_note(text + suffix, kind=kind)
+
+
+def _refuse_operator_install(model: ConfigModel, info: ValidationInfo, key: str) -> None:
     """``operator.install: true`` is refused by the commands that change data.
 
     Shared operators are cluster infrastructure: a deployment verifies them
     and never installs them. A command that changes data refuses ``true``
-    with *fix*; teardown and read commands load it as ``false`` with a note,
+    with :func:`operator_install_fix`; teardown and read commands load it as ``false`` with a note,
     so an old config can still be destroyed and inspected. ``false`` loads
     as before. A model built without a purpose (not through ``load_config``)
     keeps the value. Checked after coercion, so ``"true"``, ``1`` and a
@@ -642,6 +598,7 @@ def _refuse_operator_install(model: ConfigModel, info: ValidationInfo, key: str,
     """
     if not getattr(model, "install", False):
         return
+    fix = operator_install_fix(key)
     purpose = purpose_from_context(info.context)
     if purpose is None:
         return
@@ -676,10 +633,6 @@ def operator_install_fix(key: str) -> str:
     )
 
 
-_SPARK_OPERATOR_INSTALL_FIX = operator_install_fix("platform.compute.spark.operator.install")
-_STACKABLE_OPERATOR_INSTALL_FIX = operator_install_fix("architecture.catalog.hive.operator.install")
-
-
 class SparkOperatorConfig(ConfigModel):
     """Where the shared Spark Operator runs and the chart a fresh install uses.
 
@@ -696,16 +649,14 @@ class SparkOperatorConfig(ConfigModel):
     """
     namespace: str = "spark-operator"
     """Namespace for the Spark Operator."""
-    version: str = "2.5.1"  # webhook volume injection gap (gotcha 3) unchanged from 2.4.0; template workaround stays
+    # 2.5.1 still does not inject webhook volumes; the SparkApplication template works around it.
+    version: str = "2.5.1"
     """Chart version a fresh `admin install` uses. v2.x required. An installed operator keeps
     its version."""
 
     @model_validator(mode="after")
     def _refuse_install(self, info: ValidationInfo) -> SparkOperatorConfig:
-        if self.install:
-            _refuse_operator_install(
-                self, info, "platform.compute.spark.operator.install", _SPARK_OPERATOR_INSTALL_FIX
-            )
+        _refuse_operator_install(self, info, "platform.compute.spark.operator.install")
         return self
 
 
@@ -879,10 +830,7 @@ class SparkComputeConfig(ConfigModel):
             "Lakebench can count: write a whole number above 0 with a unit, k, m, g or t "
             "(for example 16g)"
         )
-        purpose = purpose_from_context(info.context)
-        if purpose is None or purpose in CHANGES_DATA:
-            raise ValueError(text)
-        emit_note(text + "; ignored. Commands that change data refuse it.", kind="removed")
+        _refuse_or_note(text, info, "; ignored. Commands that change data refuse it.")
         return None
 
     @field_validator(
@@ -903,10 +851,7 @@ class SparkComputeConfig(ConfigModel):
             f"platform.compute.spark.{info.field_name} {value!r} is not a scratch size "
             "Lakebench can request: write whole gibibytes above 0 (for example 200Gi)"
         )
-        purpose = purpose_from_context(info.context)
-        if purpose is None or purpose in CHANGES_DATA:
-            raise ValueError(text)
-        emit_note(text + "; ignored. Commands that change data refuse it.", kind="removed")
+        _refuse_or_note(text, info, "; ignored. Commands that change data refuse it.")
         return None
 
     @field_validator(
@@ -931,10 +876,7 @@ class SparkComputeConfig(ConfigModel):
             f"proven ceiling of {limit}; set {limit} or less, or leave it unset for "
             "the scale-derived count"
         )
-        purpose = purpose_from_context(info.context)
-        if purpose is None or purpose in CHANGES_DATA:
-            raise ValueError(text)
-        emit_note(text + ". Ignored; commands that change data refuse it.", kind="removed")
+        _refuse_or_note(text, info, ". Ignored; commands that change data refuse it.")
         return None
 
 
@@ -1083,10 +1025,7 @@ class PlatformConfig(ConfigModel):
             "platform.storage.scratch.enabled is false, so no executor gets one: "
             "remove the size or turn scratch on"
         )
-        purpose = purpose_from_context(info.context)
-        if purpose is None or purpose in CHANGES_DATA:
-            raise ValueError(text)
-        emit_note(text + ". Commands that change data refuse it.", kind="dead")
+        _refuse_or_note(text, info, ". Commands that change data refuse it.", kind="dead")
         return self
 
 
@@ -1123,13 +1062,7 @@ class StackableOperatorConfig(ConfigModel):
 
     @model_validator(mode="after")
     def _refuse_install(self, info: ValidationInfo) -> StackableOperatorConfig:
-        if self.install:
-            _refuse_operator_install(
-                self,
-                info,
-                "architecture.catalog.hive.operator.install",
-                _STACKABLE_OPERATOR_INSTALL_FIX,
-            )
+        _refuse_operator_install(self, info, "architecture.catalog.hive.operator.install")
         return self
 
 
@@ -1170,9 +1103,9 @@ class PolarisConfig(ConfigModel):
 
     ``client_secret`` is optional. Empty: ``deploy`` generates one
     per deployment, once, into the Secret ``lakebench-polaris-client``, and
-    ``run``, ``benchmark`` and ``destroy`` read it back from there, so
-    separate invocations agree (a value generated at config load would
-    differ per invocation). Set: it is used as is and stored in that Secret.
+    ``run`` and ``benchmark`` read it back from there, so separate invocations
+    agree (a value generated at config load would differ per invocation).
+    Set: it is used as is and stored in that Secret.
     """
 
     port: int = Field(default=8181, ge=1, le=65535)
@@ -1342,17 +1275,6 @@ class TrinoWorkerConfig(ConfigModel):
                 "would be evicted"
             )
         return self
-        for field in ("spill_max_per_node", "storage"):
-            if not str(getattr(self, field)).endswith("Gi"):
-                raise ValueError(
-                    f"trino.worker.{field} must be in Gi (got {getattr(self, field)!r})"
-                )
-        if float(self.spill_max_per_node[:-2]) > float(self.storage[:-2]):
-            raise ValueError(
-                f"trino.worker.spill_max_per_node ({self.spill_max_per_node}) exceeds "
-                f"trino.worker.storage ({self.storage}); a spilling worker would be evicted"
-            )
-        return self
 
 
 class TrinoConfig(ConfigModel):
@@ -1373,7 +1295,7 @@ class SparkThriftConfig(ConfigModel):
     """Spark Thrift Server CPU cores. Auto-sized to `8` on Delta + Hive when unset."""
     memory: str = "4g"
     """Spark Thrift Server heap. The pod limit adds max(10% of heap, 1 GiB). Auto-sized to
-    `16g` on Delta + Hive and `24g` on the financial schema when unset.
+    `16g` on Delta + Hive when unset.
     """
     catalog_name: str = "lakehouse"
     """Iceberg catalog name for Spark Thrift Server."""
@@ -1385,15 +1307,12 @@ class DuckDBConfig(ConfigModel):
     cores: int = Field(default=2, ge=1)
     """DuckDB CPU cores."""
     memory: str = "4g"
-    """DuckDB pod memory. Auto-sized to `16g` on the financial schema when unset (less on a
-    node with under 24 GiB allocatable)."""
+    """DuckDB pod memory."""
     catalog_name: str = "lakehouse"
     """Iceberg catalog name for DuckDB."""
-    # Pinned, not floating. Both install sites used a bare `pip install duckdb`,
-    # so every deploy took whatever was current and two runs weeks apart could
-    # compare different query engines while reporting the difference as a
-    # result. Measured local run-to-run spread is 0.9%, well below what an
-    # engine change would move, so the drift was invisible to the noise floor.
+    # Pinned, not floating: a bare `pip install duckdb` lets two runs weeks
+    # apart compare different engines and report the difference as a result.
+    # Local run-to-run spread is 0.9%, so the noise floor would not show it.
     version: str = "1.5.6"
     """DuckDB version installed at deploy time. Keep it pinned: an unpinned install takes
     whatever is current, so two runs weeks apart can query with different engines.
@@ -1447,6 +1366,29 @@ _MEDALLION_V16_DEFAULT: dict[str, Any] = {
         ],
     },
 }
+
+
+_INTERVAL_UNITS = {"second": 1, "minute": 60, "hour": 3600}
+# What the trigger interval validator accepts: a whole number and a unit.
+TRIGGER_INTERVAL_RE = re.compile(r"\s*\d+\s+(second|minute|hour)s?\s*", re.IGNORECASE)
+
+
+def interval_seconds(interval: Any) -> float | None:
+    """Seconds in a Spark interval string ("30 seconds", "5 minutes");
+    None when it does not parse, never a guessed default."""
+    if not isinstance(interval, str):
+        return None
+    parts = interval.strip().lower().split()
+    if len(parts) != 2:
+        return None
+    try:
+        value = float(parts[0])
+    except ValueError:
+        return None
+    unit = _INTERVAL_UNITS.get(parts[1].rstrip("s"))
+    if unit is None or value <= 0:
+        return None
+    return value * unit
 
 
 class SustainedConfig(ConfigModel):
@@ -1604,11 +1546,7 @@ class SustainedConfig(ConfigModel):
     def _validate_interval(cls, v: str) -> str:
         # A bare "0" passed straight to Spark for one workload and read as a
         # 10 s fallback for the other.
-        import re as _re
-
-        if not isinstance(v, str) or not _re.fullmatch(
-            r"\s*\d+\s+(second|minute|hour)s?\s*", v, flags=_re.IGNORECASE
-        ):
+        if not isinstance(v, str) or not TRIGGER_INTERVAL_RE.fullmatch(v):
             raise ValueError(
                 f"trigger interval {v!r} is not a whole number and a unit (seconds, minutes "
                 "or hours), for example '0 seconds' (back to back) or '5 minutes'"
@@ -1618,11 +1556,9 @@ class SustainedConfig(ConfigModel):
     @field_validator("retention_threshold")
     @classmethod
     def _validate_retention_threshold(cls, v: str) -> str:
-        # The maintenance parser used to guess: an unknown unit read as
-        # minutes ("7D" -> 7 min) and "1.5h" / "30min" raised mid-run.
-        import re as _re
-
-        if not isinstance(v, str) or not _re.fullmatch(r"\s*\d+\s*[smhdSMHD]\s*", v):
+        # Refused at load so the maintenance parser never meets a unit it
+        # cannot read mid-run.
+        if not isinstance(v, str) or not re.fullmatch(r"\s*\d+\s*[smhdSMHD]\s*", v):
             raise ValueError(
                 f"retention_threshold {v!r} is not a duration: use a whole number and one "
                 "unit, s, m, h or d (for example '30m', '1h', '7d')"
@@ -1689,20 +1625,7 @@ class SustainedConfig(ConfigModel):
         Both fields are clamped up to gold_refresh_interval (default
         0s, so no clamp).  Users who want more rounds must run the pipeline longer.
         """
-        parts = self.gold_refresh_interval.strip().lower().split()
-        gold_s = 300  # fallback
-        if len(parts) == 2:
-            try:
-                val = int(parts[0])
-                unit = parts[1].rstrip("s")
-                if unit == "second":
-                    gold_s = val
-                elif unit == "minute":
-                    gold_s = val * 60
-                elif unit == "hour":
-                    gold_s = val * 3600
-            except ValueError:
-                pass
+        gold_s = int(interval_seconds(self.gold_refresh_interval) or 0)
         if self.benchmark_warmup < gold_s:
             self.benchmark_warmup = gold_s
         if self.benchmark_interval < gold_s:
@@ -1726,7 +1649,7 @@ class SustainedConfig(ConfigModel):
     def effective_silver_bronze_wait_seconds(self, run_duration: int | None = None) -> int:
         """silver_bronze_wait_seconds, or auto: run_duration // 4 floored at 600.
 
-        A3 (silver-plan): caps the wait for the bronze table so a stalled
+        Caps the wait for the bronze table so a stalled
         bronze-ingest stops the run. The floor covers datagen's start (it
         starts once the streams run) and bronze's first batch, all before
         the window opens.
@@ -1741,7 +1664,7 @@ class ProcessingConfig(ConfigModel):
     """Processing pattern configuration."""
 
     pattern: ProcessingPattern = ProcessingPattern.MEDALLION
-    """**Deprecated; removed in v1.7.** The stages are chosen by `pipeline.mode`. The only
+    """**Deprecated; to be removed in a future release.** The stages are chosen by `pipeline.mode`. The only
     remaining effect is that `streaming` makes the auto-sizer give Spark 60% and datagen 40%
     of the CPU budget; any value other than `medallion` prints a warning.
     """
@@ -1792,7 +1715,7 @@ class ProcessingConfig(ConfigModel):
 
         The settings block is stored on the ``sustained`` field, so the
         canonical key is renamed onto it silently and the transitional
-        spelling is accepted with a DeprecationWarning (D18).
+        spelling is accepted with a DeprecationWarning.
         """
         if not isinstance(data, dict):
             return data
@@ -1828,13 +1751,13 @@ class ProcessingConfig(ConfigModel):
 
     @model_validator(mode="after")
     def _warn_pattern(self) -> ProcessingConfig:
-        # ProcessingPattern predates pipeline.mode and is removed in v1.7
-        # (D18). Stages are chosen by the mode; the only remaining reader is
-        # the auto-sizer, which splits the CPU budget for 'streaming'.
+        # Stages are chosen by pipeline.mode; the only remaining reader of
+        # the pattern is the auto-sizer, which splits the CPU budget for
+        # 'streaming'.
         if self.pattern != ProcessingPattern.MEDALLION:
             msg = (
                 f"'pipeline.pattern: {self.pattern.value}' is deprecated and will be "
-                "removed in v1.7. The pipeline stages are chosen by 'pipeline.mode' "
+                "removed in a future release. The pipeline stages are chosen by 'pipeline.mode' "
                 "(batch or continuous). The pattern does not select stages: it is "
                 "recorded in the run's config snapshot, and 'streaming' makes the "
                 "auto-sizer give Spark 60% and datagen 40% of the CPU budget."
@@ -1931,7 +1854,7 @@ class DatagenConfig(ConfigModel):
     deployment's namespace, never as a Job argument. For `calibration`, an unset `seed` uses
     the calibration seed. Only set it for the one registered gate run of that role.
     """
-    # Robustness corpus (financial only; AML-GOALS R3(b)): datagen shifts the
+    # Robustness corpus (financial only): datagen shifts the
     # nuisance parameters by corpora.robustness_perturbation in the
     # pre-registration (median amount, persona sds, dormancy, each x1.2 in
     # natural units). Required with corpus_role: robustness, refused with a
@@ -1955,8 +1878,8 @@ class DatagenConfig(ConfigModel):
     financial floor and capped to fit the cluster (a cap lowers the offered load). The schema
     fallback without auto-sizing is 4.
     """
-    # Datagen output file size, fixed at 64mb for every workload and mode
-    # (owner decision 2026-09-29). c360 rows are drawn per file and truncated
+    # Datagen output file size, fixed at 64mb for every workload and mode.
+    # c360 rows are drawn per file and truncated
     # by file size, so one size keeps row content identical across delivery
     # modes and keeps corpus identity stable. The field stays so
     # existing configs that set 64mb still load; any other value is refused.
@@ -2006,7 +1929,7 @@ class DatagenConfig(ConfigModel):
     @classmethod
     def _fixed_file_size(cls, v: object, info: ValidationInfo) -> object:
         """Accept any spelling of 64mb; refuse every other size. The loads
-        that do not change data (LoadPurpose TEARDOWN, READ, COMPARE) accept
+        that do not change data (LoadPurpose TEARDOWN, READ, INSPECT) accept
         an old size with a note, as they do a removed key, so a deployment
         made from an older config can still be inspected and torn down."""
         if isinstance(v, str) and v.strip().lower() == "64mb":
@@ -2078,7 +2001,7 @@ class Customer360Config(ConfigModel):
 
 
 class TmOperationsConfig(ConfigModel):
-    """Simulated TM operations on top of the AML alerts (GOALS P10 stages 6-8).
+    """Simulated TM operations on top of the AML alerts.
 
     Dispositions are simulated from the datagen ground truth: the L1 analyst
     decides an alert correctly with probability ``analyst_accuracy``, the L2
@@ -2165,12 +2088,6 @@ class TmOperationsConfig(ConfigModel):
         }
 
 
-#: Load purposes that skip the AML seed guard at load: they tear down, read
-#: about or show a deployment, or resolve a config's name, and never generate
-#: or score data (``WorkloadConfig._seed_allowed``).
-_SEED_GUARD_SKIPPED = frozenset({LoadPurpose.TEARDOWN, LoadPurpose.READ, LoadPurpose.INSPECT})
-
-
 class WorkloadConfig(ConfigModel):
     """Workload/data generation configuration."""
 
@@ -2224,17 +2141,17 @@ class WorkloadConfig(ConfigModel):
     have the executor budget.
     """
 
-    # Financial transaction-monitoring operations layer (GOALS P10).
+    # Financial transaction-monitoring operations layer.
     tm_operations: TmOperationsConfig = Field(default_factory=TmOperationsConfig)
     """AML: the simulated transaction-monitoring operations on top of the alerts."""
 
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True)
 
     @field_validator("schema_type", mode="after")
     @classmethod
     def _reject_custom(cls, v: WorkloadSchema) -> WorkloadSchema:
-        # 'custom' had no generator, stages or correctness contract of its own
-        # and silently ran the Customer 360 query set (D13).
+        # 'custom' has no generator, stages or correctness contract of its own
+        # and would silently run the Customer 360 query set.
         if v == WorkloadSchema.CUSTOM:
             raise ValueError(
                 "workload schema 'custom' is not supported in this release: it has no "
@@ -2294,7 +2211,7 @@ class WorkloadConfig(ConfigModel):
         # Refused at load, before anything is deployed: a spent AML seed would
         # regenerate a corpus that has already been looked at, and an
         # evaluation or robustness seed without its declared role would burn
-        # it (AML-GOALS R3). The commands that only tear down, read about or
+        # it. The commands that only tear down, read about or
         # show a deployment skip the seed guard: they generate and score
         # nothing, and a registered look's seed is spent once its look is
         # recorded, so its deployment must still be destroyable. The commands
@@ -2302,7 +2219,8 @@ class WorkloadConfig(ConfigModel):
         # (lakebench.aml.look_guard).
         from lakebench.config.datagen_seed import check_perturbation, resolve_seed
 
-        if purpose_from_context(info.context) not in _SEED_GUARD_SKIPPED:
+        purpose = purpose_from_context(info.context)
+        if purpose is None or purpose in CHANGES_DATA:
             resolve_seed(self.datagen.seed, self.schema_type.value, self.datagen.corpus_role)
         check_perturbation(
             self.schema_type.value, self.datagen.corpus_role, self.datagen.robustness_perturbation
@@ -2310,38 +2228,28 @@ class WorkloadConfig(ConfigModel):
         return self
 
 
-# Supported component combinations (catalog, table_format, query_engine).
-# Unsupported combinations fail validation with a clear error.
-_SUPPORTED_COMBINATIONS = [
-    # (catalog, table_format, pipeline_engine, query_engine)
-    # -- Hive + Iceberg (v1.1) --
-    ("hive", "iceberg", "spark", "trino"),
-    ("hive", "iceberg", "spark", "spark-thrift"),
-    ("hive", "iceberg", "spark", "duckdb"),
-    ("hive", "iceberg", "spark", "none"),
-    # -- Polaris REST catalog + Iceberg (v1.1) --
-    ("polaris", "iceberg", "spark", "trino"),
-    ("polaris", "iceberg", "spark", "spark-thrift"),
-    ("polaris", "iceberg", "spark", "duckdb"),
-    ("polaris", "iceberg", "spark", "none"),
-    # -- Hive + Delta Lake (v1.2) --
-    ("hive", "delta", "spark", "trino"),
-    ("hive", "delta", "spark", "spark-thrift"),
-    ("hive", "delta", "spark", "none"),
-    # Note: Unity + Delta excluded from v1.2. UCSingleCatalog 0.4.0 always
-    # calls generateTemporaryTableCredentials (STS) even for CREATE TABLE
-    # ... LOCATION (EXTERNAL tables). No workaround without upstream fix
-    # or direct REST API table registration. Planned for v1.3.
-    # Note: Polaris + Delta is excluded -- Polaris is Iceberg-native.
-]
+# Supported component combinations (catalog, table_format, pipeline_engine,
+# query_engine): one per recipe. Unsupported combinations fail validation with
+# a clear error that lists these in this order: Iceberg before Delta, Hive
+# before Polaris, then by query engine. Unity is in none, because
+# UCSingleCatalog 0.4.0 calls generateTemporaryTableCredentials (STS) even for
+# EXTERNAL tables; Polaris is Iceberg-native, so it has no Delta combination.
+_QUERY_ENGINE_ORDER = ("trino", "spark-thrift", "duckdb", "none")
+_SUPPORTED_COMBINATIONS = sorted(
+    {
+        tuple(_recipes.recipe_components(name).values())
+        for name in _recipes.RECIPES
+        if name != "default"
+    },
+    key=lambda c: (c[1] != "iceberg", c[0] != "hive", _QUERY_ENGINE_ORDER.index(c[3])),
+)
 
 
 # What each workload can run on (support layers 2 and 3, config/support.py).
 # The architecture tuple list above says nothing about workloads; this does. A
 # workload x format or workload x mode pair not listed here is refused at load.
 # The AML stage scripts and DDL write Iceberg tables (USING iceberg), so AML on
-# Delta used to pass validation and then run Iceberg code on a Delta
-# deployment.
+# Delta would run Iceberg code on a Delta deployment.
 WORKLOAD_TABLE_FORMATS: dict[str, tuple[str, ...]] = {
     "customer360": ("iceberg", "delta"),
     "financial": ("iceberg",),
@@ -2451,21 +2359,8 @@ def nearest_supported(
 class TableNamesConfig(ConfigModel):
     """Fully-qualified Iceberg table names (namespace.table).
 
-    Defaults match the Customer 360 pipeline.  Override these when using a
-    different workload schema or custom table naming conventions.  The
-    ``{catalog}`` prefix is added at runtime from the catalog configuration.
-
-    Examples::
-
-        # Default (Customer 360)
-        bronze: "default.bronze_raw"
-        silver: "silver.customer_interactions_enriched"
-        gold:   "gold.customer_executive_dashboard"
-
-        # IoT workload
-        bronze: "default.sensor_raw"
-        silver: "silver.sensor_readings_cleaned"
-        gold:   "gold.device_health_dashboard"
+    Defaults match the Customer 360 pipeline. The ``{catalog}`` prefix is
+    added at runtime from the catalog configuration.
     """
 
     bronze: str = Field(
@@ -2529,7 +2424,7 @@ class TableNamesConfig(ConfigModel):
         default="gold.daily_dashboards",
         description="Gold daily-aggregate dashboard table (Financial): namespace.table",
     )
-    # Transaction-monitoring operations layer (GOALS P10), written by
+    # Transaction-monitoring operations layer, written by
     # tm_operations.py after detection.
     gold_tm_reconciliation: str = Field(
         default="gold.tm_reconciliation",
@@ -2551,9 +2446,9 @@ class TableNamesConfig(ConfigModel):
     def financial_env(self) -> dict[str, str]:
         """Env vars the financial Spark scripts read their table names from.
 
-        Without these the scripts fell back to their own hard-coded defaults,
-        so a table override in config changed what the benchmark, maintenance
-        and destroy touched but not what the pipeline wrote.
+        Without them the scripts use their own defaults, and a table override
+        would change what the benchmark, maintenance and destroy touch but not
+        what the pipeline writes.
         """
         return {
             "LB_FINANCIAL_SILVER_TRANSACTIONS": self.silver,
@@ -2585,8 +2480,8 @@ class TableNamesConfig(ConfigModel):
         """Every table the pipeline writes for ``schema``, bronze first.
 
         Customer 360 writes one table per layer. Financial writes several per
-        layer; maintenance, compaction and destroy that only looked at
-        ``silver``/``gold`` missed all but two of them. ``continuous=False``
+        layer, and maintenance, compaction and destroy must see all of them.
+        ``continuous=False``
         leaves out the tables only the continuous pipeline writes
         (``silver_counterparty_pairs``), which a batch run never creates.
         """
@@ -2594,7 +2489,7 @@ class TableNamesConfig(ConfigModel):
             by_layer = {"bronze": [self.bronze], "silver": [self.silver], "gold": [self.gold]}
         else:
             by_layer = {
-                "bronze": [self.bronze, "bronze.manifest"],
+                "bronze": [self.bronze, "bronze.manifest", "bronze.accounts"],
                 "silver": [
                     self.silver,
                     self.silver_entities,
@@ -2738,8 +2633,8 @@ class BenchmarkConfig(ConfigModel):
     """AML continuous only: concurrent investigator sessions run once, as an extra round
     after the first in-stream round that had a case, each working one case of the run (IQ1
     to IQ4). Range: 1--32. Unset runs no such round. Refused at load unless the workload is
-    `financial`, `tm_operations.enabled` is true and the query engine is `trino` or
-    `spark-thrift`, and by `run` unless the run is continuous. The sessions that ran (fewer
+    `financial` with `tm_operations.enabled` true (the financial workload itself requires
+    the `trino` query engine), and by `run` unless the run is continuous. The sessions that ran (fewer
     when the run has fewer cases) are an outcome condition: two runs that differ in it
     are not like-for-like.
     """
@@ -2888,7 +2783,7 @@ class ArchitectureConfig(ConfigModel):
     @model_validator(mode="after")
     def validate_investigator_sessions(self) -> ArchitectureConfig:
         """Refuse ``benchmark.investigator_sessions`` outside AML with TM
-        operations on trino or spark-thrift. The mode is ``run``'s to check
+        operations on trino. The mode is ``run``'s to check
         (``RUN_RULES``, with the mode it resolves), so ``run --continuous`` on
         a batch config with the key runs, and ``run`` of it in batch is
         refused before any cluster call."""
@@ -2907,6 +2802,24 @@ class ArchitectureConfig(ConfigModel):
         )
         if problem:
             raise ValueError(problem)
+        return self
+
+    @model_validator(mode="after")
+    def validate_financial_has_a_query_engine(self) -> ArchitectureConfig:
+        """Refuse the financial workload without a query engine that can score.
+
+        Recall and precision are measured by SQL run through Trino (the
+        validated financial query engine); `none`, `duckdb` and the untested
+        spark-thrift path cannot score and the run would produce no result."""
+        if self.workload.schema_type.value != "financial":
+            return self
+        engine = self.query_engine.type.value
+        if engine != "trino":
+            raise ValueError(
+                f"The financial (AML) workload scores recall and precision with SQL on "
+                f"Trino, so it needs query_engine trino, not {engine}. Use a trino recipe "
+                f"(for example recipe: polaris-iceberg-spark-trino)."
+            )
         return self
 
     @model_validator(mode="after")
@@ -2959,7 +2872,7 @@ class ObservabilityConfig(ConfigModel):
     One stack per deployment: Prometheus, Grafana and the Pushgateway live in
     the deployment namespace, go with it on destroy, and never collide with
     another deployment on the cluster. Flat model: nested YAML such as
-    ``metrics.prometheus.enabled`` is rejected (BUG-029).
+    ``metrics.prometheus.enabled`` is rejected.
     """
 
     enabled: bool = False
@@ -3185,7 +3098,7 @@ def _merge_workload_blocks(top: object, nested: object, path: str, conflicts: li
 def resolve_workload_location(data: dict[str, Any]) -> dict[str, Any]:
     """Move the workload block to where the model stores it.
 
-    ``workload`` is a top-level config key (D12). The model still stores it
+    ``workload`` is a top-level config key. The model still stores it
     at ``architecture.workload``, which every reader uses, so this is the one
     place the two locations are reconciled: the top-level block is canonical,
     the old location is accepted with a DeprecationWarning, and when both are
@@ -3289,10 +3202,7 @@ def _default_spark_image(data: dict, injected: list[str], *, recipe_set: bool) -
     if recipe_set:
         image = (images or {}).get("spark")
     else:
-        try:
-            matched = written_recipe(data, "hive-iceberg-spark-trino")
-        except Exception:  # noqa: BLE001 -- a malformed block is refused by validation
-            return
+        matched = written_recipe(data, "hive-iceberg-spark-trino")
         image = (RECIPES.get(matched or "", {}).get("images") or {}).get("spark")
     image = image or ImagesConfig.model_fields["spark"].default
     arch = data.get("architecture")
@@ -3562,9 +3472,8 @@ class LakebenchConfig(ConfigModel):
         """Refuse a deployment namespace that holds shared lakebench state.
 
         Destroy deletes the deployment's namespace. If that namespace were
-        the shared observability namespace or the cluster-lock namespace,
-        tearing down one deployment would remove what every other deployment
-        uses: destroying deployment A must never affect deployment B.
+        the cluster-lock namespace, tearing down one deployment would remove
+        what every other deployment uses.
         """
         ns = self.get_namespace()
         if ns in RESERVED_NAMESPACES:
@@ -3580,16 +3489,12 @@ class LakebenchConfig(ConfigModel):
     def default_bucket_names(self) -> LakebenchConfig:
         """Name unset buckets after the deployment: ``<name>-bronze`` and so on.
 
-        The defaults were the fixed names ``lakebench-bronze/-silver/-gold``.
         On a store where bucket names are global (FlashBlade across accounts,
         AWS across everyone) a fixed name is usually taken, and HeadBucket on
-        a bucket another account owns returns 403, so the documented quick
-        start failed at deploy. Two deployments on one store also shared the
-        buckets. Deriving the name from the deployment keeps each
+        a bucket another account owns returns 403. Deriving the name from the deployment keeps each
         deployment's buckets its own and matches the name-prefix ownership
         fallback in ``deploy/ownership.py``. Explicit names are kept.
         """
-        import re as _re
 
         buckets = self.platform.storage.s3.buckets
         for layer in ("bronze", "silver", "gold"):
@@ -3597,7 +3502,7 @@ class LakebenchConfig(ConfigModel):
                 derived = f"{self.name}-{layer}"
                 # Derived names are checked here; explicit ones are the
                 # user's (some stores accept names S3 does not).
-                if not _re.fullmatch(r"[a-z0-9][a-z0-9.-]*[a-z0-9]", derived):
+                if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*[a-z0-9]", derived):
                     raise ValueError(
                         f"default bucket name {derived!r} (from name {self.name!r}) is "
                         "not a valid S3 bucket name: use lowercase letters, digits, "
@@ -3636,7 +3541,10 @@ class LakebenchConfig(ConfigModel):
         major.minor.  When the user *has* specified a version, this
         validates it against the compatibility matrix.
         """
-        from lakebench.spark.job import resolve_format_version, validate_format_version
+        from lakebench.modules.pipeline_engines.spark.job import (
+            resolve_format_version,
+            validate_format_version,
+        )
 
         spark_image = self.images.spark
         fmt = self.architecture.table_format
@@ -3685,10 +3593,6 @@ class LakebenchConfig(ConfigModel):
                 fmt.delta.version = resolved
         return self
 
-    def get_s3_endpoint_url(self) -> str:
-        """Get the full S3 endpoint URL."""
-        return self.platform.storage.s3.endpoint
-
     def get_namespace(self) -> str:
         """Get the Kubernetes namespace, defaulting to deployment name."""
         return self.platform.kubernetes.namespace or self.name
@@ -3720,16 +3624,6 @@ class LakebenchConfig(ConfigModel):
             )
 
         return dims
-
-    def get_compute_guidance(self):
-        """Get compute guidance for the current scale.
-
-        Returns:
-            ComputeGuidance with tier name, minimum and recommended resources
-        """
-        from lakebench.config.scale import compute_guidance
-
-        return compute_guidance(self.architecture.workload.datagen.get_effective_scale())
 
 
 # =============================================================================

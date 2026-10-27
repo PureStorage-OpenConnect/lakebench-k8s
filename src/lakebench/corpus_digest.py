@@ -127,8 +127,9 @@ def listing_sha256(objects: Iterable[Mapping[str, Any]]) -> str:
     return hashlib.sha256(canonical_json(triples).encode()).hexdigest()
 
 
-#: Bucket-level prefix of the objects Lakebench itself keeps in a bucket
-#: (the bucket owner marker). They are never corpus data.
+#: Bucket-level prefix of the objects Lakebench itself keeps in a bucket (the
+#: bucket owner marker); they are never corpus data. Kept as a literal, not
+#: imported from ``s3.client``, so this module stays stdlib-only at import.
 RESERVED_PREFIX = ".lakebench/"
 
 
@@ -469,14 +470,11 @@ def utc_seconds(value: Any) -> float | None:
     return dt.timestamp()
 
 
-_utc = utc_seconds
-
-
 def completed_range(markers: Mapping[int, Sequence[Mapping[str, Any]]]) -> tuple[Any, Any]:
     """The earliest and latest marker ``completed_utc`` (ISO strings, or
     None when any marker lacks a readable one)."""
     stamps = [
-        (m.get("completed_utc"), _utc(m.get("completed_utc")))
+        (m.get("completed_utc"), utc_seconds(m.get("completed_utc")))
         for ms in markers.values()
         for m in ms
     ]
@@ -500,10 +498,10 @@ def series_check(
     # completed, so a series older than the last marker is from an earlier
     # generate (a failed series write leaves the old one in place).
     last = completed_range(markers)[1]
-    written = _utc(series.get("updated_utc"))
+    written = utc_seconds(series.get("updated_utc"))
     if last is None or written is None:
         return "series.json or the corpus markers carry no readable completion time"
-    if written + SERIES_CLOCK_SKEW_S < (_utc(last) or 0.0):
+    if written + SERIES_CLOCK_SKEW_S < (utc_seconds(last) or 0.0):
         return "series.json was written before the corpus markers (an earlier generate)"
     if "seed_ref" in gen and {str(m.get("seed_ref")) for m in bodies} != {str(gen["seed_ref"])}:
         return "series.json names another seed than the corpus markers"

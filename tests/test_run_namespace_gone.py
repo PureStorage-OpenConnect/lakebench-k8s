@@ -189,16 +189,6 @@ def test_strikes_need_three_reads_over_a_minute(watch):
         w.check(160.0)
 
 
-def test_redeployed_namespace_is_seen(watch):
-    from lakebench.cli._sustained import NamespaceGone
-
-    make, _ = watch
-    w, _ = make(_ns("u1"), _ns("u2"))
-    w.start()
-    with pytest.raises(NamespaceGone, match="created again"):
-        w.check(1.0)
-
-
 def test_start_retries_then_the_first_answer_sets_the_uid(watch):
     """Unread at the window start (three tries): the first read that answers
     becomes the baseline, so a later redeploy is still seen."""

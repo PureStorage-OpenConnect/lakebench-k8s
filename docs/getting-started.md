@@ -89,8 +89,6 @@ lakebench destroy lakebench.yaml --yes                 # remove what this deploy
 - `--generate` fills the bronze bucket first. Without it `run` refuses with
   exit 4.
 
-The steps below cover the same path with checks in between.
-
 ### 1. Generate a configuration file
 
 ```bash
@@ -194,8 +192,7 @@ lakebench config validate lakebench.yaml
 lakebench run lakebench.yaml --generate --yes
 ```
 
-Scale 1 (about 10 GB) exercises every stage. This deploys if needed,
-generates the data, runs the pipeline and runs the benchmark.
+Scale 1 (about 10 GB) exercises every stage.
 
 Each step on its own:
 
@@ -344,10 +341,12 @@ for scale factors and row counts.
   Hive, Iceberg and Trino. See [Recipes](recipes.md).
 - **Component versions** and overrides:
   [Supported Components](compatibility-matrix.md#components).
-- **AML (financial crime).** Any Iceberg recipe runs it. Set
+- **AML (financial crime).** Any Iceberg recipe with a Trino query engine
+  runs it; `none`, `duckdb` and `spark-thrift` are refused at load, because
+  recall and precision are scored with SQL on Trino. Set
   `workload.schema: financial`, or start from
   [`examples/polaris-iceberg-spark-financial.yaml`](../examples/polaris-iceberg-spark-financial.yaml).
-  `run` scores the nine detection rules (W1-W8 and W17) inline after
+  `run` scores the nine detection rules (W1-W8 and W17) with SQL after
   gold-finalize. Recall and precision from the default seed, 43, are
   in-sample and uncalibrated; see [AML Scoring](aml-scoring.md).
 

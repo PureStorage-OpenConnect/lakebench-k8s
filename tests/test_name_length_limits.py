@@ -33,8 +33,7 @@ class TestHiveLimit:
         _cfg(_exact(23), "hive-iceberg-spark-trino")
         with pytest.raises(ValidationError, match="it is 24"):
             _cfg(_exact(24), "hive-iceberg-spark-trino")
-
-    def test_default_catalog_is_hive(self):
+        # The default catalog is hive, so the same limit bites with no recipe.
         with pytest.raises(ValidationError):
             _cfg(_exact(24))
 
@@ -110,7 +109,11 @@ class TestLoader:
                 outcomes.append(exc)
             raise ConfigFileNotFoundError(str(path))
 
-        monkeypatch.setattr(importlib.import_module(module), "load_config", spy)
+        mod = importlib.import_module(module)
+        # Commands that load through cli._helpers.load_config_or_exit read
+        # load_config from lakebench.config at call time.
+        target = mod if hasattr(mod, "load_config") else importlib.import_module("lakebench.config")
+        monkeypatch.setattr(target, "load_config", spy)
         cfg_path = self._write(tmp_path, "ov-perf-c360-continuous-s10")
         CliRunner().invoke(app, [*argv, str(cfg_path)])
         assert outcomes, f"{argv} never loaded the config"

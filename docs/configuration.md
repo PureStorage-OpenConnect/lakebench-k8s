@@ -668,10 +668,10 @@ What `lb-deps` is and when it resolves again: see [Dependency server](#dependenc
 | `architecture.query_engine.trino.worker.storage_class` | string | `""` | advanced | Worker StorageClass. Empty = emptyDir (ephemeral, no PVC needed). Set a class name to use PVC-backed persistent volumes instead. |
 | `architecture.query_engine.trino.catalog_name` | string | `lakehouse` | advanced | Trino catalog name for the Iceberg connector. |
 | `architecture.query_engine.spark_thrift.cores` | integer | `2` | advanced | Spark Thrift Server CPU cores. Auto-sized to `8` on Delta + Hive when unset. |
-| `architecture.query_engine.spark_thrift.memory` | string | `4g` | advanced | Spark Thrift Server heap. The pod limit adds max(10% of heap, 1 GiB). Auto-sized to `16g` on Delta + Hive and `24g` on the financial schema when unset. |
+| `architecture.query_engine.spark_thrift.memory` | string | `4g` | advanced | Spark Thrift Server heap. The pod limit adds max(10% of heap, 1 GiB). Auto-sized to `16g` on Delta + Hive when unset. |
 | `architecture.query_engine.spark_thrift.catalog_name` | string | `lakehouse` | advanced | Iceberg catalog name for Spark Thrift Server. |
 | `architecture.query_engine.duckdb.cores` | integer | `2` | advanced | DuckDB CPU cores. |
-| `architecture.query_engine.duckdb.memory` | string | `4g` | advanced | DuckDB pod memory. Auto-sized to `16g` on the financial schema when unset (less on a node with under 24 GiB allocatable). |
+| `architecture.query_engine.duckdb.memory` | string | `4g` | advanced | DuckDB pod memory. |
 | `architecture.query_engine.duckdb.catalog_name` | string | `lakehouse` | advanced | Iceberg catalog name for DuckDB. |
 | `architecture.query_engine.duckdb.version` | string | `1.5.6` | advanced | DuckDB version installed at deploy time. Keep it pinned: an unpinned install takes whatever is current, so two runs weeks apart can query with different engines. |
 
@@ -681,7 +681,7 @@ The legacy name `processing` is still accepted with a deprecation warning.
 
 | Field | Type | Default | Tier | Description |
 |---|---|---|---|---|
-| `architecture.pipeline.pattern` | one of `medallion`, `streaming`, `batch`, `custom` | `medallion` | advanced | **Deprecated; removed in v1.7.** The stages are chosen by `pipeline.mode`. The only remaining effect is that `streaming` makes the auto-sizer give Spark 60% and datagen 40% of the CPU budget; any value other than `medallion` prints a warning. |
+| `architecture.pipeline.pattern` | one of `medallion`, `streaming`, `batch`, `custom` | `medallion` | advanced | **Deprecated; to be removed in a future release.** The stages are chosen by `pipeline.mode`. The only remaining effect is that `streaming` makes the auto-sizer give Spark 60% and datagen 40% of the CPU budget; any value other than `medallion` prints a warning. |
 | `architecture.pipeline.mode` | one of `batch`, `continuous` | `batch` | advanced | Pipeline execution mode: `batch` (sequential medallion jobs) or `continuous` (concurrent jobs over arriving data). `sustained` is accepted as a deprecated alias. The `--continuous` CLI flag overrides this. |
 | `architecture.pipeline.cycles` | integer | `1` | advanced | Batch iterations (1--50). Cycle 1 is full overwrite; cycles 2+ are incremental append/merge. Simulates multi-day lakehouse behavior. Only valid when `mode: batch`. See [Multi-Cycle Batch](#multi-cycle-batch). |
 | `architecture.pipeline.pre_benchmark_maintenance` | boolean | `true` | advanced | Run table maintenance before the benchmark phase so QpH is measured against maintained tables. Iceberg: `expire_snapshots`, `remove_orphan_files` (never below 24 h 10 min) and compaction of silver and gold. Delta: `VACUUM` on Trino only; Delta `OPTIMIZE` is never run. All statements share one 30-minute budget; the first statement timeout or the deadline stops the rest, and the post-maintenance QpH is then not a measurement. |
@@ -762,7 +762,7 @@ Advanced workload overrides. Most users should leave these at defaults and contr
 | `architecture.benchmark.maintenance_settle.tolerance_pct` | number | `10.0` | advanced | Settled when two consecutive probes differ by at most this percent and neither is slower than the pre-maintenance time by more. Range: above 0, up to 100. |
 | `architecture.benchmark.maintenance_settle.probe_query` | string or null | `null` | advanced | Benchmark query name to probe with. Default: the workload's first scan-class query (a full scan of the table compaction rewrote) |
 | `architecture.benchmark.maintenance_settle.probe_samples` | integer | `1` | advanced | Timed runs per probe; the probe time is their median. Range: 1--10. |
-| `architecture.benchmark.investigator_sessions` | integer or null | `null` | advanced | AML continuous only: concurrent investigator sessions run once, as an extra round after the first in-stream round that had a case, each working one case of the run (IQ1 to IQ4). Range: 1--32. Unset runs no such round. Refused at load unless the workload is `financial`, `tm_operations.enabled` is true and the query engine is `trino` or `spark-thrift`, and by `run` unless the run is continuous. The sessions that ran (fewer when the run has fewer cases) are an outcome condition: two runs that differ in it are not like-for-like. |
+| `architecture.benchmark.investigator_sessions` | integer or null | `null` | advanced | AML continuous only: concurrent investigator sessions run once, as an extra round after the first in-stream round that had a case, each working one case of the run (IQ1 to IQ4). Range: 1--32. Unset runs no such round. Refused at load unless the workload is `financial` with `tm_operations.enabled` true (the financial workload itself requires the `trino` query engine), and by `run` unless the run is continuous. The sessions that ran (fewer when the run has fewer cases) are an outcome condition: two runs that differ in it are not like-for-like. |
 
 ### Architecture -- Table Names
 

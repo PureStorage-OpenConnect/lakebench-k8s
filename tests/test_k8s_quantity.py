@@ -35,7 +35,9 @@ def test_parse_every_kubernetes_form():
 
 
 def test_rejects_what_kubernetes_rejects():
-    for value in ["16g", "1.5gb", "16GB", "-1Gi", "", "12e6Ki", "1K", "Gi", "1 Gi x", True, -2]:
+    bad = ["16g", "1.5gb", "16GB", "-1Gi", "", "12e6Ki", "1K", "Gi", "1 Gi x", True, -2]
+    bad += [float("nan"), float("inf")]  # non-finite numbers are quantity errors too
+    for value in bad:
         with pytest.raises(QuantityError):
             parse(value)
 
@@ -82,18 +84,26 @@ def _engine_gb(cfg) -> float:
     return sum(mem for _, _, mem in _engine_pods(cfg))
 
 
-@pytest.mark.parametrize(
-    "engine,workers_gib",
-    [
+def test_engine_pod_memory_is_counted():
+    """Every query engine's pod memory, as the capacity plan counts it."""
+    from lakebench.deploy.engine import thrift_pod_memory_limit
+
+    # Trino: coordinator plus every worker replica.
+    for engine, workers_gib in (
         ({"worker": {"replicas": 1, "memory": "1Ti"}}, 1024),
         ({"worker": {"replicas": 2, "memory": "2000000Ki"}}, 2 * to_gib("2000000Ki")),
-    ],
-    ids=["ti", "ki"],
-)
-def test_trino_memory_is_counted(engine, workers_gib):
-    cfg = _config({"type": "trino", "trino": engine})
-    coordinator = to_gib(cfg.architecture.query_engine.trino.coordinator.memory)
-    assert _engine_gb(cfg) == pytest.approx(coordinator + workers_gib)
+    ):
+        cfg = _config({"type": "trino", "trino": engine})
+        coordinator = to_gib(cfg.architecture.query_engine.trino.coordinator.memory)
+        assert _engine_gb(cfg) == pytest.approx(coordinator + workers_gib), engine
+
+    # Spark-thrift: the pod limit, not the heap (the heap is "16g").
+    thrift_gb = _engine_gb(_config({"type": "spark-thrift", "spark_thrift": {"memory": "16g"}}))
+    assert thrift_gb == to_gib(thrift_pod_memory_limit("16g"))
+    assert thrift_gb > 16
+
+    # DuckDB: its single pod ("6g", rendered as 6Gi).
+    assert _engine_gb(_config({"type": "duckdb", "duckdb": {"memory": "6g"}})) == 6
 
 
 def test_unreachable_cluster_refuses_run_and_skips_for_deploy():
@@ -106,21 +116,6 @@ def test_unreachable_cluster_refuses_run_and_skips_for_deploy():
         deploy_check = deploy_capacity_check(_config())
     assert not run_check.passed and "capacity could not be read" in run_check.message
     assert deploy_check.passed and "skipped" in deploy_check.message
-
-
-def test_thrift_counts_the_pod_not_the_heap():
-    from lakebench.deploy.engine import thrift_pod_memory_limit
-
-    qe = {"type": "spark-thrift", "spark_thrift": {"memory": "16g"}}
-    gb = _engine_gb(_config(qe))
-    assert gb == to_gib(thrift_pod_memory_limit("16g"))
-    assert gb > 16
-
-
-@pytest.mark.parametrize("value", [float("nan"), float("inf")])
-def test_non_finite_numbers_are_quantity_errors(value):
-    with pytest.raises(QuantityError):
-        parse(value)
 
 
 def test_fingerprint_quantities_match_the_kubernetes_client():
@@ -154,12 +149,6 @@ def test_bad_node_allocatable_fails_the_real_capacity_read():
         result = _check_cluster_capacity(_config())
     assert not result.passed
     assert "402 gigs" in result.message
-
-
-def test_duckdb_counts_its_pod():
-    # A Spark-style size ("6g"), which deploy renders as 6Gi.
-    qe = {"type": "duckdb", "duckdb": {"memory": "6g"}}
-    assert _engine_gb(_config(qe)) == 6
 
 
 @pytest.mark.parametrize(("cluster", "bad"), [("unreachable", "16g"), ("healthy", "lots")])

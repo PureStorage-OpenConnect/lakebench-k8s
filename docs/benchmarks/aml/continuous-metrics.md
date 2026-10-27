@@ -35,7 +35,7 @@ Primary: `data_freshness_seconds`, lower is better.
 | `qph_degradation_withheld` | text | none | why `qph_degradation_pct` is absent with 4 or more rounds: the rounds ran different query sets |
 | `query_time_event_age_seconds` | s | none | not in the scorecard (`pipeline_benchmark.diagnostics`): median age of gold's newest event date at query time; tracks the corpus's position in time, not freshness |
 | `total_elapsed_seconds` | s | none | the run's wall-clock seconds |
-| `pipeline_throughput_gb_per_second`, `compute_efficiency_gb_per_core_hour` | GB/s, GB/core-h | higher | data processed over the window; the streams' input over their core-hours |
+| `pipeline_throughput_gb_per_second`, `compute_efficiency_gb_per_core_hour` | GiB/s, GiB/core-h | higher | data processed over the window; the streams' input over their core-hours |
 | `total_core_hours` | core-h | none | core-hours of the three streams, which run the whole window, so it follows the window length |
 
 `qph_degradation_pct` needs four rounds to read as a trend; a typical run
@@ -78,27 +78,28 @@ carry the keys, null when nothing was measured.
 
 **Time-travel reads** (`continuous.time_travel`; reported, never gating).
 Each tick records the `silver.transactions` snapshot it read. After a passing
-run, `time-travel-financial` reads those snapshots back and verifies that each
-still holds the row count its summary gave and reads identically twice.
-Snapshots are immutable, so the comparison shows read determinism, not the
-content the tick saw. Snapshots expired by a Lakebench maintenance round are
-attributed to the earliest round that could have expired them.
+run, with the streams stopped, the check runs through the query engine: for
+each recorded snapshot a metadata read of the table's `$snapshots` list says
+whether it is still present, and for a present snapshot one point read
+re-reads one case's payments as of that snapshot and confirms the evidence
+rows are there. This is the investigator's "what did the system see when this
+alert was raised" question, asked on the real query path, not a full rescan.
+Snapshots expired by a Lakebench maintenance round are attributed to the
+earliest round that could have expired them.
 
 | State | Meaning |
 |---|---|
-| `verified` | scan rows equal the recorded count and the fingerprint equals the hash |
-| `verified_hash_only` | recorded count is not a live-row count: no summary count, or delete files |
-| `mismatch` | the read scan's rows, `fp` or column spec differ from the hash pass, or its rows differ from the tick's `total_records`; also when the tick recorded no snapshot id |
-| `error` | a listed snapshot could not be read |
-| `not_read` | the budget ran out |
-| `expired` | expired by a Lakebench maintenance round, named in `expired_by` |
-| `missing_unexplained` | expired, and no Lakebench round could have |
+| `verified` | the snapshot is present and the case's evidence rows are all there as of it |
+| `verified_hash_only` | the snapshot is present but there was no case to read (no alert, or an alert with no payments, or no pinned alerts snapshot) |
+| `mismatch` | the snapshot is present but fewer evidence rows are there than the alert recorded |
+| `error` | the snapshot list or the point read failed |
+| `expired` | the snapshot is gone, explained by a Lakebench maintenance round named in `expired_by` |
+| `missing_unexplained` | the snapshot is gone, and no Lakebench round could have expired it |
 
 | Verdict | When |
 |---|---|
-| `fail` | any `mismatch`, `missing_unexplained`, `error` or `not_supported`; zero recorded snapshots; or no `verified` record (`verified_hash_only` alone compares nothing the tick recorded) |
-| `incomplete` | the budget ran out |
-| `not_run` | the job could not run, or the run failed its gates |
+| `fail` | any `mismatch`, `missing_unexplained` or `error`; zero recorded snapshots; or no `verified` record (`verified_hash_only` alone compares nothing the tick recorded) |
+| `not_run` | the check could not run, or the run failed its gates |
 | `pass` | otherwise |
 
 At the default 30 min retention, older tick snapshots expire inside a 2 h

@@ -1,7 +1,8 @@
 """Spark module for Lakebench.
 
-Backward-compat re-exports. Implementations moved to
-``lakebench.modules.pipeline_engines.spark.*``.
+The CLI imports ``SparkOperatorManager`` and ``SparkJobMonitor`` from here
+at call time, so tests patch them here (``lakebench.spark.<name>``). The
+implementations are ``lakebench.modules.pipeline_engines.spark.*``.
 """
 
 from lakebench.modules.pipeline_engines.spark.job import (

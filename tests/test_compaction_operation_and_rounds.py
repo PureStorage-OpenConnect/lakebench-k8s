@@ -160,39 +160,31 @@ def _collector():
     return c
 
 
-def test_record_round_writes_the_round_record():
+def test_record_round_writes_and_saves_the_round_record():
+    from lakebench.benchmark.queries import query_set_id
+    from lakebench.metrics.storage import _deserialize_benchmark_rounds
+
+    # The full round record carries its index, times and executed set.
     c = _collector()
     t0 = datetime(2026, 10, 2, 1, 0, tzinfo=timezone.utc)
     t1 = datetime(2026, 10, 2, 1, 1, tzinfo=timezone.utc)
     c.record_round(_round(EIGHT, index=3), started_at=t0, ended_at=t1)
     (r,) = c.current_run.benchmark_rounds
     d = r.to_dict()
-    from lakebench.benchmark.queries import query_set_id
-
     assert d["index"] == 3
     assert d["started_at"] == t0.isoformat() and d["ended_at"] == t1.isoformat()
     assert d["executed_queries"] == EIGHT
     assert d["executed_query_set_id"] == query_set_id(EIGHT)
+    # It round-trips through a save unchanged.
+    (loaded,) = _deserialize_benchmark_rounds([d])
+    assert loaded.to_dict() == d
 
-
-def test_a_failed_query_is_not_executed():
+    # A failed query is not counted as executed.
     c = _collector()
     c.record_round(_round(EIGHT, failed=("Q8",)))
-    from lakebench.benchmark.queries import query_set_id
-
     d = c.current_run.benchmark_rounds[0].to_dict()
     assert d["executed_queries"] == EIGHT[:7]
     assert d["executed_query_set_id"] == query_set_id(EIGHT[:7])
-
-
-def test_the_round_record_survives_a_save():
-    from lakebench.metrics.storage import _deserialize_benchmark_rounds
-
-    c = _collector()
-    c.record_round(_round(EIGHT), started_at=datetime(2026, 10, 2, tzinfo=timezone.utc))
-    raw = [r.to_dict() for r in c.current_run.benchmark_rounds]
-    (loaded,) = _deserialize_benchmark_rounds(raw)
-    assert loaded.to_dict() == raw[0]
 
 
 def test_blended_rounds_labelled():
@@ -214,19 +206,19 @@ def test_blended_rounds_labelled():
 
 def test_stored_rounds_get_their_sets_from_the_queries():
     """Rounds recorded before the round record: their queries' success flags
-    say what they executed."""
+    say what they executed, so a failed query in one round makes them blend."""
     from lakebench.benchmark.queries import query_set_id
 
+    # Every round ran the same set: not blended, one set.
     rounds = [_round(EIGHT, index=i) for i in range(3)]
     assert all(r.round_record is None for r in rounds)
     basis, by_set = composite_qph_basis(rounds)
     assert basis == {"blended": False, "sets": {query_set_id(EIGHT): 3}}
     assert list(by_set) == [query_set_id(EIGHT)]
 
-
-def test_a_stored_round_with_a_failed_query_is_blended():
-    rounds = [_round(EIGHT, index=0), _round(EIGHT, failed=("Q1",), index=1)]
-    assert composite_qph_basis(rounds)[0]["blended"] is True
+    # One round whose query failed executed a smaller set: blended.
+    mixed = [_round(EIGHT, index=0), _round(EIGHT, failed=("Q1",), index=1)]
+    assert composite_qph_basis(mixed)[0]["blended"] is True
 
 
 def test_by_set_is_the_median_and_failed_rounds_are_left_out():
@@ -283,7 +275,7 @@ def test_the_compaction_call_records_its_operation(monkeypatch):
     the operation of the statements it ran into its outcome."""
     from unittest.mock import MagicMock
 
-    import lakebench.deploy.iceberg as iceberg
+    import lakebench.modules.table_formats.iceberg.maintenance as iceberg
     from lakebench.cli import _sustained
     from lakebench.config import LakebenchConfig
 
@@ -362,9 +354,10 @@ def _sustained_with(rounds):
     return pb
 
 
-def test_degradation_is_withheld_when_rounds_ran_different_sets():
+def test_degradation_is_withheld_for_blended_sets_and_computed_over_one():
     """An AML continuous run: 8-query rounds before its first case, 12 after.
-    The halves time different work, so no degradation figure is recorded."""
+    The blended halves time different work, so no degradation figure is
+    recorded; over one set it is computed."""
     from lakebench.metrics.collector import QPH_DEGRADATION_BLENDED
 
     rounds = [_round(EIGHT, qph=400.0), _round(EIGHT, qph=400.0)]
@@ -376,8 +369,5 @@ def test_degradation_is_withheld_when_rounds_ran_different_sets():
     assert "qph_degradation_pct" not in scores
     assert scores["qph_degradation_withheld"] == QPH_DEGRADATION_BLENDED
 
-
-def test_degradation_is_computed_over_one_set():
-    rounds = [_round(TWELVE, qph=q) for q in (100.0, 100.0, 80.0, 80.0)]
-    run = _sustained_with(rounds)
-    assert run.qph_degradation_pct == 20.0 and run.qph_degradation_withheld is None
+    one_set = _sustained_with([_round(TWELVE, qph=q) for q in (100.0, 100.0, 80.0, 80.0)])
+    assert one_set.qph_degradation_pct == 20.0 and one_set.qph_degradation_withheld is None

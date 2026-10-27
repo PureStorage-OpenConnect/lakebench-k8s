@@ -175,7 +175,7 @@ fn compression_env_maps_to_the_exact_codec() {
 // Manifest -> bronze UETR contract
 // ---------------------------------------------------------------------------
 //
-// score_financial.py joins `manifest.participant_uetrs` against
+// The scoring SQL joins `manifest.participant_uetrs` against
 // `gold.alerts.related_txn_ids`. If the manifest's UETR derivation drifts from
 // what bronze emit produces, recall silently reports 0. This test pins both
 // sides of the identity: the same (uid, seed) must produce the same UETR

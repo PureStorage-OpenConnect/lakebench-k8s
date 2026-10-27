@@ -36,7 +36,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ _STREAM_CHECKPOINT_DIRS = ("bronze-ingest", "silver-stream", "gold-refresh")
 _LOCATION_TRINO = re.compile(r"location\s*=\s*'([^']+)'", re.IGNORECASE)
 _NUMBER = re.compile(r"^-?\d+(\.\d+)?([eE][+-]?\d+)?$")
 
-#: Raised by a SQL runner when the engine refuses or fails a statement.
+#: Runs one SQL statement and returns the engine's stdout.
 SqlRunner = Callable[[str], str]
 
 
@@ -473,14 +473,6 @@ def measure(
     return out
 
 
-def iter_objects(boto_client: Any, bucket: str) -> Iterator[dict[str, Any]]:
-    """Every object in *bucket* except Lakebench's own keys, one page at a
-    time (s3/client.py does every listing)."""
-    from lakebench.s3.client import iter_user_objects
-
-    return iter_user_objects(boto_client, bucket, "")
-
-
 def orphan_removal_ran(outcomes: list[dict[str, Any]] | None) -> bool:
     """Whether a ``remove_orphan_files`` statement succeeded in the run's
     recorded maintenance outcomes."""
@@ -492,18 +484,9 @@ def orphan_removal_ran(outcomes: list[dict[str, Any]] | None) -> bool:
 
 
 def _s3_client(cfg: Any) -> Any:
-    from lakebench.s3 import S3Client
+    from lakebench.s3 import s3_client_from_config
 
-    s3_cfg = cfg.platform.storage.s3
-    return S3Client(
-        endpoint=s3_cfg.endpoint,
-        access_key=s3_cfg.access_key,
-        secret_key=s3_cfg.secret_key,
-        region=s3_cfg.region,
-        path_style=s3_cfg.path_style,
-        ca_cert=s3_cfg.ca_cert,
-        verify_ssl=s3_cfg.verify_ssl,
-    )
+    return s3_client_from_config(cfg.platform.storage.s3)
 
 
 def measure_run(cfg: Any, k8s: Any, s3: Any, metrics: Any) -> dict:
@@ -555,6 +538,8 @@ def measure_run(cfg: Any, k8s: Any, s3: Any, metrics: Any) -> dict:
         def run_sql(sql: str) -> str:
             return query_sql(str(engine), k8s, str(pod), namespace, sql, timeout=120)
 
+        from lakebench.s3.client import iter_user_objects
+
         return measure(
             buckets=buckets,
             tables_by_layer=tables_by_layer,
@@ -562,7 +547,7 @@ def measure_run(cfg: Any, k8s: Any, s3: Any, metrics: Any) -> dict:
             engine=engine,
             table_format=cfg.architecture.table_format.type.value,
             datagen_prefix=bronze_datagen_prefix(cfg).rstrip("/"),
-            list_objects=lambda b: iter_objects(s3.raw_client, b),
+            list_objects=lambda b: iter_user_objects(s3.raw_client, b, ""),
             run_sql=run_sql if engine else None,
             maintenance_id=getattr(metrics, "maintenance_policy_id", None),
             orphan_removal_ran=orphan_removal_ran(getattr(metrics, "maintenance_outcomes", None)),

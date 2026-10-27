@@ -17,9 +17,10 @@ from lakebench.cli._admin import (
     _migrate_secretclass,
     admin_app,
 )
-from lakebench.deploy.cluster_lock import ClusterLockHeld
+from lakebench.deploy.cluster_lock import ClusterLockError, ClusterLockHeld
 from lakebench.exit_codes import ExitCode
 from lakebench.modules.pipeline_engines.spark.operator_scratch import TmpVolume
+from tests.conftest import make_config
 
 runner = CliRunner()
 
@@ -29,39 +30,40 @@ def _api_exc(status: int) -> ApiException:
 
 
 class TestReleaseLock:
-    def test_expired_only_refuses_live(self):
-        with (
-            patch("lakebench.cli._admin._get_core_v1"),
-            patch(
-                "lakebench.deploy.cluster_lock.force_release_cluster_lock",
-                side_effect=ClusterLockHeld(
+    @pytest.mark.parametrize(
+        ("side_effect", "exit_code", "text"),
+        [
+            # a live lease is refused (lease.held)
+            (
+                ClusterLockHeld(
                     holder="prod@host@abc",
                     acquired_at="2026-09-21T12:00:00+00:00",
                     ttl_seconds=3600,
                     expires_at="2026-09-21T13:00:00+00:00",
                 ),
+                3,
+                "prod@host@abc",
             ),
-        ):
-            r = runner.invoke(admin_app, ["release-lock"])
-        assert r.exit_code == 3  # refused: the lease is live (lease.held)
-        assert "prod@host@abc" in r.output
-
-
-class TestReleaseLockErrors:
-    def test_lock_error_is_a_message_not_a_traceback(self):
-        from lakebench.deploy.cluster_lock import ClusterLockError
-
+            # a force-delete failure is a message, not a traceback
+            (
+                ClusterLockError("cannot force-delete lease: (403) Forbidden"),
+                1,
+                "403",
+            ),
+        ],
+    )
+    def test_force_release_faults(self, side_effect, exit_code, text):
         with (
             patch("lakebench.cli._admin._get_core_v1"),
             patch(
                 "lakebench.deploy.cluster_lock.force_release_cluster_lock",
-                side_effect=ClusterLockError("cannot force-delete lease: (403) Forbidden"),
+                side_effect=side_effect,
             ),
         ):
             r = runner.invoke(admin_app, ["release-lock"])
-        assert r.exit_code == 1
+        assert r.exit_code == exit_code, r.output
         assert r.exception is None or isinstance(r.exception, SystemExit)
-        assert "403" in r.output
+        assert text in r.output
 
 
 class TestMigrateDeployment:
@@ -163,7 +165,10 @@ class TestReclaimBucket:
         assert "--force-nonempty" in r.output
 
     def test_rewrites_tag_on_empty_bucket(self, tmp_path):
-        s3, cfg = self._mock_s3_and_cfg(key_count=0)
+        s3, _ = self._mock_s3_and_cfg(key_count=0)
+        # A real config: a MagicMock one answers any attribute, so it would
+        # hide a workload read from the wrong place.
+        cfg = make_config(name="new-owner")
         yaml_path = tmp_path / "cfg.yaml"
         yaml_path.write_text("name: x\n")
 
@@ -184,6 +189,9 @@ class TestReclaimBucket:
         mock_tag.assert_called_once()
         # SAF-10: the claim carries this cluster's stamp.
         assert mock_tag.call_args.kwargs["cluster"] == "fp1"
+        # The tag names the workload, as deploy's tag does.
+        assert mock_tag.call_args.kwargs["workload_schema"] == "customer360"
+        assert "workload=customer360" in r.output
         cm_ctx.__enter__.assert_called_once()
 
     def test_refuses_without_a_cluster_fingerprint(self, tmp_path):
@@ -247,10 +255,12 @@ class _Repair:
         active_in_lease=None,
         state=None,
         after=None,
-        tmp=TmpVolume(True, "8Gi"),
+        tmp=None,
     ):
         from contextlib import contextmanager
 
+        if tmp is None:
+            tmp = TmpVolume(True, "8Gi")
         self.held = False
         self.rolled_back = False
         self.calls: list[tuple[str, bool]] = []
@@ -465,10 +475,8 @@ class TestRepairOperator:
         assert r.exit_code == 3, r.output
         assert h.writes() == []
 
-    def test_unreadable_webhook_fails_closed(self):
+    def _webhook_unreadable(self, h):
         from lakebench.modules.pipeline_engines.spark.operator import _DeploymentReadError
-
-        h = _Repair(values=["ns-a", "ns-gone"], live=["ns-a"], active=("ns-a",))
 
         def read(operator_ns=None, deployment=None):
             if deployment == "spark-operator-webhook":
@@ -476,26 +484,34 @@ class TestRepairOperator:
             return ["ns-a"]
 
         h.mgr._get_active_namespaces.side_effect = read
-        r = h.invoke()
-        assert r.exit_code == 1
-        assert "spark-operator-webhook" in _flat(r)
-        assert h.writes() == []
 
-    def test_unreadable_release_state_fails_closed(self):
-        h = _Repair(values=["ns-a"], live=["ns-a"], active=("ns-a",))
+    def _release_state_unreadable(self, h):
         h.mgr.release_state.side_effect = None
         h.mgr.release_state.return_value = None
-        r = h.invoke()
-        assert r.exit_code == 1
-        assert h.writes() == []
 
-    def test_namespace_list_error_is_a_message_not_a_traceback(self):
-        h = _Repair(values=["ns-a"], live=["ns-a"], active=("ns-a",))
+    def _namespace_list_error(self, h):
         h.core.list_namespace.side_effect = RuntimeError("apiserver timeout")
+
+    @pytest.mark.parametrize(
+        ("values", "fault", "text"),
+        [
+            # a webhook that cannot be read fails closed and names it
+            (["ns-a", "ns-gone"], "_webhook_unreadable", "spark-operator-webhook"),
+            # no release state fails closed
+            (["ns-a"], "_release_state_unreadable", ""),
+            # an apiserver error is a message, not a traceback
+            (["ns-a"], "_namespace_list_error", "Cannot list the cluster's namespaces"),
+        ],
+    )
+    def test_read_faults_fail_closed(self, values, fault, text):
+        h = _Repair(values=values, live=["ns-a"], active=("ns-a",))
+        getattr(self, fault)(h)
         r = h.invoke()
-        assert r.exit_code == 1
-        assert "Cannot list the cluster's namespaces" in _flat(r)
-        assert not isinstance(r.exception, RuntimeError)
+        assert r.exit_code == 1, (fault, r.output)
+        assert h.writes() == [], fault
+        assert r.exception is None or isinstance(r.exception, SystemExit), fault
+        if text:
+            assert text in _flat(r), fault
 
     def test_failed_set_exits_nonzero(self):
         h = _Repair(values=["ns-a", "ns-gone"], live=["ns-a", "ns-gone"], active=("ns-a",))

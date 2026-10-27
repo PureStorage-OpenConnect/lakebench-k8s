@@ -9,7 +9,6 @@ from .loader import (
     ConfigProtectedCorpusError,
     ConfigValidationError,
     LoadPurpose,
-    generate_default_config,
     load_config,
     save_config,
 )
@@ -66,7 +65,6 @@ __all__ = [
     "LoadPurpose",
     "load_config",
     "save_config",
-    "generate_default_config",
     # Helpers
     "parse_size_to_bytes",
     "parse_spark_memory",

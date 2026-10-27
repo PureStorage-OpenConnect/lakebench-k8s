@@ -1,8 +1,8 @@
-{# Per-deployment Prometheus Pushgateway (ownership category 1).            #}
-{# Datagen pods and the Spark driver push batch-job metrics here; the shared #}
-{# Prometheus scrapes it via podmonitor-pushgateway.yaml.j2. Lives in the    #}
-{# deployment namespace and is torn down with it by `lakebench destroy`.     #}
-{# Best-effort LIVE view only -- metrics.json stays the source of truth.     #}
+{# Per-deployment Prometheus Pushgateway. Datagen pods and the Spark driver #}
+{# push batch-job metrics here and the deployment's Prometheus scrapes it.  #}
+{# Lives in the deployment namespace and is torn down with it by            #}
+{# `lakebench destroy`. A best-effort live view: metrics.json stays the     #}
+{# source of truth.                                                          #}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -15,12 +15,12 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  {% if pushgateway_storage_class | default('px-csi-scratch') %}
-  storageClassName: {{ pushgateway_storage_class | default('px-csi-scratch') }}
+  {% if pushgateway_storage_class %}
+  storageClassName: {{ pushgateway_storage_class }}
   {% endif %}
   resources:
     requests:
-      storage: {{ pushgateway_storage | default('1Gi') }}
+      storage: {{ pushgateway_storage }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -46,7 +46,7 @@ spec:
         app.kubernetes.io/name: lakebench
         app.kubernetes.io/component: pushgateway
     spec:
-      {% if not openshift_mode | default(false) %}
+      {% if not openshift_mode %}
       # Vanilla k8s has no automatic fsGroup: make the RWO volume group-writable
       # by the image's nobody (65534) so --persistence.file can be created. On
       # OpenShift the restricted-v2 SCC assigns an fsGroup + arbitrary UID (same
@@ -57,10 +57,10 @@ spec:
       {% endif %}
       containers:
         - name: pushgateway
-          image: {{ pushgateway_image | default('prom/pushgateway:v1.11.4') }}
+          image: {{ pushgateway_image }}
           args:
             # Persist so a pod restart does not drop a completed stage's final
-            # push before Prometheus scrapes it (best-effort; see design doc).
+            # push before Prometheus scrapes it (best-effort).
             - --persistence.file=/pushgateway/data/state
             - --persistence.interval=30s
           ports:

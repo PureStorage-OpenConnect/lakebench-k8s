@@ -35,9 +35,6 @@ from lakebench.cli._helpers import (
     resolve_config_path,
     warn_deprecated_short_f,
 )
-from lakebench.cli._helpers import (
-    get_journal as get_journal,
-)
 from lakebench.cli._json import json_option
 from lakebench.cli._nameless import NAME_OPTION_HELP, guard_nameless
 from lakebench.config import (
@@ -49,7 +46,6 @@ from lakebench.config import (
 )
 from lakebench.config.schema import is_continuous_mode
 from lakebench.exit_codes import ExitCode
-from lakebench.journal import DEFAULT_JOURNAL_DIR as DEFAULT_JOURNAL_DIR
 from lakebench.journal import CommandName, EventType, Journal
 from lakebench.k8s import (
     K8sConnectionError,
@@ -100,12 +96,8 @@ def _main(
         ),
     ] = False,
 ) -> None:
-    """Root callback. Exists so `--version` is a top-level flag.
-
-    Priya (roleplay P2) tried ``lakebench --version`` and got
-    ``No such option``; the ``version`` subcommand is idiomatic but
-    the flag form is muscle memory for anyone coming from any other
-    CLI. Both work now."""
+    """Root callback. Exists so `--version` is a top-level flag, next to
+    the ``version`` subcommand."""
 
 
 # Config subcommand group
@@ -141,33 +133,6 @@ from lakebench.cli import _aliases  # noqa: E402
 _aliases.register(app)
 
 
-# Re-exports for backward compatibility (tests import these from lakebench.cli)
-from lakebench.cli._deploy import _preflight_check as _preflight_check  # noqa: E402
-from lakebench.cli._run import (  # noqa: E402
-    _run_preflight_infra_check as _run_preflight_infra_check,
-)
-from lakebench.cli._sustained import (  # noqa: E402
-    _collect_platform_metrics as _collect_platform_metrics,
-)
-from lakebench.cli._sustained import (  # noqa: E402
-    _parse_spark_interval as _parse_spark_interval,
-)
-from lakebench.cli._sustained import (  # noqa: E402
-    _run_iceberg_compaction as _run_iceberg_compaction,
-)
-from lakebench.cli._sustained import (  # noqa: E402
-    _run_iceberg_maintenance as _run_iceberg_maintenance,
-)
-
-
-def _print_front_matter(metrics) -> None:
-    """The report's front matter (reports/front_matter.py), before any metric."""
-    from lakebench.reports.front_matter import print_front_matter
-
-    print_front_matter(metrics, console)
-
-
-# Re-export for backward compatibility (report command references this)
 def _note_benchmark_record(metrics) -> None:
     """One stderr line when *metrics* is a ``lakebench benchmark`` record: its
     pipeline numbers are its parent run's, its benchmark is its own."""
@@ -191,8 +156,10 @@ def _print_report_summary(metrics, judged: dict | None = None) -> None:
     ``verdict.verdict_of`` of the stored record: the status line is its
     headline (the strictest of the stored and the recomputed verdict, as
     every reader takes it), naming both when they differ."""
+    from lakebench.reports.front_matter import print_front_matter
+
     _note_benchmark_record(metrics)
-    _print_front_matter(metrics)
+    print_front_matter(metrics, console)
     pb = metrics.pipeline_benchmark
     if pb is None:
         print_warning("No pipeline benchmark data in this run.")
@@ -220,9 +187,9 @@ def _print_report_summary(metrics, judged: dict | None = None) -> None:
     table = Table(show_header=True, header_style="bold", expand=False)
     table.add_column("Stage", style="cyan")
     table.add_column("Time", justify="right")
-    table.add_column("In (GB)", justify="right")
-    table.add_column("Out (GB)", justify="right")
-    table.add_column("GB/s", justify="right")
+    table.add_column("In (GiB)", justify="right")
+    table.add_column("Out (GiB)", justify="right")
+    table.add_column("GiB/s", justify="right")
     table.add_column("Executors", justify="right")
 
     for stage in pb.stages:
@@ -274,12 +241,12 @@ def _print_report_summary(metrics, judged: dict | None = None) -> None:
         if pb.time_to_value_seconds > 0:
             scores.append(f"Time to Value:   {pb.time_to_value_seconds:>8.1f}s")
         if pb.pipeline_throughput_gb_per_second > 0:
-            scores.append(f"Throughput:      {pb.pipeline_throughput_gb_per_second:>8.3f} GB/s")
+            scores.append(f"Throughput:      {pb.pipeline_throughput_gb_per_second:>8.3f} GiB/s")
         if pb.total_data_processed_gb > 0:
-            scores.append(f"Data Processed:  {pb.total_data_processed_gb:>8.1f} GB")
+            scores.append(f"Data Processed:  {pb.total_data_processed_gb:>8.1f} GiB")
         if pb.compute_efficiency_gb_per_core_hour > 0:
             scores.append(
-                f"Efficiency:      {pb.compute_efficiency_gb_per_core_hour:>8.3f} GB/core-hr"
+                f"Efficiency:      {pb.compute_efficiency_gb_per_core_hour:>8.3f} GiB/core-hr"
             )
         if pb.scale_ratio > 0:
             pct = pb.scale_ratio * 100
@@ -444,12 +411,8 @@ def validate(
 
     # validate is read-only: it opens no journal and writes no file.
 
-    # Track validation results
-    checks_passed = 0
-    checks_failed = 0
-    checks_warned = 0
-
-    # --- Helpers for grouped section output ---
+    # Checks per status ("ok", "fail", "warn") over every section.
+    counts = dict.fromkeys(("ok", "fail", "warn"), 0)
     _section_items: list[tuple[str, str, str | None]] = []  # (status, msg, hint)
 
     def _section_start(title: str) -> None:
@@ -465,24 +428,17 @@ def validate(
     def _check_warn(msg: str, *, hint: str | None = None) -> None:
         _section_items.append(("warn", msg, hint))
 
-    def _section_end() -> tuple[int, int, int]:
-        """Flush section items. Returns (passed, failed, warned)."""
-        ok = fail = warn = 0
+    marks = {"ok": "[green]+[/green]", "fail": "[red]x[/red]", "warn": "[yellow]![/yellow]"}
+
+    def _section_end() -> None:
+        """Print the section's items and add them to the counts."""
         for status, msg, hint in _section_items:
-            if status == "ok":
-                console.print(f"   [green]+[/green] {esc(msg)}")
-                ok += 1
-            elif status == "fail":
-                console.print(f"   [red]x[/red] {esc(msg)}")
-                fail += 1
-            else:
-                console.print(f"   [yellow]![/yellow] {esc(msg)}")
-                warn += 1
+            console.print(f"   {marks[status]} {esc(msg)}")
+            counts[status] += 1
             if hint:
                 for line in hint.split("\n"):
                     console.print(f"     [dim]{esc(line)}[/dim]")
         _section_items.clear()
-        return ok, fail, warn
 
     # 1. Load and validate config
     _section_start("Configuration")
@@ -506,10 +462,7 @@ def validate(
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(ExitCode.USAGE)  # noqa: B904
-    p, f, w = _section_end()
-    checks_passed += p
-    checks_failed += f
-    checks_warned += w
+    _section_end()
 
     # 2. CLI tools
     _section_start("CLI Tools")
@@ -518,10 +471,7 @@ def validate(
             _check_ok(f"{tool} found")
         else:
             _check_fail(f"{tool} not found on PATH")
-    p, f, w = _section_end()
-    checks_passed += p
-    checks_failed += f
-    checks_warned += w
+    _section_end()
 
     # 3. S3 storage (endpoint + credentials + connectivity -- single group)
     _section_start("S3 Storage")
@@ -566,13 +516,11 @@ def validate(
     if len(set(bucket_names)) < 3:
         _check_warn("Bronze, silver, and gold use overlapping bucket names")
 
-    p, f, w = _section_end()
-    checks_passed += p
-    checks_failed += f
-    checks_warned += w
+    _section_end()
 
     # 4. Kubernetes cluster (connectivity + namespace + platform security)
     _section_start("Kubernetes")
+    ns_exists: bool | None = None  # read once here; the Spark Operator check reuses it
     try:
         k8s = get_k8s_client(
             context=cfg.platform.kubernetes.context,
@@ -590,7 +538,8 @@ def validate(
             _check_ok(f"Context: {ctx.name} / Cluster: {ctx.cluster}")
 
         ns = cfg.get_namespace()
-        if k8s.namespace_exists(ns):
+        ns_exists = k8s.namespace_exists(ns)
+        if ns_exists:
             _check_ok(f"Namespace '{ns}' exists")
         else:
             can_create, msg = k8s.can_create_namespace(ns)
@@ -625,15 +574,12 @@ def validate(
                         hint="Auto-configured during deploy" if not verbose else fix_hint,
                     )
 
-        if security_result.passed:
-            checks_passed += security_result.checks_passed
-        else:
-            if platform == PlatformType.OPENSHIFT:
-                _check_warn(
-                    f"Security: {security_result.checks_failed} item(s) need attention",
-                    hint="SCC will be configured automatically during deploy",
-                )
-            checks_passed += security_result.checks_passed
+        counts["ok"] += security_result.checks_passed
+        if not security_result.passed and platform == PlatformType.OPENSHIFT:
+            _check_warn(
+                f"Security: {security_result.checks_failed} item(s) need attention",
+                hint="SCC will be configured automatically during deploy",
+            )
 
         if verbose and security_result.recommendations:
             for rec in security_result.recommendations:
@@ -642,10 +588,7 @@ def validate(
     except K8sConnectionError as e:
         _check_fail(f"Connection failed: {e}")
 
-    p, f, w = _section_end()
-    checks_passed += p
-    checks_failed += f
-    checks_warned += w
+    _section_end()
 
     # 5. Storage classes
     _section_start("Storage Classes")
@@ -662,35 +605,27 @@ def validate(
         if scratch_will_be_enabled(cfg) and scratch_cfg.storage_class:
             # StorageClass is Category 2 shared infrastructure: preflight
             # requires it to exist before deploy runs.
-            storage_classes.append((scratch_cfg.storage_class, "scratch", True))
+            storage_classes.append((scratch_cfg.storage_class, "scratch"))
 
         pg_sc = cfg.platform.compute.postgres.storage_class
         if pg_sc:
-            storage_classes.append((pg_sc, "postgres", True))
+            storage_classes.append((pg_sc, "postgres"))
 
         if not storage_classes:
             _check_ok("Using cluster defaults (no custom storage classes)")
         else:
-            for sc_name, purpose, required in storage_classes:
+            for sc_name, purpose in storage_classes:
                 try:
                     storage_v1.read_storage_class(sc_name)
                     _check_ok(f"{sc_name} ({purpose})")
                 except ApiException as e:
                     if e.status == 404:
-                        if required:
-                            _check_fail(f"{sc_name} not found ({purpose})")
-                        else:
-                            _check_warn(
-                                f"{sc_name} will be created during deploy ({purpose})",
-                            )
+                        _check_fail(f"{sc_name} not found ({purpose})")
                     else:
                         _check_warn(f"Could not check {sc_name}: {e.reason}")
     except Exception as e:
         _check_warn(f"Could not validate storage classes: {e}")
-    p, f, w = _section_end()
-    checks_passed += p
-    checks_failed += f
-    checks_warned += w
+    _section_end()
 
     # 6. Catalog prerequisites
     _section_start("Catalog")
@@ -720,10 +655,7 @@ def validate(
         _check_ok("Polaris catalog (no external operators needed)")
     else:
         _check_ok(f"Catalog type: {cfg.architecture.catalog.type.value}")
-    p, f, w = _section_end()
-    checks_passed += p
-    checks_failed += f
-    checks_warned += w
+    _section_end()
 
     # 7. Spark Operator
     _section_start("Spark Operator")
@@ -745,18 +677,9 @@ def validate(
             # Check namespace watching. Never a failure: deploy and run
             # both add the namespace under the cluster lease.
             if status.watching_namespace is False:
-                ns_now = cfg.get_namespace()
-                try:
-                    from lakebench.k8s import get_k8s_client as _gkc
-
-                    ns_exists: bool | None = _gkc(
-                        context=cfg.platform.kubernetes.context, namespace=ns_now
-                    ).namespace_exists(ns_now)
-                except Exception:
-                    ns_exists = None
                 op_ns = status.namespace or spark_op_cfg.namespace
                 level, msg, hint = operator_watch_verdict(
-                    ns_now,
+                    cfg.get_namespace(),
                     status.watched_namespaces or [],
                     namespace_exists=ns_exists,
                     can_edit_release=can_edit_operator_release(op_ns),
@@ -786,10 +709,7 @@ def validate(
             )
     except Exception as e:
         _check_warn(f"Could not check status: {e}")
-    p, f, w = _section_end()
-    checks_passed += p
-    checks_failed += f
-    checks_warned += w
+    _section_end()
 
     # 8. Scale. Executor counts and per-executor sizing come from the job
     # profiles at manifest build, so there is no executor setting to grade;
@@ -808,13 +728,11 @@ def validate(
 
     except Exception as e:
         _check_warn(f"Could not read the scale: {e}")
-    p, f, w = _section_end()
-    checks_passed += p
-    checks_failed += f
-    checks_warned += w
+    _section_end()
 
     # Summary
     console.print()
+    checks_passed, checks_failed, checks_warned = counts["ok"], counts["fail"], counts["warn"]
     if checks_failed == 0:
         if checks_warned > 0:
             warn_s = "s" if checks_warned > 1 else ""
@@ -1216,10 +1134,9 @@ def info_datagen_mode(cfg: LakebenchConfig) -> str:
     where it came from, and, for a continuous pipeline, how the corpus
     reaches bronze.
 
-    DatagenMode is a delivery pattern since Wave 2 D1 (2026-09-28): batch
-    buffers whole files and PUTs, continuous streams row-groups through S3
-    multipart. Same corpus, different write pipeline. Auto resolves to
-    continuous at every scale (Wave 2 D-wave adv-review fix).
+    DatagenMode is a delivery pattern: batch buffers whole files and PUTs,
+    continuous streams row-groups through S3 multipart. Same corpus,
+    different write pipeline. Auto resolves to continuous at every scale.
     """
     from lakebench.config.autosizer import _resolve_datagen_mode
     from lakebench.config.schema import DatagenMode
@@ -1238,8 +1155,8 @@ def info_date_range(cfg: LakebenchConfig, scale_days: int) -> str:
 
     For customer360 the generator spans datagen.timestamp_start to
     timestamp_end (defaults 2024-01-01 to 2025-01-01), whatever the scale
-    table says; showing the scale's 365 days for a 14-day config misled
-    (lb16-checks2). Other schemas, and a range that does not parse, show
+    table says, so a 14-day config does not show the scale's 365 days.
+    Other schemas, and a range that does not parse, show
     the scale dimensions' figure.
     """
     from datetime import date
@@ -1310,7 +1227,7 @@ def info(
     # Workload profile: {schema}-{pipeline mode}. The datagen mode (batch or
     # continuous generator) is its own line: a continuous pipeline at small
     # scale runs the batch generator, and naming the workload after it read
-    # as "customer360-batch" for a continuous config (lb16-checks2).
+    # as "customer360-batch" for a continuous config.
     workload_profile = f"{workload.schema_type.value}-{arch.pipeline.mode.value}"
 
     is_sustained = is_continuous_mode(arch.pipeline.mode)
@@ -1321,41 +1238,36 @@ def info(
         j: _resolve_job_profile(j, workload.schema_type.value) or _JOB_PROFILES[j]
         for j in _JOB_PROFILES
     }
-    # Per-job executor counts with auto/override labels
-    from lakebench.modules.pipeline_engines.spark.job import executor_override
+    from lakebench.modules.pipeline_engines.spark.job import (
+        executor_override,
+        stage_profile,
+        streaming_executor_count,
+    )
 
-    override_map = {
-        j: executor_override(j, cfg) for j in ("bronze-verify", "silver-build", "gold-finalize")
-    }
-    executor_parts = []
-    for job_name, override_val in override_map.items():
-        auto_count = _scale_executor_count(_profiles[job_name], scale)
-        if override_val is not None:
-            executor_parts.append(f"{job_name}={override_val} (override)")
-        else:
-            executor_parts.append(f"{job_name}={auto_count} (auto)")
+    def _executor_parts(jobs: tuple[str, ...], auto_count, auto_label: str) -> list[str]:
+        """Per-job executor counts, labelled override or auto."""
+        parts = []
+        for job_name in jobs:
+            auto = auto_count(job_name)
+            override_val = executor_override(job_name, cfg)
+            if override_val is not None:
+                parts.append(f"{job_name}={override_val} (override)")
+            else:
+                parts.append(f"{job_name}={auto} ({auto_label})")
+        return parts
 
-    # Streaming executor counts
-    streaming_override_map = {
-        j: executor_override(j, cfg) for j in ("bronze-ingest", "silver-stream", "gold-refresh")
-    }
-    streaming_executor_parts = []
-    from lakebench.modules.pipeline_engines.spark.job import streaming_executor_count
-
-    for job_name, override_val in streaming_override_map.items():
-        from lakebench.modules.pipeline_engines.spark.job import stage_profile
-
-        auto_count = streaming_executor_count(
-            job_name, stage_profile(job_name, cfg) or _profiles[job_name], cfg
-        )
-        if override_val is not None:
-            streaming_executor_parts.append(f"{job_name}={override_val} (override)")
-        else:
-            # info does not read the cluster, so this is the profile count;
-            # the run caps it to the concurrent budget and warns when it does.
-            streaming_executor_parts.append(
-                f"{job_name}={auto_count} (auto, before cluster budget)"
-            )
+    executor_parts = _executor_parts(
+        ("bronze-verify", "silver-build", "gold-finalize"),
+        lambda j: _scale_executor_count(_profiles[j], scale),
+        "auto",
+    )
+    # info does not read the cluster, so a streaming count is the profile
+    # count; the run caps it to the concurrent budget and warns when it does.
+    streaming_executor_parts = _executor_parts(
+        ("bronze-ingest", "silver-stream", "gold-refresh"),
+        lambda j: streaming_executor_count(j, stage_profile(j, cfg) or _profiles[j], cfg),
+        "auto, before cluster budget",
+    )
 
     # Build info lines
     lines = [
@@ -1556,7 +1468,7 @@ def _print_stage_matrix(metrics, output_format: str) -> None:
             f"[bold]Pipeline Benchmark:[/bold] {esc(pb.deployment_name)} (run {esc(pb.run_id)})\n"
             f"Mode: {esc(pb.pipeline_mode)} | "
             f"Time-to-Value: {pb.time_to_value_seconds:.1f}s | "
-            f"Throughput: {pb.pipeline_throughput_gb_per_second:.3f} GB/s",
+            f"Throughput: {pb.pipeline_throughput_gb_per_second:.3f} GiB/s",
             expand=False,
         )
     )
@@ -1565,11 +1477,11 @@ def _print_stage_matrix(metrics, output_format: str) -> None:
     table.add_column("Stage", style="cyan")
     table.add_column("Engine")
     table.add_column("Time(s)", justify="right")
-    table.add_column("In(GB)", justify="right")
-    table.add_column("Out(GB)", justify="right")
+    table.add_column("In(GiB)", justify="right")
+    table.add_column("Out(GiB)", justify="right")
     table.add_column("In Rows", justify="right")
     table.add_column("Out Rows", justify="right")
-    table.add_column("GB/s", justify="right")
+    table.add_column("GiB/s", justify="right")
     table.add_column("Rows/s", justify="right")
     table.add_column("Execs", justify="right")
     table.add_column("Status")
@@ -1604,7 +1516,7 @@ def _print_stage_matrix(metrics, output_format: str) -> None:
     console.print(
         f"\n  Pipeline: {pb.total_elapsed_seconds:.1f}s total"
         f" | {pb.time_to_value_seconds:.1f}s time-to-value"
-        f" | {pb.pipeline_throughput_gb_per_second:.3f} GB/s"
+        f" | {pb.pipeline_throughput_gb_per_second:.3f} GiB/s"
     )
     console.print()
 
@@ -1652,20 +1564,15 @@ def _stored_verdict(runs_dir: Path, rid: str) -> dict | None:
     return verdict_of(record) if record else None
 
 
-def _report_run_data(
-    metrics, runs_dir: Path, delivered: Path | None, requested: str | None = None
-) -> dict:
+def _report_run_data(metrics, record: dict, delivered: Path | None) -> dict:
     """The run ``report`` shows, for ``--json`` (cli/_json.ReportRun), from
-    the record as stored (the per-run file, else the legacy flat one, as
-    ``load_run`` reads them). Scores are as stored. The verdict carries both
+    *record*, the run as stored (``_stored_record``). Scores are as stored. The verdict carries both
     halves: ``verdict_stored`` as the record holds it, ``verdict_recomputed``
     from the record (``verdict.verdict_from_record``), and ``verdict``, the
     strictest of them. A record that cannot be read as stored gives null for all three and
     for the scores."""
     from lakebench.metrics.verdict import verdict_of
 
-    # The id load_run was given, when one was.
-    record = _stored_record(runs_dir, requested or metrics.run_id)
     pbd = record.get("pipeline_benchmark") or {}
     judged = verdict_of(record) if record else {"stored": None, "recomputed": None, "status": None}
     return {
@@ -1802,10 +1709,6 @@ def report(
 
     storage = MetricsStorage(metrics_dir)
 
-    # Scope the "latest run" lookup to a specific deployment when a config
-    # file is given. Under parallel deployments the shared runs/ tree can
-    # have another deployment's newer record on top; without scoping,
-    # `report` would display it (SP-2 owns the durable deployment_id fix).
     if output_format is not None and output_format not in _REPORT_FORMATS:
         print_error(f"--format must be one of {', '.join(_REPORT_FORMATS)}, not {output_format}")
         raise typer.Exit(ExitCode.USAGE)
@@ -1817,6 +1720,9 @@ def report(
         raise typer.Exit(ExitCode.USAGE)
     config_file, target_run = _report_target(target, run_id, use_default=not list_runs)
     run_id = target_run or run_id
+    # Scope the "latest run" lookup to the config's deployment: under
+    # parallel deployments the shared runs/ tree can hold another
+    # deployment's newer record, which `report` would otherwise display.
     deployment_name: str | None = None
     if config_file is not None:
         try:
@@ -1852,7 +1758,7 @@ def report(
         from lakebench.metrics.verdict import verdict_status as _verdict_status
 
         for r in runs:
-            # Prefer the persisted verdict (OD-6: v1.6 records) and fall
+            # Prefer the persisted verdict (v1.6 records) and fall
             # back to raw ``success`` for legacy v1.5 records.
             headline = r.get("verdict_headline")
             if r.get("passed", _record_passed(r)):
@@ -1964,15 +1870,15 @@ def report(
         _print_stage_matrix(metrics, output_format)
         return
 
-    _print_report_summary(metrics, _stored_verdict(storage.metrics_dir, run_id or metrics.run_id))
+    from lakebench.metrics.verdict import verdict_of
+
+    # The record as stored, read once for the summary's verdict and --json.
+    record = _stored_record(storage.metrics_dir, run_id or metrics.run_id)
+    _print_report_summary(metrics, verdict_of(record) if record else None)
 
     # Not run_dir(): that creates the directory, and report only reads here.
     delivered = storage.metrics_dir / f"run-{run_id or metrics.run_id}" / "report.html"
-    _json.set_data(
-        _report_run_data(
-            metrics, storage.metrics_dir, delivered if delivered.exists() else None, run_id
-        )
-    )
+    _json.set_data(_report_run_data(metrics, record, delivered if delivered.exists() else None))
     if delivered.exists():
         console.print(f"[dim]Delivered report: {esc(delivered)}[/dim]")
         console.print(
@@ -1988,7 +1894,7 @@ def report(
 
 _LOGS_HELP_COMPONENTS = (
     "datagen, a stage (bronze-verify, silver-build, gold-finalize, bronze-ingest, "
-    "silver-stream, gold-refresh, score-financial, ...), spark-driver, trino, "
+    "silver-stream, gold-refresh, ...), spark-driver, trino, "
     "trino-worker, thrift, duckdb, hive, polaris, postgres"
 )
 

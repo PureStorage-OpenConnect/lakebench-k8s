@@ -29,15 +29,26 @@ from tests.fixtures.recording_k8s import K8sRecorder, recording
 
 NS = "u01"
 
-RECIPES = (
+# Query-engine recipes run across every workload (financial scores through
+# Trino only, so AML pairs with the Trino recipe); the +observability and +ca
+# recipes add only deploy-time objects that do not vary by workload, so each
+# runs on c360-batch alone.
+WORKLOADS = ("c360-batch", "aml-batch", "c360-continuous")
+_ENGINE_RECIPES = (
     "hive-iceberg-spark-trino",
     "polaris-iceberg-spark-duckdb",
     "hive-delta-spark-thrift",
     "polaris-iceberg-spark-none",
-    "hive-iceberg-spark-trino+observability",
-    "hive-iceberg-spark-trino+ca",
 )
-WORKLOADS = ("c360-batch", "aml-batch", "c360-continuous")
+CASES = [
+    (recipe, workload)
+    for recipe in _ENGINE_RECIPES
+    for workload in WORKLOADS
+    if not (workload == "aml-batch" and not recipe.endswith("-trino"))
+] + [
+    ("hive-iceberg-spark-trino+observability", "c360-batch"),
+    ("hive-iceberg-spark-trino+ca", "c360-batch"),
+]
 _CREATE_VERBS = frozenset({"create", "replace", "patch", "apply"})
 
 
@@ -76,7 +87,7 @@ def _instant_deps_server(mp: pytest.MonkeyPatch) -> None:
 
     from lakebench.deploy.deps import DependencyServerDeployer
     from lakebench.deps.request import select_request
-    from tests.test_deps_manifest import fake_shown
+    from tests.fixtures.deps_manifest_helpers import fake_shown
 
     pod = SimpleNamespace(
         metadata=SimpleNamespace(name="lb-deps-0", uid="uid-lb-deps-0"),
@@ -95,9 +106,6 @@ def _config(recipe: str, workload: str, tmp_path: Path | None = None):
     from tests.conftest import make_config
 
     recipe, _, extra = recipe.partition("+")
-    if workload.startswith("aml"):
-        # AML runs on Iceberg only; the Delta recipe's engine is covered on Iceberg.
-        recipe = recipe.replace("-delta-", "-iceberg-")
     overrides: dict = {"name": NS, "recipe": recipe}
     if extra == "observability":
         overrides["observability"] = {"enabled": True}
@@ -175,10 +183,7 @@ def _job_types(workload: str) -> list:
         return [JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH]
     jobs = [JobType.BRONZE_VERIFY, JobType.SILVER_BUILD, JobType.GOLD_FINALIZE]
     if workload.startswith("aml"):
-        jobs += [
-            JobType.SCORE_FINANCIAL,
-            JobType.SCORE_FINANCIAL_REFERENCE,
-        ]
+        jobs += [JobType.SCORE_FINANCIAL_REFERENCE]
     return jobs
 
 
@@ -252,8 +257,7 @@ def _registered(kind: str, name: str, labels: dict | None) -> bool:
     return any(e.matches(kind, name, labels, NS) for e in CATEGORY1_OBJECTS)
 
 
-@pytest.mark.parametrize("workload", WORKLOADS)
-@pytest.mark.parametrize("recipe", RECIPES)
+@pytest.mark.parametrize(("recipe", "workload"), CASES)
 def test_teardown_covers_every_created_object(recipe, workload, monkeypatch, tmp_path):
     from lakebench.deploy.category1 import CATEGORY1_ANNOTATIONS, KEPT_ON_DESTROY
     from lakebench.deploy.engine import DeploymentEngine

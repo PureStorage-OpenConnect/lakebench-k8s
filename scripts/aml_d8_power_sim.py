@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Power of the registered D8 rule (AML-GOALS 5a D8, section 9 #45).
+"""Power of the registered D8 rule.
 
 Simulates the rule src/lakebench/aml/scale_invariance.py implements, with the
 constants read from aml_preregistration.json (scale_invariance block, band,
@@ -13,9 +13,9 @@ logit(AP) = logit(true AP) + tau x N(0, 1) + k x s x N(0, 1), and each
 scale-10 shard shares one corpus effect: logit(true AP) + tau x z0 + k x s x
 N(0, 1), with tau the corpus-level (seed) sd and
 where s is the customer-bootstrap sd of logit(AP) measured on the v6-43
-calibration run (seed 43, scale 2, full refit; analysis in
-lb-scratch/d8stats, boot.py) and k inflates it for refit noise the bootstrap
-does not see (halfA/halfB replicate chi-square suggests k ~ 1.3). A shard is
+calibration run (seed 43, scale 2, full refit) and k inflates it for refit
+noise the bootstrap does not see (halfA/halfB replicate chi-square suggests
+k ~ 1.3). A shard is
 s2-sized, so it has the same s. Each run's bootstrap sd is taken as s (1000
 resamples estimate it to about 2%).
 
@@ -49,7 +49,7 @@ PREREG = ROOT / "src/lakebench/spark/data/aml/aml_preregistration.json"
 N_SIM = 20000
 RNG_SEED = 20260926
 #: (AP, customer-bootstrap sd of logit AP) per typology at scale 2, v6-43 full
-#: refit (lb-scratch/d8stats/out/boot__d0v2__*.npz and boot__v6full__*.npz).
+#: refit.
 BASE = {
     "gather_scatter": (0.7235, 0.134),
     "rapid_layering": (0.0049, 0.071),

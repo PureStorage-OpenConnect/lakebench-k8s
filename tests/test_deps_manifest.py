@@ -43,11 +43,14 @@ def _request(**cfg_over) -> req.DepsRequest:
 
 
 C360 = {"recipe": "hive-iceberg-spark-trino"}
-AML_DUCK = {"recipe": "polaris-iceberg-spark-duckdb", "workload": {"schema": "financial"}}
+# Financial is Trino-only; it carries the py-reference group. DuckDB carries
+# the duckdb-ext group (on Customer 360, the only workload DuckDB scores).
+AML = {"recipe": "polaris-iceberg-spark-trino", "workload": {"schema": "financial"}}
+DUCK = {"recipe": "polaris-iceberg-spark-duckdb"}
 DELTA = {"recipe": "hive-delta-spark-thrift"}
 
 
-@pytest.mark.parametrize("over", [C360, AML_DUCK, DELTA])
+@pytest.mark.parametrize("over", [C360, AML, DUCK, DELTA])
 def test_a_matching_set_passes(over):
     r = _request(**over)
     assert m.check_manifest(r, fake_shown(r)) == []
@@ -59,17 +62,15 @@ def _rehash(shown: dict) -> dict:
 
 
 def test_printed_pinset_is_never_trusted():
+    """A changed jar entry and a reordered jar list are both another set: the
+    printed pinset is recomputed, never trusted."""
     r = _request(**C360)
-    shown = fake_shown(r)
-    shown["groups"]["jars"][0]["sha256"] = "1" * 64  # entries changed, field kept
-    assert any("printed pinset" in p for p in m.check_manifest(r, shown))
-
-
-def test_reordered_jars_are_another_set():
-    r = _request(**C360)
-    shown = fake_shown(r)
-    shown["jar_order"] = list(reversed(shown["jar_order"]))
-    assert any("printed pinset" in p for p in m.check_manifest(r, shown))
+    changed = fake_shown(r)
+    changed["groups"]["jars"][0]["sha256"] = "1" * 64  # entries changed, field kept
+    assert any("printed pinset" in p for p in m.check_manifest(r, changed))
+    reordered = fake_shown(r)
+    reordered["jar_order"] = list(reversed(reordered["jar_order"]))
+    assert any("printed pinset" in p for p in m.check_manifest(r, reordered))
 
 
 def test_jar_order_must_name_the_jars_group():
@@ -92,18 +93,24 @@ def test_another_request_or_resolver_is_refused(field, value, needle):
 
 
 def test_a_missing_or_extra_group_is_refused():
-    r = _request(**AML_DUCK)
+    r = _request(**AML)  # financial carries the py-reference group
     shown = fake_shown(r)
     del shown["groups"]["py-reference"]
-    assert m.check_manifest(r, _rehash(shown)) != []
+    assert any(
+        "groups ['jars'] are not the request's ['jars', 'py-reference']" in p
+        for p in m.check_manifest(r, _rehash(shown))
+    )
     c360 = _request(**C360)
     extra = fake_shown(c360)
     extra["groups"]["py-reference"] = [{"file": "x-1-py3-none-any-x.whl", "sha256": H, "size": 1}]
-    assert m.check_manifest(c360, _rehash(extra)) != []
+    assert any(
+        "groups ['jars', 'py-reference'] are not the request's ['jars']" in p
+        for p in m.check_manifest(c360, _rehash(extra))
+    )
 
 
 def test_an_empty_group_is_refused():
-    r = _request(**AML_DUCK)
+    r = _request(**DUCK)  # DuckDB carries the duckdb-ext group
     shown = fake_shown(r)
     shown["groups"]["duckdb-ext"] = []
     assert any("empty" in p for p in m.check_manifest(r, _rehash(shown)))
@@ -118,12 +125,14 @@ def test_an_empty_group_is_refused():
     ],
 )
 def test_unsafe_file_names_are_refused(group, name):
-    r = _request(**AML_DUCK)
+    r = _request(**DUCK) if group == "duckdb-ext" else _request(**C360)
     shown = fake_shown(r)
     shown["groups"][group][0]["file"] = name
     if group == "jars":
         shown["jar_order"][0] = name
-    assert m.check_manifest(r, _rehash(shown)) != []
+    assert any(
+        f"{group}: unsafe file name {name!r}" in p for p in m.check_manifest(r, _rehash(shown))
+    )
 
 
 def test_a_missing_direct_coordinate_is_refused():
@@ -167,33 +176,53 @@ def test_unknown_overlaps_are_refused_and_known_ones_pass():
     bad = dict(ok, version="9.9.9")
     assert m.check_manifest(r, fake_shown(r, overlaps=[bad])) != []
     assert m.check_manifest(r, fake_shown(r, overlaps=[{}])) != []
+    # overlaps must be a list: a non-list value, or a missing key, is refused.
+    for not_a_list in (None, {}, "x"):
+        assert m.check_manifest(r, fake_shown(r, overlaps=not_a_list)) != []
+    missing = fake_shown(r)
+    del missing["overlaps"]
+    assert m.check_manifest(r, missing) != []
 
 
 def test_wheels_match_pins_one_to_one():
-    r = _request(**AML_DUCK)
+    r = _request(**AML)
     shown = fake_shown(r)
     shown["groups"]["py-reference"][0]["file"] = "numpy-9.9.9-cp310-cp310-x.whl"
-    assert m.check_manifest(r, _rehash(shown)) != []
+    assert any(
+        "py-reference: pin numpy==2.2.6 matches 0 wheels" in p
+        for p in m.check_manifest(r, _rehash(shown))
+    )
     extra = fake_shown(r)
     extra["groups"]["py-reference"].append(
         {"file": "evil-1.0-py3-none-any.whl", "sha256": H, "size": 1}
     )
-    assert m.check_manifest(r, _rehash(extra)) != []
+    assert any(
+        "py-reference: 11 files for 10 pins" in p for p in m.check_manifest(r, _rehash(extra))
+    )
 
 
 def test_duckdb_files_are_the_requested_version_and_extensions():
-    r = _request(**AML_DUCK)
+    r = _request(**DUCK)
     wrong_version = fake_shown(r)
     e = wrong_version["groups"]["duckdb-ext"][0]
     e["file"] = e["file"].replace(f"v{r.duckdb_version}/", "v0.0.1/")
-    assert m.check_manifest(r, _rehash(wrong_version)) != []
+    assert any(
+        f"not one platform of v{r.duckdb_version}" in p and "0.0.1" in p
+        for p in m.check_manifest(r, _rehash(wrong_version))
+    )
     missing = fake_shown(r)
     missing["groups"]["duckdb-ext"].pop()
-    assert m.check_manifest(r, _rehash(missing)) != []
+    assert any(
+        "duckdb-ext: ['avro', 'httpfs'] are not ['avro', 'httpfs', 'iceberg']" in p
+        for p in m.check_manifest(r, _rehash(missing))
+    )
     two_platforms = fake_shown(r)
     e = two_platforms["groups"]["duckdb-ext"][0]
     e["file"] = e["file"].replace("linux_amd64", "linux_arm64")
-    assert m.check_manifest(r, _rehash(two_platforms)) != []
+    assert any(
+        "platforms ['linux_amd64', 'linux_arm64'] are not one platform" in p
+        for p in m.check_manifest(r, _rehash(two_platforms))
+    )
 
 
 # --- platform.deps ------------------------------------------------------------------
@@ -301,21 +330,10 @@ def test_a_yaml_ambiguous_storage_class_stays_a_string():
     from lakebench.deploy.engine import TemplateRenderer
 
     s3 = {"endpoint": "http://m:9000", "access_key": "k", "secret_key": "s"}
-    cfg = make_config(
-        **AML_DUCK, platform={"storage": {"s3": s3}, "deps": {"storage_class": "true"}}
-    )
+    cfg = make_config(**AML, platform={"storage": {"s3": s3}, "deps": {"storage_class": "true"}})
     eng = MagicMock(config=cfg, renderer=TemplateRenderer(), dry_run=False)
     docs = {d["kind"]: d for d in DependencyServerDeployer(eng).render(req.select_request(cfg))}
     assert docs["PersistentVolumeClaim"]["spec"]["storageClassName"] == "true"
-
-
-def test_overlaps_must_be_a_list():
-    r = _request(**C360)
-    for bad in (None, {}, "x"):
-        assert m.check_manifest(r, fake_shown(r, overlaps=bad)) != []
-    missing = fake_shown(r)
-    del missing["overlaps"]
-    assert m.check_manifest(r, missing) != []
 
 
 def test_the_duckdb_groups_are_what_fetch_and_pip_consume(

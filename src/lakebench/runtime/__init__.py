@@ -3,11 +3,9 @@
 Kubernetes is the production runtime. A container runtime (podman or docker)
 supports local single-host runs where no cluster is available.
 
-The protocol covers only what deployers genuinely need from their substrate.
-It deliberately does NOT model StatefulSets, PVCs, or SCCs: those are
-Kubernetes concepts with no local equivalent, and K8s deployers reach them
-through ``K8sRuntime.k8s`` rather than through a lowest-common-denominator
-abstraction.
+The protocol does not model StatefulSets, PVCs or SCCs: those are
+Kubernetes concepts with no local equivalent, and Kubernetes deployers use
+``K8sClient`` directly.
 """
 
 from lakebench.runtime.protocol import (
@@ -15,7 +13,6 @@ from lakebench.runtime.protocol import (
     ContainerPort,
     Mount,
     Runtime,
-    RuntimeKind,
 )
 
 __all__ = [
@@ -23,5 +20,4 @@ __all__ = [
     "ContainerPort",
     "Mount",
     "Runtime",
-    "RuntimeKind",
 ]

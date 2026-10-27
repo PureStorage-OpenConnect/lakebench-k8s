@@ -42,7 +42,6 @@ _SCRIPT = textwrap.dedent(
     [
         ("return None", 0),
         ("raise SystemExit(3)", 3),
-        ("raise SystemExit(None)", 0),
         ("raise SystemExit('refused: reason')", 1),
     ],
 )

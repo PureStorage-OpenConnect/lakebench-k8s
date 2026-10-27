@@ -30,10 +30,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from rich.console import Console
 from rich.table import Table
 
-from lakebench.cli._helpers import esc
+from lakebench.cli._helpers import console, esc
 from lakebench.exit_codes import ExitCode
 
 if TYPE_CHECKING:
@@ -41,7 +40,6 @@ if TYPE_CHECKING:
     from lakebench.config.sizing import CapacityVerdict, SizingPlan
     from lakebench.k8s.client import ClusterCapacity
 
-console = Console()
 
 _GIB = 1024**3
 _MILESTONES = (1, 10, 50, 100, 300, 500)
@@ -68,19 +66,10 @@ def _capacity_from(
     detect_capacity: Callable[[], ClusterCapacity | None] | None,
 ) -> tuple[ClusterCapacity | None, bool, str]:
     """``(capacity, node shape known, source label)``."""
-    from lakebench.k8s.client import ClusterCapacity
-
     if cluster_cores is not None and cluster_memory_gb is not None:
-        # Node shape unknown: the whole cluster stands in for its largest
-        # node, and the largest-pod check is skipped.
-        cap = ClusterCapacity(
-            total_cpu_millicores=cluster_cores * 1000,
-            total_memory_bytes=cluster_memory_gb * _GIB,
-            node_count=0,
-            largest_node_cpu_millicores=cluster_cores * 1000,
-            largest_node_memory_bytes=cluster_memory_gb * _GIB,
-        )
-        return cap, False, "user-provided"
+        from lakebench.cli._helpers import manual_capacity
+
+        return manual_capacity(cluster_cores, cluster_memory_gb), False, "user-provided"
     if detect_capacity is None:
         return None, False, ""
     from lakebench.k8s.target import ContextConflictError
@@ -97,6 +86,8 @@ def _capacity_from(
         return None, False, ""
     if detected is None:
         return None, False, ""
+    from lakebench.k8s.client import ClusterCapacity
+
     cap = ClusterCapacity(
         total_cpu_millicores=(
             cluster_cores * 1000 if cluster_cores is not None else detected.total_cpu_millicores
@@ -303,9 +294,9 @@ def recommend_impl(
         )
     if full < best:
         who = "a run on a corpus generated first" if continuous else "the run"
-        # Continuous: a capped stream cannot carry the scale's offered load,
-        # so the balance check fails the run.
-        consequence = ", so it cannot balance and fails" if continuous else " (degraded)"
+        # Continuous: a capped stream cannot carry the scale's offered load;
+        # the record marks the run not balanced (advisory).
+        consequence = ", so it cannot balance" if continuous else " (degraded)"
         console.print(
             f"[yellow]Above scale {full:,} {esc(who)} caps its streams to fit"
             f"{consequence}.[/yellow]"

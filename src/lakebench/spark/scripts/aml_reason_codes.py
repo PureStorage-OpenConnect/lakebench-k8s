@@ -4,7 +4,7 @@ Every alert carries ``reason_codes`` (array<string>, the last gold.alerts
 column): first its rule's base code (``BASE_CODE``), then each conditional
 code whose condition holds on the alert. The base code makes the codes of a
 rule cover all of its alerts, so the per-code hit sets of a rule union to the
-rule's hit set (score_financial's per-code recall relies on it).
+rule's hit set (the scorer's per-code recall relies on it).
 
 Conditional codes read only columns the rule's own projection already holds,
 and use only cut points the rule already has: its HIGH priority threshold
@@ -13,9 +13,9 @@ and use only cut points the rule already has: its HIGH priority threshold
 code introduces a threshold of its own, so no code is a tuned constant. A
 code never changes which alerts a rule raises.
 
-This module has no pyspark import at its top: detection_rules imports it
-inside ``_alert_frame`` only, and the scripts that import
-detection_rules never reach it.
+This module has no pyspark import at its top, so the host (cli/_aml_post.py)
+can import it for the vocabulary digest; detection_rules imports it inside
+``_alert_frame`` only.
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ def _all_codes(rule_id: str) -> tuple[str, ...]:
 REASON_CODES = {rule: _all_codes(rule) for rule in BASE_CODE}
 
 
-def vocabulary_digest(cutoffs: dict | None = None) -> str:
+def vocabulary_digest(cutoffs: dict) -> str:
     """sha256 (16 hex) of the code vocabulary and the cut points its codes
     read (detection_rules.HIGH_PRIORITY_CUTOFFS, passed by the caller: this
     module does not import pyspark at its top), recorded beside per-code

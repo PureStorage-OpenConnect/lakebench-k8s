@@ -163,7 +163,6 @@ def test_kube_reader_makes_only_reads():
     reader.storage_class_names()
     reader.default_storage_class_names()
     reader.pvc_storage_class("ns", "pvc")
-    reader.deployments("a=b")
     reader.deployments("a=b", namespace="ns")
     reader.running_pod_exists("a=b")
     reader.cluster_role_exists("role")

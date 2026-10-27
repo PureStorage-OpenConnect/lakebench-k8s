@@ -38,16 +38,14 @@ def _free_from_total(k8s_mock):
 class TestComputePeakRequirements:
     """Peak resource derivation from _JOB_PROFILES."""
 
-    def test_batch_peak_is_max_not_sum(self):
-        """Batch jobs run sequentially, so the peak is the largest job."""
-        peak = compute_peak_requirements(100)
-        assert peak.memory_gb == max(r.memory_gb for r in peak.per_job)
-        assert peak.memory_gb < sum(r.memory_gb for r in peak.per_job)
-
-    def test_sustained_peak_is_sum_not_max(self):
-        """Streaming jobs run concurrently, so their needs add up."""
-        peak = compute_peak_requirements(10, "sustained")
-        assert peak.memory_gb == sum(r.memory_gb for r in peak.per_job)
+    def test_peak_is_max_for_batch_and_sum_for_sustained(self):
+        # Batch jobs run sequentially, so the peak is the largest job.
+        batch = compute_peak_requirements(100)
+        assert batch.memory_gb == max(r.memory_gb for r in batch.per_job)
+        assert batch.memory_gb < sum(r.memory_gb for r in batch.per_job)
+        # Streaming jobs run concurrently, so their needs add up.
+        sustained = compute_peak_requirements(10, "sustained")
+        assert sustained.memory_gb == sum(r.memory_gb for r in sustained.per_job)
 
 
 def _cfg(scale=1, mode="batch", schema="customer360"):
@@ -59,9 +57,12 @@ def _cfg(scale=1, mode="batch", schema="customer360"):
     """
     from tests.conftest import make_config
 
+    # Financial scores through Trino (refused on `none`); the engine does not
+    # affect the capacity sizing this check exercises.
+    engine = "trino" if schema == "financial" else "none"
     return make_config(
         workload={"schema": schema, "datagen": {"scale": scale}},
-        architecture={"pipeline": {"mode": mode}, "query_engine": {"type": "none"}},
+        architecture={"pipeline": {"mode": mode}, "query_engine": {"type": engine}},
     )
 
 

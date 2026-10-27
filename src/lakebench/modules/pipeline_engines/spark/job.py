@@ -5,6 +5,8 @@ Handles SparkApplication submission and lifecycle.
 
 from __future__ import annotations
 
+import copy
+import functools
 import hashlib
 import logging
 import math
@@ -15,9 +17,8 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from lakebench._constants import POLARIS_CLIENT_ID, SPARK_SERVICE_ACCOUNT
-from lakebench.modules.pipeline_engines.spark.conf_keys import (  # noqa: F401 -- job.py's names
+from lakebench.modules.pipeline_engines.spark.conf_keys import (
     DEPENDENCY_SET_SPARK_KEYS,
-    LAKEBENCH_OWNED_SPARK_KEYS,
     SPARK_CONF_DEFAULTS,
 )
 
@@ -95,7 +96,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
     },
     "silver-build": {
         "driver_cores": 4,
-        "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
+        "driver_memory": "32g",  # 24g OOMs on Spark 4: the 558MB SDK v2 bundle plus K8s API polling
         "executor_cores": 4,
         "executor_memory": "48g",
         "executor_memory_overhead": "12g",
@@ -118,7 +119,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
     },
     "gold-finalize": {
         "driver_cores": 4,
-        "driver_memory": "32g",  # BUG-007: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
+        "driver_memory": "32g",  # 24g OOMs on Spark 4: the 558MB SDK v2 bundle plus K8s API polling
         "executor_cores": 4,
         "executor_memory": "32g",
         "executor_memory_overhead": "8g",
@@ -175,63 +176,11 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "max_executors": 10,
         "base_partitions": 32,
     },
-    # Recall/precision scoring. A manifest read + a linear
-    # explode-and-join against gold.alerts (score_financial.py rewrote the
-    # old N*M crossjoin to a single explode per side, so it stays linear in
-    # the UETR footprint). Deliberately small: without this entry the job
-    # falls back to the silver-build profile (~36 cores / 525 GB at scale 1)
-    # just to score a handful of typologies, which under the 4-parallel UAT
-    # limit fails to schedule and blocks on the per-job timeout after the
-    # pipeline already reported success (adversarial-review finding).
-    "score-financial": {
-        "driver_cores": 2,
-        "driver_memory": "8g",
-        "executor_cores": 4,
-        "executor_memory": "16g",
-        "executor_memory_overhead": "4g",
-        "scratch_size": "50Gi",
-        "base_executors": 2,
-        "executors_per_100_scale": 4,
-        "max_executors": 10,
-        "base_partitions": 32,
-    },
-    # Time-travel reads after a continuous AML window: two full scans
-    # of each recorded transactions snapshot that is still live and one of
-    # the current one, each a single fingerprint aggregate. Sized as the
-    # scorer, which runs just before it on the same stopped deployment.
-    "time-travel-financial": {
-        "driver_cores": 2,
-        "driver_memory": "8g",
-        "executor_cores": 4,
-        "executor_memory": "16g",
-        "executor_memory_overhead": "4g",
-        "scratch_size": "50Gi",
-        "base_executors": 2,
-        "executors_per_100_scale": 4,
-        "max_executors": 10,
-        "base_partitions": 32,
-    },
-    # The reference detector took silver-build's profile through a fallback
-    # that is now an error (MissingSizingProfile); this is a literal copy of
-    # it, so its manifest does not change.
-    "score-financial-reference": {
-        "driver_cores": 4,
-        "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
-        "executor_cores": 4,
-        "executor_memory": "48g",
-        "executor_memory_overhead": "12g",
-        # 300Gi (was 150Gi). At scale 100, live UAT hit "No space left
-        # on device" mid-silver-build: c360's window + wide-join shuffle
-        # spill exceeds 150Gi per executor once the max_executors cap
-        # (28) means data-per-executor stops decreasing with scale.
-        # Portworx px-csi-scratch is repl=1 (ephemeral), so growing this
-        # only costs bare block storage. Do not shrink.
-        "scratch_size": "300Gi",
-        "base_executors": 8,  # scale <= 10
-        "executors_per_100_scale": 12,  # add 12 per 100 scale units
-        "max_executors": _MAX_EXECUTORS_SAFE,
-        "base_partitions": 64,
-    },
+}
+# The reference detector runs on silver-build's profile with a fixed
+# scratch size.
+_JOB_PROFILES["score-financial-reference"] = {
+    k: v for k, v in _JOB_PROFILES["silver-build"].items() if k != "scratch_gib_per_scale"
 }
 
 
@@ -300,8 +249,8 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
             "executor_memory": "8g",
             "executor_memory_overhead": "12g",
         },
-        # AML continuous bronze-ingest. Measured on run-20260925-104452-21bf3a
-        # (scale 10, 1800 s window) with the base 2 executors x 2 cores: every
+        # AML continuous bronze-ingest, measured at scale 10 over an 1800 s
+        # window with the base 2 executors x 2 cores: every
         # micro-batch took the full 50 files (maxFilesPerTrigger) and ran
         # 109.7 s against a 30 s trigger, so bronze was busy 97.5% of the
         # window and moved 0.456 files/s. The scale-10 corpus is 1,371 files:
@@ -327,8 +276,8 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
             "executors_per_100_scale": 4,
             "max_executors": 20,
         },
-        # AML continuous silver-stream. Measured on run-20260925-135005-4b7a97
-        # (scale 10, 1800 s, bronze-ingest at the override above) with the base
+        # AML continuous silver-stream, measured at scale 10 over an 1800 s
+        # window (bronze-ingest at the override above) with the base
         # 4 executors x 4 cores: 4 micro-batches of 66.7M rows at 299 s each
         # against a 60 s trigger, 13.9K rows/s per core with the per-batch
         # overhead folded in. The silver source has no per-trigger file or row
@@ -350,14 +299,14 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
             "max_executors": _MAX_EXECUTORS_SAFE,
             "base_partitions": 80,
         },
-        # AML continuous gold-refresh. Same run: 4 ticks at 349.5 s mean on
-        # the base 2 x 4 = 8 cores, over the 300 s refresh interval, so ticks
-        # ran back to back. Every tick recomputes all of silver (windowing
+        # AML continuous gold-refresh, same scale-10 window: 4 ticks at 349.5 s
+        # mean on the base 2 x 4 = 8 cores, over the 300 s refresh interval, so
+        # ticks ran back to back. Every tick recomputes all of silver (windowing
         # loses recall), so tick cost follows silver's size, and those
         # ticks read a lagging silver: 58.4M rows on average. Once silver keeps
         # up it holds the whole scale-10 corpus, 266.7M rows, by the time
-        # bronze drains. Lane U's local ticks (84 s at 3.4M rows, 122 s at
-        # 6.7M) put the fixed per-tick cost near 45 s, which leaves 5.2 s of
+        # bronze drains. Local ticks (84 s at 3.4M rows, 122 s at 6.7M) put the
+        # fixed per-tick cost near 45 s, which leaves 5.2 s of
         # row work per million rows at 8 cores, taken as scaling with cores
         # (path searches, ~80% of a tick, are shuffle joins). A full-silver
         # tick is then 1,389 s of row work at 8 cores: 12 x 4 = 48 cores run
@@ -482,8 +431,6 @@ def scratch_executor_size(profile: dict[str, Any], scale: float, executors: int)
     ``scratch_gib_per_scale`` x *scale*, between ``_SCRATCH_MIN_GIB`` and the
     profile's ``scratch_size``. A profile without a per-scale need keeps
     ``scratch_size``."""
-    import math
-
     per_scale = profile.get("scratch_gib_per_scale")
     if not per_scale:
         return str(profile["scratch_size"])
@@ -523,8 +470,6 @@ def balance_executor_need(
     cores. The load follows scale and schema only, so
     *scale* and *schema* stand in for a config. 0 for a stage with no rate
     (gold-refresh)."""
-    import math
-
     stage = _BALANCE_STAGES.get(job_type)
     if stage is None or (config is None and scale is None):
         return 0
@@ -558,8 +503,6 @@ def balance_executor_need(
 #: profile's size is above the executor cap (fewer, larger pods put less load
 #: on the Kubernetes API).
 _EXECUTOR_CORE_STEPS = (8, 16)
-#: The streaming jobs whose executor size the config may set.
-_EXECUTOR_STAGE_JOBS = ("bronze-ingest", "silver-stream", "gold-refresh")
 
 
 def _executor_cores_override(job_type: str, config: Any | None) -> int | None:
@@ -589,8 +532,6 @@ def _executor_memory_override(job_type: str, config: Any | None) -> str | None:
 def _with_executor_memory(profile: dict[str, Any], memory: str) -> dict[str, Any]:
     """*profile* with a *memory* heap per executor: the overhead keeps the
     profile's ratio to the heap, so the pod grows in proportion."""
-    import math
-
     from lakebench.config.schema import parse_spark_memory
 
     gib = 1024**3
@@ -610,8 +551,6 @@ def _reshape_executors(
     """*profile* with *cores* per executor: memory keeps the per-core share,
     and the scale counts shrink so the total cores stay the same, unless
     *keep_count* (cores set in the config change the size only)."""
-    import math
-
     from lakebench.config.schema import parse_spark_memory
 
     old = int(profile["executor_cores"])
@@ -635,8 +574,6 @@ def kubernetes_client_conf(executors: int) -> dict[str, str]:
     """Spark's Kubernetes client settings for a job of *executors*: pod lists
     from the API server cache, polling that slows as the job grows, and pod
     requests in bounded waves."""
-    import math
-
     batch = max(5, min(20, math.ceil(executors / 3)))
     return {
         "spark.kubernetes.executor.enablePollingWithResourceVersion": "true",
@@ -758,7 +695,7 @@ def streaming_executor_count(
         if base is not None:
             profile = _auto_shape(job_type, base, config, sc, sch)
     need = balance_executor_need(job_type, profile, config, scale=sc, schema=sch)
-    n = max(_scale_executor_count(profile, sc), need)
+    n = max(executor_count(profile, sc), need)
     return min(n, int(profile.get("max_executors", _MAX_EXECUTORS_SAFE)))
 
 
@@ -832,8 +769,6 @@ EXECUTOR_OVERRIDE_FIELDS: dict[str, tuple[str, str]] = {
     "gold-refresh": ("gold_executors", "gold_refresh"),
 }
 
-_STREAMING_JOBS = frozenset({"bronze-ingest", "silver-stream", "gold-refresh"})
-
 
 def stage_key_applies(job_type: str, config: Any) -> bool:
     """Whether the stage key sizes *job_type* in this config's mode.
@@ -845,7 +780,8 @@ def stage_key_applies(job_type: str, config: Any) -> bool:
     from lakebench.config.schema import is_continuous_mode
 
     return not (
-        job_type not in _STREAMING_JOBS and is_continuous_mode(config.architecture.pipeline.mode)
+        job_type not in STREAMING_JOB_TYPES
+        and is_continuous_mode(config.architecture.pipeline.mode)
     )
 
 
@@ -920,25 +856,13 @@ def gold_refresh_checkpoint_uri(cfg) -> str:
 
 
 def get_job_profile(job_type: str, schema_type: str | None = None) -> dict[str, Any] | None:
-    """Return the resource profile for a given job type.
+    """The resource profile of *job_type*, a copy, or None if it is unknown.
 
-    Args:
-        job_type: Job type string (e.g. "bronze-verify", "silver-build").
-        schema_type: Workload schema (e.g. "financial"). When given, the
-            schema's ``_SCHEMA_PROFILE_OVERRIDES`` are merged on top of the base
-            profile, so the returned memory/scratch/executor fields match what
-            the job actually deploys. The metrics/scorecard path MUST pass this
-            or it under-reports AML resources (e.g. bronze-verify as 6Gi when
-            the pod requests 20Gi). Omitting it keeps
-            the c360 base for backward compatibility.
-
-    Returns:
-        Profile dict copy or None if job_type is unknown.
+    The metrics path must pass *schema_type*: without it the Customer 360
+    base is returned and AML resources are under-reported (bronze-verify as
+    6Gi when the pod requests 20Gi).
     """
-    if schema_type is not None:
-        return _resolve_job_profile(job_type, schema_type)
-    profile = _JOB_PROFILES.get(job_type)
-    return dict(profile) if profile else None
+    return _resolve_job_profile(job_type, schema_type)
 
 
 def get_executor_count(job_type: str, scale: float, schema_type: str | None = None) -> int:
@@ -956,14 +880,8 @@ def get_executor_count(job_type: str, scale: float, schema_type: str | None = No
     Returns:
         Expected executor count, or 0 if job_type is unknown.
     """
-    profile = (
-        _resolve_job_profile(job_type, schema_type)
-        if schema_type is not None
-        else _JOB_PROFILES.get(job_type)
-    )
-    if not profile:
-        return 0
-    return _scale_executor_count(profile, scale)
+    profile = _resolve_job_profile(job_type, schema_type)
+    return executor_count(profile, scale) if profile else 0
 
 
 def aml_bronze_verify_timeout_budget(scale: float) -> int:
@@ -972,19 +890,17 @@ def aml_bronze_verify_timeout_budget(scale: float) -> int:
     AML bronze-verify is NOT the thin add_files register c360 uses. It trips
     the CTAS fallback in bronze_verify_financial.py that rewrites the full
     pacs.008 corpus through Iceberg and spills ~2x the input per executor.
-    Measured live at 4278s at scale 10 (run-20260923-120258-b71af2, 7
-    executors, ~100 GB raw pacs008 present at job start). Executor count scales
+    Measured live at 4278s at scale 10 (7 executors, ~100 GB raw pacs008
+    present at job start). Executor count scales
     with data (executors_per_100_scale=8, capped at max_executors=28), so cost
     grows sublinearly with scale rather than 1:1.
 
     The 5400s floor covers the scale-10 measurement plus headroom for a cold
     Ivy jar fetch (~135s) or a transient OOM-retry, and the gentle scale*120
-    slope adds growth once executor scaling saturates at high scale. Both the
-    batch per-job timeout (cli/_run.py) and the sustained bronze-verify
-    preflight (cli/_sustained.py) size against this single helper so they
-    cannot diverge for the same job -- the batch path had only 222s (5%)
-    headroom over the measured cost before this was shared, a false-failure
-    risk on the primary UAT path under a cold classpath or OOM retry.
+    slope adds growth once executor scaling saturates at high scale. The batch
+    per-job timeout (cli/_run.py) and the sustained bronze-verify preflight
+    (cli/_sustained.py) both size against this one helper so they cannot
+    diverge for the same job.
     """
     return max(5400, int(scale * 120))
 
@@ -1079,7 +995,7 @@ def _job_requirement(
     """
     profile = (
         stage_profile(job_type, config, scale=scale, schema=schema_type)
-        if job_type in _EXECUTOR_STAGE_JOBS
+        if job_type in STREAMING_JOB_TYPES
         else _resolve_job_profile(job_type, schema_type)
     )
     if not profile:
@@ -1092,7 +1008,7 @@ def _job_requirement(
     executors = (
         streaming_executor_count(job_type, profile, config, scale=scale, schema=schema_type)
         if job_type in _BALANCE_STAGES
-        else _scale_executor_count(profile, scale)
+        else executor_count(profile, scale)
     )
     override = executor_override(job_type, config)
     if override is not None:
@@ -1444,14 +1360,11 @@ _SUPPORTED_SPARK_VERSIONS: dict[tuple[int, int], str] = {
     (4, 0): "4.0.x (Scala 2.13, Hadoop AWS 3.4.1)",
     (4, 1): "4.1.x (Scala 2.13, Hadoop AWS 3.4.2)",
 }
-# Spark 4.2 is deliberately NOT in this dict. Live-verified 2026-07-26: the
+# Spark 4.2 is deliberately not in this dict: it changed
+# org.apache.spark.sql.connector.catalog.View from an interface, so the
 # borrowed Iceberg 4.1 runtime jar (Iceberg has no native 4.2 runtime) throws
-# java.lang.IncompatibleClassChangeError loading org.apache.iceberg.spark.
-# source.SparkView -- Spark 4.2 changed org.apache.spark.sql.connector.
-# catalog.View from an interface to something else, breaking every Iceberg
-# release that implements it. This is a real binary incompatibility, not a
-# lakebench config gap, and blocks table writes entirely (silver-build fails
-# on the first createOrReplace).
+# IncompatibleClassChangeError loading SparkView and silver-build fails on the
+# first createOrReplace. A binary incompatibility, not a config gap.
 
 # ---------------------------------------------------------------------------
 # Table format version compatibility matrix
@@ -1485,7 +1398,7 @@ _FORMAT_VERSION_DEFAULTS: dict[tuple[int, int], dict[str, str]] = {
 # bytecode major 61, where 1.10.x carried 55 (Java 11).  Spark images that ship
 # a Java 11 runtime therefore fail with UnsupportedClassVersionError at class
 # load, not at submit, so the error surfaces inside the driver rather than in
-# lakebench.  Verified by reading the class headers out of both jars.
+# lakebench.
 _ICEBERG_MIN_JAVA17_VERSION = (1, 11)
 
 # Iceberg runtime artifact suffix per (Spark version, Iceberg version).
@@ -1503,22 +1416,20 @@ _ICEBERG_RUNTIME_SUFFIX: dict[tuple[int, int], str] = {
 # No (4, 2) entry: Spark 4.2 is not in _SUPPORTED_SPARK_VERSIONS. Borrowing
 # the 4.1 jar there throws IncompatibleClassChangeError.
 
-# Additional Maven repository for ``spark.jars.repositories`` /
-# ``--repositories`` on every job. Google mirrors Maven Central at
-# ``maven-central.storage-download.googleapis.com`` and rate-limits
-# independently, so when Central returns HTTP 429 to the cluster's egress
-# IP (which happens after a burst of UAT deploys) Ivy falls to the mirror
-# and the driver still resolves cleanly. Spark's default Ivy chain tries
-# Central and repos.spark-packages.org first and this entry last; a Central
-# 429 registers as "not found", which moves Ivy on down the chain.
+# A fallback Maven repository the dependency-set request resolves against
+# (deps/request.py builds the --repositories list). Google mirrors Maven
+# Central at ``maven-central.storage-download.googleapis.com`` and rate-limits
+# independently, so when Central returns HTTP 429 to the cluster's egress IP
+# (after a burst of deploys) Ivy falls to the mirror and resolves cleanly: a
+# Central 429 registers as "not found" and Ivy moves on down the chain.
 _MAVEN_MIRROR_REPOS = "https://maven-central.storage-download.googleapis.com/maven2/"
 
-# Python packages the AML reference detector (D9) needs on the driver. The
+# Python packages the AML reference detector needs on the driver. The
 # apache/spark images ship Python 3.10 with pip but no numpy, so these are
 # installed per job into an emptyDir by an init container. Exact pins keep the
-# GBT reproducible (P4.2); they are the newest releases with cp310 wheels, so
-# they trail the local harness (Python 3.11) by a minor version or two, which
-# A6 absorbs (cluster AP must match the harness within its bootstrap CI).
+# GBT reproducible; they are the newest releases with cp310 wheels, so they
+# trail the local harness (Python 3.11) by a minor version or two, which the
+# cluster-vs-harness AP bootstrap CI absorbs.
 REFERENCE_PY_DEPS = (
     "numpy==2.2.6",
     "scipy==1.15.3",
@@ -1581,9 +1492,8 @@ def _rebuild_epoch_key(cfg) -> str | None:
 
     Delta and Iceberg silver builds each carry their own rebuild-epoch
     counter so a --force-rebuild on one deployment cannot silently disturb
-    the other. AML is Iceberg-only per the plan; a financial+delta config
-    returns None (Delta AML is out of v1.6 scope) and no LB_REBUILD_EPOCH
-    is exported for it.
+    the other. AML is Iceberg-only, so a financial+delta config returns None
+    and no LB_REBUILD_EPOCH is exported for it.
     """
     try:
         schema_type = cfg.architecture.workload.schema_type.value
@@ -1602,41 +1512,45 @@ def _rebuild_epoch_key(cfg) -> str | None:
     return None
 
 
-def _read_silver_state_epoch(namespace: str, key: str) -> int:
-    """Read a rebuild-epoch counter from ``lakebench-silver-state``.
-
-    Falls back to 0 on any read failure -- the ConfigMap is per-deployment
-    and pre-B1 deployments do not have it. A missing key inside an existing
-    ConfigMap also returns 0. Log level is WARNING so a real ops issue is
-    visible even when the fallback is taken (e.g. unit tests running
-    without a live cluster context, or a manifest built out-of-cluster).
-
-    The CLI-side ``_bump_silver_rebuild_epoch`` is the load-bearing
-    defense against the collision surface this cache-line would otherwise
-    open: a failed bump refuses to submit silver (``cli/_run.py`` raises
-    ``typer.Exit(1)`` before the cycle loop), so the submit path only
-    runs after a bump the same process just observed to succeed. A
-    transient read failure here at submit-time (post-bump) is a very
-    narrow window against a cluster the CLI just talked to successfully.
-    """
+def _read_silver_state(namespace: str) -> dict[str, str] | Exception:
+    """The ``lakebench-silver-state`` ConfigMap's data, ``{}`` when it does
+    not exist, or the error of any other failed read."""
     try:
         from kubernetes import client as _kclient
         from kubernetes.client.exceptions import ApiException
 
-        core_v1 = _kclient.CoreV1Api()
         try:
-            cm = core_v1.read_namespaced_config_map("lakebench-silver-state", namespace)
+            cm = _kclient.CoreV1Api().read_namespaced_config_map(
+                "lakebench-silver-state", namespace
+            )
         except ApiException as e:
             if e.status == 404:
-                return 0
+                return {}
             raise
-        data = cm.data or {}
-        try:
-            return int(data.get(key, "0"))
-        except (TypeError, ValueError):
-            return 0
-    except Exception as e:  # noqa: BLE001
-        logger.warning("LB_REBUILD_EPOCH fallback to 0 for key %s: %s", key, e)
+        return dict(getattr(cm, "data", None) or {})
+    except Exception as e:  # noqa: BLE001 -- each reader picks its fallback
+        return e
+
+
+def _silver_state_epoch(state: dict[str, str] | Exception, key: str) -> int:
+    """A rebuild-epoch counter from the silver-state ConfigMap data.
+
+    0 when the ConfigMap or the key is missing (a deployment that never
+    bumped it) and on a failed read, which is logged at WARNING so a real
+    ops issue is visible even when the fallback is taken.
+
+    The CLI-side ``_bump_silver_rebuild_epoch`` is the load-bearing
+    defense against a stale epoch: a failed bump refuses to submit silver
+    (``cli/_run.py`` raises ``typer.Exit(1)`` before the cycle loop), so the
+    submit path only runs after a bump the same process just observed to
+    succeed.
+    """
+    if isinstance(state, Exception):
+        logger.warning("LB_REBUILD_EPOCH fallback to 0 for key %s: %s", key, state)
+        return 0
+    try:
+        return int(state.get(key, "0"))
+    except (TypeError, ValueError):
         return 0
 
 
@@ -1645,10 +1559,10 @@ def _spark_interval_to_seconds(interval: str) -> int:
     ``"1 hour"``) to an integer seconds value, for the AML scripts' trigger
     env vars. The config validates the intervals at load; anything else
     raises rather than guessing a period."""
-    parts = interval.strip().lower().split()
-    units = {"second": 1, "minute": 60, "hour": 3600}
-    if len(parts) == 2 and parts[0].isdigit() and parts[1].rstrip("s") in units:
-        return int(parts[0]) * units[parts[1].rstrip("s")]
+    from lakebench.config.schema import TRIGGER_INTERVAL_RE, interval_seconds
+
+    if TRIGGER_INTERVAL_RE.fullmatch(interval):
+        return int(interval_seconds(interval) or 0)
     raise ValueError(f"trigger interval {interval!r} is not a whole number and a unit")
 
 
@@ -1801,21 +1715,13 @@ def _spark_compat(image: str) -> tuple[str, str, str]:
 
     Returns:
         Tuple of (scala_suffix, hadoop_aws_version, aws_sdk_version), keyed on
-        the Spark image's own major.minor. Every supported Spark minor is
-        required to have an explicit ``_HADOOP_AWS_COMPAT`` entry -- the
-        import-time gate above enforces this. Unknown Spark minors (which
-        should have failed earlier at ``_validate_spark_image``) raise a
-        loud KeyError rather than falling back to a wrong pair.
+        the Spark image's own major.minor. ``_parse_spark_major`` refuses an
+        unsupported minor, and the import-time gate above gives every
+        supported minor an entry.
     """
     major = _parse_spark_major(image)
     key = _parse_spark_major_minor(image)
     scala_suffix = "_2.13" if major >= 4 else "_2.12"
-    if key not in _HADOOP_AWS_COMPAT:
-        raise KeyError(
-            f"No hadoop-aws / AWS SDK pin for Spark {key[0]}.{key[1]} in "
-            "_HADOOP_AWS_COMPAT. This must be resolved before submitting the "
-            "job -- a fallback would silently produce a wrong S3 signing pair."
-        )
     hadoop_aws_version, aws_sdk_version = _HADOOP_AWS_COMPAT[key]
     return scala_suffix, hadoop_aws_version, aws_sdk_version
 
@@ -1925,10 +1831,6 @@ class JobType(Enum):
     SILVER_STREAM = "silver-stream"
     GOLD_REFRESH = "gold-refresh"
 
-    # Financial-only: recall scoring (submitted by `run`)
-    SCORE_FINANCIAL = "score-financial"
-    # Post-window re-read of the snapshots continuous AML ticks read.
-    TIME_TRAVEL_FINANCIAL = "time-travel-financial"
     # Reference detector + leakage gate: the "distribution checks do not
     # prove semantics" gate that a relative-threshold rule rewrite (e.g. the
     # W4/W8 precision work) must be validated against before it ships.
@@ -1974,17 +1876,10 @@ def _deps_ready_init(cfg: LakebenchConfig, deps: Any) -> dict[str, Any]:
 REFERENCE_SET_JOB_TYPES: tuple[JobType, ...] = (JobType.SCORE_FINANCIAL_REFERENCE,)
 
 
-# Streaming job types (for conditional manifest logic)
-_STREAMING_JOB_TYPES = frozenset(
-    {
-        JobType.BRONZE_INGEST,
-        JobType.SILVER_STREAM,
-        JobType.GOLD_REFRESH,
-    }
-)
-# The same jobs in data-flow order, upstream first (the concurrent budget
-# grants spare cores in this order).
+# The streaming jobs in data-flow order, upstream first (the concurrent
+# budget grants spare cores in this order).
 _STREAMING_PIPELINE_ORDER = (JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH)
+_STREAMING_JOB_TYPES = frozenset(_STREAMING_PIPELINE_ORDER)
 
 
 class JobState(Enum):
@@ -2025,6 +1920,8 @@ SUCCESS_STATES = frozenset({JobState.SUCCEEDING, JobState.COMPLETED})
 STATUS_REQUEST_TIMEOUT = (10, 30)
 #: Status reads tried per get_job_status call before a transient error is raised.
 STATUS_READ_ATTEMPTS = 3
+#: Seconds _delete_job waits for a deleted SparkApplication to disappear.
+_DELETE_WAIT_S = 60
 
 
 def is_transient_status_error(exc: BaseException) -> bool:
@@ -2040,15 +1937,6 @@ def is_transient_status_error(exc: BaseException) -> bool:
 
 #: States meaning the job will not produce a result.
 FAILURE_STATES = frozenset({JobState.FAILING, JobState.FAILED, JobState.SUBMISSION_FAILED})
-
-
-def is_terminal(state: JobState) -> bool:
-    """Whether a state means the job has stopped producing work.
-
-    ``UNKNOWN`` is deliberately excluded: an unrecognised state should keep
-    the caller waiting rather than be reported as a result either way.
-    """
-    return state in SUCCESS_STATES or state in FAILURE_STATES
 
 
 @dataclass
@@ -2177,8 +2065,6 @@ class SparkJobManager:
         custom_api = k8s_client.CustomObjectsApi()
 
         retryable_codes = {429, 500, 502, 503, 504}
-        last_exc: ApiException | None = None
-
         for attempt in range(4):  # 1 initial + 3 retries
             try:
                 created = custom_api.create_namespaced_custom_object(
@@ -2211,9 +2097,7 @@ class SparkJobManager:
                         state=JobState.FAILED,
                         message=f"Failed to submit: {e.reason}",
                     )
-                last_exc = e
                 import random
-                import time
 
                 delay = (2**attempt) + random.uniform(0, 0.5)
                 logger.warning(
@@ -2224,14 +2108,7 @@ class SparkJobManager:
                     e.reason,
                 )
                 time.sleep(delay)
-
-        # Should not reach here, but satisfy type checker
-        logger.error(f"Failed to submit job after retries: {last_exc}")
-        return JobStatus(
-            name=job_name,
-            state=JobState.FAILED,
-            message=f"Failed to submit after retries: {last_exc}",
-        )
+        raise AssertionError("the last attempt returns")
 
     def _delete_job(self, job_name: str, *, request_timeout: int | None = None) -> None:
         """Delete existing Spark job if present.
@@ -2258,11 +2135,21 @@ class SparkJobManager:
             if request_timeout is not None:
                 kwargs["_request_timeout"] = request_timeout
             custom_api.delete_namespaced_custom_object(**kwargs)
-            # Wait for deletion
-            time.sleep(2)
         except ApiException as e:
             if e.status != 404:
                 logger.warning(f"Error deleting job {job_name}: {e}")
+            return
+        # A create while the old object is still being removed returns 409,
+        # so wait until it is gone.
+        deadline = time.time() + (request_timeout or _DELETE_WAIT_S)
+        while time.time() < deadline:
+            try:
+                custom_api.get_namespaced_custom_object(**kwargs)
+            except ApiException as e:
+                if e.status == 404:
+                    return
+            time.sleep(1)
+        logger.warning("%s still present after its delete; the next submit may conflict", job_name)
 
     def get_job_status(self, job_name: str) -> JobStatus:
         """Get status of a Spark job.
@@ -2525,10 +2412,7 @@ class SparkJobManager:
             JobType.GOLD_REFRESH: "gold_refresh.py",
         }
         if workload_schema == "financial":
-            # Financial pipeline is authored end-to-end; each sub-PR of
-            # ENG-2C.3 fills in the corresponding entry. Scripts that have
-            # not shipped yet fall back to the Customer 360 file above so
-            # a partial-landing branch still boots.
+            # The financial workload has its own script per role.
             _financial_scripts = {
                 JobType.BRONZE_VERIFY: "bronze_verify_financial.py",
                 JobType.SILVER_BUILD: "silver_build_financial.py",
@@ -2548,13 +2432,11 @@ class SparkJobManager:
                     JobType.GOLD_REFRESH: "gold_refresh_delta.py",
                 }
             )
-        # Financial-only jobs (scoring, time travel, the reference detector)
-        # are schema-agnostic in the deploy path but only meaningful for
+        # Financial-only jobs (time travel, the reference detector) are
+        # schema-agnostic in the deploy path but only meaningful for
         # Financial workloads. Registered unconditionally so `run` and
         # `lakebench financial reference-score` work regardless of the elif
         # branch above.
-        script_map.setdefault(JobType.SCORE_FINANCIAL, "score_financial.py")
-        script_map.setdefault(JobType.TIME_TRAVEL_FINANCIAL, "time_travel_financial.py")
         script_map.setdefault(JobType.SCORE_FINANCIAL_REFERENCE, "score_financial_reference.py")
         # Use local:// to reference scripts already in the container filesystem
         # (projected from the lakebench-scripts-<role> ConfigMaps)
@@ -2809,12 +2691,11 @@ class SparkJobManager:
                 }
             )
 
-        # Parquet tuning
-        # BUG-006: Fixed 256MB partitions caused 26k tasks at scale 500,
-        # overwhelming driver with Iceberg commit metadata. Scale-aware sizing.
-        # 5000 tasks overwhelms AppStatusListener at scale 100+ with
-        # Spark 4.0.2 (O(liveTasks) flush per heartbeat). Target 2000 tasks
-        # and allow up to 2GB partitions to keep the driver responsive.
+        # Parquet tuning. Fixed 256MB partitions made 26k tasks at scale 500,
+        # whose Iceberg commit metadata overwhelmed the driver, and 5000 tasks
+        # overwhelm the Spark 4.0.2 AppStatusListener (O(liveTasks) flush per
+        # heartbeat) at scale 100+. Size partitions to the scale, targeting
+        # 2000 tasks and allowing up to 2GB partitions, to keep it responsive.
         # At scale 100 (1TB): 1024MB partitions = ~1000 tasks.
         # At scale 10 (100GB): 256MB partitions = ~400 tasks (floor applies).
         target_tasks = 2000
@@ -3081,63 +2962,30 @@ class SparkJobManager:
             # Point spark.local.dir to the PVC mount
             spark_conf["spark.local.dir"] = "/tmp/spark-local"
 
-        _restart_policy: dict[str, Any] = (
-            # Streaming jobs: do NOT auto-rerun a failed driver.
-            # The continuous gate at cli/_sustained.py refuses the window on
-            # "driver was resubmitted inside the window; earlier driver's
-            # work is not in the log", so an uncapped "Always" guarantees any
-            # transient event becomes a silent FAIL with the diagnostic log
-            # lost to the operator's pod delete. OnFailure with 0 driver
-            # retries converts the same event into a definitive FAILED
-            # verdict whose first driver's log is still inspectable.
-            # Submission retries stay (they run before the driver starts and
-            # the submitting operator can be transiently busy).
-            {
-                "type": "OnFailure",
-                "onFailureRetries": 0,
-                "onSubmissionFailureRetries": 5,
-                "onSubmissionFailureRetryInterval": 60,
-            }
-            if job_type in _STREAMING_JOB_TYPES
-            else {
-                "type": "OnFailure",
-                "onFailureRetries": 2,
-                "onFailureRetryInterval": 30,
-                # Submission runs spark-submit inside the SHARED operator. It
-                # no longer resolves packages (the jars are lb-deps URLs), but
-                # a busy operator still fails submissions now and then; retry
-                # more, and wait longer between attempts.
-                "onSubmissionFailureRetries": 5,
-                "onSubmissionFailureRetryInterval": 60,
-            }
-        )
-
-        if job_type is JobType.TIME_TRAVEL_FINANCIAL:
-            # One attempt: a time-travel read writes one result, and a retried
-            # driver would only repeat a determined outcome or a crash, and
-            # scan everything again inside the same job budget.
-            # Submission retries stay (they run before the driver starts).
-            _restart_policy = {
-                "type": "OnFailure",
-                "onFailureRetries": 0,
-                "onSubmissionFailureRetries": 5,
-                "onSubmissionFailureRetryInterval": 60,
-            }
-        if (
+        # A failed driver is not rerun for a stream, a time-travel read or a
+        # registered reference look. The continuous gate refuses a window
+        # whose driver was resubmitted, so a rerun stream turns a transient
+        # event into a FAIL with the first driver's log lost to the
+        # operator's pod delete; without the rerun the FAILED verdict keeps
+        # that log. A time-travel read writes one result: a rerun repeats a
+        # determined outcome or a crash and scans everything again inside the
+        # same budget. A registered look runs once: a rerun after the gate
+        # computed AP would look again. Submission retries stay for every job:
+        # they run before the driver starts, and the shared operator fails a
+        # submission now and then.
+        no_driver_retry = job_type in _STREAMING_JOB_TYPES or (
             job_type == JobType.SCORE_FINANCIAL_REFERENCE
             and cfg.architecture.workload.datagen.corpus_role in ("evaluation", "robustness")
-        ):
-            # A registered look runs once: an operator retry after the gate
-            # computed AP (a crash or an error verdict) would look again.
-            # Submission retries stay: they run before the driver starts,
-            # so no AP exists yet.
-            _restart_policy = {
-                "type": "OnFailure",
-                "onFailureRetries": 0,
-                "onSubmissionFailureRetries": 5,
-                "onSubmissionFailureRetryInterval": 60,
-            }
+        )
+        _restart_policy: dict[str, Any] = (
+            {"type": "OnFailure", "onFailureRetries": 0}
+            if no_driver_retry
+            else {"type": "OnFailure", "onFailureRetries": 2, "onFailureRetryInterval": 30}
+        )
+        _restart_policy["onSubmissionFailureRetries"] = 5
+        _restart_policy["onSubmissionFailureRetryInterval"] = 60
 
+        env = self._build_env_vars(job_type, cycle_env=cycle_env)
         manifest = {
             "apiVersion": "sparkoperator.k8s.io/v1beta2",
             "kind": "SparkApplication",
@@ -3158,12 +3006,11 @@ class SparkJobManager:
                 "image": cfg.images.spark,
                 "imagePullPolicy": cfg.images.pull_policy.value,
                 "mainApplicationFile": main_file,
-                # Args for scripts that take CLI options (score, reference score).
+                # Args for scripts that take CLI options (the reference score).
                 # SparkOperator maps this to the driver's Python argv after the
-                # script path. Omit when unused so we don't break the older
-                # config's assumption that omitting the field is safe.
+                # script path; the field is omitted when there are none.
                 **({"arguments": arguments} if arguments else {}),
-                # No deps.pyFiles needed - PYTHONPATH includes /opt/spark/scripts for common.py imports
+                # common.py is imported from PYTHONPATH (/opt/spark/scripts), not deps.pyFiles.
                 "sparkVersion": spark_image_tag,  # From config: images.spark
                 "restartPolicy": _restart_policy,
                 "driver": {
@@ -3179,7 +3026,7 @@ class SparkJobManager:
                         "app": "lakebench-spark",
                         "component": "driver",
                     },
-                    "env": self._build_env_vars(job_type, cycle_env=cycle_env),
+                    "env": env,
                     "template": driver_pod_template,
                     "annotations": {deps_manifest.POD_ANNOTATION_SET: deps.pinset_sha256},
                 },
@@ -3200,7 +3047,7 @@ class SparkJobManager:
                         "app": "lakebench-spark",
                         "component": "executor",
                     },
-                    "env": self._build_env_vars(job_type, cycle_env=cycle_env),
+                    "env": copy.deepcopy(env),
                     "template": executor_pod_template,
                     "annotations": {deps_manifest.POD_ANNOTATION_SET: deps.pinset_sha256},
                 },
@@ -3210,8 +3057,12 @@ class SparkJobManager:
 
         return manifest
 
-    def _resolve_silver_data_clock(self, cfg: LakebenchConfig) -> tuple[str, str]:
-        """C2 (silver-plan): resolve LB_DATA_CLOCK for a silver job.
+    def _resolve_silver_data_clock(
+        self,
+        cfg: LakebenchConfig,
+        silver_state: Callable[[], dict[str, str] | Exception],
+    ) -> tuple[str, str]:
+        """Resolve LB_DATA_CLOCK for a silver job.
 
         Returns ``(iso_date, source_label)`` where ``source_label`` is one of
         ``datagen_timestamp_end``, ``bronze_data_clock``,
@@ -3245,9 +3096,11 @@ class SparkJobManager:
             return str(_ts_end), "datagen_timestamp_end"
 
         # Rung 2: bronze-verify's max(event_ts).
-        bronze_clock = self._read_bronze_data_clock()
-        if bronze_clock:
-            return bronze_clock, "bronze_data_clock"
+        state = silver_state()
+        if isinstance(state, Exception):
+            logger.debug("silver-state ConfigMap read failed (%s); falling back", state)
+        elif (state.get("bronze_data_clock") or "").strip():
+            return state["bronze_data_clock"].strip(), "bronze_data_clock"
 
         # Rung 3: configured window start.
         _ts_start = cfg.architecture.workload.datagen.timestamp_start
@@ -3257,30 +3110,6 @@ class SparkJobManager:
         # Rung 4: today at 00:00 UTC.
         today = _dt.now(_tz.utc).date().isoformat()
         return today, "fallback_default"
-
-    def _read_bronze_data_clock(self) -> str | None:
-        """Best-effort read of ``lakebench-silver-state.bronze_data_clock``
-        from the deployment namespace. Returns None on any failure so the
-        resolver falls through to the next ladder rung."""
-        try:
-            from kubernetes import client as _kclient
-            from kubernetes.client.exceptions import ApiException
-        except ImportError:  # pragma: no cover
-            return None
-        try:
-            core = _kclient.CoreV1Api()
-            cm = core.read_namespaced_config_map("lakebench-silver-state", self.namespace)
-            data = getattr(cm, "data", None) or {}
-            val = data.get("bronze_data_clock", "")
-            return val.strip() or None
-        except ApiException as e:
-            if e.status == 404:
-                return None
-            logger.debug("silver-state ConfigMap read failed (%s); falling back", e.status)
-            return None
-        except Exception as e:  # noqa: BLE001
-            logger.debug("silver-state ConfigMap read error: %s; falling back", e)
-            return None
 
     def _build_env_vars(
         self,
@@ -3298,6 +3127,8 @@ class SparkJobManager:
         """
         cfg = self.config
         s3 = cfg.platform.storage.s3
+        # The silver-state ConfigMap, read at most once per build.
+        silver_state = functools.cache(lambda: _read_silver_state(self.namespace))
 
         env: list[dict[str, Any]] = [
             # PYTHONPATH for finding common.py
@@ -3364,7 +3195,7 @@ class SparkJobManager:
             )
             env.append({"name": "LB_RUN_ID", "value": os.environ.get("LB_RUN_ID", "")})
 
-        # C2 (silver-plan): silver jobs always carry LB_DATA_CLOCK so a rerun
+        # Silver jobs always carry LB_DATA_CLOCK so a rerun
         # scores recency reproducibly, and a greenfield deployment never
         # silently writes NULL customer_recency_score. Resolution order:
         #
@@ -3383,13 +3214,13 @@ class SparkJobManager:
         _ts_end = cfg.architecture.workload.datagen.timestamp_end
         _is_silver_job = job_type in (JobType.SILVER_BUILD, JobType.SILVER_STREAM)
         if _is_silver_job:
-            _clock_value, _clock_source = self._resolve_silver_data_clock(cfg)
+            _clock_value, _clock_source = self._resolve_silver_data_clock(cfg, silver_state)
             env.append({"name": "LB_DATA_CLOCK", "value": _clock_value})
             env.append({"name": "LB_DATA_CLOCK_SOURCE", "value": _clock_source})
         elif _ts_end:
             env.append({"name": "LB_DATA_CLOCK", "value": str(_ts_end)})
 
-        # G3: reproducibility seed for silver-build profile sampling
+        # Reproducibility seed for silver-build profile sampling
         # (silver_build.py, silver_build_delta.py). Exported so re-runs at
         # the same seed produce the same profile numbers. Uses the resolved
         # datagen seed (config/datagen_seed.py) so the sampler sees the same
@@ -3414,14 +3245,14 @@ class SparkJobManager:
             )
             _lb_seed = 0
         # A registered (held-out) corpus's seed is never in a SparkApplication
-        # spec (owner, 10-03); LB_SEED feeds only the Customer 360 silver
-        # sampler, so it is left out there.
+        # spec; LB_SEED feeds only the Customer 360 silver sampler, so it is
+        # left out there.
         from lakebench.config.seed_secret import uses_seed_secret
 
         if not uses_seed_secret(cfg):
             env.append({"name": "LB_SEED", "value": str(_lb_seed)})
 
-        # B1 rebuild-epoch: the per-deployment lakebench-silver-state ConfigMap
+        # Rebuild-epoch: the per-deployment lakebench-silver-state ConfigMap
         # stores one counter per (workload x format). The counter bumps on a
         # user-triggered --force-rebuild via the CLI so Delta's (txnAppId,
         # txnVersion) commits from earlier epochs do not short-circuit the
@@ -3434,11 +3265,11 @@ class SparkJobManager:
             JobType.SILVER_BUILD,
             JobType.SILVER_STREAM,
         ):
-            _epoch = _read_silver_state_epoch(self.namespace, _rebuild_key)
+            _epoch = _silver_state_epoch(silver_state(), _rebuild_key)
             env.append({"name": "LB_REBUILD_EPOCH", "value": str(_epoch)})
 
-        # G5: silver streams label their admission decision against the
-        # measured scale envelope (invariant 6). The stream mains compute
+        # Silver streams label their admission decision against the
+        # measured scale envelope. The stream mains compute
         # `admission = "ok"` when scale <= measured envelope, else
         # `labelled_beyond_measured_envelope`. Export the deployment scale
         # so a running stream can decide, not just recite a hardcoded string.
@@ -3480,12 +3311,12 @@ class SparkJobManager:
                     "value": str(cfg.architecture.workload.w1_max_vertices),
                 }
             )
-            # P10 operations layer parameters (tm_operations.py).
+            # Operations-layer parameters (tm_operations.py).
             env.extend(
                 {"name": k, "value": v}
                 for k, v in cfg.architecture.workload.tm_operations.env().items()
             )
-            # H4 fat-finger guard: AML batch silver refuses to overwrite while
+            # AML batch silver refuses to overwrite while
             # continuous silver is active. silver_build_financial.main() probes
             # for ``_STARTED`` under this deployment's known silver-stream
             # checkpoint path -- the same URI job.py builds for the SILVER_STREAM
@@ -3550,7 +3381,7 @@ class SparkJobManager:
                     {"name": "TARGET_FILE_SIZE_BYTES", "value": target_file_size_bytes},
                 ]
             )
-            # A3 (silver-plan): silver-stream reads this cap so its bronze
+            # Silver-stream reads this cap so its bronze
             # wait loop cannot spend the whole window before the empty-rows gate
             # fires. See SustainedConfig.effective_silver_bronze_wait_seconds.
             if job_type == JobType.SILVER_STREAM:
@@ -3641,7 +3472,7 @@ class SparkJobManager:
                         }
                     )
                     # The TM layer reads the bronze stream's source log to
-                    # know which raw files bronze should hold (P10 stage 1).
+                    # know which raw files bronze should hold.
                     env.append(
                         {
                             "name": "LB_FINANCIAL_BRONZE_CHECKPOINT",
@@ -3649,15 +3480,15 @@ class SparkJobManager:
                         }
                     )
 
-        # AML fidelity gate provenance (AML-GOALS R6, R3): which corpus seed
-        # the report scored and which lakebench revision produced it.
+        # AML fidelity gate provenance: which corpus seed the report scored
+        # and which lakebench revision produced it.
         if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
             from lakebench.config.datagen_seed import config_seed
             from lakebench.config.seed_secret import seed_secret_env, uses_seed_secret
 
             if uses_seed_secret(cfg):
                 # A registered corpus's seed: from the Secret generate wrote,
-                # never in the SparkApplication spec (owner, 10-03).
+                # never in the SparkApplication spec.
                 env.append(seed_secret_env(cfg))
             else:
                 env.append({"name": "LB_DATAGEN_SEED", "value": str(config_seed(cfg))})
@@ -3877,8 +3708,3 @@ class SparkJobManager:
                     "(another run or tree wrote it); not submitting"
                 )
         return None
-
-    # Alias for backward compatibility
-    def deploy_scripts(self) -> bool:
-        """Deploy scripts. Alias for deploy_scripts_configmap()."""
-        return self.deploy_scripts_configmap()

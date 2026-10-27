@@ -240,7 +240,7 @@ class MonthWindows:
         need = (self.lead + self.history) * _SECONDS_PER_DAY
         return self._start_epoch(self.burn_in) - need >= self._start_epoch(0)
 
-    def history_features(self, cs: DataFrame, in_a: DataFrame | None = None) -> DataFrame:
+    def history_features(self, cs: DataFrame) -> DataFrame:
         """HISTORY_FEATURE_COLUMNS per (key, month) from the customer's own
         payment sides ``cs``.
 
@@ -518,7 +518,7 @@ def entity_features(txns: DataFrame, entities: DataFrame, windows=None) -> DataF
     unit = ["key", "month"]
     in_a = cs.withColumn("month", windows.a_months(col("ts"))).filter(windows.scorable("month"))
     feats = _aggregate(in_a, unit)
-    feats = feats.join(windows.history_features(cs, in_a), unit, "left")
+    feats = feats.join(windows.history_features(cs), unit, "left")
     out = feats.join(ent, "key", "left")
     return out.select(*unit, *FEATURE_COLUMNS, *HISTORY_FEATURE_COLUMNS, "is_customer", "n_sends")
 
@@ -556,16 +556,17 @@ def _splitmix64(x: int) -> int:
     return z ^ (z >> 31)
 
 
+try:
+    from lakebench.config.datagen_seed import subject_index as _subject_index
+except ImportError:  # the Spark driver: the flat copy mounted beside this script
+    from datagen_seed import subject_index as _subject_index
+
+
 def subject_index(typ: str, n: int, inst_seed: int) -> int:
     """datagen_rs::typology::subject_index: the participant the typology's
-    scenario fires on (always a customer, typology::enforce_subject)."""
-    if typ in ("fan_in", "micro_structuring"):
-        return n - 1
-    if typ in ("stack", "rapid_layering"):
-        return min(1, n - 1)
-    if typ == "corridor_high_risk":
-        return _splitmix64(inst_seed & _MASK64) & 1
-    return 0
+    scenario fires on. Resolved once at import, since it is called once per
+    manifest row."""
+    return _subject_index(typ, n, inst_seed)
 
 
 def labels_from_subjects(spark, manifest: DataFrame, id_map: DataFrame) -> DataFrame:

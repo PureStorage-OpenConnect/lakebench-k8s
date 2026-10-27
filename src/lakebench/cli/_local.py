@@ -129,7 +129,6 @@ def deploy_local(
     cfg: LakebenchConfig,
     workdir: Path | None = None,
     timeout: int = 180,
-    cli: str = "",
 ) -> LocalDeployment:
     """Stand up the local stack and report what was skipped."""
     check_local_supported(cfg)
@@ -146,7 +145,6 @@ def deploy_local(
         namespace=cfg.get_namespace(),
         region=cfg.platform.storage.s3.region,
         buckets=buckets,
-        cli=cli,
     )
 
     print_info(f"Starting local stack in {workdir}")
@@ -163,7 +161,6 @@ def destroy_local(
     cfg: LakebenchConfig,
     workdir: Path | None = None,
     remove_data: bool = False,
-    cli: str = "",
 ) -> tuple[int, Path]:
     """Tear down the local stack.
 
@@ -176,7 +173,6 @@ def destroy_local(
         workdir=workdir,
         namespace=cfg.get_namespace(),
         region=cfg.platform.storage.s3.region,
-        cli=cli,
     )
     return deployer.destroy(remove_data=remove_data), workdir
 
@@ -184,7 +180,6 @@ def destroy_local(
 def status_local(
     cfg: LakebenchConfig,
     workdir: Path | None = None,
-    cli: str = "",
 ) -> dict[str, Any]:
     """Report what is running locally and what data exists.
 
@@ -207,7 +202,6 @@ def status_local(
             workdir=workdir,
             namespace=cfg.get_namespace(),
             region=s3.region,
-            cli=cli,
         )
         info["running"] = deployer.status()
     except Exception as e:  # noqa: BLE001 -- a missing container CLI is a status answer
@@ -219,7 +213,7 @@ def status_local(
 
     # Read the port off the running container rather than assuming the
     # default: a second stack on this host is published somewhere else.
-    creds = _running_credentials(cfg, workdir, cli)
+    creds = _running_credentials(cfg, workdir)
     if creds:
         info["endpoint"] = creds.endpoint
         info["buckets"] = _measure_layers(cfg, creds)
@@ -228,7 +222,7 @@ def status_local(
     return info
 
 
-def _running_credentials(cfg: LakebenchConfig, workdir: Path, cli: str) -> GarageCredentials | None:
+def _running_credentials(cfg: LakebenchConfig, workdir: Path) -> GarageCredentials | None:
     """Read credentials back from a running Garage without redeploying it.
 
     ``deploy_local`` would also return them, but calling it from ``status``
@@ -238,7 +232,7 @@ def _running_credentials(cfg: LakebenchConfig, workdir: Path, cli: str) -> Garag
     from lakebench.runtime.container import ContainerRuntime, detect_container_cli
 
     try:
-        runtime = ContainerRuntime(cli=cli or detect_container_cli(), namespace=cfg.get_namespace())
+        runtime = ContainerRuntime(cli=detect_container_cli(), namespace=cfg.get_namespace())
         deployer = GarageDeployer(
             runtime,
             config_dir=str(workdir / "garage"),
@@ -340,20 +334,19 @@ def generate_local(
     cfg: LakebenchConfig,
     deployment: LocalDeployment,
     timeout: int = 3600,
-    replace: bool = True,
 ) -> bool:
     """Generate bronze data with the datagen image, against the local store.
 
     Uses the same published image as the Kubernetes path, so local data has the
     schema the pipeline scripts expect rather than something approximated here.
 
-    Bronze is emptied first by default. Datagen writes part-NNNNNN keys that do
-    not collide across runs, so without this a second ``--generate`` adds to the
+    Bronze is emptied first. Datagen writes part-NNNNNN keys that do not
+    collide across runs, so without this a second ``--generate`` adds to the
     first rather than replacing it, and the pipeline silently processes a
     multiple of the configured scale. That surfaces as an OOM in silver-build,
     which points at the sizing rather than at the real cause.
     """
-    if replace and not _empty_bronze(cfg, deployment):
+    if not _empty_bronze(cfg, deployment):
         return False
 
     dims = get_dimensions(
@@ -443,6 +436,9 @@ def benchmark_local(
     duckdb_dir.mkdir(parents=True, exist_ok=True)
     duckdb_dir.chmod(0o777)
 
+    silver_table = "silver.customer_interactions_enriched"
+    gold_table = "gold.customer_executive_dashboard"
+
     buckets = cfg.platform.storage.s3.buckets
     executor = LocalDuckDBExecutor(
         endpoint=deployment.endpoint,
@@ -450,10 +446,7 @@ def benchmark_local(
         secret_key=deployment.credentials.secret_key,
         warehouse_bucket=getattr(buckets, LOCAL_WAREHOUSE_LAYER),
         region=deployment.credentials.region,
-        table_names={
-            "silver": "silver.customer_interactions_enriched",
-            "gold": "gold.customer_executive_dashboard",
-        },
+        table_names={"silver": silver_table, "gold": gold_table},
         cli=deployment.runtime_cli,
         workdir=str(duckdb_dir),
         duckdb_version=cfg.architecture.query_engine.duckdb.version,
@@ -463,9 +456,6 @@ def benchmark_local(
     if not executor.health_check():
         print_error("DuckDB could not start; skipping benchmark")
         return [], 0.0
-
-    silver_table = "silver.customer_interactions_enriched"
-    gold_table = "gold.customer_executive_dashboard"
 
     # (name, success, elapsed, rows)
     results: list[tuple[str, bool, float, int]] = []
@@ -505,7 +495,7 @@ def print_local_benchmark(results: list[tuple], qph: float) -> None:
     table.add_column("Result")
     table.add_column("Elapsed", justify="right")
     table.add_column("Rows", justify="right")
-    for name, ok, elapsed, rows, *_ in results:
+    for name, ok, elapsed, rows in results:
         marker = "[green]ok[/green]" if ok else "[red]failed[/red]"
         table.add_row(name, marker, f"{elapsed:.2f}s", f"{rows:,}" if rows else "-")
 

@@ -57,8 +57,8 @@ Known limits, by design or not yet measured:
 * ``same_system`` trusts the CA to name one cluster. Clusters whose API
   certificates chain to one shared organisation CA, reached with that CA as
   the client bundle, share the part, so siblings of one shape read as one
-  system (the same limit as ``api_server_fingerprint``'s F-3). Not checked
-  on the reference cluster, which presents its own installer CA.
+  system (the same limit as ``api_server_fingerprint``). Not checked on the
+  reference cluster, which presents its own installer CA.
 * ``storage_backend`` hashes ``detect_backend``'s answer; a change to that
   heuristic changes the part for an unchanged system, so it needs a bump of
   ``SYSTEM_IDENTITY_VERSION`` (pinned by a test).
@@ -329,12 +329,9 @@ def _nodes(k8s: Any) -> Any:
 def _storage_endpoint(cfg: Any) -> Any:
     """Return a stable, redacted identifier for the S3 endpoint.
 
-    The raw host:port used to be returned so the fingerprint could tell two
-    endpoints apart. That raw value leaks the operator's lab IP when a
-    metrics.json or report.html is shared off the host. The sha256 hash of the
-    canonical host:port preserves per-endpoint distinguishability (two
-    different endpoints still produce different fingerprints) while hiding the
-    value.
+    The sha256 hash of the canonical host:port, not the raw value: two
+    endpoints still fingerprint differently, and sharing a metrics.json or
+    report.html off the host does not leak the operator's lab IP.
     """
     endpoint = str(cfg.platform.storage.s3.endpoint or "").strip()
     parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
@@ -600,9 +597,8 @@ def _inputs(run: Any) -> dict[str, Any] | None:
     return inputs if isinstance(inputs, dict) else None
 
 
-def _clients(cfg: Any, local: bool, *, s3_too: bool = True) -> tuple[Any, Any]:
-    if local:
-        return None, None
+def _clients(cfg: Any, *, s3_too: bool = True) -> tuple[Any, Any]:
+    # Both callers return on a local run before reaching here.
     k8s = s3 = None
     try:
         from lakebench.k8s import get_k8s_client
@@ -614,18 +610,10 @@ def _clients(cfg: Any, local: bool, *, s3_too: bool = True) -> tuple[Any, Any]:
         # Without a cluster client this is not a cluster run; skip the HEAD.
         return k8s, None
     try:
-        from lakebench.s3 import S3Client
+        from lakebench.s3 import s3_client_from_config
 
         s3c = cfg.platform.storage.s3
-        s3 = S3Client(
-            endpoint=s3c.endpoint,
-            access_key=s3c.access_key,
-            secret_key=s3c.secret_key,
-            region=s3c.region,
-            path_style=s3c.path_style,
-            ca_cert=s3c.ca_cert,
-            verify_ssl=s3c.verify_ssl,
-        )
+        s3 = s3_client_from_config(s3c)
     except Exception as exc:  # noqa: BLE001
         logger.debug("system identity: no S3 client: %s", _reason(exc))
     return k8s, s3
@@ -687,7 +675,7 @@ def sample_run_start(run: Any, cfg: Any, *, local: bool = False, k8s: Any = None
             return
 
         def work() -> tuple[dict[str, Any], dict[str, Any]]:
-            built_k8s, s3 = _clients(cfg, local) if k8s is None else (k8s, None)
+            built_k8s, s3 = _clients(cfg) if k8s is None else (k8s, None)
             ident = observe_system(built_k8s, cfg, s3_client=s3)
             return ident, observe_load(built_k8s, cfg.get_namespace())
 
@@ -726,7 +714,7 @@ def sample_run_end(run: Any, cfg: Any, *, local: bool = False, k8s: Any = None) 
             return
 
         def work() -> dict[str, Any]:
-            client = k8s if k8s is not None else _clients(cfg, local, s3_too=False)[0]
+            client = k8s if k8s is not None else _clients(cfg, s3_too=False)[0]
             return observe_load(client, cfg.get_namespace())
 
         done, result = _within(END_DEADLINE_S, work)

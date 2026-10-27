@@ -135,3 +135,20 @@ def test_filter_at_fails_closed(spark):
     leaked = [case for case, df in returned.items() if PARTIAL in _batches(df)]
     assert not leaked, f"returned the partial batch: {leaked}"
     assert not returned, f"did not raise: {sorted(returned)}"
+
+
+def test_current_filter_fails_open_only_on_a_missing_versions_table(spark):
+    """``sealed_txns_filter`` returns the transactions unfiltered when the
+    versions table does not exist, and raises on any other read error
+    instead of returning partial batches."""
+    from common import sealed_txns_filter
+
+    txns, _, _ = _fixture(spark)
+    assert sealed_txns_filter(spark, txns, CATALOG, "silver.no_such_versions") is txns
+
+    class _Unreachable:
+        def table(self, name):
+            raise RuntimeError("catalog unreachable: connection reset")
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        sealed_txns_filter(_Unreachable(), txns, CATALOG, "silver.versions")

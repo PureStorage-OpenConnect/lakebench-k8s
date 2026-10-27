@@ -69,8 +69,9 @@ What it does not claim:
 
 ## 11. Supported compositions
 
-AML runs on Iceberg only. Of the 11 structurally valid tuples, 8 are
-workload-compatible, in batch and continuous.
+AML runs on Iceberg with a Trino query engine only, in batch and continuous.
+Recall and precision are scored with SQL on Trino, so a financial config on
+any other query engine is refused at load.
 
 The generated [support table](../compatibility-matrix.md#support-states)
 lists support states per recipe and mode. AML is supported only on the cells
@@ -79,14 +80,9 @@ it lists; every other valid combination is unverified.
 | Recipe | Query access path | Spark image | Notes |
 |---|---|---|---|
 | hive-iceberg-spark-trino (`default`) | catalog | 4.1.3 | |
-| hive-iceberg-spark-thrift | catalog | 4.1.3 | query and pipeline share Spark |
-| hive-iceberg-spark-duckdb | direct storage | 4.1.3 | DuckDB runs no Iceberg maintenance |
-| hive-iceberg-spark-none | none | 4.1.3 | no query benchmark or QpH |
 | polaris-iceberg-spark-trino | catalog | 4.1.3 | |
-| polaris-iceberg-spark-thrift | catalog | 4.1.3 | |
-| polaris-iceberg-spark-duckdb | direct storage | 4.1.3 | as DuckDB above |
-| polaris-iceberg-spark-none | none | 4.1.3 | as none above |
-| hive-delta-spark-{trino,thrift,none} | -- | -- | unsupported, refused at load: the AML stage scripts and DDL are Iceberg-only |
+| hive/polaris-iceberg-spark-{thrift,duckdb,none} | -- | -- | refused at load: the financial workload requires a Trino query engine to score recall and precision |
+| hive-delta-spark-{trino,thrift,none} | -- | -- | refused at load: the AML stage scripts and DDL are Iceberg-only |
 
 - The pipeline engine is Spark in every recipe. Every recipe uses
   `apache/spark:4.1.3-python3`; a config that sets `images.spark` runs that

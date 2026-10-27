@@ -2,17 +2,13 @@
 
 Every kubectl/helm/oc invocation in lakebench must run against the cluster
 named by ``platform.kubernetes.context`` in the loaded config, not the
-ambient current-context of whichever kubeconfig happens to be on ``$PATH``.
-A stale or wrong current-context has, in the past, sent a `helm upgrade`
-of the shared spark-operator release to a cluster the operator did not
-intend, and destroyed resources in the wrong namespace on another.
+ambient current-context of the kubeconfig. A wrong current-context would
+send a ``helm upgrade`` of the shared spark-operator release, or a delete,
+to another cluster.
 
-Rather than sprinkle ``--context=<value>``/``--kube-context=<value>``
-literals across the ~30 subprocess sites, callers thread a small
-``context`` value through and let these helpers append the correct flag
-form. They also give the repo-wide lint one entry point to whitelist,
-so a new bare ``subprocess.run(["kubectl", ...])`` fails CI instead of
-silently reading the ambient context.
+Callers pass a ``context`` value and these helpers append the flag in the
+form each tool expects. They are also the one entry point the repo-wide
+lint allows, so a bare ``subprocess.run(["kubectl", ...])`` fails CI.
 
 The helpers accept, uniformly:
 
@@ -39,30 +35,6 @@ from lakebench.k8s.lease_state import LeaseHoldExceeded, lease_held, lease_hold_
 logger = logging.getLogger(__name__)
 
 
-def _resolve_context(cfg_or_context: Any) -> str | None:
-    """Return the configured context string, or None if none is set.
-
-    Accepts a full ``LakebenchConfig`` (duck-typed via
-    ``.platform.kubernetes.context``), a plain string, or ``None``.
-    An empty string means "no explicit context"; a missing attribute
-    chain is treated the same way rather than raising -- calls made
-    from paths that never had a config loaded (module-level helpers,
-    ad-hoc scripts) must still work.
-    """
-    if cfg_or_context is None:
-        return None
-    if isinstance(cfg_or_context, str):
-        return cfg_or_context or None
-    ctx: Any = cfg_or_context
-    for attr in ("platform", "kubernetes", "context"):
-        ctx = getattr(ctx, attr, None)
-        if ctx is None:
-            return None
-    if isinstance(ctx, str) and ctx:
-        return ctx
-    return None
-
-
 def _pinned_argv(tool: str, cfg_or_context: Any, args: list[str]) -> list[str]:
     """Assemble the argv for ``tool`` with ``--context``/``--kube-context`` pinned.
 
@@ -73,7 +45,7 @@ def _pinned_argv(tool: str, cfg_or_context: Any, args: list[str]) -> list[str]:
     """
     from lakebench.k8s.target import cli_args
 
-    return [tool, *cli_args(tool, _resolve_context(cfg_or_context)), *args]
+    return [tool, *cli_args(tool, cfg_or_context), *args]
 
 
 # helm's own --timeout is this much shorter than the subprocess timeout, so

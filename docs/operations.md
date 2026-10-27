@@ -47,7 +47,8 @@ lakebench admin doctor lakebench.yaml                              # confirm eve
 - the Stackable operators (Hive recipes)
 - the kubelet-metrics ClusterRole (`lakebench-kubelet-metrics`), when `observability.enabled` is set
 
-Name components one at a time with `--component spark-operator` and so on.
+Name one with `--component scratch-storage-class`, `spark-operator`,
+`stackable` or `observability` (repeatable).
 
 Re-running is safe:
 
@@ -59,16 +60,11 @@ Re-running is safe:
 Developers then run `lakebench deploy`, `run` and `destroy` without
 cluster-admin rights.
 
-**The cluster lease.** Every `admin` mutation takes a cluster-wide lease, so
-concurrent admins do not race each other.
+**The cluster lease.** Every `admin` mutation holds the cluster lease, so
+two admins do not race each other. Deploys and destroys wait while it is
+held: [Several deployments on one cluster](#several-deployments-on-one-cluster).
 
-- A deploy or destroy waits for the lease up to 37.5 minutes (2,250 s,
-  within its `--timeout`).
-- One that waits longer fails, naming the holder, and changes nothing
-  shared.
-- `lakebench admin --help` shows the full subcommand tree.
-
-**Scratch StorageClass.** Scratch PVCs (Portworx-backed shuffle volumes on OpenShift, for example) are off by default below batch scale 50 and on at and above it.
+**Scratch StorageClass.** Scratch PVCs are on by default for a batch run at scale 50 and above, or when the config sets an executor scratch size; off otherwise.
 
 - Set `platform.storage.scratch.enabled` to choose explicitly. Setting only the class does nothing.
 - When scratch is on, the named `StorageClass` must exist before `deploy` runs.
@@ -79,14 +75,14 @@ concurrent admins do not race each other.
 default) must be installed cluster-wide before any `lakebench deploy`.
 
 - `deploy` adds its own namespace to the operator's `spark.jobNamespaces`
-  watch list under the `lakebench-cluster-lock` lease. `destroy` removes it
-  again.
+  watch list under the cluster lease. `destroy` removes it again.
 - Never edit that list by hand with `helm upgrade --reuse-values`. It skips
   the lease and can drop another deployment's entry.
 - `admin install --component spark-operator` takes the lease and runs
   `helm install` (never an upgrade) at the config's
   `platform.compute.spark.operator.version`.
-- `--version` naming another version than the installed one is refused: exit 2, or exit 3 with `--allow-version-change`, which lists the
+- `--version` naming another version than the installed one is refused:
+  exit 2, or exit 3 with `--allow-version-change`, which lists the
   deployments using it and any deleted namespaces still in its watch list.
 - Lakebench does not automate a version change: `helm upgrade` leaves the
   chart's `crds/` at the installed version.
@@ -130,14 +126,14 @@ A run that exits 0 still needs reading: the record's verdict and the stage row c
 
 **Use one namespace and one config per deployment.** Deployments in different namespaces share only the cluster-wide pieces above.
 
-- Changes to shared mutable state, the Spark Operator's `spark.jobNamespaces`, go through one lock: the `lakebench-cluster-lock` ConfigMap in `lakebench-system`. Two deploys or destroys at once cannot lose each other's watch-list entry.
+- Changes to shared mutable state, the Spark Operator's `spark.jobNamespaces`, go through the cluster lease: the `lakebench-cluster-lock` ConfigMap in `lakebench-system`. Two deploys or destroys at once cannot lose each other's watch-list entry.
 
-**A deploy or destroy can wait on the lock.**
+**A deploy or destroy can wait on the lease.**
 
-- One holder keeps it for at most `LEASE_MAX_HOLD_S` (longer for `admin` commands).
-- A watch-list change waits for up to three such holders, then gives up with nothing changed.
-- A crashed holder is reclaimed when its lease expires (`DEFAULT_TTL_SEC`). That can be later than a waiting deploy gives up; re-run the deploy once `lakebench admin status` shows the lease expired.
-- `lakebench admin status` shows who holds the lock. `lakebench admin release-lock` clears a stale one; it is for a cluster admin who has checked the holder is gone.
+- A deploy or destroy has a hold budget of 750 s; an `admin` command 1,800 s.
+- A watch-list change waits for up to three deploy or destroy holds (3 x 750 s = 2,250 s; a deploy's wait counts against its `--timeout`), then fails naming the holder, with nothing shared changed. A long admin hold can outlast that wait.
+- A crashed holder's lease expires an hour after it was taken. That can be later than a waiting deploy gives up; re-run the deploy once `lakebench admin status` shows the lease expired.
+- `lakebench admin status` shows who holds the lease. `lakebench admin release-lock` clears an expired one, and with `--force` a live one; it is for a cluster admin who has checked the holder is gone.
 
 **Leave headroom.**
 
@@ -163,7 +159,7 @@ A run that exits 0 still needs reading: the record's verdict and the stage row c
 
 **Destroy with `lakebench destroy <config>`, never `kubectl delete namespace`.**
 
-- Destroy takes the namespace off the operator's watch list under the lock before it deletes it.
+- Destroy takes the namespace off the operator's watch list under the lease before it deletes it.
 - It keeps the namespace when an operator pod still watches it. Deleting a watched namespace crash-loops the operator for every deployment on the cluster.
 - Which buckets it empties and deletes: [Bucket ownership](deployment.md#bucket-ownership).
 - A `kubectl delete namespace`, or a delete by name prefix, skips the watch-list removal and the ownership checks.

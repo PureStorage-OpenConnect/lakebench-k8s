@@ -289,6 +289,11 @@ def _check_namespace(cfg) -> PrereqResult:
         )
 
 
+def _run_mode(sustained: bool | None) -> str | None:
+    """The sizing run mode: None (unknown), ``continuous`` or ``batch``."""
+    return None if sustained is None else ("continuous" if sustained else "batch")
+
+
 def _unreadable_config(e: Exception) -> PrereqResult:
     """The capacity check's failure when the config's request cannot be read."""
     return PrereqResult(
@@ -370,7 +375,7 @@ def _check_cluster_capacity(
     from lakebench.k8s.target import ContextConflictError
     from lakebench.quantity import QuantityError
 
-    run_mode = None if sustained is None else ("continuous" if sustained else "batch")
+    run_mode = _run_mode(sustained)
     # The request comes from the config alone, so read it before the cluster:
     # a value the plan cannot read fails the check even when the cluster
     # cannot be read either.
@@ -514,7 +519,7 @@ def _decide_capacity(
     free, allocatable = found.free, found.allocatable
 
     scale = cfg.architecture.workload.datagen.scale
-    run_mode = None if sustained is None else ("continuous" if sustained else "batch")
+    run_mode = _run_mode(sustained)
     try:
         verdict = check_capacity(
             cfg,
@@ -587,9 +592,9 @@ def _decide_capacity(
     from lakebench.modules.pipeline_engines.spark.job import executor_override
 
     overrides = [
-        f"{r.job_type} {executor_override(r.job_type, cfg)}"
+        f"{r.job_type} {ov}"
         for r in plan.spark.per_job
-        if executor_override(r.job_type, cfg) is not None
+        if (ov := executor_override(r.job_type, cfg)) is not None
     ]
     if overrides:
         summary += f"; with executor overrides {', '.join(overrides)}"

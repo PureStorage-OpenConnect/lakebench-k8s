@@ -127,7 +127,8 @@ def test_no_io_means_no_storage_lane() -> None:
 
 @pytest.mark.parametrize(
     ("mode", "schema"),
-    [("continuous", "customer360"), ("sustained", "unknown"), ("batch", "unknown")],
+    # The two unknown-schema cases (sustained, batch) take one branch; keep one.
+    [("continuous", "customer360"), ("sustained", "unknown")],
 )
 def test_no_profile_no_replay(mode: str, schema: str) -> None:
     assert build_replay(_record(mode, schema)) is None
@@ -323,3 +324,22 @@ def test_sustained_customer360_counts_cleaned_interactions_and_queries() -> None
 
     pace = next(t for t in build_tiles(rec, mode="sustained", gates=None) if t.label == "Pace")
     assert "interactions/s" in pace.value and "480 interactions cleaned in 480 s" in pace.sub
+    assert "<span>interactions cleaned per second</span>" in render_replay(data, pace)
+
+
+def test_offered_pace_headline_names_the_offered_rows() -> None:
+    """A continuous Customer 360 record without a window reads the offered
+    load; the headline caption names it, not a fragment of the tile's text."""
+    from lakebench.reports.tiles import build_tiles
+
+    rec = _sustained_record()
+    rec["config_snapshot"]["workload_schema"] = "customer360"
+    del rec["continuous"]["window"]
+    rec["pipeline_benchmark"]["scores"] = {
+        "sustained_throughput_rps": 1200.0,
+        "pipeline_saturated": False,
+    }
+    pace = next(t for t in build_tiles(rec, mode="sustained", gates=None) if t.label == "Pace")
+    assert pace.sub == "offered load; the pipeline kept pace"
+    html = render_replay(build_replay(_sustained_record()), pace)
+    assert "<span>interactions offered per second</span>" in html

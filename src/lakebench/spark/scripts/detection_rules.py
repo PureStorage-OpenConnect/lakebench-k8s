@@ -16,19 +16,15 @@ Rules implemented in this file:
 - W5_sanctions_match: payments whose beneficiary fuzzy-matches an entry on
   the corpus's dated synthetic sanctions list, screened at transaction time
   and rescreened when a list version is published.
-- W6_pep_counterparty: payments of $10,000 or more whose beneficiary
-  fuzzy-matches an entry on the corpus's synthetic PEP list.
+- W6_pep_counterparty: payments whose beneficiary fuzzy-matches an entry
+  on the corpus's synthetic PEP list (MED at $10,000 or more, LOW below).
 - W7_cross_border_high_risk: cross-border transactions to a FATF grey/
   black list jurisdiction or to one of the generator's synthetic high-risk
   corridor countries (synthetic_corridors.json, not a regulatory list).
-- W8_dormant_reactivation: originator account inactive > 90 days then
+- W8_dormant_reactivation: originator account inactive 90 days or more, then
   a transaction >= $5,000-equivalent.
 - W17_layering_chain: open chains of 3+ transfers where each hop forwards
   80-100% of the previous one within 7 days (temporal path search).
-
-W5_splink_resolution (probabilistic entity resolution) is a separate
-research effort tracked as ENH; it is not a "fix" and is intentionally
-out of scope here.
 
 The rule dispatcher (`get_rule`) is called by gold_finalize_financial.py and
 incremental_detection.py.
@@ -38,6 +34,10 @@ from __future__ import annotations
 
 import contextlib
 
+# ``_delete_uri`` lives in common beside ``_hadoop_fs``; it is re-exported
+# here because gold_refresh_financial and incremental_detection import it
+# from this module.
+from common import _delete_uri, _hadoop_fs  # noqa: F401
 from pyspark.sql import DataFrame, Window
 from pyspark.sql.functions import (
     array,
@@ -55,7 +55,6 @@ from pyspark.sql.functions import (
     row_number,
     size,
     struct,
-    to_timestamp,
     when,
 )
 from pyspark.sql.functions import (
@@ -127,36 +126,21 @@ ALERT_COLUMNS = (
     ("reason_codes", "ARRAY<STRING>", True),
 )
 
-#: The count or size at which a rule's alert is HIGH priority. The priority
-#: expressions and the matching reason codes (aml_reason_codes) both read it,
-#: so a code always means "a HIGH-priority alert of that kind".
-HIGH_PRIORITY_CUTOFFS = {
-    "W1_connected_components": 8,
-    "W2_structuring": 6,
-    "W3_round_tripping": 4,
-    "W4_risk_propagation": 3,
-    "W17_layering_chain": 5,
-}
-
-# Driver-side rule -> planted-typology-target map. This MUST stay in lock-step
-# with RULE_TARGETS in src/lakebench/benchmark/aml_queries.py (the
-# orchestrator-side authority); a consistency test asserts they match, because
-# the two live on opposite sides of the package boundary (this module ships to
-# the Spark driver under /opt/spark/scripts; aml_queries does not). It exists
-# here so score_financial can attribute a rule SKIP to the typologies that rule
-# was the sole detector for, and mark their recall "not run" instead of 0%
-# A None target means the rule has no planted typology.
-RULE_TARGET_TYPOLOGY = {
-    "W1_connected_components": "gather_scatter",
-    "W2_structuring": "micro_structuring",
-    "W3_round_tripping": "cycle",
-    "W4_risk_propagation": "rapid_layering",
-    "W5_sanctions_match": "sanctions_match",
-    "W6_pep_counterparty": "pep_match",
-    "W7_cross_border_high_risk": "corridor_high_risk",
-    "W8_dormant_reactivation": "dormant_reactivation",
-    "W17_layering_chain": "stack",
-}
+# HIGH_PRIORITY_CUTOFFS (the count or size at which an alert is HIGH) and the
+# rule -> planted-typology map are pure metadata the CLI-side scorer also
+# needs without pyspark, so they live in aml.rule_meta and ship flat to the
+# driver. They are imported here and re-exported for aml_reason_codes.py and
+# tm_operations.py, which import them from this module.
+try:
+    from lakebench.aml.rule_meta import (  # noqa: F401
+        HIGH_PRIORITY_CUTOFFS,
+        RULE_TARGET_TYPOLOGY,
+    )
+except ImportError:
+    from rule_meta import (  # type: ignore[import-not-found,no-redef]  # noqa: F401
+        HIGH_PRIORITY_CUTOFFS,
+        RULE_TARGET_TYPOLOGY,
+    )
 
 # Alert subject scope (GOALS P10 stage 0). The reporting FI monitors its own
 # customers: a customer-scoped rule raises an alert only when its subject
@@ -166,19 +150,7 @@ RULE_TARGET_TYPOLOGY = {
 # another bank; they are declared as counterparty scenarios instead.
 # COUNTERPARTY_SCENARIOS must match tm_operations.DEFAULT_COUNTERPARTY_SCENARIOS
 # and the TmOperationsConfig default (a test asserts both), or the TM layer's
-# noncustomer_alerts_declared invariant fails on every run. The typology
-# generator makes every planted subject a customer (typology::subject_index),
-# and each customer-scoped rule's entity_id is that subject, so the scope does
-# not change designated recall.
-CUSTOMER_SCOPED_RULES = frozenset(
-    {
-        "W2_structuring",
-        "W5_sanctions_match",
-        "W6_pep_counterparty",
-        "W7_cross_border_high_risk",
-        "W8_dormant_reactivation",
-    }
-)
+# noncustomer_alerts_declared invariant fails on every run.
 COUNTERPARTY_SCENARIOS = (
     "W1_connected_components",
     "W3_round_tripping",
@@ -323,7 +295,7 @@ def _alert_frame(
     if not isinstance(rule_id, str):
         raise TypeError(f"_alert_frame rule_id must be a str, got {type(rule_id).__name__}")
     from aml_reason_codes import BASE_CODE, reason_expr
-    from pyspark.sql.functions import array_distinct, array_union, coalesce
+    from pyspark.sql.functions import array_union, coalesce
 
     if reason_codes is None:
         reason_codes = reason_expr(reason_key or rule_id)
@@ -674,9 +646,8 @@ def w2_alert_frame(
 # 30% of scratch for the silver scan and the alert write. Projected at
 # scale 10, W3 holds about 1.05B rows at peak against a 1.16B budget on
 # gold-finalize (4 x 100 Gi); gold-refresh (2 x 100 Gi) skips it there. A
-# row's width grows with depth (more uetrs per path); the flat figure was
-# measured over all levels together. Before levels were checkpointed and
-# released, a review measured 430 B. These are resource guards, not
+# row's width grows with depth (more uetrs per path); the flat figure is
+# measured over all levels together. These are resource guards, not
 # detection thresholds.
 PATH_SEARCH_BYTES_PER_ROW = 260
 PATH_SEARCH_SCRATCH_SHARE = 0.7
@@ -769,19 +740,6 @@ def _path_spill_root(spark) -> str | None:
     return f"{base.rstrip('/')}/_checkpoints/paths/{app}"
 
 
-def _delete_uri(spark, path: str, who: str) -> None:
-    """Recursively delete ``path`` through the Hadoop FileSystem. Best effort."""
-    try:
-        jvm = spark._jvm  # type: ignore[attr-defined]
-        hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
-        fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(path), hconf)
-        p = jvm.org.apache.hadoop.fs.Path(path)
-        if fs.exists(p):
-            fs.delete(p, True)
-    except Exception as e:  # noqa: BLE001
-        print(f"[{who}] cleanup of {path} failed: {e}")
-
-
 def sweep_stale_path_spill(spark, max_age_hours: float = PATH_SEARCH_STALE_HOURS) -> int:
     """Delete other drivers' spill directories whose newest file is older than
     ``max_age_hours``: a driver killed mid-search (OOM, eviction, retry) never
@@ -796,10 +754,7 @@ def sweep_stale_path_spill(spark, max_age_hours: float = PATH_SEARCH_STALE_HOURS
     cutoff_ms = (time.time() - max_age_hours * 3600) * 1000
     removed = 0
     try:
-        jvm = spark._jvm  # type: ignore[attr-defined]
-        hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
-        fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(parent), hconf)
-        ppath = jvm.org.apache.hadoop.fs.Path(parent)
+        fs, ppath = _hadoop_fs(spark, parent)
         if not fs.exists(ppath):
             return 0
         for st in fs.listStatus(ppath):
@@ -850,23 +805,18 @@ class _PathBudget:
 
     Materialising drops the frame's lineage, which frees the shuffles behind
     it once unreferenced. With ``LB_GOLD_URI`` set (every cluster run) a frame
-    is written as Parquet under _path_spill_root and read back. A local
-    checkpoint, used before, kept each block only on the executor that built
-    it: at scale 10 gold executors were OOM-killed and the next level failed
-    with CHECKPOINT_RDD_BLOCK_ID_NOT_FOUND, since a lost block cannot be
-    recomputed. Why the executors exceeded their 40Gi limit is not settled
-    from the driver log alone: exit 137 is the container limit, and cached
-    blocks at MEMORY_AND_DISK are evicted rather than killed. Writing the
-    levels removes the fatal dependency either way and takes them out of
-    executor memory and scratch; the writes add S3A upload buffers
-    (fast.upload.buffer=bytebuffer, about 4 tasks x 4 blocks x 64 MB per
-    executor) to the 8g overhead. Without ``LB_GOLD_URI`` (unit tests) the
-    local checkpoint remains.
+    is written as Parquet under _path_spill_root and read back, so a level
+    does not depend on cached blocks on an executor that may be lost: a
+    local checkpoint keeps each block only on the executor that built it,
+    and a lost block cannot be recomputed (CHECKPOINT_RDD_BLOCK_ID_NOT_FOUND).
+    Writing the levels takes them out of executor memory and scratch; the
+    writes add S3A upload buffers (fast.upload.buffer=bytebuffer, about 4
+    tasks x 4 blocks x 64 MB per executor) to the 8g overhead. Without
+    ``LB_GOLD_URI`` (unit tests) the local checkpoint remains.
 
-    The budget still counts a written level as held. That overstates the
-    scratch it takes (only its shuffle, when it is the next level's input,
-    lands on scratch), so the skip stays where it was; relaxing it needs a
-    scratch measurement on the cluster.
+    The budget counts a written level as held. That overstates the scratch
+    it takes (only its shuffle, when it is the next level's input, lands on
+    scratch), so the budget is conservative.
     """
 
     def __init__(self, spark, rule: str, max_rows: int) -> None:
@@ -935,10 +885,8 @@ class _PathBudget:
         """Rewrite this driver's liveness file (see sweep_stale_path_spill)."""
         root = self.spill.rsplit("/", 1)[0]
         try:
-            jvm = self.spark._jvm  # type: ignore[attr-defined]
-            hconf = self.spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
-            p = jvm.org.apache.hadoop.fs.Path(f"{root}/_alive")
-            jvm.org.apache.hadoop.fs.FileSystem.get(p.toUri(), hconf).create(p, True).close()
+            fs, p = _hadoop_fs(self.spark, f"{root}/_alive")
+            fs.create(p, True).close()
         except Exception as e:  # noqa: BLE001
             print(f"[{self.rule}] could not write {root}/_alive: {e}")
 
@@ -1033,7 +981,7 @@ def _search_frames(
 ):
     """Edges and the extension (step) frame, both held and budgeted.
 
-    Returns ``(budget, edges, n_edges, step, n_step, parts)``. ``edges`` is
+    Returns ``(budget, edges, n_edges, step, parts)``. ``edges`` is
     persisted (the caller unpersists it once level 2 is built); ``step`` is
     persisted for the whole search.
 
@@ -1110,7 +1058,7 @@ def _search_frames(
     n_step = step.count()
     budget.add(n_step, "step", 2 * n_edges)
     print(f"[{rule}] extension join partitions={parts}")
-    return budget, edges, n_edges, step, n_step, parts
+    return budget, edges, n_edges, step, parts
 
 
 @contextlib.contextmanager
@@ -1200,8 +1148,8 @@ def _w3_levels(budget, edges, n_edges, step, paths, _ext, max_hops):
             return e.filter(col("e_dst") == col("start")) if final else e
 
         # Estimated from a sample of the paths at every level: a growth
-        # factor from earlier levels is wrong in both directions (a review
-        # measured a 45x under-estimate and a skip on a level that was empty).
+        # factor extrapolated from earlier levels is wrong in both
+        # directions, from a large under-estimate to a skip on an empty level.
         est = _sampled_size(paths, n_paths, _build)
         level, n = budget.admit(_build(paths), est, f"level {_hop}")
         cycles.append(
@@ -1265,9 +1213,8 @@ def w3_round_tripping(
     ``total_window_days``. Paths are simple (no entity repeats before the
     return).
 
-    The earlier form only found A -> B -> A, which none of the planted cycle
-    typologies contain (cycle and cross_border_cycle route A -> B -> C -> D
-    -> A), so it could not detect its designated typology. No amount
+    The cycle length matters: the planted typologies route A -> B -> C -> D
+    -> A, so a two-hop A -> B -> A search would miss them. No amount
     condition is applied. The windows, max_hops and the hub cut are
     self-chosen scenario parameters, not derived from the generator.
 
@@ -1292,7 +1239,7 @@ def w3_round_tripping(
         return _empty_alerts_df(spark, run_id)
     hop_us = hop_window_hours * 3_600_000_000
     total_us = total_window_days * 86_400_000_000
-    budget, edges, n_edges, step, _, parts = _search_frames(
+    budget, edges, n_edges, step, parts = _search_frames(
         silver_txns, "W3", hop_us, max_out_degree, max_edges, max_paths, with_amount=False
     )
 
@@ -1324,7 +1271,7 @@ def w3_round_tripping(
         related_txn_ids=col("uetrs"),
         related_entity_ids=col("nodes"),
         alert_ts=col("ts_last"),
-        # Longer cycles are more deliberate. Bounded [0.6, 0.9].
+        # Longer cycles are more deliberate. Hops >= 2, so bounded [0.7, 0.9].
         alert_score=expr("least(0.9, 0.5 + 0.1 * hops)").cast("double"),
         priority=when(col("hops") >= HIGH_PRIORITY_CUTOFFS["W3_round_tripping"], lit("HIGH"))
         .when(col("hops") >= 3, lit("MED"))
@@ -1434,10 +1381,9 @@ def w17_layering_chain(
     cliff check must exempt it.
 
     Precision decision: on a corpus with amount continuity this rule is
-    about 1% precise for stack (118 of 11,381 alerts touch a stack
-    transfer on Lane A's 2fb9259 corpus at scale 0.25, and a review found 25
-    of 2,191 at scale 0.05).
-    That is deliberate and published as is. Tightening min_hops, adding a
+    about 1% precise for stack (of the order of 100 of 10,000 alerts touch a
+    stack transfer). That is deliberate and published as is. Tightening
+    min_hops, adding a
     dwell limit or narrowing the ratio toward the generator's stack
     parameters (hop gaps of 6-54 h, a 1-10% skim) would be tuning the rule
     to the data (AML-GOALS R2). The planned structural cut is monitoring
@@ -1512,7 +1458,7 @@ def w17_chains(
         return None
 
     hop_us = hop_window_hours * 3_600_000_000
-    budget, edges, n_edges, step, _, parts = _search_frames(
+    budget, edges, n_edges, step, parts = _search_frames(
         silver_txns, "W17", hop_us, max_out_degree, max_edges, max_paths, with_amount=True
     )
 
@@ -1682,7 +1628,7 @@ def w4_risk_propagation(
     entities_truncated ('true' when the cap cut the list). Scoring matches
     planted transactions against related_txn_ids, so a truncated hub alert
     can miss planted payments past the cut: recall is reported as bounded by
-    this cap when any W4 alert was truncated (score_financial).
+    this cap when any W4 alert was truncated.
 
     ``alert_window_hours`` (continuous gold): one alert per B per window of
     payments instead, so a tick recomputes only the windows of its new rows.
@@ -1759,12 +1705,11 @@ def w4_alert_frame(
     tumbling from the epoch), so an alert depends only on its window's
     pairs."""
     # Group by B (the entity being alerted on) so the alert count is
-    # per-entity, not per (uetr_in, uetr_out) pair. Prior design produced
-    # N*M rows for an entity with N incoming + M outgoing matches
-    # (10000 rows for a moderate case). Collect all in/out UETRs per B
-    # into related_txn_ids and the counterparty ids into
-    # related_entity_ids so investigators can trace all txns from a
-    # single alert row.
+    # per-entity, not per (uetr_in, uetr_out) pair: an entity with N
+    # incoming and M outgoing matches would otherwise produce N*M rows.
+    # Collect all in/out UETRs per B into related_txn_ids and the
+    # counterparty ids into related_entity_ids so investigators can trace
+    # every txn from a single alert row.
     keys = ["b"]
     if alert_window_hours:
         from pyspark.sql.functions import unix_timestamp
@@ -1799,9 +1744,9 @@ def w4_alert_frame(
         related_txn_ids=expr(f"slice(_txns, 1, {cap})"),
         related_entity_ids=expr(f"slice(_entities, 1, {cap})"),
         alert_ts=col("last_ts"),
-        # Score clamped to [0, 0.95] so downstream percentile aggregations
-        # don't skew from >1 values (see W3 fix). max_forward_ratio -
-        # threshold is scaled and offset from 0.7 baseline.
+        # Score clamped to 0.95 so downstream percentile aggregations
+        # don't skew from values above 1. max_forward_ratio - threshold is
+        # scaled and offset from a 0.7 baseline.
         alert_score=expr(f"least(0.95, 0.7 + (max_forward_ratio - {forward_ratio}) * 0.15)").cast(
             "double"
         ),
@@ -1935,8 +1880,10 @@ def w1_connected_components(
         max_vertices: refuse to run above this vertex count. Iterative
             label propagation shuffles O(edges) per iteration; a
             multi-million-vertex silver at scale >= 100 would produce
-            an unhelpful multi-hour replay. Default 5M; operator
-            raises it when they have the executor budget.
+            an unhelpful multi-hour replay. Above it the rule raises
+            RuleSkipped("vertex-cap"). gold_finalize passes
+            financial.w1_max_vertices (8M by default); raise it when the
+            executors have the budget.
         run_id: opaque id written into every alert row.
         max_cluster_size: components larger than this are not emitted. On
             the full transaction graph the baseline counterparty rings join
@@ -1952,11 +1899,9 @@ def w1_connected_components(
 
     Returns:
         DataFrame with the gold.alerts schema. Empty when no component
-        meets min_cluster_size or when the vertex count exceeds
-        max_vertices (a warning is emitted in the latter case).
+        meets min_cluster_size.
     """
     spark = silver_txns.sparkSession
-    from pyspark.sql.functions import min as _min
 
     edges = (
         silver_txns.select(
@@ -2023,8 +1968,7 @@ def w1_connected_components(
         # was built from ``edges_u`` -- so ``labels`` and ``edges_u`` share
         # attribute IDs in Catalyst. Without aliases, ``labels["id"]`` and
         # ``edges_u["src"]`` resolve to ambiguous attributes and Spark raises
-        # ``AnalysisException: Column dst#NNN are ambiguous`` (surfaced by
-        # the first live S1 run of the AML batch pipeline). Aliases give
+        # ``AnalysisException: Column dst#NNN are ambiguous``. Aliases give
         # each side its own attribute namespace so column resolution is
         # unambiguous every iteration.
         lbl = labels.alias("lbl")
@@ -2036,7 +1980,7 @@ def w1_connected_components(
             labels.select("id", "label")
             .unionByName(neighbour_labels)
             .groupBy("id")
-            .agg(_min("label").alias("label"))
+            .agg(min_("label").alias("label"))
         )
         new_labels = _truncate_lineage(new_labels)
         # Convergence check: per-vertex label deltas, not distinct-label
@@ -2114,11 +2058,9 @@ def w1_connected_components(
     # touch its members. Tag each edge with the src vertex's component
     # label via a single hash join -- since both endpoints of every
     # edge are in the same connected component by construction, the
-    # src's label IS the component. This avoids the previous
-    # union-of-two-joins pattern (which doubled shuffle: each edge
-    # appeared once under src_hits and once under dst_hits, then
-    # collect_list->distinct dedup'd on the reduce side). Single
-    # equi-join, each edge counted once, no dedup shuffle.
+    # src's label IS the component. One equi-join, each edge counted once:
+    # joining on both endpoints would list every edge twice and need a
+    # dedup shuffle.
     edges_tagged = (
         edges.join(
             labels.select(col("id").alias("_src"), col("label").alias("component")),
@@ -2208,9 +2150,10 @@ def w1_connected_components(
 
 
 # ---------------------------------------------------------------------------
-# W5-W8: reference-table rules. Load lists from the packaged JSON files and
-# broadcast to workers. Reference tables are small (< 100 rows each) so a
-# broadcast join is O(N) in silver.transactions size with no shuffle.
+# Packaged JSON reference lists (W7's high-risk jurisdictions and synthetic
+# corridors). They are small (< 100 rows each), so W7 broadcasts them: a join
+# that is O(N) in silver.transactions size with no shuffle. W5 and W6 read
+# the corpus watchlist Parquet instead (_load_watchlist).
 # ---------------------------------------------------------------------------
 
 
@@ -2220,10 +2163,9 @@ def _aml_data_candidates() -> list[str]:
     When ``LB_AML_DATA_DIR`` is set it is the ONLY candidate --
     tests and operators use the env var to pin a specific reference
     directory, and falling through to other candidates on a per-file
-    miss would silently mix stale + current reference data (a partial
-    override that only contains sanctions_list.json would otherwise
-    shadow that file while other rules read from the installed pkg
-    -- split-brain reference state, no warning).
+    miss would silently mix stale and current reference data (a partial
+    override holding one file would shadow it while other files came
+    from the installed package, with no warning).
 
     Otherwise:
 
@@ -2254,40 +2196,21 @@ def _aml_data_candidates() -> list[str]:
     return candidates
 
 
-def _aml_data_path() -> str:
-    """First existing AML data directory, or the last candidate as a
-    stable string. Kept for tests that patched the singular helper."""
-    import os
-
-    for c in _aml_data_candidates():
-        if os.path.isdir(c):
-            return c
-    return _aml_data_candidates()[-1]
-
-
 def _load_reference(spark, filename: str, schema_ddl: str) -> DataFrame | None:
     """Load one packaged JSON reference file as a Spark DataFrame.
 
     Returns None when the entries list is empty OR the file is not
-    present in any candidate directory. The latter is expected inside
-    the cluster driver when the scripts ConfigMap has not shipped the
-    AML sidecar files -- callers already treat None as "reference-list
-    rule cannot run here" and return the empty alerts DF, which is the
-    correct silent degrade for a benchmark whose W5/W6/W7 signal is
-    optional.
+    present in any candidate directory (a cluster driver whose scripts
+    ConfigMap did not ship the file). W7 then raises RuleSkipped without
+    its jurisdiction list and runs without the corridor list.
 
-    When ``LB_AML_DATA_DIR`` is set as the exclusive candidate and
-    it does NOT contain ``filename``, we emit a stderr note so a
-    partial override does not silently degrade to empty (round-2
-    finding: an operator setting the env var to a scratch dir with
-    only one file expects the others to work; making the override
-    authoritative for correctness reasons is right, but the missing
-    file has to be visible).
+    When ``LB_AML_DATA_DIR`` is set (the only candidate) and does not
+    contain ``filename``, a note is printed: an operator who points it at
+    a directory holding only some of the files sees which one is missing.
 
     `schema_ddl` is a Spark DDL string ("col1 type1, col2 type2, ...")
     used to type the DF. Explicit typing avoids Spark's Python-side
-    schema inference, which is slow and infers Long for what should be
-    String (e.g. sdn_id "SDN-000001").
+    schema inference, which is slow and can infer the wrong type.
     """
     import json
     import os
@@ -2416,13 +2339,11 @@ def _block_keys_expr(tokens: str) -> str:
 
 def _entity_country_frame(silver_entities: DataFrame) -> DataFrame:
     """One country per entity_id, deterministically (lexicographic minimum)."""
-    from pyspark.sql.functions import min as _min_agg
-
     return (
         silver_entities.filter(col("country").isNotNull())
         .select(col("entity_id").alias("bene_entity_id"), col("country").alias("bene_country"))
         .groupBy("bene_entity_id")
-        .agg(_min_agg("bene_country").alias("bene_country"))
+        .agg(min_("bene_country").alias("bene_country"))
     )
 
 
@@ -2526,6 +2447,23 @@ def screen_base_frame(silver_txns: DataFrame, silver_entities: DataFrame | None)
     return _screen_txns(silver_txns, _entities_frame(spark, silver_entities, "W5/W6"))
 
 
+def _screen_hits(silver_txns, silver_entities, screen_base, list_type: str, rule: str):
+    """``(customers, hits)`` for W5 and W6: the customer ids, and every
+    screened transaction joined to the ``list_type`` watchlist entries its
+    counterparty matches. ``screen_base`` is the screening input when the
+    driver built it once for both rules."""
+    from pyspark.sql.functions import broadcast
+
+    spark = silver_txns.sparkSession
+    silver_entities = _entities_frame(spark, silver_entities, rule)
+    customers = _customer_ids(spark, silver_entities, rule)
+    wl = _load_watchlist(spark, list_type, rule)
+    txns = screen_base if screen_base is not None else _screen_txns(silver_txns, silver_entities)
+    matches = screen_counterparties(txns, wl)
+    hits = txns.join(broadcast(matches), ["rptd_beneficiary_name", "bene_country"], "inner")
+    return customers, hits
+
+
 def _screen_alerts(hits: DataFrame, rule_id: str, alert_type: str, run_id: str, score, priority):
     """gold.alerts rows for per-transaction screening hits (one alert per
     transaction, on its best-matching entry)."""
@@ -2595,16 +2533,7 @@ def w5_sanctions_match(
     ``rescreen=False`` (continuous) runs the transaction screen only: a
     rescreen alert reads a counterparty's whole payment history.
     """
-    spark = silver_txns.sparkSession
-    silver_entities = _entities_frame(spark, silver_entities, "W5")
-    customers = _customer_ids(spark, silver_entities, "W5")
-    wl = _load_watchlist(spark, "sanctions", "W5")
-    # screen_base: the same frame, built once for W5 and W6 by the driver.
-    txns = screen_base if screen_base is not None else _screen_txns(silver_txns, silver_entities)
-    matches = screen_counterparties(txns, wl)
-    from pyspark.sql.functions import broadcast
-
-    hits = txns.join(broadcast(matches), ["rptd_beneficiary_name", "bene_country"], "inner")
+    customers, hits = _screen_hits(silver_txns, silver_entities, screen_base, "sanctions", "W5")
     listed_ts = expr("cast(listed_date as timestamp)")
     at_txn = hits.filter(col("txn_timestamp") >= listed_ts)
     txn_alerts = _screen_alerts(
@@ -2689,18 +2618,8 @@ def w6_pep_counterparty(
     so priority is MED at PEP_MIN_USD or more and LOW below. The USD amount
     falls back to txn_amount when the FX enrichment is missing.
     """
-    spark = silver_txns.sparkSession
-    silver_entities = _entities_frame(spark, silver_entities, "W6")
-    customers = _customer_ids(spark, silver_entities, "W6")
-    wl = _load_watchlist(spark, "pep", "W6")
-    # screen_base: the same frame, built once for W5 and W6 by the driver.
-    txns = screen_base if screen_base is not None else _screen_txns(silver_txns, silver_entities)
-    matches = screen_counterparties(txns, wl)
-    from pyspark.sql.functions import broadcast
-
-    hits = txns.join(broadcast(matches), ["rptd_beneficiary_name", "bene_country"], "inner").filter(
-        col("txn_timestamp") >= expr("cast(listed_date as timestamp)")
-    )
+    customers, hits = _screen_hits(silver_txns, silver_entities, screen_base, "pep", "W6")
+    hits = hits.filter(col("txn_timestamp") >= expr("cast(listed_date as timestamp)"))
     alerts = _screen_alerts(
         hits,
         "W6_pep_counterparty",
@@ -2733,11 +2652,8 @@ def w7_cross_border_high_risk(
     originator alerts. The beneficiary's country comes from every entity,
     customer or not (the high-risk counterparty is usually not one).
 
-    Historically this rule crashed inside the driver when the caller did
-    NOT pass silver_entities AND the reference JSON was not mounted --
-    the ImportError from ``import lakebench.spark.data`` surfaced as a
-    hard failure of the whole job. A missing reference JSON now
-    degrades to an empty alerts DF with a stderr note.
+    A missing or empty high_risk_jurisdictions.json raises RuleSkipped
+    ("no-reference"), like every other missing input.
     """
     from pyspark.sql.functions import broadcast
 
@@ -2750,8 +2666,7 @@ def w7_cross_border_high_risk(
         "country_code string, country_name string, risk_tier string",
     )
     if raw is None:
-        print("[W7] high_risk_jurisdictions.json not available; skipping.")
-        return _empty_alerts_df(spark, run_id)
+        raise RuleSkipped("no-reference", "W7: high_risk_jurisdictions.json not available")
     # The FATF list names none of the generator's home countries (June 2026),
     # so on its own W7 could never fire on this corpus. The synthetic
     # corridor list is the set corridor_high_risk plants against, labelled
@@ -2769,23 +2684,10 @@ def w7_cross_border_high_risk(
         col("risk_tier"),
     )
 
-    # Collapse silver.entities to one country per entity_id
-    # deterministically. Prior version used ``.dropDuplicates(["bene_entity_id"])``
-    # which keeps whichever row Spark's shuffle put first -- across
-    # re-runs against the same silver, two entities with divergent
-    # country values (SCD1 update in flight, upstream dedup bug) would
-    # produce different W7 alert counts run-to-run. Contract of this
-    # rule is reproducibility, so aggregate to the lexicographically
-    # smallest country per entity_id: unambiguous, deterministic,
-    # tolerant of a rare multi-country row without silently biasing.
-    from pyspark.sql.functions import min as _min_agg
-
-    entities_country = (
-        silver_entities.filter(col("country").isNotNull())
-        .select(col("entity_id").alias("bene_entity_id"), col("country").alias("bene_country"))
-        .groupBy("bene_entity_id")
-        .agg(_min_agg("bene_country").alias("bene_country"))
-    )
+    # One country per entity, the smallest when an entity carries two (an
+    # SCD1 update in flight, an upstream dedup miss), so the alert count does
+    # not depend on row order.
+    entities_country = _entity_country_frame(silver_entities)
 
     hits = (
         silver_txns.filter(col("cross_border") == True)  # noqa: E712
@@ -2847,7 +2749,7 @@ def w8_dormant_reactivation(
     """Flag reactivation of dormant originator accounts.
 
     An originator's transaction is flagged when:
-    - The gap to the originator's prior transaction exceeds dormant_days;
+    - The gap to the originator's prior transaction is at least dormant_days;
     - The current transaction's USD-equivalent amount >= threshold.
 
     First-ever activity for an originator is NOT flagged (no prior
@@ -2919,8 +2821,9 @@ def w8_dormant_reactivation(
 
 
 def _empty_alerts_df(spark, run_id: str) -> DataFrame:
-    """Zero-row DataFrame with the gold.alerts schema (ALERT_COLUMNS), for
-    the case where a rule declines to run (e.g. W1 above max_vertices)."""
+    """Zero-row DataFrame with the gold.alerts schema (ALERT_COLUMNS), for a
+    rule that ran and found nothing to flag (e.g. W3 with max_hops < 2, or
+    W17 whose path search produced no chain)."""
     from pyspark.sql.types import StructField, StructType, _parse_datatype_string
 
     schema = StructType(
@@ -2948,10 +2851,6 @@ _RULE_DISPATCH = {
 def get_rule(rule_id: str):
     """Look up a rule function by id. Returns None if unknown."""
     return _RULE_DISPATCH.get(rule_id)
-
-
-def known_rules() -> list[str]:
-    return list(_RULE_DISPATCH.keys())
 
 
 def w1_max_vertices() -> int:
@@ -2982,7 +2881,3 @@ def rule_params(fn, run_id: str, silver_entities=None) -> dict:
     if "max_vertices" in sig and cap > 0:
         params["max_vertices"] = cap
     return params
-
-
-# Guard against ruff unused-import warnings for symbols exported for callers.
-_ = (row_number, to_timestamp, explode, Window)

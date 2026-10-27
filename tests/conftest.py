@@ -106,8 +106,7 @@ def shipped_script_modules() -> dict[str, Path]:
     with its file: the .py files the scripts ConfigMaps ship flat under one
     directory (scripts_maps.SCRIPT_MAPS, which also ships reference_score,
     fidelity_gate and datagen_seed from outside spark/scripts), plus any
-    script in spark/scripts the maps miss (tests/test_script_loader.py checks
-    there is none)."""
+    script in spark/scripts the maps miss."""
     return dict(_shipped_script_modules())
 
 

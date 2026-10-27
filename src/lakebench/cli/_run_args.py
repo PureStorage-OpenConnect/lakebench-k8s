@@ -1,12 +1,9 @@
 """Every ``lakebench run`` argument checked before the first cluster call.
 
-``run`` used to reach the cluster (capacity read, auto-deploy, the operator
-watch list, the scripts ConfigMaps) before it looked at its own flags, so an
-unknown ``--stage`` or a flag the chosen mode ignores was found only after
-something had changed on the cluster, or never. ``validate_run_args`` is
-pure: it reads the options and the loaded config, and refuses a bad
-argument or combination with ``UsageError`` (exit 2) before anything else
-runs.
+``validate_run_args`` is pure: it reads the options and the loaded config,
+and refuses a bad argument or combination with ``UsageError`` (exit 2)
+before anything reaches the cluster, so an unknown ``--stage`` or a flag the
+chosen mode ignores is caught before anything changes.
 
 The rules are one table, ``RUN_RULES``: a predicate over ``RunArgs`` and the
 resolved mode, the refusal, what to do instead, and the line the CLI
@@ -105,16 +102,11 @@ class RunRule:
         return self.message(args) if callable(self.message) else self.message
 
 
-def _local_stages() -> tuple[str, ...]:
-    from lakebench.cli._local import LOCAL_JOB_ORDER
-
-    return LOCAL_JOB_ORDER
-
-
 def _bad_stage(a: RunArgs, c: RunContext) -> bool:
     if not a.stage or c.mode != "batch":
         return False
-    return a.stage not in (_local_stages() if a.local else BATCH_STAGES)
+    # Local mode runs the same batch stages as a cluster run.
+    return a.stage not in BATCH_STAGES
 
 
 RUN_RULES: tuple[RunRule, ...] = (
@@ -296,10 +288,9 @@ RUN_RULES: tuple[RunRule, ...] = (
     RunRule(
         lambda a, c: c.investigators is not None,
         "architecture.benchmark.investigator_sessions runs only on an AML continuous run with "
-        "TM operations on a trino or spark-thrift query engine",
+        "TM operations on a trino query engine",
         "run it continuous on a financial config with tm_operations enabled, or delete the key",
-        "`benchmark.investigator_sessions` outside an AML continuous run with TM operations on "
-        "trino or spark-thrift",
+        "`benchmark.investigator_sessions` outside an AML continuous run with TM operations",
     ),
 )
 
@@ -343,10 +334,12 @@ def _multi_cycle_generates(a: RunArgs, c: RunContext) -> bool:
 
 def run_args_problems(args: RunArgs, cfg: Any) -> list[RunRule]:
     """Every rule *args* break (empty when the run may start)."""
+    from lakebench.config.c360_run import run_cycles
+
     mode = run_mode(args, cfg)
     ctx = RunContext(
         mode=mode,
-        cycles=_cycles(cfg),
+        cycles=run_cycles(cfg),
         schema=_schema(cfg),
         investigators=_investigators(cfg, mode),
     )
@@ -363,13 +356,6 @@ def _investigators(cfg: Any, mode: str) -> str | None:
     if getattr(bench, "investigator_sessions", None) is None:
         return None
     return investigator_sessions_problem(cfg.architecture, mode)
-
-
-def _cycles(cfg: Any) -> int:
-    try:
-        return int(cfg.architecture.pipeline.cycles or 1)
-    except (AttributeError, TypeError, ValueError):
-        return 1
 
 
 def _schema(cfg: Any) -> str:

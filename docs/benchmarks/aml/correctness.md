@@ -3,11 +3,11 @@
 ## 5. Correctness contract
 
 A PASSED batch run asserts the gated rows below, including the record gates
-the verdict applies before saving the record. Row
-relations between layers (bronze = generated rows, `silver.transactions` =
-bronze, the relations of [2.3](data-model.md#23-silver-tables)) are expected
-at a fixed seed but not checked; check them from `metrics.json`
-(`jobs[].output_rows`, `jobs[].silver_tables`) before publishing.
+the verdict applies before the run is saved. Row relations between layers
+(bronze = generated rows, `silver.transactions` = bronze, the relations of
+[2.3](data-model.md#23-silver-tables)) are expected at a fixed seed but not
+checked; check them from `metrics.json` (`jobs[].output_rows`,
+`jobs[].silver_tables`) before publishing.
 
 | Check | Where | Gates? |
 |---|---|---|
@@ -18,19 +18,18 @@ at a fixed seed but not checked; check them from `metrics.json`
 | Silver frames non-empty, accounts = distinct IBANs, output > 0 | silver-build | yes (stage fails) |
 | `detection_status` written | gold-finalize | yes (stage fails) |
 | Any stage failure | `lakebench run` | yes (exit 1) |
-| Any rule `error`; zero alerts (from `recall.json`, else per-rule log counts) | AML batch gate | yes |
-| Score job failed or refused the corpus (`financial_scoring.status: not_scored`) | AML batch gate; record gate `aml_rules` | yes, with the reason |
+| Any rule `error`; zero alerts (the scorer's `financial_scoring.total_alerts`, else per-rule log counts) | AML batch gate | yes |
+| Scoring failed or refused the corpus (`financial_scoring.status: not_scored`) | AML batch gate; record gate `aml_rules` | yes, with the reason |
 | Per-rule counts and the scorer's alert total both missing | AML batch gate | CLI warns; the `layer_rows` record gate fails a gold-finalize whose log was not read |
 | A skipped rule whose target typology is in the pre-registered behavioural subset | AML batch gate | no (warning, every run) |
 | Every layer has rows (a continuous layer with no row figure passes on its measured size) | record gate `layer_rows` | yes |
 | Batch: expected rules ran, none errored, detection alerted, every skip allowed (W1 `giant-component` or `vertex-cap`; W3 and W17 `path-cap`). A W3 or W17 `edge-cap` skip is not allowed | record gate `aml_rules` | yes; an allowed cap skip passes, labelled in `verdict.qualifiers.rule_caps` |
-| Continuous: no mode-excluded rule ran, gold-refresh counted alerts, every expected rule ran without skip (path-cap included) or error on the scored [tick](../../glossary.md#tick) (or the last tick that completed and committed inside the window when scoring did not run). With neither status recorded, rules come from the time-to-detect lines, with a warning | record gate `aml_rules` | yes |
+| Continuous: on the scored [tick](../../glossary.md#tick) (without scoring, the last completed and committed tick), every expected rule ran with no skip (path-cap included) or error and no mode-excluded rule ran; gold-refresh counted alerts. With no scored-tick status recorded, rules come from the time-to-detect lines (warning) | record gate `aml_rules` | yes |
 | Batch bronze reached 95% of the scale's expected volume | record gate `scale_ratio` | yes |
-| No benchmark query outside `allow_empty` returned zero rows | record gate `query_answers` | yes |
 | TM invariants ([8.5](tm-operations.md#85-tm-operations)) | TM verdict | only on `fail`; `unknown` (an unchecked invariant, an interrupted pass, an unparsed cycle log), `not_run` and `disabled` warn |
-| Any failed query; a non-`allow_empty` query with 0 rows | benchmark gate | yes. Batch: the scored round. Continuous: a failed query in any round fails; a timeout on a query that passed in an earlier round is recorded in `query_sla_crossings` instead. The empty check applies to the last round only |
-| Recall, precision, false-positive rate | score-financial | no; scoring is best effort |
-| Subject-customer check (every planted subject is a customer) | score-financial | no (warning) |
+| Any failed query; a non-`allow_empty` query with 0 rows | benchmark gate; record gate `query_answers` (0 rows only) | yes. Batch: the scored round. Continuous: a failed query in any round fails; a timeout on a query that passed in an earlier round is recorded in `query_sla_crossings` instead. The empty check applies to the last round only |
+| Recall, precision, false-positive rate | scoring (SQL on Trino) | no; scoring is best effort |
+| Subject-customer check (every planted subject is a customer) | scoring (SQL on Trino) | no (warning) |
 | Reference detector, band-leakage report, fidelity gate | `financial reference-score`, `scripts/aml_gate.py` | not part of `run` |
 | Continuous: data arrived in the window, silver committed and gold refreshed on new data at least twice inside it, gold freshness measured | continuous window gate | yes |
 | Continuous: gold-refresh logs present, a cumulative-alerts line, peak alerts > 0 | AML continuous gate | yes |

@@ -19,105 +19,42 @@ from typing import Any
 # ---------------------------------------------------------------------------
 # Recipe defaults
 # ---------------------------------------------------------------------------
-# Each recipe maps 1:1 to a validated entry in _SUPPORTED_COMBINATIONS.
+# schema._SUPPORTED_COMBINATIONS is derived from these recipes.
 # User-specified values always take precedence over recipe defaults.
 
+#: Images every recipe sets. Each recipe gets its own copy.
+_IMAGES = {"spark": "apache/spark:4.1.3-python3", "postgres": "postgres:18"}
+
+
+def _recipe(catalog: str, table_format: str, query_engine: str) -> dict[str, Any]:
+    return {
+        "images": dict(_IMAGES),
+        "architecture": {
+            "catalog": {"type": catalog},
+            "table_format": {"type": table_format},
+            "query_engine": {"type": query_engine},
+        },
+    }
+
+
 RECIPES: dict[str, dict[str, Any]] = {
-    "hive-iceberg-spark-trino": {
-        "images": {"spark": "apache/spark:4.1.3-python3", "postgres": "postgres:18"},
-        "architecture": {
-            "catalog": {"type": "hive"},
-            "table_format": {"type": "iceberg"},
-            "query_engine": {"type": "trino"},
-        },
-    },
-    "hive-iceberg-spark-thrift": {
-        "images": {"spark": "apache/spark:4.1.3-python3", "postgres": "postgres:18"},
-        "architecture": {
-            "catalog": {"type": "hive"},
-            "table_format": {"type": "iceberg"},
-            "query_engine": {"type": "spark-thrift"},
-        },
-    },
-    "hive-iceberg-spark-none": {
-        "images": {"spark": "apache/spark:4.1.3-python3", "postgres": "postgres:18"},
-        "architecture": {
-            "catalog": {"type": "hive"},
-            "table_format": {"type": "iceberg"},
-            "query_engine": {"type": "none"},
-        },
-    },
-    "polaris-iceberg-spark-trino": {
-        "images": {"spark": "apache/spark:4.1.3-python3", "postgres": "postgres:18"},
-        "architecture": {
-            "catalog": {"type": "polaris"},
-            "table_format": {"type": "iceberg"},
-            "query_engine": {"type": "trino"},
-        },
-    },
-    "polaris-iceberg-spark-thrift": {
-        "images": {"spark": "apache/spark:4.1.3-python3", "postgres": "postgres:18"},
-        "architecture": {
-            "catalog": {"type": "polaris"},
-            "table_format": {"type": "iceberg"},
-            "query_engine": {"type": "spark-thrift"},
-        },
-    },
-    "polaris-iceberg-spark-none": {
-        "images": {"spark": "apache/spark:4.1.3-python3", "postgres": "postgres:18"},
-        "architecture": {
-            "catalog": {"type": "polaris"},
-            "table_format": {"type": "iceberg"},
-            "query_engine": {"type": "none"},
-        },
-    },
-    "hive-iceberg-spark-duckdb": {
-        "images": {"spark": "apache/spark:4.1.3-python3", "postgres": "postgres:18"},
-        "architecture": {
-            "catalog": {"type": "hive"},
-            "table_format": {"type": "iceberg"},
-            "query_engine": {"type": "duckdb"},
-        },
-    },
-    "polaris-iceberg-spark-duckdb": {
-        "images": {"spark": "apache/spark:4.1.3-python3", "postgres": "postgres:18"},
-        "architecture": {
-            "catalog": {"type": "polaris"},
-            "table_format": {"type": "iceberg"},
-            "query_engine": {"type": "duckdb"},
-        },
-    },
-    # -- Hive + Delta Lake (v1.2) --
-    # delta.version omitted so DeltaConfig.version="auto" resolves per Spark image.
-    "hive-delta-spark-trino": {
-        "images": {"spark": "apache/spark:4.1.3-python3", "postgres": "postgres:18"},
-        "architecture": {
-            "catalog": {"type": "hive"},
-            "table_format": {"type": "delta"},
-            "query_engine": {"type": "trino"},
-        },
-    },
-    "hive-delta-spark-thrift": {
-        "images": {"spark": "apache/spark:4.1.3-python3", "postgres": "postgres:18"},
-        "architecture": {
-            "catalog": {"type": "hive"},
-            "table_format": {"type": "delta"},
-            "query_engine": {"type": "spark-thrift"},
-        },
-    },
-    "hive-delta-spark-none": {
-        "images": {"spark": "apache/spark:4.1.3-python3", "postgres": "postgres:18"},
-        "architecture": {
-            "catalog": {"type": "hive"},
-            "table_format": {"type": "delta"},
-            "query_engine": {"type": "none"},
-        },
-    },
-    # Unity + Delta excluded from v1.2. See schema.py for rationale.
+    "hive-iceberg-spark-trino": _recipe("hive", "iceberg", "trino"),
+    "hive-iceberg-spark-thrift": _recipe("hive", "iceberg", "spark-thrift"),
+    "hive-iceberg-spark-none": _recipe("hive", "iceberg", "none"),
+    "polaris-iceberg-spark-trino": _recipe("polaris", "iceberg", "trino"),
+    "polaris-iceberg-spark-thrift": _recipe("polaris", "iceberg", "spark-thrift"),
+    "polaris-iceberg-spark-none": _recipe("polaris", "iceberg", "none"),
+    "hive-iceberg-spark-duckdb": _recipe("hive", "iceberg", "duckdb"),
+    "polaris-iceberg-spark-duckdb": _recipe("polaris", "iceberg", "duckdb"),
+    # delta.version is left out so DeltaConfig.version="auto" resolves per Spark image.
+    "hive-delta-spark-trino": _recipe("hive", "delta", "trino"),
+    "hive-delta-spark-thrift": _recipe("hive", "delta", "spark-thrift"),
+    "hive-delta-spark-none": _recipe("hive", "delta", "none"),
 }
 
 # Alias
-RECIPES["default"] = RECIPES["hive-iceberg-spark-trino"]
+DEFAULT_ALIAS_TARGET = "hive-iceberg-spark-trino"
+RECIPES["default"] = RECIPES[DEFAULT_ALIAS_TARGET]
 
 # Human-readable descriptions for CLI interactive flow
 RECIPE_DESCRIPTIONS: dict[str, str] = {
@@ -232,7 +169,7 @@ RECIPE_NOTES: dict[str, RecipeNote] = {
 def get_recipe_note(name: str) -> RecipeNote | None:
     """Return the trade-off note for a recipe, resolving the 'default' alias."""
     if name == "default":
-        name = "hive-iceberg-spark-trino"
+        name = DEFAULT_ALIAS_TARGET
     return RECIPE_NOTES.get(name)
 
 

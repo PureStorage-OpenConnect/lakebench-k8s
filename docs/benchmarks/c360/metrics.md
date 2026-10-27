@@ -13,7 +13,7 @@ Primary: `time_to_value_seconds`, lower is better.
 |---|---|---|---|
 | `time_to_value_seconds` | s | lower | latest stage end minus earliest stage start over bronze-verify, silver-build, gold-finalize; details below the table |
 | `time_to_value_datagen_excluded_seconds` | s | none | multi-cycle only: the cycles' datagen seconds inside the span, left out of `time_to_value_seconds` (0 when the run reused its corpus); absent when a cycle's datagen times are missing |
-| `total_elapsed_seconds` | s | lower | sum of stage elapsed seconds, including a datagen stage when one ran and the query stage when a benchmark ran |
+| `total_elapsed_seconds` | s | lower | run wall clock, start to end (datagen, stages, the gaps between them, maintenance, benchmark); the sum of stage seconds only when the run has no start and end timestamps |
 | `total_data_processed_gb` | GiB | none | sum of the GiB each job reported reading: bronze-verify and silver-build the bronze path size, gold-finalize the silver table size (table metadata); never a bucket listing; the query stage reports no input |
 | `pipeline_throughput_gb_per_second` | GiB/s | higher | `total_data_processed_gb / time_to_value_seconds` |
 | `total_core_hours` | core-h | lower | sum over batch stages of executors x executor cores x elapsed / 3600 (requested, not used; drivers excluded) |
@@ -24,7 +24,7 @@ Primary: `time_to_value_seconds`, lower is better.
 | `pre_compaction_qph`, `post_compaction_qph` | QpH | higher | the pre- and post-maintenance rounds |
 | `maintenance_value_pct`, `maintenance_value_reason`, `maintenance_paired_queries` | pct, text, count | none | change from the pre to the post round over queries that succeeded in both; null with the reason in the cases below the table |
 | `maintenance_elapsed_seconds` | s | lower | maintenance and compaction time |
-| `maintenance_pct_of_pipeline` | pct | none | maintenance time as a share of `total_elapsed_seconds` (which includes datagen and the query stage) |
+| `maintenance_pct_of_pipeline` | pct | none | maintenance time / (`time_to_value_seconds` + maintenance time) |
 | `maintenance_stopped`, `maintenance_stop_reason` | bool, text | none | pre-benchmark maintenance stopped on a statement timeout or its budget, and why |
 | `maintenance_live_streams`, `maintenance_live_streams_reason` | bool, text | none | stream apps were present, or unreadable, during pre-benchmark maintenance |
 | `pre_compaction_file_count`, `post_compaction_file_count` | count | none | data files before and after (not published for Delta, whose OPTIMIZE never runs) |
@@ -38,7 +38,8 @@ Primary: `time_to_value_seconds`, lower is better.
   container's finish (else `terminationTime`, else the 5 s status poll,
   labelled `timing_source: poll`), mapped to the host clock.
 - The `[c360-check]` fact collection's `check_seconds` are subtracted. The
-  gold-finalize non-degeneracy gate's two reads are not.
+  gold-finalize non-degeneracy gate's two reads (gold count, distinct
+  silver dates) are not; they grow with silver.
 - It excludes datagen, maintenance, settle and benchmark.
 - Multi-cycle: it spans every cycle, with each cycle's datagen interval
   (`cycles[].datagen_start`..`datagen_end`) subtracted. The table-health
@@ -55,11 +56,8 @@ Primary: `time_to_value_seconds`, lower is better.
 - the change is inside the within-round spread or the 11% round-to-round
   drift floor.
 
-Batch time to value includes the non-degeneracy gate's gold count and
-distinct silver date count, which grow with silver. From workload version
-`c360-2`, gold-finalize never picks its incremental strategy from table size
-(gold with rows, silver over 1,000 GB), so a repeat run rebuilds every gold
-day. A run under `c360-2` or later compares with no `c360-1` run.
+A repeat run's gold-finalize rebuilds every gold day; incremental gold runs
+only in multi-cycle cycles 2 and later.
 
 ### 8.2 Continuous
 
@@ -90,7 +88,7 @@ Primary: `data_freshness_seconds`, lower is better.
 | `qph_degradation_withheld` | text | none | why `qph_degradation_pct` is absent with 4 or more rounds: the rounds ran different query sets |
 | `query_time_event_age_seconds` | s | none | median age of gold's newest event date at query time; tracks the corpus's position in time, not freshness |
 | `total_elapsed_seconds` | s | none | wall clock from run start (before datagen and stream submission) to the record, including stream start-up and stream stop; shared with batch in name only |
-| `pipeline_throughput_gb_per_second`, `compute_efficiency_gb_per_core_hour` | GB/s, GB/core-h | higher | `total_data_processed_gb` (stream input sizes, falling back to measured bucket sizes, plus the query stage's gold size when rounds ran) over the window; efficiency is the streams' input over their core-hours |
+| `pipeline_throughput_gb_per_second`, `compute_efficiency_gb_per_core_hour` | GiB/s, GiB/core-h | higher | `total_data_processed_gb` (bronze and silver window rows x datagen's bytes per row; never a bucket listing) over the window; efficiency is the streams' input over their core-hours |
 | `total_s3_objects` | count | none | objects across the three buckets at the window's end, before the streams stop; unbounded growth means maintenance is not keeping up. Not on batch records |
 | `total_core_hours` | core-h | none | core-hours of the streams, which scale with the window (config-bound) |
 
@@ -114,9 +112,8 @@ continuous `composite_qph` must carry `composite_qph_basis`.
 
 | Metric | Unit | Direction | Definition |
 |---|---|---|---|
-| `snapshots_expired`, `orphan_files_removed`, `storage_reclaimed_mb` | count, count, MB | none | reserved for what table maintenance removed; no code path fills them in this release, so they never appear in a record |
 | `storage_multiple_total` | ratio | lower, diagnostic (never a directional delta) | physical over logical table bytes at run end under the maintenance policy that ran (`storage_multiple.total.multiple`); a condition of the policy, not a system score |
 
-`storage_multiple_total` is shown by the report and gates nothing. None of
-these is under `scores`. Per-stage and per-query figures (`<stage>_seconds`,
-`query_qph_<query>`) are recorded beside them.
+`storage_multiple_total` is shown by the report, gates nothing and is not
+under `scores`. Per-stage and per-query figures (`<stage>_seconds`,
+`query_qph_<query>`) are recorded beside it.

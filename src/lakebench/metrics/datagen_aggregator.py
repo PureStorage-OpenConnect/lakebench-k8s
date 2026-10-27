@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -98,45 +98,13 @@ class PodMetrics:
 
     @classmethod
     def from_json_obj(cls, obj: dict[str, Any], pod_name: str = "") -> PodMetrics:
-        # Only project known fields; unknown fields are ignored so a future
-        # datagen release can add fields without breaking the aggregator.
-        allowed = {
-            "node_id",
-            "node_count",
-            "schema",
-            "cores_used",
-            "cpu_request_millicores",
-            "bucket",
-            "prefix",
-            "file_size_mb",
-            "rows_per_file",
-            "total_files",
-            "files_written",
-            "bytes_written",
-            "rows_written",
-            "elapsed_s",
-            "setup_s",
-            "gen_s",
-            "build_batch_s",
-            "encode_parquet_s",
-            "s3_put_s",
-            "throughput_mbps",
-            "cpu_seconds",
-            "cpu_hr_per_tb",
-            "world_s",
-            "typology_s",
-            "reference_s",
-            "scale",
-            "corpus_months",
-            "population",
-            "total_txns",
-            "typology_instances",
-            "target_tb",
-            "customer_id_max",
-            "dirty_ratio",
-            "delivery_mode",
-        }
-        kwargs = {k: obj[k] for k in obj if k in allowed}
+        # The allowed fields and their int/float casts come from the
+        # dataclass: a field here (minus ``pod_name``) is projected from the
+        # JSON, unknown keys are ignored (a future datagen release can add
+        # fields), and a field annotated int or float is cast from what the
+        # log carries (Rust emits fixed precision, but a hand-edited log or a
+        # future encoding tweak could hand us a string).
+        kwargs = {k: obj[k] for k in obj if k in _POD_FIELDS}
         # rows_written was added later; older logs won't have it. Fall back
         # to files_written * rows_per_file, which is exact for c360 (every
         # file targets rows_per_file and no short tail) and an approximation
@@ -146,47 +114,20 @@ class PodMetrics:
             fw = int(kwargs.get("files_written", 0) or 0)
             rpf = int(kwargs.get("rows_per_file", 0) or 0)
             kwargs["rows_written"] = fw * rpf
-        # Cast numeric fields defensively; Rust emits with fixed precision but
-        # a hand-edited log or a future encoding tweak could hand us strings.
-        for f in (
-            "node_id",
-            "node_count",
-            "cores_used",
-            "cpu_request_millicores",
-            "file_size_mb",
-            "rows_per_file",
-            "total_files",
-            "files_written",
-            "bytes_written",
-            "rows_written",
-            "corpus_months",
-            "population",
-            "total_txns",
-            "typology_instances",
-            "customer_id_max",
-        ):
-            if f in kwargs and kwargs[f] is not None:
+        for f in _POD_INT_FIELDS:
+            if kwargs.get(f) is not None:
                 kwargs[f] = int(kwargs[f])
-        for f in (
-            "elapsed_s",
-            "setup_s",
-            "gen_s",
-            "build_batch_s",
-            "encode_parquet_s",
-            "s3_put_s",
-            "throughput_mbps",
-            "cpu_seconds",
-            "cpu_hr_per_tb",
-            "world_s",
-            "typology_s",
-            "reference_s",
-            "scale",
-            "target_tb",
-            "dirty_ratio",
-        ):
-            if f in kwargs and kwargs[f] is not None:
+        for f in _POD_FLOAT_FIELDS:
+            if kwargs.get(f) is not None:
                 kwargs[f] = float(kwargs[f])
         return cls(pod_name=pod_name, **kwargs)
+
+
+#: The JSON keys from_json_obj reads, and the int/float casts, derived from
+#: PodMetrics' fields and their annotations (pod_name is not a log field).
+_POD_FIELDS = frozenset(f.name for f in fields(PodMetrics) if f.name != "pod_name")
+_POD_INT_FIELDS = frozenset(f.name for f in fields(PodMetrics) if str(f.type).startswith("int"))
+_POD_FLOAT_FIELDS = frozenset(f.name for f in fields(PodMetrics) if str(f.type).startswith("float"))
 
 
 @dataclass
@@ -532,12 +473,11 @@ def collect_from_k8s(
             text = core_v1.read_namespaced_pod_log(
                 name=name,
                 namespace=namespace,
-                # LB_METRICS_JSON is emitted last, so we only need the tail.
-                # 200 was too tight for financial pods under RUST_LOG=debug
-                # or a jittery AWS SDK: the metrics line got scrolled off
-                # and was reported as "no metrics line" (aggregator
-                # undercounts silently). 5000 is generous but a datagen
-                # pod's total log is well under this even with warnings.
+                # LB_METRICS_JSON is emitted last, so only the tail is needed.
+                # The tail is large enough that a debug-logging or
+                # jittery-SDK pod does not scroll the metrics line off (which
+                # the aggregator would read as "no metrics line" and
+                # undercount); a datagen pod's whole log is well under it.
                 tail_lines=5000,
                 _preload_content=True,
             )

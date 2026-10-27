@@ -46,9 +46,6 @@ class SecurityCheckResult:
     platform_version: str = ""
     checks_passed: int = 0
     checks_failed: int = 0
-    checks_skipped: int = 0
-    issues: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
     recommendations: list[str] = field(default_factory=list)
     scc_status: list[SCCStatus] = field(default_factory=list)
 
@@ -267,12 +264,6 @@ class SecurityVerifier:
         self._platform: PlatformType | None = None
         self._platform_version: str = ""
 
-    @property
-    def _kube_context(self) -> str | None:
-        """The client's kube-context, or None to use the current context."""
-        k8s = getattr(self, "k8s", None)
-        return getattr(k8s, "context_name", "") or None
-
     # API group whose presence makes a cluster OpenShift for Lakebench's
     # purposes: it serves the SCCs that admission enforces. Discovery (/apis)
     # is readable by every authenticated user, unlike the CRD list.
@@ -372,7 +363,7 @@ class SecurityVerifier:
             result: Result object to populate
         """
         # Check required SCCs for Spark
-        for scc_name, sa_name, reason in self.SPARK_SCCS:
+        for scc_name, sa_name, _reason in self.SPARK_SCCS:
             scc_status = self._check_scc_assignment(scc_name, sa_name, namespace)
             result.scc_status.append(scc_status)
 
@@ -380,21 +371,10 @@ class SecurityVerifier:
                 result.checks_passed += 1
             else:
                 result.checks_failed += 1
-                result.issues.append(
-                    f"SCC '{scc_name}' not assigned to '{sa_name}' in namespace '{namespace}'. "
-                    f"Reason: {reason}. "
-                    f"Fix: oc adm policy add-scc-to-user {scc_name} -z {sa_name} -n {namespace}"
-                )
 
-        # Check if service account exists
+        # A missing service account is created during deployment.
         if self._sa_exists(namespace, SPARK_SERVICE_ACCOUNT):
             result.checks_passed += 1
-        else:
-            result.warnings.append(
-                f"ServiceAccount '{SPARK_SERVICE_ACCOUNT}' not found in namespace '{namespace}'. "
-                f"It will be created during deployment."
-            )
-            result.checks_skipped += 1
 
         # OpenShift-specific recommendations
         result.recommendations.append(
@@ -414,20 +394,9 @@ class SecurityVerifier:
             result: Result object to populate
         """
         # Check namespace PSA labels (K8s 1.25+)
-        psa_status = self._check_psa_labels(namespace)
-        if psa_status is not None:
-            if psa_status:
-                result.checks_passed += 1
-            else:
-                result.warnings.append(
-                    f"Namespace '{namespace}' may have restrictive Pod Security Admission. "
-                    f"Spark pods need 'baseline' or 'privileged' enforcement. "
-                    f"Check: kubectl get ns {namespace} -o yaml | grep pod-security"
-                )
-                result.checks_skipped += 1
-        else:
-            # Namespace doesn't exist yet - will be created
-            result.checks_skipped += 1
+        # None: the namespace does not exist yet; False: restrictive enforcement.
+        if self._check_psa_labels(namespace):
+            result.checks_passed += 1
 
         # Note about vanilla K8s
         result.recommendations.append(
@@ -443,13 +412,9 @@ class SecurityVerifier:
         Checks the namespaced RoleBinding first
         (``system:openshift:scc:<scc>``): that is where
         ``oc adm policy add-scc-to-user`` records the grant on OCP 4.10+.
-        Falls back to the legacy cluster-scoped ``.users`` array only when
-        the RoleBinding does not exist, so pre-4.10 clusters still verify
-        correctly.
-
-        Reading ``.users`` alone (as this method did before) always reports
-        "not assigned" on modern OCP because that field stays empty. Both
-        reads go through the API, so no ``oc`` is needed.
+        Falls back to the cluster-scoped ``.users`` array only when the
+        RoleBinding does not exist. Both reads go through the API, so no
+        ``oc`` is needed.
         """
         try:
             if self._scc_binding_has_subject(scc_name, sa_name, namespace):

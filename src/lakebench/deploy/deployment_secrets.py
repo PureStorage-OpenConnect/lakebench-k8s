@@ -95,6 +95,18 @@ def _labels(cfg: LakebenchConfig, component: str) -> dict[str, str]:
     }
 
 
+def _secret_body(
+    cfg: LakebenchConfig, namespace: str, name: str, key: str, value: str, component: str
+) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": name, "namespace": namespace, "labels": _labels(cfg, component)},
+        "type": "Opaque",
+        "stringData": {key: value},
+    }
+
+
 def create_secret(
     core_v1: Any,
     cfg: LakebenchConfig,
@@ -109,13 +121,7 @@ def create_secret(
     two racing deploys of one deployment end with one value."""
     from kubernetes.client.rest import ApiException
 
-    body = {
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {"name": name, "namespace": namespace, "labels": _labels(cfg, component)},
-        "type": "Opaque",
-        "stringData": {key: value},
-    }
+    body = _secret_body(cfg, namespace, name, key, value, component)
     try:
         core_v1.create_namespaced_secret(namespace, body)
         return value
@@ -139,13 +145,7 @@ def _replace_secret_value(
     value: str,
     component: str,
 ) -> None:
-    body = {
-        "apiVersion": "v1",
-        "kind": "Secret",
-        "metadata": {"name": name, "namespace": namespace, "labels": _labels(cfg, component)},
-        "type": "Opaque",
-        "stringData": {key: value},
-    }
+    body = _secret_body(cfg, namespace, name, key, value, component)
     core_v1.replace_namespaced_secret(name, namespace, body)
 
 

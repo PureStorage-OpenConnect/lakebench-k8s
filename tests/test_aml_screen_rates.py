@@ -78,11 +78,7 @@ def test_rates_and_ratio_from_the_four_records(mod):
     # Labelled where an evidence cap cut either side, and only there.
     assert ratios[("seed-43", W5)]["bounded_by_evidence_cap"] is True
     assert ratios[("seed-43", W6)]["bounded_by_evidence_cap"] is False
-
-
-def test_ratio_is_computed_from_raw_counts_not_rounded_rates(mod):
-    doc, _ = mod.build(_four())
-    ratios = {(r["seed_role"], r["rule"]): r for r in doc["ratios"]}
+    # The ratio is computed from raw counts, not rounded rates:
     # (151 / 987,654) / (6 / 98,731) = 2.5159..., while 6-dp rounded rates
     # would give 2.508.
     assert ratios[("calibration", W5)]["s10_over_s1"] == 2.516
@@ -129,29 +125,41 @@ def test_a_missing_run_of_the_four_stops_the_file(mod, tmp_path):
     assert problems == ["calibration: no usable record at scale 10"]
 
 
-def test_protected_role_is_refused(mod):
-    rec = _record("ev", 1.0, 40, 20, 10_000)
+def _protected_evaluation_role(mod, monkeypatch):
+    rec = _record("prot", 1.0, 40, 20, 10_000)
     rec["experiment"]["corpus"]["corpus_role"] = "evaluation"
-    doc, problems = mod.build([rec, *_four()])
-    assert len(_about(problems, "ev")) == 1 and "protected" in _about(problems, "ev")[0]
-    assert "ev" not in {f["run_id"] for f in doc["figures"]}
+    return [rec, *_four()], None
 
 
-def test_held_out_seed_is_refused_without_naming_it(mod, monkeypatch):
+def _protected_heldout_seed(mod, monkeypatch):
     ts.use_fixture(monkeypatch)
-    rec = _record("ho", 1.0, 40, 20, 10_000, seed=ts.TEST_EVALUATION_SEED)
-    _doc, problems = mod.build([rec])
-    assert len(_about(problems, "ho")) == 1 and "protected" in _about(problems, "ho")[0]
-    assert all(str(ts.TEST_EVALUATION_SEED) not in p for p in problems)
+    rec = _record("prot", 1.0, 40, 20, 10_000, seed=ts.TEST_EVALUATION_SEED)
+    return [rec], ts.TEST_EVALUATION_SEED
 
 
-def test_unreadable_held_out_record_fails_closed(mod, monkeypatch):
+def _protected_unreadable_heldout(mod, monkeypatch):
     def broken():
         raise OSError("gone")
 
     monkeypatch.setattr(datagen_seed, "_heldout", broken)
-    _doc, problems = mod.build([_record("s1-a", 1.0, 40, 20, 10_000)])
-    assert len(_about(problems, "s1-a")) == 1 and "protected" in _about(problems, "s1-a")[0]
+    rec = _record("prot", 1.0, 40, 20, 10_000)
+    return [rec], None
+
+
+def test_a_protected_run_is_refused_without_naming_a_seed(mod):
+    for setup in (
+        _protected_evaluation_role,
+        _protected_heldout_seed,
+        _protected_unreadable_heldout,
+    ):
+        with pytest.MonkeyPatch.context() as mp:
+            records, seed = setup(mod, mp)
+            doc, problems = mod.build(records)
+            about = _about(problems, "prot")
+            assert len(about) == 1 and "protected" in about[0], setup.__name__
+            assert "prot" not in {f["run_id"] for f in doc["figures"]}, setup.__name__
+            if seed is not None:
+                assert all(str(seed) not in p for p in problems), setup.__name__
 
 
 def _set(path: tuple, value):

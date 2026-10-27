@@ -96,20 +96,15 @@ def _write_series(s3, cfg, cycles, complete, run_id="r1", **over):
 # -- the reuse rule ------------------------------------------------------------
 
 
-def test_incomplete_series_refuses_skip_generate():
-    cfg = _cfg(4)
-    s3 = S3()
-    _write_series(s3, cfg, 4, [0, 1])
-    why = corpus.series_problem(cfg, corpus.read_series(cfg, s3))
-    assert why is not None
-
-
-def test_complete_series_through_json_is_accepted():
-    """Windows read back from JSON are lists; the rule compares them as such."""
-    cfg = _cfg(4)
-    s3 = S3()
-    _write_series(s3, cfg, 4, [0, 1, 2, 3])
-    assert corpus.series_problem(cfg, corpus.read_series(cfg, s3)) is None
+def test_series_completeness_gates_skip_generate():
+    """An incomplete series refuses skip-generate; a complete one, read back
+    from JSON as lists, is accepted."""
+    for cycles, complete in [([0, 1], False), ([0, 1, 2, 3], True)]:
+        cfg = _cfg(4)
+        s3 = S3()
+        _write_series(s3, cfg, 4, cycles)
+        why = corpus.series_problem(cfg, corpus.read_series(cfg, s3))
+        assert (why is None) is complete, cycles
 
 
 def test_single_cycle_skip_generate_refuses_changed_generation():

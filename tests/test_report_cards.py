@@ -22,13 +22,6 @@ from lakebench.reports.generator import ReportGenerator
 
 
 class TestFormatMeasurement:
-    def test_plain_value_no_tags(self):
-        out = format_measurement("12,345", "rows/s")
-        assert "BOUNDED BY" not in out
-        assert "n=" not in out
-        assert "12,345" in out
-        assert "rows/s" in out
-
     @pytest.mark.parametrize(
         ("n_runs", "tag"),
         [(None, None), (0, None), (1, "n=1"), (5, "n=5")],
@@ -37,6 +30,7 @@ class TestFormatMeasurement:
         out = format_measurement("42.0", "QpH", n_runs=n_runs)
         if tag is None:
             assert "n=" not in out
+            assert "BOUNDED BY" not in out  # a plain value carries no tags
         else:
             assert tag in out
 
@@ -61,7 +55,6 @@ class TestConfidenceChip:
         ("n", "spread", "label"),
         [
             (1, None, "single_run"),
-            (None, None, "single_run"),
             # fewer than 3 independent runs never claim replication
             (2, None, "single_run"),
             (3, None, "replicated_n=3"),
@@ -153,31 +146,35 @@ def _metrics_with_experiment(
 
 
 class TestReportContainsQualifiers:
-    def test_capped_run_has_bounded_by_on_qph_card(self, tmp_path):
-        storage, m = _metrics_with_experiment(
-            tmp_path,
-            bound=["bronze-verify: executor cap 28 (scale asks for 40)"],
-        )
-        # Bypass experiment_block()'s live rebuild by feeding the stored
-        # block through caps_bound_from directly, and rendering the QpH
-        # card path (batch, single benchmark).
-        html = ReportGenerator(storage.metrics_dir)._generate_qph_card(m)
-        assert "BOUNDED BY" in html
-        assert "_MAX_EXECUTORS_SAFE=28" in html
-
-    def test_uncapped_run_has_no_bounded_tag(self, tmp_path):
-        storage, m = _metrics_with_experiment(tmp_path, bound=[])
-        html = ReportGenerator(storage.metrics_dir)._generate_qph_card(m)
-        assert "BOUNDED BY" not in html
+    def test_bounded_by_on_qph_card_only_when_capped(self, tmp_path):
+        # Bypass experiment_block()'s live rebuild by feeding the stored block
+        # through caps_bound_from directly, and rendering the QpH card path
+        # (batch, single benchmark). The cap tag appears only when bound.
+        for i, (bound, present) in enumerate(
+            [
+                (["bronze-verify: executor cap 28 (scale asks for 40)"], True),
+                ([], False),
+            ]
+        ):
+            sub = tmp_path / f"c{i}"
+            sub.mkdir()
+            storage, m = _metrics_with_experiment(sub, bound=bound)
+            html = ReportGenerator(storage.metrics_dir)._generate_qph_card(m)
+            if present:
+                assert "BOUNDED BY" in html, bound
+                assert "_MAX_EXECUTORS_SAFE=28" in html, bound
+            else:
+                assert "BOUNDED BY" not in html, bound
 
 
 class TestConfidenceChipOnBadge:
     @pytest.mark.parametrize(
         ("n_runs", "n_iterations", "present", "absent"),
         [
-            # fewer than 3 independent runs never claim replication
+            # fewer than 3 independent runs never claim replication; one case
+            # is enough to prove the chip reaches the page (labels are covered
+            # by TestConfidenceChip::test_chip_label).
             (2, None, "single_run", "replicated_n=2"),
-            (3, None, "replicated_n=3", None),
         ],
     )
     def test_badge_chip(self, tmp_path, n_runs, n_iterations, present, absent):

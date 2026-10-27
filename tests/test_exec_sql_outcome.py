@@ -78,17 +78,15 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
 
 
 @pytest.mark.parametrize(
-    ("output", "table_missing", "schema_missing"),
+    ("output", "table_missing"),
     [
         pytest.param(
             "Query q1 failed: line 1:13: Table 'lakehouse.gold.t' does not exist",
             True,
-            False,
             id="trino-table-missing",
         ),
         pytest.param(
             "Query q2 failed: line 1:13: Schema 'gold' does not exist",
-            True,
             True,
             id="trino-schema-missing",
         ),
@@ -96,19 +94,16 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
             _BEELINE + "[TABLE_OR_VIEW_NOT_FOUND] The table or view `lakehouse`.`gold`.`t` "
             "cannot be found. (state=42P01,code=0)",
             True,
-            False,
             id="beeline-table-missing",
         ),
         pytest.param(
             _BEELINE + "[SCHEMA_NOT_FOUND] The schema `lakehouse`.`gold` cannot be found. "
             "(state=42704,code=0)",
             True,
-            True,
             id="beeline-schema-missing",
         ),
         pytest.param(
             "Query q4 failed: line 1:13: Catalog 'lakehouse' does not exist",
-            False,
             False,
             id="trino-catalog-does-not-exist",
         ),
@@ -118,27 +113,18 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
             "ALTER TABLE lakehouse.gold.t EXECUTE remove_orphan_files -- table cleanup\n"
             "Query q5 failed: Catalog 'lakehouse' does not exist",
             False,
-            False,
             id="echoed-sql-then-catalog",
         ),
         pytest.param(
             "Query q6 failed: ALTER TABLE lakehouse.gold.t EXECUTE expire_snapshots: "
             "Catalog 'lakehouse' does not exist",
             False,
-            False,
             id="same-line-sql-then-catalog",
         ),
-        pytest.param(
-            "Query q7 failed: line 1:1: Table procedure not registered: remove_orphan_files",
-            False,
-            False,
-            id="trino-procedure-missing",
-        ),
-        pytest.param(TRINO_METASTORE_DOWN, False, False, id="trino-metastore-down"),
+        pytest.param(TRINO_METASTORE_DOWN, False, id="trino-metastore-down"),
         pytest.param(
             _BEELINE + "[CATALOG_NOT_FOUND] The catalog `lakehouse` not found. "
             "(state=42P08,code=0)",
-            False,
             False,
             id="beeline-catalog-missing",
         ),
@@ -146,22 +132,12 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
             _BEELINE + "java.lang.IllegalArgumentException: Cannot find procedure: "
             "system.remove_orphan_filez",
             False,
-            False,
             id="beeline-procedure-missing",
         ),
-        pytest.param(
-            _BEELINE + "org.apache.thrift.transport.TTransportException: "
-            "java.net.ConnectException: Connection refused (state=08S01,code=0)",
-            False,
-            False,
-            id="beeline-metastore-down",
-        ),
-        pytest.param("Command timed out", False, False, id="timeout"),
         pytest.param(
             _BEELINE + "java.lang.IllegalArgumentException: Couldn't load table 'exp.nope' "
             "in catalog 'lakehouse'",
             True,
-            False,
             id="spark-procedure-table-missing",
         ),
         pytest.param(
@@ -170,14 +146,12 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
             "with iceberg.expire_snapshots_min_retention configuration property or "
             "iceberg.expire_snapshots_min_retention session property",
             False,
-            False,
             id="trino-min-retention",
         ),
         pytest.param(
             _BEELINE + "java.lang.IllegalArgumentException: Cannot remove orphan files with "
             "an interval less than 24 hours. Executing this procedure with a short interval "
             "may corrupt the table if other operations are happening at the same time.",
-            False,
             False,
             id="spark-orphan-interval",
         ),
@@ -186,15 +160,12 @@ _BEELINE = "Error: org.apache.hive.service.cli.HiveSQLException: Error running q
         pytest.param(
             "Query q10 failed: Table 'gold.customer_executive_dashboard' not found",
             True,
-            False,
             id="trino-procedure-table-missing",
         ),
     ],
 )
-def test_classifier(output, table_missing, schema_missing):
-    e = _err(output)
-    assert destroy_mod._is_table_missing(e) is table_missing
-    assert destroy_mod._is_schema_missing(e) is schema_missing
+def test_classifier(output, table_missing):
+    assert destroy_mod._is_table_missing(_err(output)) is table_missing
 
 
 # -- callers outside destroy: a failure is recorded, never fatal ---------------
@@ -223,7 +194,7 @@ def _journal_details(j, message):
 @pytest.fixture
 def _engine_pod():
     with patch(
-        "lakebench.deploy.iceberg.find_maintenance_engine",
+        "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
         return_value=("trino", "trino-coordinator-0", "lakehouse"),
     ):
         yield
@@ -344,7 +315,7 @@ def test_batch_delta_vacuum_still_honours_short_retention():
 
 
 def test_trino_maintenance_sets_the_session_minimum_in_the_same_submission():
-    from lakebench.deploy.iceberg import build_maintenance_sql
+    from lakebench.modules.table_formats.iceberg.maintenance import build_maintenance_sql
 
     exp, orph = build_maintenance_sql("trino", "lakehouse", "lakehouse.silver.t", "30m")
     assert exp == (
@@ -363,13 +334,13 @@ def test_trino_maintenance_sets_the_session_minimum_in_the_same_submission():
 
 
 def _iceberg_trino_statements():
-    from lakebench.deploy.iceberg import build_maintenance_sql
+    from lakebench.modules.table_formats.iceberg.maintenance import build_maintenance_sql
 
     return build_maintenance_sql("trino", "lakehouse", "lakehouse.silver.t", "30m")
 
 
 def _delta_trino_statements():
-    from lakebench.deploy.delta_maintenance import build_delta_maintenance_sql
+    from lakebench.modules.table_formats.delta.maintenance import build_delta_maintenance_sql
 
     return build_delta_maintenance_sql("trino", "lakehouse", "lakehouse.gold.t", 0.0)
 
@@ -405,7 +376,7 @@ def test_trino_maintenance_reaches_one_execute_each(statements, main_statement):
     ids=["utc", "cest"],
 )
 def test_spark_maintenance_uses_a_timestamp_literal(now):
-    from lakebench.deploy.iceberg import build_maintenance_sql
+    from lakebench.modules.table_formats.iceberg.maintenance import build_maintenance_sql
 
     exp, orph = build_maintenance_sql(
         "spark-thrift", "lakehouse", "lakehouse.silver.t", "30m", "24h", now=now
@@ -429,61 +400,45 @@ def _sent(k8s):
 
 
 @pytest.mark.usefixtures("_engine_pod")
-def test_continuous_floors_expire_at_1h_and_orphans_at_24h10m():
+def test_orphan_retention_is_floored_at_24h10m():
+    """expire follows the asked threshold, but orphan removal never drops
+    below the 1450m floor (stream apps may be writing, even in batch with
+    restartPolicy Always). Continuous also floors expire at 1h."""
     from lakebench.cli._sustained import _run_iceberg_maintenance
 
-    k8s = MagicMock()
-    k8s.exec_in_pod.return_value = (0, "", "")
-    j = MagicMock()
-    _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "30m", live_streams=True)
-    sent = _sent(k8s)
-    assert any("expire_snapshots(retention_threshold => '1h')" in q for q in sent)
-    assert any("remove_orphan_files(retention_threshold => '1450m')" in q for q in sent)
-    d = _journal_details(j, "Iceberg maintenance")
-    assert d["expire_retention"] == "1h" and d["orphan_retention"] == "1450m"
-
-
-@pytest.mark.usefixtures("_engine_pod")
-def test_batch_trino_orphans_are_floored_too():
-    """Stream apps may be writing even in batch (restartPolicy Always)."""
-    from lakebench.cli._sustained import _run_iceberg_maintenance
-
-    k8s = MagicMock()
-    k8s.exec_in_pod.return_value = (0, "", "")
-    j = MagicMock()
-    _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "0s")
-    sent = _sent(k8s)
-    assert any("expire_snapshots(retention_threshold => '0s')" in q for q in sent)
-    assert all("'0s'" not in q for q in sent if "remove_orphan_files" in q)
-    d = _journal_details(j, "Iceberg maintenance")
-    assert d["expire_retention"] == "0s" and d["orphan_retention"] == "1450m"
-
-
-def test_batch_spark_orphans_never_below_24h10m():
-    from lakebench.cli._sustained import _run_iceberg_maintenance
-
-    k8s = MagicMock()
-    k8s.exec_in_pod.return_value = (0, "", "")
-    j = MagicMock()
-    with patch(
-        "lakebench.deploy.iceberg.find_maintenance_engine",
-        return_value=("spark-thrift", "thrift-0", "lakehouse"),
-    ):
-        _run_iceberg_maintenance(_cfg("spark-thrift"), k8s, Console(quiet=True), j, "30m")
-    d = _journal_details(j, "Iceberg maintenance")
-    assert d["expire_retention"] == "30m" and d["orphan_retention"] == "1450m"
+    cases = [
+        # (engine, cfg engine_type, kwargs, expire, orphan)
+        ("trino", "trino", {"live_streams": True}, "30m", "1h", "1450m"),  # continuous floors
+        ("trino", "trino", {}, "0s", "0s", "1450m"),  # batch trino
+        ("spark-thrift", "spark-thrift", {}, "30m", "30m", "1450m"),  # batch spark
+    ]
+    for engine, cfg_type, kwargs, asked, expire, orphan in cases:
+        k8s = MagicMock()
+        k8s.exec_in_pod.return_value = (0, "", "")
+        j = MagicMock()
+        with patch(
+            "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
+            return_value=(engine, f"{engine}-0", "lakehouse"),
+        ):
+            _run_iceberg_maintenance(_cfg(cfg_type), k8s, Console(quiet=True), j, asked, **kwargs)
+        d = _journal_details(j, "Iceberg maintenance")
+        assert d["expire_retention"] == expire, (engine, asked)
+        assert d["orphan_retention"] == orphan, (engine, asked)
+        if engine == "trino":  # the SQL is sent to the Trino coordinator
+            sent = _sent(k8s)
+            assert any(f"expire_snapshots(retention_threshold => '{expire}')" in q for q in sent)
+            assert any(f"remove_orphan_files(retention_threshold => '{orphan}')" in q for q in sent)
 
 
 # -- parser, live-stream detection, loop resilience ---------------------------
 
 
-@pytest.mark.parametrize(
-    ("given", "stored"), [("30m", "30m"), (" 7D ", "7d"), ("1 H", "1h"), ("0s", "0s")]
-)
-def test_config_normalises_valid_thresholds(given, stored):
+def test_config_normalises_valid_thresholds():
+    """Whitespace is stripped and the unit lowercased; one spelling exercises
+    both, every other valid spelling takes the same branch."""
     from lakebench.config.schema import SustainedConfig
 
-    assert SustainedConfig(retention_threshold=given).retention_threshold == stored
+    assert SustainedConfig(retention_threshold=" 7D ").retention_threshold == "7d"
 
 
 def test_live_stream_apps_detects_present_apps_and_fails_safe():

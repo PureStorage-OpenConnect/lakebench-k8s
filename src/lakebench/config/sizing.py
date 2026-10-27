@@ -1,5 +1,5 @@
 """One sizing source for the capacity preflight, ``info``, ``config show``,
-``recommend``, the generated docs tables and, later, ``plan``.
+``recommend``, ``plan`` and the generated docs tables.
 
 Every figure the CLI or the docs quote for "how big a cluster does this
 config need" comes from :func:`plan_requirements`, and every capacity
@@ -497,7 +497,7 @@ def _plan(
         scratch_gb=spark.scratch_gb,
         scratch_enabled=bool(scratch.enabled),
         scratch_storage_class=str(scratch.storage_class),
-        cuts=tuple(c for c in cuts if not c.startswith("datagen.mode=")),
+        cuts=tuple(cuts),
         basis=tuple(basis),
         unbalanced=tuple(_unbalanced(resolved)) if continuous else (),
     )
@@ -756,7 +756,7 @@ def check_capacity(
                 cluster_memory_bytes=budget_base.total_memory_bytes,
             )
         except Exception as e:  # fall through to the refusal below
-            logging.getLogger(__name__).debug("Capped continuous request unavailable: %s", e)
+            logging.getLogger(__name__).warning("Capped continuous request unavailable: %s", e)
             capped = None
         if (
             capped is not None
@@ -783,7 +783,7 @@ def largest_fitting_scale(fits: Callable[[int], bool], *, upper: int) -> int:
     """Largest integer scale *s* <= *upper* such that ``fits(t)`` holds for
     every scale 1..s; 0 when scale 1 does not fit.
 
-    A scan, not the bisection the design named: the floor is not monotonic
+    A scan, not a bisection: the floor is not monotonic
     in scale. The autosizer's tier guidance moves Trino from 20 workers of 8
     cores at scale 500 to 10 workers at 501, and offline datagen from 50
     pods to 16, so a bisection could step over a scale that does not fit.
@@ -894,8 +894,7 @@ def _financial_silver_cap_memory_ceiling(config: LakebenchConfig) -> int:
     The one case that matters is a cluster so small the budget starves silver
     to a single executor; the full cap on one executor can then exceed its
     memory. That starvation only happens on clusters too small to run the AML
-    workload, and it predates this derivation (the old flat default had the
-    same shape); closing it would mean clamping the per-trigger rows by the
+    workload; closing it would mean clamping the per-trigger rows by the
     post-budget count at submit, a separate change. Returns at least
     :data:`SILVER_CAP_FLOOR`.
     """
@@ -987,9 +986,11 @@ def _silver_cap_advisories(config: LakebenchConfig) -> list[str]:
     # that (900 s is the documented UAT floor), where the margin is thin and
     # worth confirming on cluster.
     if sustained.run_duration < 1800:
+        from lakebench.metrics.continuous_window import MIN_WINDOW_COMMITS
+
         advisories.append(
             f"confirm the {sustained.run_duration} s window holds at least "
-            "2 silver commits at this cap, or the continuous gate fails; raise "
+            f"{MIN_WINDOW_COMMITS} silver commits at this cap, or the continuous gate fails; raise "
             "run_duration or set a smaller silver_max_rows_per_trigger if not"
         )
     return advisories
@@ -1079,18 +1080,9 @@ DOCS_WITH_BLOCKS: dict[str, tuple[str, ...]] = {
 
 def expected_block(name: str) -> str:
     """The full generated block *name*, markers included."""
-    from lakebench.config.support import _BEGIN, _END
+    from lakebench.config.support import expected_block as _expected_block
 
-    return "\n".join(
-        [
-            _BEGIN.format(name=name),
-            _REGEN,
-            "",
-            GENERATED_BLOCKS[name](),
-            "",
-            _END.format(name=name),
-        ]
-    )
+    return _expected_block(name, GENERATED_BLOCKS, _REGEN)
 
 
 def block_in(text: str, name: str) -> str | None:

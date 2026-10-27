@@ -199,18 +199,21 @@ class DestroyAllBucketsHarness:
             ) as forget,
             patch("lakebench.spark.SparkOperatorManager"),
             patch(
-                "lakebench.deploy.iceberg.find_maintenance_engine",
+                "lakebench.modules.table_formats.iceberg.maintenance.find_maintenance_engine",
                 return_value=(maint or (None, None, None)),
             ),
             patch(
-                "lakebench.deploy.iceberg.build_maintenance_sql",
+                "lakebench.modules.table_formats.iceberg.maintenance.build_maintenance_sql",
                 side_effect=lambda _e, _c, t, _r: [f"EXPIRE {t}", f"ORPHANS {t}"],
             ),
             patch(
-                "lakebench.deploy.iceberg.build_drop_table_sql",
+                "lakebench.modules.table_formats.iceberg.maintenance.build_drop_table_sql",
                 side_effect=lambda _e, t: f"DROP {t}",
             ),
-            patch("lakebench.deploy.iceberg.exec_sql", side_effect=self._exec) as exec_sql,
+            patch(
+                "lakebench.modules.table_formats.iceberg.maintenance.exec_sql",
+                side_effect=self._exec,
+            ) as exec_sql,
         ):
             self.exec_sql = exec_sql
             core.return_value.list_namespace.return_value.items = []

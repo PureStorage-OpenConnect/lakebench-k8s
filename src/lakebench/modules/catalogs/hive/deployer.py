@@ -36,13 +36,6 @@ class HiveDeployer:
         "hive/service.yaml.j2",  # ClusterIP service for stable DNS
     ]
 
-    # Legacy raw Hive templates (deprecated)
-    LEGACY_TEMPLATES = [
-        "hive/configmap.yaml.j2",
-        "hive/deployment.yaml.j2",
-        "hive/service.yaml.j2",
-    ]
-
     def __init__(self, engine: DeploymentEngine):
         """Initialize Hive deployer.
 
@@ -109,11 +102,6 @@ class HiveDeployer:
             for crd, present in crds.items()
         }
 
-    def _is_stackable_available(self) -> bool:
-        """True if the HiveCluster and SecretClass CRDs exist and their
-        operators are running (or their state cannot be read)."""
-        return all(self._check_stackable_crds().values())
-
     def deploy(self) -> DeploymentResult:
         """Deploy Hive Metastore on the Stackable operators.
 
@@ -142,10 +130,10 @@ class HiveDeployer:
                 elapsed_seconds=0,
             )
 
-        if not self._is_stackable_available():
+        crd_status = self._check_stackable_crds()
+        if not all(crd_status.values()):
             # Deploy never installs shared operators (they serve every
             # deployment on the cluster); a cluster admin does, once.
-            crd_status = self._check_stackable_crds()
             missing = [
                 self._REQUIRED_CRDS[crd] for crd, available in crd_status.items() if not available
             ]
@@ -228,82 +216,69 @@ class HiveDeployer:
             )
 
     def _wait_for_hivecluster(self, namespace: str, timeout_seconds: float = 300) -> WaitResult:
-        """Wait for Stackable HiveCluster to be ready.
+        """Wait for the Stackable HiveCluster to be ready.
 
-        Args:
-            namespace: Target namespace
-            timeout_seconds: Timeout
-
-        Returns:
-            WaitResult with status
+        Ready when the HiveCluster reports ``Available=True`` or a pod of the
+        cluster has all containers ready. A 404 (the CR not created yet) and a
+        server or connection error are transient and the wait continues,
+        bounded by the deploy deadline. A 401/403 cannot recover without
+        operator action, so it fails the wait at once with the cause named.
         """
-        try:
-            from kubernetes import client as k8s_client
-            from kubernetes.client.rest import ApiException
+        from kubernetes import client as k8s_client
+        from kubernetes.client.rest import ApiException
 
-            custom_api = k8s_client.CustomObjectsApi()
+        from lakebench.k8s import WaitTerminal, wait_for_condition
 
-            deadline = time.time() + timeout_seconds
-            while time.time() < deadline:
-                try:
-                    hc = custom_api.get_namespaced_custom_object(
-                        group="hive.stackable.tech",
-                        version="v1alpha1",
-                        namespace=namespace,
-                        plural="hiveclusters",
-                        name="lakebench-hive",
-                    )
+        custom_api = k8s_client.CustomObjectsApi()
+        core_v1 = k8s_client.CoreV1Api()
 
-                    # Check status conditions
-                    status = hc.get("status", {})
-                    conditions = status.get("conditions", [])
+        def _terminal_if_forbidden(e: ApiException, what: str) -> None:
+            if e.status in (401, 403):
+                raise WaitTerminal(
+                    f"cannot read {what} ({e.status} {e.reason}): the deploy "
+                    "ServiceAccount is missing RBAC for the Stackable Hive CRD "
+                    "(hive.stackable.tech/v1alpha1)"
+                )
 
-                    # Look for Available=True condition
-                    for cond in conditions:
-                        if cond.get("type") == "Available" and cond.get("status") == "True":
-                            elapsed = time.time() - (deadline - timeout_seconds)
-                            return WaitResult(WaitStatus.READY, "HiveCluster available", elapsed, 0)
+        def check() -> tuple[bool, str]:
+            try:
+                hc = custom_api.get_namespaced_custom_object(
+                    group="hive.stackable.tech",
+                    version="v1alpha1",
+                    namespace=namespace,
+                    plural="hiveclusters",
+                    name="lakebench-hive",
+                )
+            except ApiException as e:
+                if e.status == 404:
+                    return False, "HiveCluster not created yet"
+                _terminal_if_forbidden(e, "the HiveCluster")
+                return False, f"reading HiveCluster: {e.reason}"
 
-                    # Also check if pods are running
-                    core_v1 = k8s_client.CoreV1Api()
-                    pods = core_v1.list_namespaced_pod(
-                        namespace,
-                        label_selector="app.kubernetes.io/name=hive,app.kubernetes.io/instance=lakebench-hive",
-                    )
+            for cond in hc.get("status", {}).get("conditions", []):
+                if cond.get("type") == "Available" and cond.get("status") == "True":
+                    return True, "HiveCluster available"
 
-                    running_pods = [p for p in pods.items if p.status.phase == "Running"]
-                    if running_pods:
-                        # Check if container is ready
-                        for pod in running_pods:
-                            if pod.status.container_statuses:
-                                all_ready = all(c.ready for c in pod.status.container_statuses)
-                                if all_ready:
-                                    elapsed = time.time() - (deadline - timeout_seconds)
-                                    return WaitResult(
-                                        WaitStatus.READY,
-                                        f"HiveCluster pod ready: {pod.metadata.name}",
-                                        elapsed,
-                                        0,
-                                    )
+            try:
+                pods = core_v1.list_namespaced_pod(
+                    namespace,
+                    label_selector="app.kubernetes.io/name=hive,app.kubernetes.io/instance=lakebench-hive",
+                )
+            except ApiException as e:
+                _terminal_if_forbidden(e, "the HiveCluster pods")
+                return False, f"listing HiveCluster pods: {e.reason}"
+            for pod in pods.items:
+                if pod.status.phase == "Running" and pod.status.container_statuses:
+                    if all(c.ready for c in pod.status.container_statuses):
+                        return True, f"HiveCluster pod ready: {pod.metadata.name}"
+            return False, "HiveCluster not ready"
 
-                except ApiException as e:
-                    if e.status == 404:
-                        pass  # HiveCluster not yet created, keep waiting
-                    else:
-                        raise
-
-                time.sleep(10)
-
-            deploy_deadline.check("HiveCluster lakebench-hive", "not Available")
-            elapsed = time.time() - (deadline - timeout_seconds)
-            return WaitResult(
-                WaitStatus.TIMEOUT, f"HiveCluster not ready after {timeout_seconds}s", elapsed, 0
-            )
-
-        except deploy_deadline.DeployTimeout:
-            raise
-        except Exception as e:
-            return WaitResult(WaitStatus.FAILED, str(e), 0.0, 0)
+        return wait_for_condition(
+            check,
+            timeout_seconds=int(timeout_seconds),
+            poll_interval=10,
+            description="HiveCluster lakebench-hive",
+        )
 
     def _get_hive_pod_name(self, namespace: str) -> str:
         """Get Stackable Hive pod name.
@@ -327,12 +302,3 @@ class HiveDeployer:
             return "unknown"
         except Exception:
             return "unknown"
-
-    def get_thrift_uri(self) -> str:
-        """Get Hive Metastore thrift URI.
-
-        Returns:
-            Thrift URI string
-        """
-        namespace = self.config.get_namespace()
-        return f"thrift://lakebench-hive-metastore.{namespace}.svc.cluster.local:9083"

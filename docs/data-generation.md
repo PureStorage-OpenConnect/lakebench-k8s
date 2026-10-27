@@ -14,8 +14,8 @@ lakebench generate my-config.yaml --timeout 14400    # longer wait for large sca
 - The command asks for confirmation first; pass `--yes` in scripts and CI.
 - It waits for the Job with a progress bar of pod completions.
 - `--timeout 0` (the default) computes the wait from scale, parallelism and a conservative per-pod throughput.
-- On a continuous config, `generate` writes until the datagen lead plus the
-  window has passed, as a continuous run's datagen does.
+- On a continuous config, `generate` writes until `run_duration` has passed
+  from submission. Unlike a continuous run's datagen, it adds no lead.
 
 ## Scale Factor and Data Volume
 
@@ -46,8 +46,8 @@ unit. Its size is measured, not linear:
   between those two points.
 - Between scale 1 and 10 the size per unit is interpolated in log scale.
   Below 1 it is the scale-1 value; above 10, the scale-10 value.
-- Two scale-100 runs on another setup read 0.4% (128 MB files) and 1.8% (an
-  earlier generator) above that.
+- Two scale-100 runs on another setup read 0.4% (128 MB files, no longer
+  settable) and 1.8% (an earlier generator) above that.
 - `scale_ratio` divides the bronze a run read by this size.
 
 ### Scale limits
@@ -103,9 +103,13 @@ Two independent fields both use the values `batch` and `continuous`. Delivery mo
 - `datagen.mode: batch` with `pipeline.mode: continuous` is valid. Datagen
   still writes for the whole window; each file lands in one PUT.
 - `streaming` is not a mode name; the continuous pipeline's name is `continuous`.
-- `auto` moved from `batch` (scale <= 10) to `continuous` at every scale on 2026-09-28. If a run depends on bursty uploads (bandwidth ceilings, RSS profile), set `mode: batch`. `continuous` overlaps generation with upload; `batch` uploads each file once written. No speed difference is published, so choose from file count and network profile.
+- For bursty uploads (bandwidth ceilings, RSS profile), set `mode: batch`.
+  `continuous` overlaps generation with upload; `batch` uploads each file
+  once written. No speed difference is published, so choose from file count
+  and network profile.
 
-`deploy/datagen.py` turns `datagen.mode` into a `--delivery-mode` argument on the datagen container (`templates/datagen/job.yaml.j2`); it shows in rendered Job manifests. The entrypoint maps `auto` to `continuous` and passes `batch` or `continuous` to the Rust binary.
+The rendered Job manifest carries the mode as the datagen container's
+`--delivery-mode` argument.
 
 ### Per-pod resources
 
@@ -113,7 +117,7 @@ Lakebench sizes datagen pods from scale and keeps any value you set:
 
 | Field | When unset | When set |
 |---|---|---|
-| `cpu` | `8` in batch. In continuous with `parallelism` also unset: the cores that offer the scale's load, in 100m steps (at least 200m), in pods of up to 8 cores | Used as given |
+| `cpu` | `8`, except in a continuous pipeline with `parallelism` also unset: the cores that offer the scale's load, in 100m steps (at least 200m), in pods of up to 8 cores | Used as given |
 | `memory` | Derived from the measured peak RSS for the schema, scale and thread count at the fixed 64mb file size; at least `4Gi` | Used as given |
 | `generators` | `0` (auto): one generator thread per started core of the pod's CPU (`CPU_LIMIT`; a 1300m pod runs 2) | Used as the thread count |
 
@@ -161,8 +165,8 @@ accident.
 What happens next depends on whether this deployment owns the bucket. It
 does when the bucket carries this deployment's and this cluster's stamp (a
 tag, or on FlashBlade the `.lakebench/owner.json` marker), or when this
-namespace's created-buckets record lists it (a bucket 1.6 created, stamped on
-the next deploy).
+namespace's created-buckets record lists it (a bucket created by 1.6, which
+the next deploy stamps).
 
 | Bucket | Prefix | Flag | Result |
 |---|---|---|---|
@@ -205,8 +209,8 @@ generation parameters and the image digest the datagen pods ran.
 - A prefix holding only that marker counts as empty.
 - A run that reuses the corpus is refused (exit 3) when the marker is
   unfinished or describes another cycle count, window or generation than the
-  config's. See "Reusing a corpus" under [run](cli-reference.md#run).
-- No Spark stage reads `_corpus/`.
+  config's. See [Reusing a corpus](cli-reference.md#reusing-a-corpus).
+- No pipeline stage or scoring query reads `_corpus/`.
 
 ### Before the first cycle
 
@@ -256,12 +260,9 @@ workload:
     cpu: "8"                   # CPU per pod (sized from scale when unset)
     memory: 4Gi                # Memory per pod (derived when unset)
     generators: 0              # Per-pod generator threads (0 = follow pod CPU)
-    # Timestamp range -- affects Iceberg partition count.
-    # Silver partitions by interaction_date (from event_timestamp).
-    # Continuous mode: use a narrow range (days/weeks) to avoid
-    # small-file proliferation across many date partitions.
-    # Batch mode: wider ranges are fine (single compaction pass).
-    # See docs/configuration.md#timestamp-range-impact for details.
+    # Timestamp range: customer360 only (financial ignores it). Silver
+    # partitions by interaction_date, so a continuous run wants a narrow
+    # range. See docs/configuration.md#timestamp-range-impact.
     timestamp_start: null      # Start date for timestamps (ISO format)
     timestamp_end: null        # End date for timestamps (ISO format, exclusive)
 ```
@@ -294,6 +295,8 @@ workload:
 - Entity counts, events per entity and date ranges are in
   `src/lakebench/config/scale.py`. The Arrow schemas are in
   `datagen_rs/src/schema.rs`.
+- `financial` requires a Trino query engine: recall and precision are
+  scored by SQL through Trino, so any other query engine is refused at load.
 - `schema: custom` is rejected at config load. There is no IoT schema.
 
 ### Financial bronze layout
@@ -305,9 +308,9 @@ The financial prefix is fixed at `pacs008/`. Under
 |---|---|
 | `bronze/pacs008/part-NNNNNN.parquet` | pacs.008 payment messages |
 | `bronze/party.parquet` | party master: identity, address, customer flag, customer type, CRR score and tier (no sanctions, PEP or initial risk columns) |
-| `bronze/account.parquet` | account master: IBAN, holder, bank, currency, dates, balance |
+| `bronze/account.parquet` | account master: IBAN, holder, bank, currency, dates, balance; its holder and IBAN columns are registered as `bronze.accounts` |
 | `bronze/watchlist.parquet` | synthetic dated sanctions and PEP lists |
-| `manifest/manifest.parquet` | planted typology ground truth used for scoring |
+| `manifest/manifest.parquet` | planted typology ground truth; registered as the Iceberg table `bronze.manifest`, which the scoring statements read |
 
 - Cycles after the first in a multi-cycle run add a cycle suffix
   (`part-cNNN-NNNNNN.parquet`, `manifest-cNNN.parquet`).

@@ -4,7 +4,7 @@ Reference: Trino query engine: config keys, catalog wiring, memory limits, timeo
 
 ## What it does
 
-Trino is the default query engine. It runs the benchmark query suite against Iceberg or Delta tables and serves ad-hoc SQL on every medallion layer.
+Trino is the default query engine. It runs the benchmark query suite against Iceberg or Delta tables, serves ad-hoc SQL on every medallion layer, and scores the AML recall and precision with SQL. The financial workload requires Trino for that reason.
 
 - `architecture.query_engine.type: trino` (the default).
 - Trino is wired to the recipe's catalog (Hive Metastore or Polaris), so every registered table is queryable. Delta runs with Hive only.

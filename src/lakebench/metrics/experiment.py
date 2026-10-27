@@ -17,54 +17,30 @@ the run starts and is stored in ``config_snapshot["experiment_inputs"]``
 fingerprint). ``build_experiment(metrics)`` runs when metrics.json is
 written and adds what only the run knows.
 
-WORKLOAD_VERSIONS history (bump a workload's version whenever what it
-computes changes: the pipeline scripts' output semantics, the detection
-rules, or the benchmark queries; a run under another version compares with
-nothing measured under this one):
+A workload's version is bumped whenever what it computes changes (the
+pipeline scripts' output semantics, the detection rules, or the benchmark
+queries); a run under another version compares with nothing measured under
+this one. The current versions and what they mean:
 
-- ``c360-1``, ``aml-1``: first stamped versions (2026-09-26).
-- ``aml-1`` kept (2026-10-02): continuous ``silver.entity_profiles`` now
-  leaves ``total_sent_usd`` and ``total_received_usd`` NULL for a side an
-  entity never used, as batch always did, instead of 0.00. No detection
-  rule, score, gold table or query reads these two columns, so no result
-  changes and the version is not bumped.
-- ``c360-2``: gold-finalize no longer switches to the incremental strategy
-  when gold has rows and silver is over 1,000 GB, so a repeat run rebuilds
-  every gold day; incremental gold runs only for multi-cycle cycles 2+, and
-  the strategy that ran is recorded per job (2026-10-02).
-- ``aml-2``: W4's related_txn_ids and related_entity_ids are sorted and cut
-  to 1,000 per alert, and its evidence map gains txn_total, txns_truncated,
-  entity_total and entities_truncated, so W4 alerts and possibly W4 recall,
-  false positives, continuous time to detect and TM alert identity for
-  hubs change; W2 and the W5 rescreen gain txn_total and txns_truncated,
-  and W2's beneficiary sender list is sorted before its cut (2026-10-02).
-  The first AML result change of v1.7.
-- ``aml-2`` also covers (both land before any release record, so v1.7 has
-  the one version): AML continuous in-stream rounds run the investigator
-  queries (IQ1 to IQ4) once the run has a case, so the continuous query set
-  changes from 8 queries to 12; a round before the first TM pass runs the 8
-  and is labelled (2026-10-02). FQ4 recomputes its running balance in
-  ledger order and IQ3 sums its second hop per pair, so continuous silver
-  answers both as batch silver does; batch answers are unchanged, and the
-  AML query-set ids move (2026-10-03).
-- ``c360-2.dev1``: a multi-cycle run's silver jobs take one data clock, the
-  exclusive end of the range its cycles cover (``data_clock_source``
-  ``cycle_series_end``), instead of each cycle's bronze-verify clock, so
-  ``customer_recency_score`` is anchored to one day across cycles.
-  Single-cycle results do not change. With it, multi-cycle time to value
-  leaves the cycles' datagen out. The release takes ``c360-3``, never
-  ``c360-2`` again, so no release record shares an identity with a pre-``dev1`` one
-  (2026-10-03).
-- ``aml-3``: W3 and W17 treat an account as a hub (not an intermediary)
-  only in the weeks it sends more than ``max_out_degree`` transfers, not
-  for the whole corpus once any week does, so their alerts, recall and
-  false positives change in batch and continuous alike. Hub status is then
-  local in time, which lets continuous gold re-detect only the weeks new
-  rows can reach (2026-10-08).
+- ``customer360`` ``c360-2.dev1``: gold-finalize rebuilds every gold day for
+  a single-cycle run (incremental gold runs only for multi-cycle cycles 2+,
+  and the strategy that ran is recorded per job); a multi-cycle run's silver
+  jobs take one data clock, the exclusive end of the range its cycles cover
+  (``data_clock_source`` ``cycle_series_end``), so
+  ``customer_recency_score`` is anchored to one day across cycles and
+  multi-cycle time to value leaves the cycles' datagen out.
+- ``financial`` ``aml-3``: W4's related ids are sorted and cut to 1,000 per
+  alert, with its evidence map carrying the pre-cut totals and truncation
+  flags (W2 and the W5 rescreen likewise); AML continuous in-stream rounds
+  run the investigator queries once the run has a case, so the continuous
+  query set is 12 queries (8 before the first TM pass, labelled); and W3 and
+  W17 treat an account as a hub only in the weeks it sends more than
+  ``max_out_degree`` transfers, so continuous gold re-detects only the weeks
+  new rows can reach.
 
 Identity versions. A block is stamped ``exp2``
-(``identity_version`` 2) only when every ``V2_REQUIRED_INPUTS`` entry is
-present: corpus id v2 (from the generator's markers), the run-start
+(``identity_version`` 2) only when every one of these is present: corpus
+id v2 (from the generator's markers), the run-start
 ``identity_version`` and a system identity with at least one observed
 part. Otherwise it is ``exp1`` and names what was missing in
 ``v2_unavailable``. ``identity()``
@@ -88,12 +64,7 @@ from lakebench.metrics.provenance import experiment_lakebench
 
 EXPERIMENT_SCHEMA_V1 = "exp1"
 EXPERIMENT_SCHEMA_V2 = "exp2"
-#: The newest schema; written only when every V2_REQUIRED_INPUTS entry exists.
-EXPERIMENT_SCHEMA = EXPERIMENT_SCHEMA_V2
 IDENTITY_VERSION = 2
-
-#: What an exp2 block needs, by the name ``v2_unavailable`` lists when absent.
-V2_REQUIRED_INPUTS = ("corpus id v2", "identity version", "system identity")
 
 WORKLOAD_VERSIONS: dict[str, str] = {
     "customer360": "c360-2.dev1",
@@ -110,8 +81,6 @@ DATAGEN_MODEL_VERSIONS: dict[str, str | None] = {
     "customer360": None,
     "custom": None,
 }
-
-# Batch and continuous Spark job types -> snapshot executor-override key.
 
 
 def _short_hash(obj: Any) -> str:
@@ -204,12 +173,6 @@ def _c360_resolved(cfg: Any) -> dict[str, Any]:
     return out
 
 
-def _canonical_mode(mode: Any) -> str:
-    from lakebench.config.support import canonical_mode
-
-    return canonical_mode(mode)
-
-
 def _frozen_support(cfg: Any, run_mode: str | None, system: str) -> dict[str, Any]:
     from lakebench.config.support import support_state_for_config
     from lakebench.metrics.provenance import run_provenance
@@ -293,6 +256,7 @@ def experiment_inputs(
     # "spark executor overrides" and "spark driver overrides"), only when set
     # and not for --local (no executors). Executor counts are keyed as in
     # config_snapshot.spark.executor_overrides, for the run's mode only.
+    from lakebench.config.support import canonical_mode
     from lakebench.modules.pipeline_engines.spark.job import (
         BATCH_JOB_TYPES,
         EXECUTOR_OVERRIDE_FIELDS,
@@ -300,7 +264,7 @@ def experiment_inputs(
         executor_override,
     )
 
-    mode_of_run = _canonical_mode(run_mode) if run_mode else _canonical_mode(arch.pipeline.mode)
+    mode_of_run = canonical_mode(run_mode) if run_mode else canonical_mode(arch.pipeline.mode)
     job_types = STREAMING_JOB_TYPES if mode_of_run == "continuous" else BATCH_JOB_TYPES
     executor_overrides = (
         {
@@ -340,16 +304,15 @@ def experiment_inputs(
         "date_range_days": None,
     }
     corpus["id"] = _short_hash(corpus)
-    # The id hashes the seed itself (ids recorded before stay valid); the
-    # record keeps it in plaintext only when it is a public development seed
-    # (metrics.seed_record).
+    # The id hashes the seed and the declared overrides (null when unset), so
+    # ids recorded before this stay valid. The record keeps the seed in
+    # plaintext only for a public development seed (metrics.seed_record), and
+    # shows what ran: the resolved customer id space for c360, and no
+    # date_range_days, which datagen never reads (the window is
+    # timestamp_start/_end).
     from lakebench.metrics.seed_record import recorded_seed
 
     corpus["seed"] = recorded_seed(seed)
-    # The id keeps hashing the declared overrides (null when unset), so ids
-    # recorded before this stay valid. The record shows what ran instead:
-    # the resolved customer id space for c360, and no date_range_days,
-    # which datagen never reads (the window is timestamp_start/_end).
     declared_customers = corpus.pop("unique_customers", None)
     corpus.pop("date_range_days", None)
     if schema != "financial":
@@ -449,7 +412,7 @@ def experiment_inputs(
         },
         # The config file's mode; run_mode is what the command line ran.
         "mode": (arch.pipeline._configured_mode or arch.pipeline.mode).value,
-        **({"run_mode": _canonical_mode(run_mode)} if run_mode else {}),
+        **({"run_mode": canonical_mode(run_mode)} if run_mode else {}),
         "support": _frozen_support(cfg, run_mode, system),
         "config_limits": {
             "max_files_per_trigger": effective_trickle(cfg),
@@ -597,30 +560,6 @@ def _rules(metrics: Any) -> dict[str, Any]:
         "skipped": dict(sorted(skipped.items())),
         "errored": dict(sorted(errors.items())),
     }
-
-
-def _caps_bound(limits: Mapping[str, Any], rules: Mapping[str, Any]) -> list[str]:
-    """The Lakebench limits that bound this run (invariant 4), one line each.
-    A figure measured under one of these is not what the system can do."""
-    from lakebench.metrics.bounds import bound_entries
-
-    return [line for _kind, line in bound_entries(limits, rules)]
-
-
-def _bound_kinds(limits: Mapping[str, Any], rules: Mapping[str, Any]) -> list[str]:
-    """Which limits bound, without the counts: the like-for-like condition.
-    The counts (a concurrent budget granted from live cluster capacity)
-    vary between runs of one config and stay in ``bound`` as evidence."""
-    from lakebench.metrics.bounds import bound_entries
-
-    return sorted({kind for kind, _line in bound_entries(limits, rules)})
-
-
-def _benchmark_queries(metrics: Any) -> list[dict[str, Any]]:
-    bench = metrics.benchmark
-    if bench is None and metrics.pipeline_benchmark is not None:
-        bench = metrics.pipeline_benchmark.query_benchmark
-    return list(getattr(bench, "queries", None) or [])
 
 
 def _continuous_results(metrics: Any) -> dict[str, Any]:
@@ -781,8 +720,8 @@ def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[
     return out, problems
 
 
-def support_state(
-    workload: str | None, arch: Mapping[str, Any], mode: str | None, *, system: str = "cluster"
+def _support_state(
+    workload: str | None, arch: Mapping[str, Any], mode: str | None, *, system: str
 ) -> dict[str, Any]:
     """The support state of a run's workload x architecture x mode,
     computed by lakebench.config.support from layers 1-3 and the release
@@ -819,7 +758,7 @@ def _recorded_support(
     frozen = inputs.get("support")
     if isinstance(frozen, Mapping) and frozen.get("state"):
         return dict(frozen)
-    out = support_state(schema, arch, mode, system="local" if local else "cluster")
+    out = _support_state(schema, arch, mode, system="local" if local else "cluster")
     if out.get("state") == "supported":
         out.update(
             state="unverified",
@@ -921,9 +860,17 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         tm_over = max(tm_over, int(ops.get("alerts_over_capacity") or 0))
     if tm_over:
         limits["tm_alerts_over_capacity"] = tm_over
+    # The Lakebench limits that bound this run, one line each (``bound``),
+    # and which bound without the counts (``bound_kinds``, the like-for-like
+    # condition; the counts vary between runs of one config, so they stay in
+    # ``bound`` as evidence). A figure measured under a bound is not what the
+    # system can do.
+    from lakebench.metrics.bounds import bound_entries
+
     rules = _rules(metrics)
-    limits["bound"] = _caps_bound(limits, rules)
-    limits["bound_kinds"] = _bound_kinds(limits, rules)
+    entries = bound_entries(limits, rules)
+    limits["bound"] = [line for _kind, line in entries]
+    limits["bound_kinds"] = sorted({kind for kind, _line in entries})
     from lakebench.metrics.attribution import attribution, headroom_pct
 
     headroom = headroom_pct(metrics) if mode == "batch" else None
@@ -994,11 +941,11 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     )
     if corpus_problems:
         corpus["problems"] = corpus_problems
-    v17 = inputs.get("identity_version") == IDENTITY_VERSION
+    wants_v2 = inputs.get("identity_version") == IDENTITY_VERSION
     sysid = inputs.get("system_identity")
     sysid = dict(sysid) if isinstance(sysid, Mapping) and sysid.get("parts") else None
     missing: list[str] = []
-    if v17:
+    if wants_v2:
         if corpus.get("id_v2") is None and not corpus.get("id_v2_unavailable"):
             from lakebench.metrics.corpus_identity import NOT_OBSERVED
 
@@ -1030,7 +977,7 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     block: dict[str, Any] = {
         "schema": EXPERIMENT_SCHEMA_V2 if exp2 else EXPERIMENT_SCHEMA_V1,
         **({"identity_version": IDENTITY_VERSION} if exp2 else {}),
-        **({"v2_unavailable": missing} if v17 and missing else {}),
+        **({"v2_unavailable": missing} if wants_v2 and missing else {}),
         **({"system_identity": sysid} if sysid is not None else {}),
         # Allocatable and co-tenant load at run start and end:
         # Observational, never compared.

@@ -1,16 +1,10 @@
-"""The TM operations pass reads bounded silver and pins its sealed set.
+"""The TM operations pass reads bounded silver.
 
-Two properties of ``tm_operations.run_tm_operations``' pinned read:
-
-- Case activity reads only the span the case windows cover. ``_bound_to_window``
-  prunes the payments outside [min window start, max window end); the per-case
-  window join is unchanged, so the activity counts are identical to a scan of
-  the whole pinned frame.
-- The sealed set is pinned at one versions snapshot, so every action in the
-  pass (the in-flight watermark, the reconciliation count, the activity scan)
-  sees the same sealed rows. A batch that seals mid-pass does not change the
-  frame, so reconciliation cannot double-count it. Reading the versions table
-  at current state instead lets a mid-pass seal be counted twice.
+Case activity reads only the span the case windows cover.
+``_bound_to_window`` prunes the payments outside [min window start, max window
+end); the per-case window join is unchanged, so the activity counts are
+identical to a scan of the whole pinned frame. (The sealed-set pin is covered
+by test_sealed_filter_at_spark::test_seal_committed_between_actions_is_invisible.)
 
 Runs in a Spark child (``spark_subprocess``) with the Iceberg jar on the
 driver classpath at JVM launch.
@@ -28,7 +22,7 @@ pytest.importorskip("pyspark")
 
 
 @pytest.mark.requires_jars("iceberg")
-def test_bounded_read_matches_full_and_pin_is_stable(spark_subprocess, spark_jars):
+def test_bounded_read_matches_full(spark_subprocess, spark_jars):
     res = spark_subprocess(__file__, spark_jars.classpath, timeout=600)
     out = json.loads(res.stdout.strip().splitlines()[-1])
     # Bounding the silver read to the case windows drops the out-of-window
@@ -37,14 +31,6 @@ def test_bounded_read_matches_full_and_pin_is_stable(spark_subprocess, spark_jar
     # ...but produces exactly the same per-case activity as scanning the whole
     # frame: the per-case window join already excluded them.
     assert out["activity_full"] == out["activity_bounded"], out
-    # Before the mid-pass seal both filters agree (batch 2 unsealed).
-    assert out["pinned_before"] == out["current_before"], out
-    # The pinned sealed filter does not see a batch that seals after the pin:
-    # its row count is the same before and after the mid-pass seal.
-    assert out["pinned_before"] == out["pinned_after"], out
-    # The current-state filter does see it on the same transactions snapshot,
-    # which is the overshoot the pin removes.
-    assert out["current_after"] == out["current_before"] + out["sealed_batch_rows"], out
 
 
 _TXNS_DDL = """
@@ -160,49 +146,11 @@ def _run(jars):
         activity_full = _activity(txns)
         activity_bounded = _activity(bounded)
 
-        # The race: a batch's transactions are in the pinned transactions
-        # snapshot but its versions row seals DURING the pass. Write batch 2's
-        # rows now (so they are in the snapshot), pin the transactions
-        # snapshot and the versions snapshot, then seal batch 2 after the pin.
-        _write("w2", 1, 2, datetime(2024, 12, 25, 12), "S1", 2)
-        _write("w3", 2, 1, datetime(2024, 12, 26, 12), "S1", 2)
-        sealed_batch_rows = 2
-        snap = tm.current_snapshot_id(spark, "lakehouse.silver.transactions")
-        vsid = tm.current_snapshot_id(spark, "lakehouse.silver.silver_batch_versions")
-        pinned = tm.sealed_txns_filter_at(
-            spark,
-            tm.read_at_snapshot(spark, "lakehouse.silver.transactions", snap),
-            "lakehouse",
-            "silver.silver_batch_versions",
-            vsid,
-        )
-        current = tm.sealed_txns_filter(
-            spark,
-            tm.read_at_snapshot(spark, "lakehouse.silver.transactions", snap),
-            "lakehouse",
-            "silver.silver_batch_versions",
-        )
-        pinned_before = pinned.count()
-        current_before = current.count()
-        # Batch 2 seals mid-pass.
-        _seal("S1", 2)
-        # The pinned frame's sealed set is fixed at vsid: unchanged.
-        pinned_after = pinned.count()
-        # The current-state frame re-reads the versions table each action, so
-        # the same transactions snapshot now shows the just-sealed batch: the
-        # overshoot the pin removes.
-        current_after = current.count()
-
         out = {
             "full_rows": full_rows,
             "bounded_rows": bounded_rows,
             "activity_full": activity_full,
             "activity_bounded": activity_bounded,
-            "pinned_before": pinned_before,
-            "pinned_after": pinned_after,
-            "current_before": current_before,
-            "current_after": current_after,
-            "sealed_batch_rows": sealed_batch_rows,
         }
         assert col is not None
         print(json.dumps(out, default=str))

@@ -65,18 +65,15 @@ def test_every_result_carries_the_source_the_query_ran_under():
         assert _SRC.match(res.engine_source)
         assert res.engine_source == cmd[cmd.index("--source") + 1]
 
-
-def test_timed_out_query_still_reports_its_source():
-    ex = _trino()
-
+    # A timed-out query still reports a source.
     def fake_run(cmd, **kwargs):
         if "SELECT 1" in cmd:
             raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     with patch("subprocess.run", side_effect=fake_run):
-        res = ex.execute_query("SELECT 1", timeout=30)
-    assert res.error and _SRC.match(res.engine_source)
+        timed_out = ex.execute_query("SELECT 1", timeout=30)
+    assert timed_out.error and _SRC.match(timed_out.engine_source)
 
 
 def test_query_io_reads_one_row_per_source():
@@ -329,32 +326,26 @@ def test_an_older_trino_record_says_not_recorded():
     ]
 
 
-def test_an_instrumented_engine_without_io_says_not_recorded():
-    # DuckDB reports its own read bytes now, so a record with no io block on
-    # its queries is "not recorded", not "engine not instrumented".
-    rec = {"benchmark": _bench([{"name": "Q1"}], engine="duckdb")}
+@pytest.mark.parametrize(
+    ("engine", "reason"),
+    [
+        # DuckDB reports its own read bytes now, so a record with no io block on
+        # its queries is "not recorded", not "engine not instrumented".
+        ("duckdb", REASON_NOT_RECORDED),
+        # presto is not an engine lakebench instruments.
+        ("presto", REASON_ENGINE),
+    ],
+)
+def test_query_io_not_measured_names_its_reason(engine, reason):
+    rec = {"benchmark": _bench([{"name": "Q1"}], engine=engine)}
     io = build_io(rec)
     assert io["not_measured"] == [
         {
-            "source": "duckdb",
+            "source": engine,
             "stage": "query",
             "label": "benchmark",
             "direction": "both",
-            "reason": REASON_NOT_RECORDED,
-        }
-    ]
-
-
-def test_an_unknown_query_engine_is_not_instrumented():
-    rec = {"benchmark": _bench([{"name": "Q1"}], engine="presto")}
-    io = build_io(rec)
-    assert io["not_measured"] == [
-        {
-            "source": "presto",
-            "stage": "query",
-            "label": "benchmark",
-            "direction": "both",
-            "reason": REASON_ENGINE,
+            "reason": reason,
         }
     ]
 
