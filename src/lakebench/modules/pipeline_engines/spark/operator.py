@@ -583,7 +583,8 @@ class SparkOperatorManager:
                 m = re.search(r"-(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)$", rel.get("chart", ""))
                 return m.group(1) if m else None
             return None
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not read the %s chart version: %s", self.HELM_RELEASE_NAME, e)
             return None
 
     def _get_active_namespaces(
@@ -656,7 +657,7 @@ class SparkOperatorManager:
         than report "nothing watched".
         """
         probe = self._run(
-            ["kubectl", "get", "deployment", "spark-operator-controller", "-n", self.namespace],
+            ["kubectl", "get", "deployment", self.CONTROLLER_DEPLOYMENT, "-n", self.namespace],
             capture_output=True,
             text=True,
         )
@@ -766,16 +767,9 @@ class SparkOperatorManager:
 
                 ns = k8s_client.CoreV1Api().read_namespace(namespace, **request_timeout_kw())
                 break
-            except ApiException as e:
-                if e.status == 404:
-                    return True
-                logger.warning(
-                    "Could not read namespace %s before adding it (attempt %d): %s",
-                    namespace,
-                    attempt,
-                    e,
-                )
             except Exception as e:  # noqa: BLE001
+                if isinstance(e, ApiException) and e.status == 404:
+                    return True
                 logger.warning(
                     "Could not read namespace %s before adding it (attempt %d): %s",
                     namespace,
@@ -817,8 +811,12 @@ class SparkOperatorManager:
                     removed,
                 )
             return live
-        except Exception as e:
-            logger.debug("Could not list namespaces, keeping all: %s", e)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Could not list namespaces to prune the watch list, keeping all "
+                "(a stale one then fails the upgrade): %s",
+                e,
+            )
             return namespaces
 
     def recreate_namespace_rbac(self, namespace: str) -> bool:
@@ -1667,13 +1665,17 @@ class SparkOperatorManager:
         return False
 
     def _is_openshift(self) -> bool:
-        """Detect whether we are running on an OpenShift cluster."""
-        result = self._run(
-            ["kubectl", "api-resources", "--api-group=security.openshift.io"],
-            capture_output=True,
-            text=True,
-        )
-        return result.returncode == 0 and "security.openshift.io" in result.stdout
+        """Whether this is an OpenShift cluster. Probed once per manager."""
+        cached = getattr(self, "_openshift_cache", None)
+        if cached is None:
+            result = self._run(
+                ["kubectl", "api-resources", "--api-group=security.openshift.io"],
+                capture_output=True,
+                text=True,
+            )
+            cached = result.returncode == 0 and "security.openshift.io" in result.stdout
+            self._openshift_cache = cached
+        return cached
 
     def _assign_openshift_scc(self, strict: bool = False) -> None:
         """Grant anyuid to the Spark Operator ServiceAccounts on OpenShift.
@@ -1727,7 +1729,7 @@ class SparkOperatorManager:
 
         patch_json = json.dumps(patch)
 
-        for deploy in ("spark-operator-controller", "spark-operator-webhook"):
+        for deploy in (self.CONTROLLER_DEPLOYMENT, self.WEBHOOK_DEPLOYMENT):
             result = self._run(
                 [
                     "kubectl",
