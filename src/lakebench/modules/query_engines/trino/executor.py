@@ -337,12 +337,15 @@ class TrinoExecutor(PodExecutor):
         return rows
 
     def flush_cache(self) -> None:
-        """Flush Trino's Iceberg metadata cache."""
+        """Flush the Iceberg metadata cache of this deployment's Trino catalog.
+
+        A failed flush is logged, not raised: the round still runs, but warm.
+        """
         if self.table_format == "delta":
             return
         try:
             pod = self._discover_pod()
-            pinned_kubectl(
+            result = pinned_kubectl(
                 self.kube_context,
                 [
                     "exec",
@@ -354,12 +357,17 @@ class TrinoExecutor(PodExecutor):
                     "--",
                     "trino",
                     "--execute",
-                    "CALL iceberg.system.flush_metadata_cache()",
+                    f"CALL {self.catalog_name}.system.flush_metadata_cache()",
                 ],
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
+            if result.returncode != 0:
+                logger.warning(
+                    "Trino metadata cache flush failed: %s",
+                    summarise_engine_error(result.stderr or ""),
+                )
         except (subprocess.TimeoutExpired, subprocess.SubprocessError):
             logger.warning("Failed to flush Trino metadata cache")
 

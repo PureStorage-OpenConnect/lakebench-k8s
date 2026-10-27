@@ -95,6 +95,32 @@ class TestTrinoSession:
         assert cmd[cmd.index("--timezone") + 1] == "UTC"
 
 
+class TestTrinoFlushCache:
+    """flush_cache calls this deployment's catalog (there is no `iceberg`
+    catalog, so the old hard-coded call never flushed anything)."""
+
+    def _flush(self, returncode: int, stderr: str = ""):
+        from lakebench.modules.query_engines.trino.executor import TrinoExecutor
+
+        ex = TrinoExecutor("ns", "lakehouse")
+        ex._pod = "coord-0"
+        with patch(
+            "lakebench.modules.query_engines.trino.executor.pinned_kubectl",
+            return_value=MagicMock(returncode=returncode, stdout="", stderr=stderr),
+        ) as mock_kubectl:
+            ex.flush_cache()
+        return mock_kubectl.call_args[0][1]
+
+    def test_flush_targets_the_configured_catalog(self):
+        argv = self._flush(0)
+        assert argv[-1] == "CALL lakehouse.system.flush_metadata_cache()"
+
+    def test_a_failed_flush_is_logged(self, caplog):
+        with caplog.at_level("WARNING"):
+            self._flush(1, "Catalog 'iceberg' not found")
+        assert "Trino metadata cache flush failed" in caplog.text
+
+
 class TestGetExecutor:
     def test_polaris_duckdb_config_creates_executor(self):
         """polaris-iceberg-spark-duckdb recipe creates DuckDBExecutor with correct S3 config."""
