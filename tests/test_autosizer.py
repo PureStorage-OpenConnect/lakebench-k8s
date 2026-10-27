@@ -297,3 +297,11 @@ def test_datagen_mode_resolution(scale, mode, expected):
         name="test", architecture={"workload": {"datagen": {"scale": scale, "mode": mode}}}
     )
     assert _resolve_datagen_mode(config) == expected
+
+
+def test_auto_sizing_log_keeps_a_fractional_scale(caplog):
+    """A local-mode scale below 1 is logged as written, not truncated to 0."""
+    config = LakebenchConfig(name="test", architecture={"workload": {"datagen": {"scale": 0.01}}})
+    with caplog.at_level("INFO", logger="lakebench.config.autosizer"):
+        resolve_auto_sizing(config)
+    assert "Auto-sized for scale=0.01 " in caplog.text

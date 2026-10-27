@@ -34,6 +34,12 @@ def test_override_above_28_refused():
             make_config(platform={"compute": {"spark": {field: 29}}})
 
 
+def test_override_ceiling_is_the_job_modules_executor_cap():
+    from lakebench.config.schema import MAX_EXECUTOR_OVERRIDE
+
+    assert MAX_EXECUTOR_OVERRIDE == job_mod._MAX_EXECUTORS_SAFE
+
+
 def test_override_28_loads_and_17_driver_cores_refused():
     assert make_config(platform={"compute": {"spark": {"silver_executors": 28}}})
     with pytest.raises(ValueError, match="proven ceiling of 16"):

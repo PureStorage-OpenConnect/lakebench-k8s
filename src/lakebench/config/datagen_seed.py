@@ -2,9 +2,7 @@
 
 The seed names the corpus: the AML reference job reports it (LB_DATAGEN_SEED)
 and the AML pre-registration assigns seeds to roles (calibration, evaluation,
-robustness) and retires seeds that have been looked at. A cluster run used
-to hard-code 42 in three places, which is the spent D0 seed, so every cluster
-corpus silently reused it.
+robustness) and retires seeds that have been looked at.
 
 Resolution:
 
@@ -52,8 +50,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-#: Seed for schemas the AML pre-registration does not govern (Customer 360,
-#: IoT). Unchanged from the old hard-coded value so their corpora stay the same.
+#: Seed for schemas the AML pre-registration does not govern (Customer 360).
+#: Changing it would change their corpora.
 NON_AML_DEFAULT_SEED = 42
 
 #: Roles whose corpus may only be generated or scored as the registered run.
@@ -71,16 +69,25 @@ _PREREG_PATH = (
 LOOKS_FILENAME = "aml_registered_looks.json"
 
 
-def looks_path() -> Path:
-    """The look record; raises FileNotFoundError when it is missing, so a
-    lost record fails closed instead of reading as "nothing looked at"."""
+def _data_file(name: str, env: str | None = None) -> Path:
+    """An AML data file: the packaged copy, then the flat copy next to this
+    module (the Spark driver, where the package is absent), then ``env``'s
+    path. Missing raises FileNotFoundError, so a lost file fails closed."""
     here = Path(__file__).resolve().parent
-    # The packaged path first; the flat path only on the Spark driver, where
-    # the package is absent (a stray copy next to this module never shadows).
-    for p in (_PREREG_PATH.parent / LOOKS_FILENAME, here / LOOKS_FILENAME):
+    for p in (_PREREG_PATH.parent / name, here / name):
         if p.is_file():
             return p
-    raise FileNotFoundError(f"{LOOKS_FILENAME} not found next to {__file__} or {_PREREG_PATH}")
+    if env is not None:
+        value = os.environ.get(env)
+        if value and Path(value).is_file():
+            return Path(value)
+    where = f"{__file__}, {_PREREG_PATH} or {env}" if env else f"{__file__} or {_PREREG_PATH}"
+    raise FileNotFoundError(f"{name} not found next to {where}")
+
+
+def looks_path() -> Path:
+    """The look record."""
+    return _data_file(LOOKS_FILENAME)
 
 
 def load_looks(path: str | os.PathLike | None = None) -> list[dict]:
@@ -269,9 +276,9 @@ def burn_seed(
 # The robustness look scores the registered robustness seed with
 # corpora.robustness_perturbation applied by datagen (datagen_rs/src/robustness.rs,
 # --robustness-perturbation). A registered robustness run needs
-# datagen.robustness_perturbation (``perturbation_error``), and the Rust driver refuses the robustness seed
-# without the flag, so the seed is never spent on an unperturbed corpus.
-ROBUSTNESS_PERTURBATION_IMPLEMENTED = True
+# datagen.robustness_perturbation (``perturbation_error``), and the Rust driver
+# refuses the robustness seed without the flag, so the seed is never spent on an
+# unperturbed corpus.
 
 
 #: Manifest stamp written by the generator on every row of a perturbed corpus
@@ -437,9 +444,8 @@ def calibration_seed() -> int:
 # guard holds a salted SHA-256 per held-out seed, read at run time from
 # heldout_hashes.json (next to the pre-registration, flat next to this module
 # on the Spark driver, or LB_HELDOUT_HASHES on the datagen pod). The file may
-# only be appended to: heldout_history_problems is the rule, which the frozen
-# guard (QR-10) calls for every commit once it lands. Every registered hash is
-# also compiled in below (_HELDOUT_FLOOR; the owner's redraw appends to both),
+# only be appended to: heldout_history_problems is the rule. Every registered
+# hash is also compiled in below (_HELDOUT_FLOOR; a redraw appends to both),
 # checked under its own salt, so a stripped or re-salted file still protects
 # those seeds; tests/test_heldout.py holds the two equal, and equal to the
 # Rust floor (datagen_rs/src/heldout.rs): a redraw appends there too, which
@@ -495,19 +501,8 @@ class HeldOut:
 
 
 def heldout_path() -> Path:
-    """The hash file: the packaged path, then the flat path next to this
-    module (the Spark driver), then ``LB_HELDOUT_HASHES``. Missing raises
-    FileNotFoundError, so a lost file fails closed."""
-    here = Path(__file__).resolve().parent
-    for p in (_PREREG_PATH.parent / HELDOUT_FILENAME, here / HELDOUT_FILENAME):
-        if p.is_file():
-            return p
-    env = os.environ.get("LB_HELDOUT_HASHES")
-    if env and Path(env).is_file():
-        return Path(env)
-    raise FileNotFoundError(
-        f"{HELDOUT_FILENAME} not found next to {__file__}, {_PREREG_PATH} or LB_HELDOUT_HASHES"
-    )
+    """The hash file, LB_HELDOUT_HASHES its last fallback."""
+    return _data_file(HELDOUT_FILENAME, "LB_HELDOUT_HASHES")
 
 
 def _heldout_doc_problems(doc) -> list[str]:
@@ -663,7 +658,7 @@ def seed_is_protected(value, heldout: HeldOut | None = None) -> bool:
         h = heldout if heldout is not None else _heldout()
         if heldout_role(v, h) is not None or v in h.spent:
             return True
-        return v in spent_seeds() or v in recorded_seeds()
+        return v in spent_seeds()
     except Exception:  # noqa: BLE001 -- unreadable: hide it
         return True
 
@@ -1005,13 +1000,14 @@ def absence_problems(
     (the shapes listed at ``_TOKEN``) in 1..2^63 is hashed
     under the file's salt and the floor's and compared with the role hashes;
     the value is never kept or printed. Spent seeds are public and never
-    reported: ``exclude`` lists them; None means the recorded looks, the
-    pre-registration's spent_seeds and the hash file's spent list."""
+    reported: ``exclude`` lists them; None means the pre-registration's
+    spent_seeds (which already merges the recorded looks) and the hash file's
+    spent list."""
     h = heldout if heldout is not None else _heldout()
     if exclude is not None:
         skip = frozenset(int(s) for s in exclude)
     else:
-        skip = recorded_seeds() | spent_seeds() | h.spent
+        skip = spent_seeds() | h.spent
     out = []
     for key, text in texts.items():
         hit: set[str] = set()
@@ -1063,12 +1059,12 @@ def absence_problems(
     return out
 
 
-def _match_label(seed: int | None, role: str | None) -> str:
+def _role_label(role: str | None, fallback: str) -> str:
     """How a refusal names a seed: never by value, a held-out seed by its
-    role, a spent one as spent. ``seed`` is kept for the signature only."""
+    role, a spent one as spent, any other as *fallback*."""
     if role in PROTECTED_ROLES:
         return f"the registered {role} seed"
-    return "a spent seed" if role == "spent" else "another seed"
+    return "a spent seed" if role == "spent" else fallback
 
 
 def aml_seed_error(
@@ -1116,10 +1112,10 @@ def aml_seed_error(
     if seed is not None:
         for s, r in found:
             if s is not None and s != int(seed):
-                return f"the corpus was generated with {_match_label(s, r)}, not the claimed seed"
+                return f"the corpus was generated with {_role_label(r, 'another seed')}, not the claimed seed"
             if s is None and claim_verified is not True:
                 return (
-                    f"the corpus holds instances from {_match_label(None, r)}, not only the "
+                    f"the corpus holds instances from {_role_label(r, 'another seed')}, not only the "
                     "claimed seed"
                 )
     if found:
@@ -1139,7 +1135,7 @@ def aml_seed_error(
         if eff is None:
             label = "the corpus seed"
         elif held_role is not None:
-            label = _match_label(eff, held_role)
+            label = _role_label(held_role, "another seed")
         else:
             label = "the configured seed"
         return (
@@ -1175,12 +1171,6 @@ def aml_seed_error(
             return (
                 f"registered {corpus_role} runs are closed: the pre-registration's "
                 "corpora.registered_looks_open is false; the seed is spent after its look."
-            )
-        if corpus_role == "robustness" and not ROBUSTNESS_PERTURBATION_IMPLEMENTED:
-            return (
-                "registered robustness runs are refused until datagen applies "
-                "corpora.robustness_perturbation: scoring the robustness seed unperturbed "
-                "would spend it on the wrong corpus"
             )
         return None
     if eff_role in PROTECTED_ROLES and not counts_only:
@@ -1250,22 +1240,11 @@ def config_seed(cfg) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _verdict_label(role: str | None) -> str:
-    if role in PROTECTED_ROLES:
-        return f"the registered {role} seed"
-    return "a spent seed" if role == "spent" else "a guarded seed"
-
-
 def prereg_spent_seeds() -> frozenset[int]:
     """The pre-registration's ``corpora.spent_seeds`` plus every recorded
-    look, read from the packaged pre-registration or, on the Spark driver,
-    the flat copy next to this module. Raises when neither can be read."""
-    here = Path(__file__).resolve().parent
-    for p in (_PREREG_PATH, here / _PREREG_PATH.name):
-        if p.is_file():
-            with open(p, encoding="utf-8") as f:
-                return spent_from(with_recorded_looks(json.load(f)["corpora"]))
-    raise FileNotFoundError(f"{_PREREG_PATH.name} not found next to {__file__} or {_PREREG_PATH}")
+    look. Raises when the pre-registration cannot be read."""
+    with open(_data_file(_PREREG_PATH.name), encoding="utf-8") as f:
+        return spent_from(with_recorded_looks(json.load(f)["corpora"]))
 
 
 def manifest_protected_reason(
@@ -1295,7 +1274,7 @@ def manifest_protected_reason(
             f"the held-out record cannot be read ({type(e).__name__}), so the corpus is unchecked"
         )
     if verdict.verdict == "refused":
-        return f"the corpus manifest comes from {_verdict_label(verdict.role)}"
+        return f"the corpus manifest comes from {_role_label(verdict.role, 'a guarded seed')}"
     return None
 
 
@@ -1491,7 +1470,7 @@ def registered_corpus_problem(
     role: str, seed: int, generator_image: str | None, corpus_dir: str | os.PathLike
 ) -> str | None:
     """Why a registered ``role`` look may not score the corpus at
-    ``corpus_dir`` (owner, 10-03), or None. The corpus ledger
+    ``corpus_dir``, or None. The corpus ledger
     (``corpora_ledger_path()``) must hold a ``generated`` entry of
     ``generate --registered-corpus`` for this role and seed (by its salted
     hash) whose corpus fingerprint equals the directory's, so the look
@@ -1607,13 +1586,7 @@ PREDICTIONS_FILENAME = "aml_level2_predictions.json"
 
 
 def predictions_path() -> Path:
-    here = Path(__file__).resolve().parent
-    for p in (_PREREG_PATH.parent / PREDICTIONS_FILENAME, here / PREDICTIONS_FILENAME):
-        if p.is_file():
-            return p
-    raise FileNotFoundError(
-        f"{PREDICTIONS_FILENAME} not found next to {__file__} or {_PREREG_PATH}"
-    )
+    return _data_file(PREDICTIONS_FILENAME)
 
 
 def load_predictions(path: str | os.PathLike | None = None, typologies=None) -> tuple[dict, str]:
@@ -1621,8 +1594,6 @@ def load_predictions(path: str | os.PathLike | None = None, typologies=None) -> 
     holds committed predictions: a prereg sha256, a generator image and, per
     typology (every one of ``typologies`` when given), a predicted AP in (0, 1)
     inside its prediction interval."""
-    import hashlib
-
     p = Path(path) if path is not None else predictions_path()
     raw = p.read_bytes()
     doc = json.loads(raw)

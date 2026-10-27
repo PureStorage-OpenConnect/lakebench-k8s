@@ -3,9 +3,8 @@
 Each schema maps an abstract scale factor to concrete domain dimensions. The
 invariant is: scale 1 ~ 10 GB on-disk bronze.
 
-Scale replaces the old target_size configuration. Instead of specifying
-raw data sizes, users specify a scale factor like HammerDB warehouses
-or TPC-H SF. Each schema maps scale to its own domain dimensions.
+Users specify a scale factor, like HammerDB warehouses or TPC-H SF, rather
+than a raw data size. Each schema maps scale to its own domain dimensions.
 
 Scale is a float so local mode can ask for datasets smaller than 10 GB, which
 is the smallest a cluster run would ever want. Scale 0.01 is ~100 MB and
@@ -64,18 +63,11 @@ class ScaleDimensions:
 
 @dataclass(frozen=True)
 class ComputeGuidance:
-    """Compute resource recommendation for a given scale.
+    """The compute tier of a scale, and a warning for the extreme tier.
 
-    Used by ``lakebench validate`` to check whether the configured
-    Spark executor resources are adequate for the chosen scale.
+    Spark is not sized from it: executor resources are the job profiles.
     """
 
-    min_executors: int
-    recommended_executors: int
-    recommended_memory: str
-    recommended_cores: int
-    min_memory: str
-    min_cores: int
     tier_name: str
     warning: str | None = None
 
@@ -93,20 +85,10 @@ class TrinoGuidance:
 
 @dataclass(frozen=True)
 class DatagenGuidance:
-    """Datagen resource recommendation for a given scale.
-
-    Proven defaults (updated 2026-09-20 after Rust c360 port perf sweep):
-    - batch mode: 1 generator, 4 CPU / 4Gi per pod
-    - continuous mode: 8 generators, 8 CPU / 8Gi per pod
-      (Rust generator uses <2 GiB per pod; 8 GiB gives 4x safety headroom.
-      Was 24 GiB for the Python image with per-worker process overhead.)
-    """
+    """The default datagen pod count for a scale. Per-pod CPU and memory
+    come from the autosizer's memory model, not from the tier."""
 
     parallelism: int
-    cpu: str
-    memory: str
-    mode: str = "batch"
-    generators: int = 1  # per-pod generator processes
 
 
 @dataclass(frozen=True)
@@ -128,18 +110,12 @@ SCALE_TIER_MINIMAL = 5
 SCALE_TIER_BALANCED = 50
 SCALE_TIER_PERFORMANCE = 500
 
-# Datagen mode crossover: scales above this threshold use sustained/continuous mode.
+# Balanced-tier scale up to which datagen keeps 4 pods; above it the pod
+# count grows with scale.
 SCALE_DATAGEN_BATCH_MAX = 10
 
-# Per-tier Spark memory recommendations (recommended / minimum).
-SPARK_MEM_MINIMAL = "4g"
-SPARK_MEM_MINIMAL_MIN = "2g"
-SPARK_MEM_BALANCED = "16g"
-SPARK_MEM_BALANCED_MIN = "8g"
-SPARK_MEM_PERFORMANCE = "32g"
-SPARK_MEM_PERFORMANCE_MIN = "16g"
+# Spark memory the extreme-tier warning recommends.
 SPARK_MEM_EXTREME = "48g"
-SPARK_MEM_EXTREME_MIN = "32g"
 
 # ---------------------------------------------------------------------------
 # Schema dimension functions
@@ -188,26 +164,6 @@ def customer360_dimensions(scale: float) -> ScaleDimensions:
     )
 
 
-def iot_dimensions(scale: float) -> ScaleDimensions:
-    """Map scale factor to IoT telemetry domain dimensions (future).
-
-    Scale 1 -> 1K sensors x 30 days @ 1 reading/min, ~10 GB
-    """
-    sensors = _entity_count(scale, 1_000)
-    readings_per_sensor_per_day = 1440  # 1 per minute
-    date_range_days = 30
-    approx_rows = sensors * readings_per_sensor_per_day * date_range_days
-
-    return ScaleDimensions(
-        scale=scale,
-        customers=sensors,  # "customers" = sensors in IoT context
-        events_per_customer=readings_per_sensor_per_day * date_range_days,
-        date_range_days=date_range_days,
-        approx_rows=approx_rows,
-        approx_bronze_gb=scale * 10.0,
-    )
-
-
 def financial_dimensions(scale: float) -> ScaleDimensions:
     """Map scale factor to Financial (AML) domain dimensions.
 
@@ -248,8 +204,9 @@ def financial_dimensions(scale: float) -> ScaleDimensions:
 
 #: pacs.008 Parquet GB per AML scale unit, measured with the default 64 MB
 #: files on the v1.6 generator: what bronze-verify read at scale 1 (8.47 GB,
-#: 26.7M rows) and 10 (93.6 GB, 267M rows). Rows are linear in scale; bytes
-#: per row grow from about 318 to 351 between the two. Above scale 10 the
+#: 26.7M rows) and 10 (93.6 GB, 267M rows). The collector's GB are GiB
+#: (bytes / 1024**3). Rows are linear in scale; bytes per row grow from about
+#: 341 to 377 between the two. Above scale 10 the
 #: scale-10 value holds: the two scale-100 runs on record are not the same
 #: setup (128 MB files, or an earlier generator) and read 0.4% and 1.8% above
 #: it (docs/data-generation.md).
@@ -281,7 +238,6 @@ def financial_gb_per_scale_unit(scale: float) -> float:
 # Registry of schema type -> dimension function
 SCHEMA_DIMENSION_MAP: dict[str, Callable[..., ScaleDimensions]] = {
     "customer360": customer360_dimensions,
-    "iot": iot_dimensions,
     "financial": financial_dimensions,
 }
 
@@ -290,7 +246,7 @@ def get_dimensions(schema_type: str, scale: float) -> ScaleDimensions:
     """Get dimensions for any schema type.
 
     Args:
-        schema_type: One of "customer360", "iot", "financial"
+        schema_type: One of "customer360", "financial"
         scale: Scale factor (>= MIN_SCALE)
 
     Returns:
@@ -324,64 +280,28 @@ def compute_guidance(scale: float) -> ComputeGuidance:
         scale: Scale factor (>= 1)
 
     Returns:
-        ComputeGuidance with tier name, minimum and recommended resources
+        ComputeGuidance with the tier name and, for the extreme tier, a warning
     """
     if scale <= SCALE_TIER_MINIMAL:
-        return ComputeGuidance(
-            min_executors=2,
-            recommended_executors=2,
-            recommended_memory=SPARK_MEM_MINIMAL,
-            recommended_cores=2,
-            min_memory=SPARK_MEM_MINIMAL_MIN,
-            min_cores=1,
-            tier_name="minimal",
-        )
-    elif scale <= SCALE_TIER_BALANCED:
-        rec_exec = max(4, min(8, int(scale // 6)))
-        return ComputeGuidance(
-            min_executors=4,
-            recommended_executors=rec_exec,
-            recommended_memory=SPARK_MEM_BALANCED,
-            recommended_cores=4,
-            min_memory=SPARK_MEM_BALANCED_MIN,
-            min_cores=2,
-            tier_name="balanced",
-        )
-    elif scale <= SCALE_TIER_PERFORMANCE:
-        rec_exec = max(8, min(16, int(scale // 30)))
-        return ComputeGuidance(
-            min_executors=8,
-            recommended_executors=rec_exec,
-            recommended_memory=SPARK_MEM_PERFORMANCE,
-            recommended_cores=8,
-            min_memory=SPARK_MEM_PERFORMANCE_MIN,
-            min_cores=4,
-            tier_name="performance",
-        )
-    else:
-        rec_exec = max(16, min(32, int(scale // 50)))
-        return ComputeGuidance(
-            min_executors=16,
-            recommended_executors=rec_exec,
-            recommended_memory=SPARK_MEM_EXTREME,
-            recommended_cores=8,
-            min_memory=SPARK_MEM_EXTREME_MIN,
-            min_cores=4,
-            tier_name="extreme",
-            warning=(
-                f"Scale {scale} requires significant compute resources. "
-                f"Recommend {SPARK_MEM_EXTREME}+ memory and 16+ executors."
-            ),
-        )
+        return ComputeGuidance(tier_name="minimal")
+    if scale <= SCALE_TIER_BALANCED:
+        return ComputeGuidance(tier_name="balanced")
+    if scale <= SCALE_TIER_PERFORMANCE:
+        return ComputeGuidance(tier_name="performance")
+    return ComputeGuidance(
+        tier_name="extreme",
+        warning=(
+            f"Scale {scale} requires significant compute resources. "
+            f"Recommend {SPARK_MEM_EXTREME}+ memory and 16+ executors."
+        ),
+    )
 
 
 def full_compute_guidance(scale: float) -> FullComputeGuidance:
     """Get combined resource guidance for Spark, Trino, and Datagen.
 
-    Derives recommended resources from scale factor using four tiers.
-    Datagen mode selection:
-    - scale <= 10 (~100 GB): batch mode (1 generator, low resources)
-    - scale > 10: continuous mode (8 generators, high resources)
+    Derives Trino resources and the datagen pod count from the scale factor
+    using four tiers.
 
     Args:
         scale: Scale factor (>= 1)
@@ -391,17 +311,10 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
     """
     spark = compute_guidance(scale)
 
-    # Datagen: CPU and memory are hard-locked per mode. Sizing updated
-    # 2026-09-20 after the Rust c360 port perf sweep:
-    #   batch:      4 CPU, 4Gi per pod, 1 generator, 1 uploader
-    #   continuous: 8 CPU, 8Gi per pod, 8 generators
-    # Measured Rust-image steady-state peak: ~1.5-2 GiB per pod. 8 GiB gives
-    # ~4x safety headroom. The pre-Rust-port sizing was 24 GiB, calibrated for
-    # the Python image's per-worker process overhead.
-    # Scaling is done by parallelism (number of pods), not per-pod resources.
+    # Datagen scales by pod count only; the autosizer sizes each pod.
 
     if scale <= SCALE_TIER_MINIMAL:
-        # Minimal: ~10-50 GB, batch mode
+        # Minimal: ~10-50 GB
         trino = TrinoGuidance(
             worker_replicas=1,
             worker_cpu="2",
@@ -409,32 +322,13 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
             coordinator_cpu="1",
             coordinator_memory="4Gi",
         )
-        datagen = DatagenGuidance(
-            parallelism=2,
-            cpu="4",
-            memory="4Gi",
-            mode="batch",
-            generators=1,
-        )
+        datagen = DatagenGuidance(parallelism=2)
     elif scale <= SCALE_TIER_BALANCED:
         # Balanced: ~60-500 GB
-        # scale <= SCALE_DATAGEN_BATCH_MAX stays batch, above switches to continuous
         if scale <= SCALE_DATAGEN_BATCH_MAX:
-            datagen = DatagenGuidance(
-                parallelism=4,
-                cpu="4",
-                memory="4Gi",
-                mode="batch",
-                generators=1,
-            )
+            datagen = DatagenGuidance(parallelism=4)
         else:
-            datagen = DatagenGuidance(
-                parallelism=max(4, int(scale // 5)),
-                cpu="8",
-                memory="8Gi",
-                mode="continuous",
-                generators=8,
-            )
+            datagen = DatagenGuidance(parallelism=max(4, int(scale // 5)))
         trino = TrinoGuidance(
             worker_replicas=2,
             worker_cpu="4",
@@ -443,14 +337,8 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
             coordinator_memory="8Gi",
         )
     elif scale <= SCALE_TIER_PERFORMANCE:
-        # Performance: ~510 GB - 5 TB, continuous mode
-        datagen = DatagenGuidance(
-            parallelism=max(8, int(scale // 10)),
-            cpu="8",
-            memory="8Gi",
-            mode="continuous",
-            generators=8,
-        )
+        # Performance: ~510 GB - 5 TB
+        datagen = DatagenGuidance(parallelism=max(8, int(scale // 10)))
         trino = TrinoGuidance(
             worker_replicas=max(4, int(scale // 25)),
             worker_cpu="8",
@@ -459,14 +347,8 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
             coordinator_memory="16Gi",
         )
     else:
-        # Extreme: > 5 TB, continuous mode
-        datagen = DatagenGuidance(
-            parallelism=max(16, int(scale // 30)),
-            cpu="8",
-            memory="8Gi",
-            mode="continuous",
-            generators=8,
-        )
+        # Extreme: > 5 TB
+        datagen = DatagenGuidance(parallelism=max(16, int(scale // 30)))
         trino = TrinoGuidance(
             worker_replicas=max(10, int(scale // 50)),
             worker_cpu="8",

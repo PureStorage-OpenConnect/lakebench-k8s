@@ -1,11 +1,11 @@
 """Where a registered (held-out) AML corpus's seed lives on the cluster.
 
-Owner decision 10-03: a registered corpus's seed reaches the cluster only
-through a Kubernetes Secret in the deployment's namespace. The datagen Job
-and the reference scorer read it as ``LB_DATAGEN_SEED`` from a secretKeyRef,
-so it is in no Job argument, pod spec or SparkApplication spec, and
-``scripts/aml_gate.py`` reads it from an owner-only file. Development seeds
-(43 and every other seed that is not held out) are passed as before.
+A registered corpus's seed reaches the cluster only through a Kubernetes
+Secret in the deployment's namespace. The datagen Job and the reference
+scorer read it as ``LB_DATAGEN_SEED`` from a secretKeyRef, so it is in no Job
+argument, pod spec or SparkApplication spec, and ``scripts/aml_gate.py``
+reads it from an owner-only file. Development seeds (43 and every other seed
+that is not held out) are passed in plaintext.
 
 The Secret is named after the seed's ``seed_ref`` (a salted hash), so a name
 is never reused for another seed: a kubelet that still caches an earlier,
@@ -36,7 +36,7 @@ def uses_seed_secret(cfg: Any) -> bool:
     Secret: a financial config that declares the evaluation or robustness
     role, or whose seed hashes to a held-out seed. A hash record that cannot
     be read answers True (fail closed). Every other config, seed 43
-    included, passes its seed in plaintext as before."""
+    included, passes its seed in plaintext."""
     workload = cfg.architecture.workload
     if workload.schema_type.value != "financial":
         return False

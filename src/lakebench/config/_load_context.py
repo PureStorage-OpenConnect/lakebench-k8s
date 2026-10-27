@@ -72,7 +72,8 @@ def purpose_from_context(context: object) -> LoadPurpose | None:
 
 @dataclass(frozen=True)
 class LoadNote:
-    """One line of the notes block: ``kind`` is removed, dead or deprecated."""
+    """One line of the notes block: ``kind`` is removed, dead, deprecated,
+    wrong-workload or conflict."""
 
     kind: str
     text: str

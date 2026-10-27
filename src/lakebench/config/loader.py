@@ -30,14 +30,12 @@ _YAML_SPACE = " \t\r\n\x85\u2028\u2029"
 _CUT_DEFAULT = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:-[^}]*$")
 
 
-def _substitute_env_vars(text: str, unresolved: list[str] | None = None) -> str:
+def _substitute_env_vars(text: str, unresolved: list[str]) -> str:
     """Replace ``${VAR}`` and ``${VAR:-default}`` in one string.
 
-    Unresolved variables without defaults raise ``ConfigError``, or are
-    appended to *unresolved* when a list is given (``load_yaml`` names them
-    all at once).
+    Unresolved variables without defaults are left as written and appended
+    to *unresolved*, so ``load_yaml`` names them all at once.
     """
-    missing: list[str] = [] if unresolved is None else unresolved
 
     def _replace(m: re.Match) -> str:
         var_name = m.group(1)
@@ -47,16 +45,10 @@ def _substitute_env_vars(text: str, unresolved: list[str] | None = None) -> str:
             return value
         if default is not None:
             return str(default)
-        missing.append(var_name)
+        unresolved.append(var_name)
         return str(m.group(0))
 
-    result = _ENV_PATTERN.sub(_replace, text)
-    if unresolved is None and missing:
-        raise ConfigError(
-            f"Unresolved environment variables: {', '.join(missing)}. "
-            f"Set them or provide defaults with ${{VAR:-default}} syntax."
-        )
-    return result
+    return _ENV_PATTERN.sub(_replace, text)
 
 
 # -- Flat field mapping (v2 config) ------------------------------------------
@@ -101,7 +93,6 @@ def _apply_flat_fields(data: dict[str, Any]) -> dict[str, Any]:
         # A config still using the deprecated 'architecture.processing' key
         # gets flat pipeline fields there, rather than a new 'pipeline'
         # block that would collide with it. An empty 'processing:' is None.
-        arch = data.get("architecture")
         if (
             nested_path[:2] == ("architecture", "pipeline")
             and isinstance(arch, dict)
@@ -139,19 +130,13 @@ def _apply_flat_fields(data: dict[str, Any]) -> dict[str, Any]:
 class ConfigError(Exception):
     """Base exception for configuration errors."""
 
-    pass
-
 
 class ConfigFileNotFoundError(ConfigError):
     """Raised when configuration file is not found."""
 
-    pass
-
 
 class ConfigParseError(ConfigError):
     """Raised when configuration file cannot be parsed."""
-
-    pass
 
 
 class ConfigValidationError(ConfigError):
@@ -506,23 +491,21 @@ def _load_and_validate(
         # block, which can carry a datagen seed or a key, and callers print
         # these dicts.
         errors = [_explain_error(dict(err)) for err in e.errors(include_input=False)]
-        if _top_level_workload:
-            errors = [
-                {**err, "loc": tuple(err["loc"][1:])}
-                if tuple(err["loc"][:2]) == ("architecture", "workload")
-                else err
-                for err in errors
-            ]
         # The continuous block is stored on the 'sustained' field; name it
         # the way the user wrote it.
         _pipe = _arch.get("pipeline") if isinstance(_arch, dict) else None
-        if not (isinstance(_pipe, dict) and "sustained" in _pipe):
-            errors = [
-                {**err, "loc": ("architecture", "pipeline", "continuous", *err["loc"][3:])}
-                if tuple(err["loc"][:3]) == ("architecture", "pipeline", "sustained")
-                else err
-                for err in errors
-            ]
+        _wrote_sustained = isinstance(_pipe, dict) and "sustained" in _pipe
+        errors = [
+            {
+                **err,
+                "loc": _user_loc(
+                    tuple(err["loc"]),
+                    workload=_top_level_workload,
+                    continuous=not _wrote_sustained,
+                ),
+            }
+            for err in errors
+        ]
         error_messages = []
         for err in errors:
             loc = ".".join(str(x) for x in err["loc"])
@@ -584,6 +567,19 @@ def _default_recipe_note(data: dict[str, Any]) -> str | None:
     )
 
 
+def _user_loc(
+    loc: tuple[Any, ...], *, workload: bool = True, continuous: bool = True
+) -> tuple[Any, ...]:
+    """*loc* in the spelling a user writes: the model's ``architecture.workload``
+    as top-level ``workload`` and its ``pipeline.sustained`` as
+    ``pipeline.continuous``, each only when its flag is set."""
+    if workload and loc[:2] == ("architecture", "workload"):
+        return ("workload", *loc[2:])
+    if continuous and loc[:3] == ("architecture", "pipeline", "sustained"):
+        return ("architecture", "pipeline", "continuous", *loc[3:])
+    return loc
+
+
 def _explain_error(err: dict[str, Any]) -> dict[str, Any]:
     """Name the nearest valid key or recipe in an error."""
     from ._hints import unknown_key_hint
@@ -591,12 +587,7 @@ def _explain_error(err: dict[str, Any]) -> dict[str, Any]:
     if err.get("type") == "extra_forbidden":
         loc = tuple(err["loc"])
         # The same place in the spellings a user writes, for the tie-break.
-        user_loc = loc
-        if loc[:2] == ("architecture", "workload"):
-            user_loc = ("workload", *loc[2:])
-        elif loc[:3] == ("architecture", "pipeline", "sustained"):
-            user_loc = ("architecture", "pipeline", "continuous", *loc[3:])
-        hint = unknown_key_hint(loc, user_loc)
+        hint = unknown_key_hint(loc, _user_loc(loc))
         err["msg"] = f"unknown key; {hint}" if hint else "unknown key"
     elif err.get("type") in ("unknown_recipe", "recipe_conflict"):
         err["loc"] = ("recipe",)
@@ -633,14 +624,9 @@ def _print_load_notes(path: Path, notes: LoadNotes) -> None:
         console.print(f"  - {escape(text)}", highlight=False, soft_wrap=True)
 
 
-# Iceberg snapshot-expiry floor while continuous streams are live. Mirrors
-# LIVE_EXPIRE_MIN_RETENTION_SECONDS in
-# modules/table_formats/iceberg/maintenance.py; a test holds them in step.
-# Delta is not checked: continuous Delta has no effective table maintenance
-# in v1.6 (VACUUM keeps the 7 d default while streams are live, OPTIMIZE is
-# skipped), and the report says so.
-_ICEBERG_LIVE_EXPIRE_FLOOR_SECONDS = 3600
-_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+# Delta is not checked by the retention advisory: continuous Delta has no
+# effective table maintenance (VACUUM keeps the 7 d default while streams are
+# live, OPTIMIZE is skipped), and the report says so.
 # Engines that run continuous Iceberg maintenance (DuckDB and none skip it).
 _MAINTENANCE_ENGINES = ("trino", "spark-thrift")
 _printed_advisories: set[str] = set()
@@ -667,11 +653,13 @@ def retention_floor_advisory(cfg: LakebenchConfig) -> str | None:
         # applied value (continuous.retention), so the default needs no
         # warning.
         return None
+    from lakebench.modules.table_formats.iceberg.maintenance import (
+        LIVE_EXPIRE_MIN_RETENTION_SECONDS,
+        _parse_threshold_seconds,
+    )
+
     threshold = sustained.retention_threshold
-    m = re.fullmatch(r"(\d+)([smhd])", threshold)
-    if m is None:
-        return None
-    if int(m.group(1)) * _UNIT_SECONDS[m.group(2)] >= _ICEBERG_LIVE_EXPIRE_FLOOR_SECONDS:
+    if _parse_threshold_seconds(threshold) >= LIVE_EXPIRE_MIN_RETENTION_SECONDS:
         return None
     return (
         f"architecture.pipeline.continuous.retention_threshold is {threshold}, below the "
@@ -737,63 +725,11 @@ def save_config(config: LakebenchConfig, path: str | Path) -> None:
     # Every component is written, so name the recipe they make (a
     # config with no recipe, or 'default', loads with a deprecation note).
     if data.get("recipe") in (None, "", "default"):
-        from .support import recipe_for
+        from .recipes import written_recipe
 
-        parts = [
-            str((arch.get("catalog") or {}).get("type")),
-            str((arch.get("table_format") or {}).get("type")),
-            str(arch.get("pipeline_engine") or "spark"),
-            str((arch.get("query_engine") or {}).get("type")),
-        ]
-        recipe = recipe_for(*parts)
+        recipe = written_recipe(data, DEFAULT_RECIPE_RESOLUTION)
         if recipe:
             data["recipe"] = recipe
 
     with open(path, "w") as f:
         yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False, indent=2)
-
-
-def generate_default_config(
-    name: str,
-    s3_endpoint: str = "",
-    s3_access_key: str = "",
-    s3_secret_key: str = "",
-    namespace: str = "",
-) -> LakebenchConfig:
-    """Generate a default configuration with common values pre-filled.
-
-    A programmatic helper; `lakebench init` writes its file from
-    `cli/_init.first_day_config` instead.
-
-    Args:
-        name: Deployment name (required)
-        s3_endpoint: S3 endpoint URL
-        s3_access_key: S3 access key
-        s3_secret_key: S3 secret key
-        namespace: Kubernetes namespace (defaults to name)
-
-    Returns:
-        LakebenchConfig with defaults
-    """
-    config_dict: dict[str, Any] = {"name": name}
-
-    # Platform configuration
-    platform: dict[str, Any] = {}
-
-    if namespace:
-        platform["kubernetes"] = {"namespace": namespace}
-
-    if s3_endpoint or s3_access_key or s3_secret_key:
-        s3_config: dict[str, Any] = {}
-        if s3_endpoint:
-            s3_config["endpoint"] = s3_endpoint
-        if s3_access_key:
-            s3_config["access_key"] = s3_access_key
-        if s3_secret_key:
-            s3_config["secret_key"] = s3_secret_key
-        platform["storage"] = {"s3": s3_config}
-
-    if platform:
-        config_dict["platform"] = platform
-
-    return LakebenchConfig.model_validate(config_dict)

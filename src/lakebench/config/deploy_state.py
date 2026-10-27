@@ -1,11 +1,9 @@
 """Deployment state kept beside a config, and name resolution for nameless configs.
 
-A config with no ``name:`` used to get a time-based name written to
-``<config dir>/.lakebench/state.json`` on every load, including read-only
-ones, and every nameless config in a directory resolved to that same name.
-From v1.7 a nameless config cannot change data: the commands that
-change data refuse it, and the read and teardown commands load it under the
-name :func:`resolve_name` resolves.
+A nameless config cannot change data: the commands that change data refuse
+it, and the read and teardown commands load it under the name
+:func:`resolve_name` resolves, which can be the name v1.6 recorded in
+``<config dir>/.lakebench/state.json``.
 
 Name resolution only reads. The deploy state below is written only by
 ``deploy`` and ``relocate_state``.
@@ -86,16 +84,6 @@ def given_legacy_state_path(config_path: str | Path) -> Path:
     in the directory of the path it was given, symbolic links not followed,
     so a config reached through a link used the link's directory."""
     return Path(config_path).absolute().parent / LEGACY_STATE
-
-
-def read_legacy_name(config_path: str | Path) -> str | None:
-    """The name a v1.6 load recorded for nameless configs in the directory of
-    the path given, as 1.6 read it (:func:`given_legacy_state_path`).
-
-    Returned verbatim. A missing, unreadable or malformed file gives None;
-    the file is never repaired or rewritten.
-    """
-    return _read_legacy_file(given_legacy_state_path(config_path))
 
 
 def _read_legacy_file(path: Path) -> str | None:
@@ -270,8 +258,7 @@ def _same_file(a: Path, b: Path) -> bool:
 # Unlike everything above, the functions below write: ``deploy`` records the
 # nonce it is about to stamp on the namespace in
 # ``<config dir>/.lakebench/<name>.json`` before it stamps it, and
-# ``relocate_state`` moves that record with a config. Read-only commands use
-# only ``read_state`` and ``current_incarnation``.
+# ``relocate_state`` moves that record with a config.
 
 #: Schema tag of the state file, also written on the namespace (annotation
 #: ``lakebench.deployment/state-schema``) by a deploy that recorded its nonce.
@@ -402,10 +389,6 @@ def _dir_id(directory: str | Path) -> str | None:
     return str(st.st_ino)
 
 
-def state_dir(config_path: str | Path) -> Path:
-    return _config_file(config_path).parent / ".lakebench"
-
-
 def state_path(config_path: str | Path, name: str) -> Path:
     """``<config dir>/.lakebench/<name>.json``.
 
@@ -419,7 +402,7 @@ def state_path(config_path: str | Path, name: str) -> Path:
         or name.lower() == "state"
     ):
         raise StateError(f"deployment name {name!r} cannot name a state file")
-    return state_dir(config_path) / f"{name}.json"
+    return _config_file(config_path).parent / ".lakebench" / f"{name}.json"
 
 
 def moved_with_its_directory(state: DeployState, config_path: str | Path) -> bool:
@@ -452,8 +435,6 @@ def not_here(state: DeployState, config_path: str | Path) -> str | None:
 
 
 def _config_name(config_path: str | Path) -> str:
-    import yaml
-
     try:
         raw = yaml.safe_load(Path(config_path).read_text()) or {}
     except (OSError, yaml.YAMLError) as e:
@@ -476,17 +457,6 @@ def read_state_file(path: Path) -> DeployState | None:
         return DeployState.from_json(json.loads(text))
     except (ValueError, KeyError, TypeError, AttributeError) as e:
         raise StateError(f"{path} is not a readable {STATE_SCHEMA} state: {e}") from e
-
-
-def read_state(config_path: str | Path, name: str | None = None) -> DeployState | None:
-    """The deploy state recorded beside ``config_path``, or None.
-
-    ``name`` defaults to the name the config resolves to (its ``name:``).
-    Never creates a file.
-    """
-    if name is None:
-        name = _config_name(config_path)
-    return read_state_file(state_path(config_path, name))
 
 
 def write_state(path: Path, state: DeployState) -> None:
@@ -623,7 +593,7 @@ def retarget(state: DeployState, namespace: str) -> bool:
     """Start a fresh nonce list when the config now targets another namespace.
 
     The kept nonces belong to the old namespace; carrying them over would let
-    ``current_incarnation`` and check 2 answer for a namespace this config
+    check 2 answer for a namespace this config
     no longer deploys. Returns True when the state was reset.
     """
     if state.namespace == namespace:
@@ -671,19 +641,6 @@ def confirm(state: DeployState, nonce: str, ident: NamespaceIdentity | None) -> 
             state.namespace_uid = ident.uid
             return True
     return False
-
-
-def current_incarnation(state: DeployState, core_v1: Any) -> str | None:
-    """``uid#nonce`` of the namespace when it carries one of ``state``'s nonces.
-
-    Reads the namespace (one ``read_namespace``). None when the namespace is
-    absent or carries a nonce this state never recorded; raises when the
-    read fails.
-    """
-    ident = read_namespace_identity(core_v1, state.namespace)
-    if ident is None or not ident.nonce or ident.nonce not in state.kept_nonces():
-        return None
-    return ident.incarnation
 
 
 # ---------------------------------------------------------------------------
@@ -738,8 +695,6 @@ def relocate_state(
                 + f"; relocate {src} from its own path"
             )
     if name:
-        import yaml
-
         try:
             raw = yaml.safe_load(src.read_text()) or {}
         except (OSError, yaml.YAMLError) as e:
@@ -844,8 +799,6 @@ def nameless_configs_in(directory: str | Path) -> list[Path]:
     substitution); parse errors are ignored. A mapping counts when it has a
     config key and no ``name``.
     """
-    import yaml
-
     d = Path(directory)
     found: list[Path] = []
     for p in sorted([*d.glob("*.yaml"), *d.glob("*.yml")]):
