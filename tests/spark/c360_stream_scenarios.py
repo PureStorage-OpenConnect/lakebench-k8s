@@ -189,17 +189,19 @@ def crash_then_replay(spark, work, name, write, files=3, rows_per_file=10, crash
 
 
 def _merge_gold_from(script):
-    """``_merge_gold`` from a gold script, which runs a job at import."""
+    """``merge_gold`` from common, which both gold scripts share; *script*
+    selects nothing now that the logic is format-independent, kept for the
+    two call sites that name their format's script."""
     import ast
 
     from pyspark.sql.functions import col, lit
 
-    path = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts" / script
+    path = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts/common.py"
     tree = ast.parse(path.read_text())
-    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_merge_gold")
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "merge_gold")
     ns = {"col": col, "lit": lit}
     exec(compile(ast.Module([fn], []), str(path), "exec"), ns)  # noqa: S102
-    return ns["_merge_gold"]
+    return ns["merge_gold"]
 
 
 def gold_merge(spark, script):
