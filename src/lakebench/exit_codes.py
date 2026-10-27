@@ -6,9 +6,9 @@ anything under ``lakebench.cli`` runs ``lakebench/cli/__init__.py``, which
 builds the whole Typer app and pulls in the Kubernetes client).
 ``lakebench.cli._exit`` re-exports every name for code inside the CLI.
 
-The codes follow the v1.7 target UX (one enum, generated into the docs):
-``docs/exit-codes.md`` is rendered from ``ExitCode`` and ``PATHS`` by
-``scripts/gen_exit_codes.py`` and a test fails when the file drifts.
+There is one enum, generated into the docs: ``docs/exit-codes.md`` is
+rendered from ``ExitCode`` and ``PATHS`` by ``scripts/gen_exit_codes.py``
+and a test fails when the file drifts.
 
 ``PATHS`` names each way a command reaches a code. An entry that is not
 ``planned`` is produced today, and ``tests/test_exit_codes.py`` has a scenario
@@ -517,11 +517,6 @@ PATHS: tuple[ExitPath, ...] = (
 
 PATHS_BY_NAME: dict[str, ExitPath] = {p.name: p for p in PATHS}
 
-# v1.6 codes that an unconverted command still produced, with what they meant
-# there. Every command is converted now, so this is empty; ``render_markdown``
-# prints a transition section only while it has entries.
-LEGACY_CODES: dict[int, str] = {}
-
 
 # Deploy and destroy report a safety refusal as a FAILED step result, not an
 # exception. The producer marks it with ``details[REFUSAL_DETAIL] = <path
@@ -613,18 +608,5 @@ def render_markdown() -> str:
         "  `report`) goes to plain stdout, unwrapped, so it can be piped to a",
         "  parser.",
     ]
-    if LEGACY_CODES:
-        lines += [
-            "",
-            "## Codes still in transition",
-            "",
-            "These commands still exit with their 1.6 code, which means something",
-            "else in the table above, until they are converted:",
-            "",
-            "| Code | 1.6 meaning |",
-            "|---|---|",
-        ]
-        for code_value, meaning in sorted(LEGACY_CODES.items()):
-            lines.append(f"| {code_value} | {_cell(meaning)} |")
     lines.append("")
     return "\n".join(lines)
