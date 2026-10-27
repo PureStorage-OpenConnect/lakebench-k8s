@@ -36,11 +36,8 @@ REDEPLOY = "run `lakebench deploy {config}` (it resolves and serves the set), th
 QUERY_ENGINE_DEPLOYMENTS = {"spark-thrift": "lakebench-spark-thrift", "duckdb": "lakebench-duckdb"}
 
 
-_CONFIG_PATH: list[str] = []
-
-
-def _fix(cfg: Any) -> str:
-    return REDEPLOY.format(config=_CONFIG_PATH[-1] if _CONFIG_PATH else "<config>")
+def _fix(config_path: str) -> str:
+    return REDEPLOY.format(config=config_path or "<config>")
 
 
 def _live(pod: Any) -> bool:
@@ -61,9 +58,9 @@ def load_handle(cfg: LakebenchConfig, k8s: Any, config_path: Any = None) -> m.De
     unclassified error."""
     from lakebench.exit_codes import LakebenchError
 
-    _CONFIG_PATH[:] = [str(config_path)] if config_path else []
+    fix_path = str(config_path) if config_path else ""
     try:
-        return _load_handle(cfg, k8s)
+        return _load_handle(cfg, k8s, fix_path)
     except LakebenchError:
         raise
     except Exception as e:
@@ -95,7 +92,7 @@ def _is_cluster_error(e: BaseException) -> bool:
     )
 
 
-def _load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
+def _load_handle(cfg: LakebenchConfig, k8s: Any, fix_path: str) -> m.DepsHandle:
     from kubernetes import client as k8s_client
     from kubernetes.client.rest import ApiException
 
@@ -113,7 +110,7 @@ def _load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
         if e.status == 404:
             raise PrerequisiteError(
                 f"namespace {ns} does not exist",
-                next=_fix(cfg),
+                next=_fix(fix_path),
                 where=where,
                 path="run.deps_missing",
             ) from e
@@ -129,7 +126,7 @@ def _load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
         raise PrerequisiteError(
             "this deployment has no dependency server",
             why="it was deployed by Lakebench 1.6 or earlier, or never finished a deploy",
-            next=_fix(cfg),
+            next=_fix(fix_path),
             where=where,
             path="run.deps_missing",
         )
@@ -138,7 +135,7 @@ def _load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
             "this deployment's dependency set is not verified",
             why="the last deploy did not finish its dependency server step, or a deploy "
             "or destroy is running",
-            next=_fix(cfg),
+            next=_fix(fix_path),
             where=where,
             path="run.deps_stale",
         )
@@ -148,7 +145,7 @@ def _load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
     except (KeyError, TypeError, ValueError) as e:
         raise PrerequisiteError(
             f"ConfigMap {m.MANIFEST_CONFIGMAP} holds no manifest",
-            next=_fix(cfg),
+            next=_fix(fix_path),
             where=where,
             path="run.deps_stale",
         ) from e
@@ -162,7 +159,7 @@ def _load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
             "the dependency set was resolved for another request than this config's",
             why=f"changed since deploy: {what} (a config edit, or another Lakebench "
             "version than the one that deployed)",
-            next=_fix(cfg),
+            next=_fix(fix_path),
             where=where,
             path="run.deps_stale",
         )
@@ -172,7 +169,7 @@ def _load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
             "the recorded dependency set does not check",
             why="; ".join(problems)
             or f"ConfigMap names {shown.get('pinset_sha256')}, the namespace {pinset}",
-            next=_fix(cfg),
+            next=_fix(fix_path),
             where=where,
             path="run.deps_mismatch",
         )
@@ -182,7 +179,7 @@ def _load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
         raise PrerequisiteError(
             f"the dependency server {m.SERVER_NAME} has no Ready pod",
             why="its pod is restarting or was lost with its node",
-            next=f"wait for pod {m.SERVER_NAME} in {ns} to be Ready, or {_fix(cfg)}",
+            next=f"wait for pod {m.SERVER_NAME} in {ns} to be Ready, or {_fix(fix_path)}",
             where=where,
             path="run.deps_stale",
         )
@@ -192,7 +189,7 @@ def _load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
             raise PrerequisiteError(
                 f"cannot read the set the restarted dependency server {server.metadata.name} serves",
                 why=err,
-                next=f"check that you may exec into pods in {ns}, or {_fix(cfg)}",
+                next=f"check that you may exec into pods in {ns}, or {_fix(fix_path)}",
                 where=where,
                 path="run.deps_stale",
             )
@@ -200,16 +197,16 @@ def _load_handle(cfg: LakebenchConfig, k8s: Any) -> m.DepsHandle:
             raise SafetyRefusal(
                 "the dependency server was replaced and serves another set",
                 why=f"pod {server.metadata.name} serves {served}, the deployment recorded {pinset}",
-                next=_fix(cfg),
+                next=_fix(fix_path),
                 where=where,
                 path="run.deps_mismatch",
             )
-    stale = _consumer_mismatches(core, ns, cfg, pinset)
+    stale = _consumer_mismatches(core, ns, cfg, pinset, fix_path)
     if stale:
         raise SafetyRefusal(
             "a query engine pod runs another dependency set",
             why=", ".join(f"{p['pod']} on {p['pinset']}" for p in stale),
-            next=_fix(cfg),
+            next=_fix(fix_path),
             where=where,
             path="run.deps_mismatch",
         )
@@ -263,7 +260,9 @@ def _served_pinset(k8s: Any, ns: str, pod: Any, request_sha: str) -> tuple[str |
         return None, f"lb_deps.py show printed no manifest: {e}"
 
 
-def _consumer_mismatches(core: Any, ns: str, cfg: Any, pinset: str) -> list[dict[str, str]]:
+def _consumer_mismatches(
+    core: Any, ns: str, cfg: Any, pinset: str, fix_path: str = ""
+) -> list[dict[str, str]]:
     """Thrift or DuckDB pods whose ``lakebench.io/deps-set`` is not ``pinset``."""
     name = QUERY_ENGINE_DEPLOYMENTS.get(cfg.architecture.query_engine.type.value)
     if name is None:
@@ -278,7 +277,7 @@ def _consumer_mismatches(core: Any, ns: str, cfg: Any, pinset: str) -> list[dict
             raise PrerequisiteError(
                 f"the deployment's query engine ({name}) is missing",
                 why="the last deploy stopped after its dependency server step",
-                next=_fix(cfg),
+                next=_fix(fix_path),
                 where=f"namespace {ns}",
                 path="run.deps_stale",
             ) from e
@@ -295,7 +294,7 @@ def _consumer_mismatches(core: Any, ns: str, cfg: Any, pinset: str) -> list[dict
     return out
 
 
-def pods_on_sets(core: Any, ns: str, cfg: Any, since: Any = None) -> list[dict[str, str]]:
+def pods_on_sets(core: Any, ns: str, cfg: Any) -> list[dict[str, str]]:
     """The query engine pods (Spark Thrift, DuckDB) with the set each names,
     for the run-end check. The Spark drivers are not listed: every job of a
     run is built from the run's one handle, so their annotation cannot
@@ -332,7 +331,7 @@ def check_pods(cfg: Any, handle: m.DepsHandle, since: Any) -> dict[str, Any]:
         if attempt:
             time.sleep(2 * attempt)  # an API blip at run end is retried
         try:
-            pods = pods_on_sets(k8s_client.CoreV1Api(), cfg.get_namespace(), cfg, since=since)
+            pods = pods_on_sets(k8s_client.CoreV1Api(), cfg.get_namespace(), cfg)
             break
         except Exception as e:  # noqa: BLE001 -- recorded, not swallowed
             last = (str(e) or type(e).__name__)[:300]

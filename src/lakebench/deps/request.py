@@ -110,9 +110,8 @@ TOOLS_PATH = Path(__file__).resolve().parent.parent / "deploy" / "deps_tools" / 
 def jar_coordinates(cfg: LakebenchConfig) -> list[str]:
     """Maven coordinates every Spark job and Spark Thrift load.
 
-    Moved unchanged from ``SparkJobManager._build_manifest``. The Iceberg
-    runtime comes from ``iceberg_runtime_suffix_for``, so the jobs and
-    Thrift load one runtime jar (UX D2).
+    The Iceberg runtime comes from ``iceberg_runtime_suffix_for``, so the jobs
+    and Thrift load one runtime jar.
     """
     from lakebench.modules.pipeline_engines.spark.job import (
         _delta_spark_artifact,
@@ -194,9 +193,7 @@ def duckdb_extension_repository(cfg: LakebenchConfig) -> str:
 def selected_groups(cfg: LakebenchConfig) -> tuple[str, ...]:
     """The groups a deployment needs.
 
-    ``py-reference`` serves the AML reference detector's driver. The design
-    also selects it for ``ml_loop.enabled``; the ML loop and its config key
-    moved to v1.8, which adds that condition with the key.
+    ``py-reference`` serves the AML reference detector's driver.
     """
     groups = [GROUP_JARS]
     if cfg.architecture.workload.schema_type.value == "financial":
@@ -278,7 +275,6 @@ def select_request(cfg: LakebenchConfig, *, tools_digest: str | None = None) -> 
     if GROUP_PY_REFERENCE in groups or GROUP_DUCKDB in groups:
         kwargs["pypi_index"] = pypi_index(cfg)
     if GROUP_PY_REFERENCE in groups:
-        # Read in place, not moved (C12): the frozen scorer's pins.
         kwargs["py_reference"] = tuple(REFERENCE_PY_DEPS)
     if GROUP_DUCKDB in groups:
         kwargs["duckdb_version"] = cfg.architecture.query_engine.duckdb.version
