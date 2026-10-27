@@ -381,22 +381,43 @@ class TestDestroyAllWiring:
         assert ns.status is DeploymentStatus.FAILED
         assert "re-run destroy" in ns.message
 
-    def test_lost_reply_then_terminating_is_not_reported_as_kept(self):
-        cluster = FakeCluster(drain_polls=1)
-        real_delete = cluster.delete_namespace
-        n = {"i": 0}
+    def test_lost_delete_reply_with_terminating_is_not_reported_as_kept(self):
+        """The delete is accepted by the API server but its reply is lost. The
+        namespace then terminates, so the run succeeded and must not report it
+        as kept, whether only the first reply or every reply is lost."""
 
-        def lost_reply(ns, uid=None):
-            n["i"] += 1
-            real_delete(ns, uid=uid)  # accepted by the API server...
-            if n["i"] == 1:
-                raise K8sResourceError("timeout")  # ...but the reply is lost
+        def first_reply_lost(cluster):
+            real_delete = cluster.delete_namespace
+            n = {"i": 0}
 
-        cluster.delete_namespace = lost_reply
-        results, _, _, _ = self._run_destroy(cluster)
-        ns = [r for r in results if r.component == "namespace"][-1]
-        assert ns.status is DeploymentStatus.SUCCESS
-        assert "NOT deleted" not in ns.message
+            def lost(ns, uid=None):
+                n["i"] += 1
+                real_delete(ns, uid=uid)  # accepted by the API server...
+                if n["i"] == 1:
+                    raise K8sResourceError("timeout")  # ...but the reply is lost
+
+            return lost
+
+        def every_reply_lost(cluster):
+            real_delete = cluster.delete_namespace
+
+            def all_lost(ns, uid=None):
+                if cluster.phase == "Active":
+                    real_delete(ns, uid=uid)
+                raise K8sResourceError("timeout")
+
+            return all_lost
+
+        for make_fake, why in [
+            (first_reply_lost, "first reply lost"),
+            (every_reply_lost, "every reply lost"),
+        ]:
+            cluster = FakeCluster(drain_polls=1)
+            cluster.delete_namespace = make_fake(cluster)
+            results, _, _, _ = self._run_destroy(cluster)
+            ns = [r for r in results if r.component == "namespace"][-1]
+            assert ns.status is DeploymentStatus.SUCCESS, why
+            assert "NOT deleted" not in ns.message, why
 
     def test_redeploy_into_the_same_namespace_during_the_helm_call_is_not_deleted(self):
         """The nonce changes (same UID) after the in-lease check, while helm
@@ -437,21 +458,6 @@ class TestDestroyAllWiring:
         assert cluster.deletes == 0
         ns = [r for r in results if r.component == "namespace"][-1]
         assert ns.status is DeploymentStatus.FAILED
-
-    def test_every_reply_lost_but_terminating_is_not_reported_kept(self):
-        cluster = FakeCluster(drain_polls=1)
-        real_delete = cluster.delete_namespace
-
-        def all_lost(ns, uid=None):
-            if cluster.phase == "Active":
-                real_delete(ns, uid=uid)
-            raise K8sResourceError("timeout")
-
-        cluster.delete_namespace = all_lost
-        results, _, _, _ = self._run_destroy(cluster)
-        ns = [r for r in results if r.component == "namespace"][-1]
-        assert ns.status is DeploymentStatus.SUCCESS
-        assert "NOT deleted" not in ns.message
 
     def test_in_lease_delete_finding_terminating_waits(self):
         cluster = FakeCluster(phase="Terminating", drain_polls=1)
@@ -513,7 +519,12 @@ class TestDestroyAllWiring:
         results, _, calls, engine = self._run_destroy(cluster, uid_fn=flaky)
         assert calls == []
         engine.k8s.delete_namespace.assert_not_called()
-        assert results[-1].status is DeploymentStatus.FAILED
+        # Assert the component and step that failed, not merely that something
+        # did: a failure moved back to the start would otherwise pass here as a
+        # duplicate of the at-start refusal.
+        failed = results[-1]
+        assert failed.component == "namespace" and failed.status is DeploymentStatus.FAILED
+        assert "Stopped before Spark pod cleanup" in failed.message
 
 
 class TestClient:

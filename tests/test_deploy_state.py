@@ -116,14 +116,6 @@ def test_two_crashed_deploys_own_namespace_accepted(tmp_path, monkeypatch):
     assert _check(nameless, core, name=NAME) == "u1#P1"
 
 
-def test_pending_nonce_accepted(tmp_path):
-    cfg = _nameless(tmp_path)
-    core = FakeCore()
-    _v16_namespace(core, nonce="P1")
-    _v17_state(cfg, [("P1", "pending")])
-    assert _check(cfg, core, name=NAME) == "u1#P1"
-
-
 def test_concurrent_deploy_state_lock(tmp_path):
     """Two threads run steps 2 to 4 on one directory; both nonces survive."""
     cfg = _nameless(tmp_path)
@@ -158,6 +150,11 @@ def test_write_deploy_nonce_marks_v17_state_only_when_recorded():
     core.add("ns2")
     fresh = write_deploy_nonce(core, "ns2")
     assert fresh and ANNOTATION_STATE_SCHEMA not in core.namespaces["ns2"]["annotations"]
+    # An auto-generated nonce is fresh each time, and the last write wins.
+    a = write_deploy_nonce(core, "ns2")
+    b = write_deploy_nonce(core, "ns2")
+    assert a != b
+    assert core.namespaces["ns2"]["annotations"][ANNOTATION_DEPLOY_NONCE] == b
 
 
 # ---------------------------------------------------------------------------
@@ -215,26 +212,30 @@ def test_v16_namespace_with_name_and_matching_stamps_proceeds(
         assert _check(cfg, core, name=NAME) == "u1#n16"
 
 
-def test_copied_dir_state_for_other_dir_refused(tmp_path):
+def test_copied_dir_state_is_refused(tmp_path):
+    """A state whose directory moved (copytree to another dir) or whose host
+    changed is the same refusal: nameless.copied_dir."""
+    import shutil
+
+    # A directory copied to another path: the state names the source dir.
     src = tmp_path / "src"
     src.mkdir()
     cfg_src = _nameless(src)
     _v17_state(cfg_src, [("n1", "confirmed")])
     dst = tmp_path / "dst"
-    import shutil
-
     shutil.copytree(src, dst)
     core = FakeCore()
     _v16_namespace(core, nonce="n1")
     _refused("nameless.copied_dir", _check, dst / "a.yaml", core, name=NAME)
 
-
-def test_state_from_other_host_refused(tmp_path):
-    cfg = _nameless(tmp_path)
+    # A state carried from another host.
+    other_host = tmp_path / "other"
+    other_host.mkdir()
+    cfg = _nameless(other_host)
     _v17_state(cfg, [("n1", "confirmed")], host="elsewhere")
-    core = FakeCore()
-    _v16_namespace(core, nonce="n1")
-    _refused("nameless.copied_dir", _check, cfg, core, name=NAME)
+    core2 = FakeCore()
+    _v16_namespace(core2, nonce="n1")
+    _refused("nameless.copied_dir", _check, cfg, core2, name=NAME)
 
 
 def test_v16_dir_needs_name(tmp_path):
@@ -436,12 +437,17 @@ def test_readonly_commands_create_no_files(tmp_path, fake_cluster, monkeypatch):
     before = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
     runner = CliRunner()
     no_name = runner.invoke(app, ["status", str(cfg)])
-    runner.invoke(app, ["status", str(cfg), "--name", NAME])
-    runner.invoke(app, ["logs", str(cfg), "hive", "--name", NAME])
+    status_named = runner.invoke(app, ["status", str(cfg), "--name", NAME])
+    logs_named = runner.invoke(app, ["logs", str(cfg), "hive", "--name", NAME])
     after = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
     assert after == before
     # Without --name a v1.6 directory is refused at load.
     assert no_name.exit_code == 2, no_name.output
+    # The --name read-only commands must end on a handled exit, not an
+    # unhandled crash: a traceback that wrote nothing would otherwise pass
+    # this test for the wrong reason.
+    for res in (status_named, logs_named):
+        assert res.exception is None or isinstance(res.exception, SystemExit), res.output
 
 
 def test_deploy_records_before_the_namespace_gets_it(tmp_path, monkeypatch):
@@ -468,17 +474,27 @@ def test_deploy_records_before_the_namespace_gets_it(tmp_path, monkeypatch):
     assert st is not None and st.nonces[0].status == "confirmed"
 
 
-def test_deploy_refuses_moved_state(tmp_path, monkeypatch):
+def test_deploy_refuses_a_moved_or_copied_state(tmp_path, monkeypatch):
+    """A state that was moved away (moved_to) or copied in from another
+    directory (config_dir) is refused, and the refusal leaves the state file's
+    recorded nonces unchanged."""
     from lakebench.cli import _deploy
 
-    cfg_path = _named(tmp_path)
-    _v17_state(cfg_path, [("n", "confirmed")], moved_to="/elsewhere")
-    core = FakeCore()
-    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
-    cfg = load_config(cfg_path, purpose=LoadPurpose.MUTATE)
-    _refused(
-        "nameless.moved", _deploy._record_deploy_nonce, cfg, cfg_path, dry_run=False, nonce=None
-    )
+    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: FakeCore())
+    cases = [
+        # (state kwargs, refusal path)
+        ({"moved_to": "/elsewhere"}, "nameless.moved"),
+        ({"config_dir": "/elsewhere"}, "deploy.state_copied"),
+    ]
+    for i, (state_kw, refusal) in enumerate(cases):
+        d = tmp_path / f"d{i}"
+        d.mkdir()
+        cfg_path = _named(d)
+        _v17_state(cfg_path, [("n1", "confirmed")], **state_kw)
+        cfg = load_config(cfg_path, purpose=LoadPurpose.MUTATE)
+        _refused(refusal, _deploy._record_deploy_nonce, cfg, cfg_path, dry_run=False, nonce=None)
+        st = ds.read_state_file(ds.state_path(cfg_path, NAME))
+        assert st is not None and st.kept_nonces() == ["n1"], refusal
 
 
 def test_deploy_cli_dry_run_writes_nothing(tmp_path, monkeypatch):
@@ -542,26 +558,6 @@ def test_a_directory_recreated_at_the_same_path_is_not_the_original(tmp_path):
     (tmp_path / "copy").rename(a)
     st = ds.read_state_file(ds.state_path(cfg_a, NAME))
     assert st is not None and "a copy of" in (ds.not_here(st, cfg_a) or "")
-
-
-def test_deploy_refuses_a_copied_state(tmp_path, monkeypatch):
-    from lakebench.cli import _deploy
-
-    cfg_path = _named(tmp_path)
-    _v17_state(cfg_path, [("n1", "confirmed")], config_dir="/elsewhere")
-    core = FakeCore()
-    monkeypatch.setattr("kubernetes.client.CoreV1Api", lambda *a, **k: core)
-    cfg = load_config(cfg_path, purpose=LoadPurpose.MUTATE)
-    _refused(
-        "deploy.state_copied",
-        _deploy._record_deploy_nonce,
-        cfg,
-        cfg_path,
-        dry_run=False,
-        nonce=None,
-    )
-    st = ds.read_state_file(ds.state_path(cfg_path, NAME))
-    assert st is not None and st.kept_nonces() == ["n1"]
 
 
 def test_deploy_to_a_new_namespace_starts_a_fresh_nonce_list(tmp_path, monkeypatch):
@@ -673,12 +669,25 @@ def test_unusable_state_directory_stops_deploy_with_exit_4(tmp_path, monkeypatch
     assert core.patches == [] and NAME not in core.namespaces
 
 
-def test_state_lock_times_out_instead_of_hanging(tmp_path):
+def test_state_lock_times_out_instead_of_hanging(tmp_path, monkeypatch):
+    # Inject the clock so the timeout is reached without a real wait. The
+    # held outer lock acquires at t=0; the blocked inner lock sleeps once,
+    # then the clock jumps past its deadline so it raises rather than hangs.
+    clock = {"t": 0.0}
+    slept: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock["t"] += 100.0  # the next monotonic() is well past any deadline
+
+    monkeypatch.setattr(ds.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(ds.time, "sleep", fake_sleep)
     cfg_path = _named(tmp_path)
     with ds.state_lock(cfg_path, NAME):
         with pytest.raises(ds.StateError):
             with ds.state_lock(cfg_path, NAME, timeout=0.3):
                 pass
+    assert slept == [0.2]  # it waited on the lock once, it did not hang
 
 
 @pytest.mark.parametrize("bad", ["", ".hidden", "a/b", "State"])

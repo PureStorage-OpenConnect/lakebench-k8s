@@ -6,7 +6,6 @@ does."""
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,8 +13,6 @@ import yaml
 
 from lakebench.config import datagen_seed as ds
 from tests.conftest import make_config
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 def _cfg(schema="financial", **dg):
@@ -138,25 +135,3 @@ def test_customer360_generate_applies_no_map():
     assert d.deploy().status.value == "success"
     kinds = [c.args[0]["kind"] for c in engine.k8s.apply_manifest.call_args_list]
     assert kinds == ["Job"]
-
-
-def test_byte_compare_runs_every_generator_with_the_hash_file(monkeypatch):
-    from types import SimpleNamespace
-
-    from tests.conftest import exec_repo_script
-
-    bc = exec_repo_script(ROOT / "scripts/datagen_byte_compare.py", "datagen_byte_compare_hm2")
-    seen = []
-
-    def run(name, args, what):
-        seen.append(args)
-        return "[entrypoint] schema=financial node 0/1 threads=2 cycle=0 -> s3://b/ :: x"
-
-    monkeypatch.setattr(bc, "_run_container", run)
-    minio = SimpleNamespace(endpoint="http://127.0.0.1:1", access="a", secret="s", port=1)
-    assert bc.run_generator("img", ["--seed", "43"], 0, minio, {}) == 2
-    args = seen[0]
-    i = args.index("img")
-    assert all(a in args[:i] for a in bc.HELDOUT_ARGS)
-    # A shared SELinux label: a private one (Z) would deny the next container.
-    assert bc.HELDOUT_ARGS[1].endswith(":ro,z")

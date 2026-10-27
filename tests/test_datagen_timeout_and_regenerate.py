@@ -68,15 +68,14 @@ class TestHandleDatagenTimeout:
     """The timeout handler: fail the run, stop the datagen Job, delete leftover
     SparkApplications, whatever the cleanup does."""
 
-    @pytest.mark.parametrize("cleanup_fails", [False, True])
-    def test_run_fails_and_every_stream_app_is_tried(self, cleanup_fails: bool) -> None:
+    def test_run_fails_and_every_stream_app_is_tried(self) -> None:
         # Best-effort cleanup: a failure deleting the Job or a SparkApplication
-        # must not swallow the exit or stop the remaining deletes.
+        # must not swallow the exit or stop the remaining deletes. The
+        # failing-cleanup case is the strict one; a clean cleanup is a subset.
         deployer = MagicMock()
         job_manager = MagicMock()
-        if cleanup_fails:
-            deployer._delete_existing_job.side_effect = RuntimeError("API down")
-            job_manager._delete_job.side_effect = RuntimeError("API down")
+        deployer._delete_existing_job.side_effect = RuntimeError("API down")
+        job_manager._delete_job.side_effect = RuntimeError("API down")
         with pytest.raises(typer.Exit) as exc_info:
             _handle_datagen_timeout(
                 datagen_deployer=deployer,

@@ -116,15 +116,17 @@ OWNED = {"a-silver": "MATCH", "a-gold": "MATCH"}
 
 class TestTrinoNeverDeletesFiles:
     @pytest.mark.parametrize(
-        ("verdicts", "kw", "tables_ok", "unregister_only"),
+        ("verdicts", "kw", "tables_ok", "unregister_only", "refused_bronze"),
         [
-            # a shared bronze tagged by deployment B
-            ({"b-bronze": "MISMATCH", **OWNED}, {}, True, False),
+            # a shared bronze tagged by deployment B: still unregistered, and
+            # the refusal is reported (buckets FAILED)
+            ({"b-bronze": "MISMATCH", **OWNED}, {}, True, False, True),
             # tagless backend, bronze adopted with data: the table step leaves it alone too
             (
                 dict.fromkeys(["b-bronze", "a-silver", "a-gold"], "UNSUPPORTED"),
                 {"delete_buckets": False, "created": {"a-silver", "a-gold"}, "other": []},
                 True,
+                False,
                 False,
             ),
             (
@@ -132,26 +134,26 @@ class TestTrinoNeverDeletesFiles:
                 {"create_buckets": False, "created": set()},
                 None,
                 False,
+                False,
             ),
-            ({"b-bronze": "MISMATCH", **OWNED}, {"table_format": "delta"}, None, False),
-            ({"b-bronze": "MISMATCH", **OWNED}, {"catalog_type": "polaris"}, None, True),
+            ({"b-bronze": "MISMATCH", **OWNED}, {"table_format": "delta"}, None, False, False),
+            ({"b-bronze": "MISMATCH", **OWNED}, {"catalog_type": "polaris"}, None, True, False),
         ],
     )
     def test_trino_never_deletes_another_deployments_files(
-        self, h, verdicts, kw, tables_ok, unregister_only
+        self, h, verdicts, kw, tables_ok, unregister_only, refused_bronze
     ):
-        boto, tables, _buckets = h.run(verdicts, TRINO, **kw)
+        boto, tables, buckets = h.run(verdicts, TRINO, **kw)
         assert h.drops() == []
         assert boto.buckets["b-bronze"] == CORPUS
         if tables_ok:
             assert tables.status is DeploymentStatus.SUCCESS, tables.message
         if unregister_only:
             assert len(h.ran) == 3 and all("unregister_table" in q for q in h.ran)
-
-    def test_a_refused_shared_bronze_is_still_reported(self, h):
-        boto, tables, buckets = h.run({"b-bronze": "MISMATCH", **OWNED}, TRINO)
-        assert "system.unregister_table(schema_name => 'bronze'" in h.ran[0]
-        assert buckets.status is DeploymentStatus.FAILED
+        if refused_bronze:
+            # A refused shared bronze is still unregistered first and reported.
+            assert "system.unregister_table(schema_name => 'bronze'" in h.ran[0]
+            assert buckets.status is DeploymentStatus.FAILED
 
     def test_missing_schema_on_unregister_is_a_clean_teardown(self, h):
         """unregister_table raises SchemaNotFoundException, whose message is
@@ -305,12 +307,6 @@ def test_unregister_sql_quotes_its_arguments():
     assert sql == (
         "CALL lakehouse.system.unregister_table(schema_name => 'bronze', table_name => 'o''brien')"
     )
-
-
-def test_drop_by_any_other_engine_counts_as_deleting_files():
-    """Only Spark Thrift on Iceberg drops the catalog entry alone (the
-    harness tests above cover both Spark Thrift formats)."""
-    assert destroy_mod._drop_deletes_files("duckdb", "iceberg") is True
 
 
 @pytest.mark.usefixtures("load_script")

@@ -203,22 +203,16 @@ class TestTemplateConditionals:
 
     # -- HTTPS / TLS conditional tests --
 
-    def test_spark_thrift_ssl_enabled_for_https(self, renderer: TemplateRenderer, https_ctx):
-        """spark-thrift ssl.enabled should be true when endpoint is HTTPS."""
-        ctx = https_ctx()
-        assert ctx["s3_use_ssl"] is True
-
+    @pytest.mark.parametrize("https", [True, False])
+    def test_spark_thrift_ssl_follows_the_endpoint_scheme(
+        self, renderer: TemplateRenderer, https_ctx, https
+    ):
+        """spark-thrift ssl.enabled is true for an HTTPS endpoint, false for HTTP."""
+        ctx = https_ctx() if https else _enrich_context(_make_engine())
+        assert ctx["s3_use_ssl"] is https
         rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
-        assert "spark.hadoop.fs.s3a.connection.ssl.enabled=true" in rendered
-
-    def test_spark_thrift_ssl_disabled_for_http(self, renderer: TemplateRenderer):
-        """spark-thrift ssl.enabled should be false when endpoint is HTTP."""
-        engine = _make_engine()
-        ctx = _enrich_context(engine)
-        assert ctx["s3_use_ssl"] is False
-
-        rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
-        assert "spark.hadoop.fs.s3a.connection.ssl.enabled=false" in rendered
+        want = "true" if https else "false"
+        assert f"spark.hadoop.fs.s3a.connection.ssl.enabled={want}" in rendered
 
     @pytest.mark.parametrize(
         ("recipe", "template", "main_container"),
@@ -250,20 +244,17 @@ class TestTemplateConditionals:
         # A failed import fails the pod here, not later as a TLS error.
         assert "|| true" not in init["command"][-1]
 
-    def test_trino_jvm_trusts_the_imported_store(self, renderer: TemplateRenderer, https_ctx):
-        """Both Trino JVM configs point at the store the init container builds."""
-        configmap = yaml.safe_load(renderer.render("trino/configmap.yaml.j2", https_ctx()))
-        for role in ("coordinator", "worker"):
-            args = configmap["data"][f"jvm.config.{role}"].split()
-            assert f"-Djavax.net.ssl.trustStore={_TRUSTSTORE_PATH}" in args
-
-    def test_polaris_jvm_trusts_the_imported_store(self, renderer: TemplateRenderer, https_ctx):
-        """Polaris JAVA_TOOL_OPTIONS point at the store the init container builds."""
-        spec = _pod_spec(
-            renderer.render("polaris/deployment.yaml.j2", https_ctx("polaris-iceberg-spark-trino"))
-        )
-        env = {e["name"]: e.get("value") for e in spec["containers"][0]["env"]}
-        assert f"-Djavax.net.ssl.trustStore={_TRUSTSTORE_PATH}" in env["JAVA_TOOL_OPTIONS"].split()
+        # The JVM is pointed at the store the init container builds. Trino's
+        # JVM config lives in its own ConfigMap (both roles); Polaris reads it
+        # from JAVA_TOOL_OPTIONS on the deployment.
+        trust = f"-Djavax.net.ssl.trustStore={_TRUSTSTORE_PATH}"
+        if main_container == "trino":
+            configmap = yaml.safe_load(renderer.render("trino/configmap.yaml.j2", https_ctx()))
+            for role in ("coordinator", "worker"):
+                assert trust in configmap["data"][f"jvm.config.{role}"].split()
+        else:
+            env = {e["name"]: e.get("value") for e in spec["containers"][0]["env"]}
+            assert trust in env["JAVA_TOOL_OPTIONS"].split()
 
     def test_polaris_catalog_allows_per_zone_namespace_locations(self, renderer: TemplateRenderer):
         """The bootstrap creates the catalog with
@@ -304,9 +295,18 @@ class TestTemplateConditionals:
         assert "Catalog 'lakehouse' already exists (OK)" in result.stdout
         assert result.stdout.count("already exists (OK)") == 5
 
-    def test_datagen_ca_cert_env_vars_when_set(self, renderer: TemplateRenderer, https_ctx):
-        """Datagen job should have S3_CA_CERT env var when CA cert set."""
-        rendered = renderer.render("datagen/job.yaml.j2", https_ctx())
+    @pytest.mark.parametrize("ca_cert", [True, False])
+    def test_datagen_ca_cert_env_vars_follow_the_ca(
+        self, renderer: TemplateRenderer, https_ctx, ca_cert
+    ):
+        """The datagen job carries S3_CA_CERT/SSL_CERT_FILE only when a CA cert
+        is set; otherwise neither appears."""
+        ctx = https_ctx() if ca_cert else _enrich_context(_make_engine())
+        rendered = renderer.render("datagen/job.yaml.j2", ctx)
+        if not ca_cert:
+            assert "S3_CA_CERT" not in rendered
+            assert "SSL_CERT_FILE" not in rendered
+            return
         assert "S3_CA_CERT" in rendered
         assert _CA_SECRET in rendered
         env = {
@@ -319,31 +319,21 @@ class TestTemplateConditionals:
         # rustls-native-certs, which reads SSL_CERT_FILE.
         assert env["SSL_CERT_FILE"] == env["S3_CA_CERT"] == "/etc/ssl/certs/custom-ca/ca.crt"
 
-    def test_datagen_no_ca_cert_env_vars_when_empty(self, renderer: TemplateRenderer):
-        """Datagen job should NOT have S3_CA_CERT env var when no CA cert."""
-        engine = _make_engine()
-        ctx = _enrich_context(engine)
-
-        rendered = renderer.render("datagen/job.yaml.j2", ctx)
-        assert "S3_CA_CERT" not in rendered
-        assert "SSL_CERT_FILE" not in rendered
-
-    def test_hive_tls_block_when_https_with_ca(self, renderer: TemplateRenderer, https_ctx):
-        """Hive cluster should trust the CA secret class when HTTPS + CA cert."""
-        ctx = https_ctx()
+    @pytest.mark.parametrize("https", [True, False])
+    def test_hive_tls_block_follows_the_endpoint(
+        self, renderer: TemplateRenderer, https_ctx, https
+    ):
+        """The Hive cluster trusts the CA secret class on an HTTPS + CA
+        endpoint, and carries no TLS block over HTTP."""
+        ctx = https_ctx() if https else _enrich_context(_make_engine())
         hive = yaml.safe_load(renderer.render("hive/stackable-hivecluster.yaml.j2", ctx))
-        tls = hive["spec"]["clusterConfig"]["s3"]["inline"]["tls"]
-        assert tls["verification"]["server"]["caCert"]["secretClass"] == (
+        inline = hive["spec"]["clusterConfig"]["s3"]["inline"]
+        if not https:
+            assert "tls" not in inline
+            return
+        assert inline["tls"]["verification"]["server"]["caCert"]["secretClass"] == (
             f"lakebench-s3-ca-cert-{ctx['namespace']}"
         )
-
-    def test_hive_no_tls_block_for_http(self, renderer: TemplateRenderer):
-        """Hive cluster should NOT have TLS block when HTTP endpoint."""
-        engine = _make_engine()
-        ctx = _enrich_context(engine)
-
-        hive = yaml.safe_load(renderer.render("hive/stackable-hivecluster.yaml.j2", ctx))
-        assert "tls" not in hive["spec"]["clusterConfig"]["s3"]["inline"]
 
 
 # ===========================================================================

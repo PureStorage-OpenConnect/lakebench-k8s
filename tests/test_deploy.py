@@ -103,16 +103,6 @@ class TestOwnershipHooksFire:
         with patch("kubernetes.client.CoreV1Api"):
             assert engine._deploy_namespace().status == DeploymentStatus.FAILED
 
-    def test_write_deploy_nonce_is_fresh_each_time(self):
-        from lakebench.deploy.ownership import ANNOTATION_DEPLOY_NONCE, write_deploy_nonce
-
-        core = MagicMock()
-        a = write_deploy_nonce(core, "ns")
-        b = write_deploy_nonce(core, "ns")
-        assert a != b
-        body = core.patch_namespace.call_args.args[1]
-        assert body["metadata"]["annotations"][ANNOTATION_DEPLOY_NONCE] == b
-
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
     @patch("lakebench.deploy.ownership.stamp_namespace")
     def test_deploy_namespace_refuses_on_mismatch(self, mock_stamp, _mock_ocp):

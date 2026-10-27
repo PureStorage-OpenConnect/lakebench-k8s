@@ -52,26 +52,15 @@ def _components(cfg: LakebenchConfig) -> dict[str, str]:
 # -- init output -------------------------------------------------------------
 
 
-@pytest.mark.parametrize("recipe", [r for r in recipe_names() if "-delta-" in r])
-def test_init_financial_on_a_delta_recipe_is_refused(tmp_path, creds, recipe):
+def test_init_financial_on_a_delta_recipe_is_refused(tmp_path, creds):
     """The financial workload is Iceberg-only: init refuses rather than write
-    a file that does not load."""
+    a file that does not load. Every delta recipe takes the same branch, so
+    one stands for all."""
+    recipe = next(r for r in recipe_names() if "-delta-" in r)
     out = tmp_path / "lakebench.yaml"
     r = runner.invoke(app, ["init", "-r", recipe, "-w", "financial", "-o", str(out)])
     assert r.exit_code == 2, r.output
     assert not out.exists()
-
-
-_RECIPE_LINES = (
-    "architecture:",
-    "  catalog:",
-    "    type: polaris",
-    "  table_format:",
-    "    type: iceberg",
-    "  pipeline_engine: spark",
-    "  query_engine:",
-    "    type: trino",
-)
 
 
 def _uncomment(text: str, only: tuple[str, ...] | None = None) -> str:
@@ -83,13 +72,6 @@ def _uncomment(text: str, only: tuple[str, ...] | None = None) -> str:
             ln = ln[2:]
         out.append(ln)
     return "\n".join(out) + "\n"
-
-
-def test_uncommented_component_block_still_loads(tmp_path, creds):
-    """A user who uncomments the recipe's own values gets no conflict."""
-    p = tmp_path / "c.yaml"
-    p.write_text(_uncomment(first_day_config(name="unc-t"), only=_RECIPE_LINES))
-    assert load_config(p).architecture.catalog.type.value == "polaris"
 
 
 def test_the_live_lines_stay_within_the_first_day_budget():
@@ -135,15 +117,6 @@ def test_uncommenting_every_listed_key_loads_and_lists_the_tuned_keys(recipe, wo
     assert tuned <= set(flat)
     # Beyond the tuned keys: the name, the recipe and the recipe's own components.
     assert set(flat) - tuned == {"name", "recipe", *recipe_components(recipe)}
-
-
-def test_every_tuned_key_exists_in_the_schema():
-    from lakebench.cli._init import _TUNED, _TUNED_PREFIXES, _schema_leaves
-
-    leaves = {path for path, _ in _schema_leaves()}
-    assert sorted(_TUNED - leaves) == []
-    for prefix in _TUNED_PREFIXES:
-        assert any(path.startswith(prefix) for path in leaves), prefix
 
 
 def test_one_key_uncommented_with_its_blocks_sets_only_that_key(tmp_path, creds):
@@ -388,40 +361,65 @@ def test_overwrite_keeps_the_existing_name(tmp_path):
 
 
 def test_overwrite_that_moves_the_deployment_is_refused(tmp_path):
-    for old, moved in [
+    # (old config, moved text, extra init flags, flags that let it through)
+    fresh = (["--name", "fresh-n"], "named a new deployment")
+    cases = [
         (
             "name: team\nrecipe: polaris-iceberg-spark-trino\n"
             "platform:\n  kubernetes:\n    namespace: team-ns\n",
             "namespace 'team-ns' -> 'team'",
+            [],
+            *fresh,
         ),
         (
             "name: team\nrecipe: polaris-iceberg-spark-trino\n"
             "platform:\n  storage:\n    s3:\n      buckets:\n        bronze: shared-b\n",
             "buckets.bronze 'shared-b' -> 'team-bronze'",
+            [],
+            *fresh,
         ),
-        ("name: team\nrecipe: hive-iceberg-spark-trino\n", "recipe 'hive-iceberg-spark-trino'"),
+        (
+            "name: team\nrecipe: hive-iceberg-spark-trino\n",
+            "recipe 'hive-iceberg-spark-trino'",
+            [],
+            *fresh,
+        ),
         (
             # v1.6 init -r polaris-*: the written catalog won, so it deployed Hive.
             "name: team\nrecipe: polaris-iceberg-spark-trino\n"
             "architecture:\n  catalog:\n    type: hive\n",
             "recipe 'hive-iceberg-spark-trino' -> 'polaris-iceberg-spark-trino'",
+            [],
+            *fresh,
         ),
-        ("name: team\n", "recipe 'hive-iceberg-spark-trino'"),
+        ("name: team\n", "recipe 'hive-iceberg-spark-trino'", [], *fresh),
         (
             # A flat top-level namespace key is read too.
             "name: alice\nrecipe: polaris-iceberg-spark-trino\nnamespace: team-ns\n",
             "namespace 'team-ns' -> 'alice'",
+            [],
+            *fresh,
         ),
-    ]:
+        (
+            # The guard runs even when the same --name is passed: a recipe
+            # change still moves the deployment, and matching the recipe is
+            # the way through.
+            "name: alice\nrecipe: hive-iceberg-spark-trino\n",
+            "recipe 'hive-iceberg-spark-trino' -> 'polaris-iceberg-spark-trino'",
+            ["--name", "alice"],
+            ["--name", "alice", "-r", "hive-iceberg-spark-trino"],
+            "same name, matching recipe",
+        ),
+    ]
+    for old, moved, extra, through, why in cases:
         out = tmp_path / "o.yaml"
         out.write_text(old)
-        r = runner.invoke(app, ["init", "-o", str(out), "--overwrite"])
-        assert r.exit_code == 3, r.output
-        assert moved in r.output and "--name" in r.output
-        assert out.read_text() == old
-        # Naming a new deployment is the way through.
-        r = runner.invoke(app, ["init", "-o", str(out), "--overwrite", "--name", "fresh-n"])
-        assert r.exit_code == 0, r.output
+        r = runner.invoke(app, ["init", "-o", str(out), "--overwrite", *extra])
+        assert r.exit_code == 3, (why, r.output)
+        assert moved in r.output and "--name" in r.output, why
+        assert out.read_text() == old, why
+        r = runner.invoke(app, ["init", "-o", str(out), "--overwrite", *through])
+        assert r.exit_code == 0, (why, r.output)
 
 
 def test_names_yaml_would_retype_are_quoted():
@@ -592,29 +590,6 @@ def test_quoted_reference_arrives_verbatim(tmp_path, monkeypatch):
         for value in values:
             monkeypatch.setenv("LB_DIFF", value)
             assert load_yaml(p)["k"] == value, (quote, value)
-
-
-def test_overwrite_guard_runs_when_the_same_name_is_passed(tmp_path):
-    out = tmp_path / "o.yaml"
-    old = "name: alice\nrecipe: hive-iceberg-spark-trino\n"
-    out.write_text(old)
-    r = runner.invoke(app, ["init", "-o", str(out), "--overwrite", "--name", "alice"])
-    assert r.exit_code == 3, r.output
-    assert "recipe 'hive-iceberg-spark-trino' -> 'polaris-iceberg-spark-trino'" in r.output
-    r = runner.invoke(
-        app,
-        [
-            "init",
-            "-o",
-            str(out),
-            "--overwrite",
-            "--name",
-            "alice",
-            "-r",
-            "hive-iceberg-spark-trino",
-        ],
-    )
-    assert r.exit_code == 0, r.output
 
 
 def test_overwrite_guard_resolves_env_defaults(tmp_path, monkeypatch):

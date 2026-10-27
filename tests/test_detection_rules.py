@@ -17,9 +17,8 @@ DETECTION_RULES_PATH = Path(__file__).resolve().parents[1] / (
     "src/lakebench/spark/scripts/detection_rules.py"
 )
 # The pure rule metadata (RULE_TARGET_TYPOLOGY, CUSTOMER_SCOPED_RULES,
-# HIGH_PRIORITY_CUTOFFS) lives here now and ships flat to the driver;
-# detection_rules re-exports it.
-RULE_META_PATH = Path(__file__).resolve().parents[1] / "src/lakebench/aml/rule_meta.py"
+# HIGH_PRIORITY_CUTOFFS) lives in lakebench.aml.rule_meta, which imports
+# cleanly, so tests read it by import rather than as source.
 
 
 def _module_ast():
@@ -54,9 +53,12 @@ def test_customer_scope_lists_agree_across_the_package_boundary():
     customer-scoped or declared. Drift here fails noncustomer_alerts_declared
     on every live run, or lets a customer-only rule's non-customer alerts
     pass as declared."""
+    from lakebench.aml.rule_meta import CUSTOMER_SCOPED_RULES, RULE_TARGET_TYPOLOGY
     from lakebench.config.schema import TmOperationsConfig
 
     def _lit(path, name):
+        # The Spark driver scripts import pyspark, so read their constants as
+        # source; rule_meta imports cleanly and is used directly below.
         tree = ast.parse(Path(path).read_text())
         for n in tree.body:
             if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == name:
@@ -68,8 +70,8 @@ def test_customer_scope_lists_agree_across_the_package_boundary():
 
     scripts = DETECTION_RULES_PATH.parent
     counterparty = _lit(DETECTION_RULES_PATH, "COUNTERPARTY_SCENARIOS")
-    scoped = _lit(RULE_META_PATH, "CUSTOMER_SCOPED_RULES")
-    dispatch = set(_lit(RULE_META_PATH, "RULE_TARGET_TYPOLOGY"))
+    scoped = set(CUSTOMER_SCOPED_RULES)
+    dispatch = set(RULE_TARGET_TYPOLOGY)
     assert counterparty | scoped == dispatch and not counterparty & scoped
     assert _lit(scripts / "tm_operations.py", "DEFAULT_COUNTERPARTY_SCENARIOS") == counterparty
     assert set(TmOperationsConfig().counterparty_scenarios) == counterparty
@@ -152,7 +154,7 @@ def test_every_targeted_rule_is_scheduled_or_declared_skipped():
     either run or be recorded as skipped, or its typology reads 0 alerts.
     Every batch rule must be in _RULE_DISPATCH, or ``get_rule`` returns None
     and the detection loop silently skips it."""
-    import re as _re
+    from lakebench.aml.rule_meta import RULE_TARGET_TYPOLOGY
 
     scripts = DETECTION_RULES_PATH.parent
 
@@ -163,9 +165,7 @@ def test_every_targeted_rule_is_scheduled_or_declared_skipped():
                 return set(ast.literal_eval(n.value))
         raise AssertionError(name)
 
-    src = RULE_META_PATH.read_text()
-    block = _re.search(r"RULE_TARGET_TYPOLOGY = \{(.*?)\n\}", src, _re.S).group(1)
-    targeted = set(_re.findall(r'"(W\d+_\w+)": "', block))
+    targeted = set(RULE_TARGET_TYPOLOGY)
     batch = _tuple(scripts / "gold_finalize_financial.py", "DEFAULT_DETECTION_RULES")
     cont = _tuple(scripts / "gold_refresh_financial.py", "CONTINUOUS_RULES") | _tuple(
         scripts / "gold_refresh_financial.py", "CONTINUOUS_SKIPPED_RULES"

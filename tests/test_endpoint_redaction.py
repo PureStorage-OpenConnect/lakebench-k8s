@@ -30,26 +30,18 @@ def _make_cfg_with_endpoint(endpoint: str = _RAW):
     return cfg
 
 
-def test_redact_endpoint_hashes_the_value():
-    out = _redact_endpoint(_RAW)
-    assert _RAW_HOST not in out
-    assert re.fullmatch(r"s3-endpoint-[0-9a-f]{16}", out)
-    assert out == _redact_endpoint(_RAW)
-    assert _redact_endpoint("http://other.example:9000") != out
-
-
-def test_redact_endpoint_passes_through_empty():
-    assert _redact_endpoint(None) is None
-    assert _redact_endpoint("") == ""
-
-
 def test_config_snapshot_does_not_leak_endpoint():
     cfg = _make_cfg_with_endpoint()
     snap = build_config_snapshot(cfg)
     serialised = json.dumps(snap)
     assert _RAW_HOST not in serialised, "config_snapshot leaks the raw S3 endpoint value"
-    # the s3.endpoint field is still populated, just redacted
-    assert snap["s3"]["endpoint"] == _redact_endpoint(_RAW)
+    # The field is populated, just redacted to the stable s3-endpoint-<16hex>
+    # form; the same host hashes the same way, a different one differently.
+    out = snap["s3"]["endpoint"]
+    assert _RAW_HOST not in out
+    assert re.fullmatch(r"s3-endpoint-[0-9a-f]{16}", out)
+    assert out == _redact_endpoint(_RAW)
+    assert _redact_endpoint("http://other.example:9000") != out
 
 
 def test_system_identity_storage_endpoint_is_hashed():
@@ -75,8 +67,10 @@ def test_report_html_does_not_render_s3_endpoint_field(tmp_path: Path):
 
     cfg = _make_cfg_with_endpoint()
     snap = build_config_snapshot(cfg)
+    # Feed the raw endpoint back into the snapshot: if the report still
+    # rendered an S3 endpoint field, the raw host would appear here. Rendering
+    # the already-redacted value could never fail.
+    snap["s3"]["endpoint"] = _RAW
     gen = ReportGenerator()
     html = gen._generate_config_section(_StubMetrics(snap))  # type: ignore[attr-defined]
-    # Defence in depth: even if the config_snapshot somehow carried the raw
-    # value, it must not appear in the rendered HTML.
     assert _RAW_HOST not in html

@@ -82,26 +82,52 @@ _REFUSED = {exit_codes.REFUSAL_DETAIL: "deploy.identity_foreign"}
 _FOLLOWS = {exit_codes.FOLLOWS_REFUSAL_DETAIL: True}
 
 
-def test_refusal_results_exit_refused():
-    results = [_result("postgres", "success"), _result("s3-buckets", "failed", **_REFUSED)]
-    assert cli_exit.refused_result_code(results) == ExitCode.REFUSED
-
-
-def test_a_real_failure_is_never_hidden_by_a_refusal():
-    refused = _result("s3-buckets", "failed", **_REFUSED)
-    kept = _result("namespace", "failed", **_FOLLOWS)
-    broken = _result("trino", "failed", "helm uninstall failed")
-    assert cli_exit.refused_result_code([refused, kept]) == ExitCode.REFUSED
-    assert cli_exit.refused_result_code([refused, broken]) is None
-    assert cli_exit.refused_result_code([kept]) is None  # a consequence alone is a failure
-
-
-def test_refusal_text_without_the_flag_is_a_failure():
-    """Classification reads the flag, never the wording, which may change."""
-    text_only = _result("namespace", "failed", "Destroy NOT completed: a redeploy")
-    assert cli_exit.refused_result_code([text_only]) is None
-    ok = _result("namespace", "success", **_REFUSED)  # a flag on a step that did not fail
-    assert cli_exit.refused_result_code([ok]) is None
+def test_refused_result_code():
+    """Classification reads the refusal flag, never the wording, which may
+    change. A refusal with only consequences is REFUSED; a real failure
+    alongside, a consequence alone, bare refusal text, or a flag on a step
+    that did not fail are all a plain failure (None)."""
+    cases = [
+        # (results, expected refused_result_code, why)
+        (
+            [_result("postgres", "success"), _result("s3-buckets", "failed", **_REFUSED)],
+            ExitCode.REFUSED,
+            "a refusal exits REFUSED",
+        ),
+        (
+            [
+                _result("s3-buckets", "failed", **_REFUSED),
+                _result("namespace", "failed", **_FOLLOWS),
+            ],
+            ExitCode.REFUSED,
+            "a refusal plus its consequence is still REFUSED",
+        ),
+        (
+            [
+                _result("s3-buckets", "failed", **_REFUSED),
+                _result("trino", "failed", "helm uninstall failed"),
+            ],
+            None,
+            "a real failure is never hidden by a refusal",
+        ),
+        (
+            [_result("namespace", "failed", **_FOLLOWS)],
+            None,
+            "a consequence alone is a failure",
+        ),
+        (
+            [_result("namespace", "failed", "Destroy NOT completed: a redeploy")],
+            None,
+            "refusal text without the flag is a failure",
+        ),
+        (
+            [_result("namespace", "success", **_REFUSED)],
+            None,
+            "a flag on a step that did not fail is not a refusal",
+        ),
+    ]
+    for results, expected, why in cases:
+        assert cli_exit.refused_result_code(results) == expected, why
 
 
 def test_cluster_lock_held_maps_to_refused():
@@ -1224,22 +1250,21 @@ def _foreign_class(module: str, name: str, base: type[BaseException]) -> type[Ba
     return type(name, (base,), {"__module__": module})
 
 
-def test_click_family_passes_through_by_package():
-    """Click prints its own usage error and exits 2; the handler must not wrap it."""
-    for module, name in [
-        ("click.exceptions", "UsageError"),  # stock click from a dependency
-        ("click.exceptions", "Exit"),
-        ("typer._click.exceptions", "NoSuchOption"),
-        ("typer._click.exceptions", "RenamedClickException"),  # a later rename
-    ]:
-        exc = _foreign_class(module, name, RuntimeError)("x")
-        assert cli_exit.error_for(exc) is None
-
-
-@pytest.mark.parametrize("module", ["click.exceptions", "typer._click.exceptions"])
-def test_any_click_abort_is_not_confirmed(module):
-    exc = _foreign_class(module, "Abort", RuntimeError)()
-    assert cli_exit.exit_code_for(exc) == ExitCode.NOT_CONFIRMED
+def test_click_family_exit_codes():
+    """Click prints its own usage error and exits 2, so the handler passes it
+    through (None); Abort from either package is NOT_CONFIRMED."""
+    cases = [
+        # (module, name, args, expected exit_code_for)
+        ("click.exceptions", "UsageError", ("x",), None),  # stock click from a dependency
+        ("click.exceptions", "Exit", ("x",), None),
+        ("typer._click.exceptions", "NoSuchOption", ("x",), None),
+        ("typer._click.exceptions", "RenamedClickException", ("x",), None),  # a later rename
+        ("click.exceptions", "Abort", (), ExitCode.NOT_CONFIRMED),
+        ("typer._click.exceptions", "Abort", (), ExitCode.NOT_CONFIRMED),
+    ]
+    for module, name, args, expected in cases:
+        exc = _foreign_class(module, name, RuntimeError)(*args)
+        assert cli_exit.exit_code_for(exc) == expected, f"{module}.{name}"
 
 
 def test_non_click_runtime_error_is_failed():

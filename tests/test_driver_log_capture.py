@@ -32,13 +32,13 @@ class TestLastStamp:
         p.write_text("2026-10-21T18:26:03.499Z [lb] Batch 621\nerror: unexpected EOF\n")
         assert DriverLogCapturer._last_stamp(p) == "2026-10-21T18:26:03.499Z"
 
-    def test_none_when_no_stamped_line(self, tmp_path):
+    def test_none_when_no_stamp_is_available(self, tmp_path):
+        # No stamped line (only a kubectl error), and a missing file, both
+        # return None.
         p = tmp_path / "d.log"
         p.write_text("error: the server doesn't have a resource type\n")
-        assert DriverLogCapturer._last_stamp(p) is None
-
-    def test_none_when_file_missing(self, tmp_path):
-        assert DriverLogCapturer._last_stamp(tmp_path / "nope.log") is None
+        assert DriverLogCapturer._last_stamp(p) is None, "no stamped line"
+        assert DriverLogCapturer._last_stamp(tmp_path / "nope.log") is None, "file missing"
 
 
 class TestMergeLogs:
@@ -66,10 +66,9 @@ class TestMergeLogs:
         # A resume that fetched only lines already captured adds nothing.
         assert merge_logs("a\nb\nc\n", "b\nc\n") == "a\nb\nc\n"
 
-    def test_empty_kept_returns_live(self):
-        assert merge_logs(None, "a\nb\n") == "a\nb\n"
-        assert merge_logs("", "a\nb\n") == "a\nb\n"
-
-    def test_empty_live_returns_kept(self):
-        assert merge_logs("a\nb\n", None) == "a\nb\n"
-        assert merge_logs("a\nb\n", "") == "a\nb\n"
+    def test_one_empty_side_returns_the_other(self):
+        # Empty or None on either side returns the non-empty side unchanged.
+        assert merge_logs(None, "a\nb\n") == "a\nb\n", "kept None"
+        assert merge_logs("", "a\nb\n") == "a\nb\n", "kept empty"
+        assert merge_logs("a\nb\n", None) == "a\nb\n", "live None"
+        assert merge_logs("a\nb\n", "") == "a\nb\n", "live empty"

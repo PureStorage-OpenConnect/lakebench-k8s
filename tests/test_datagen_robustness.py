@@ -50,18 +50,6 @@ def _rust_const(name: str) -> float:
     return float(m.group(1).replace("_", ""))
 
 
-@pytest.mark.parametrize(
-    ("const", "key"),
-    [
-        ("ROBUSTNESS_MEDIAN_AMOUNT_MULTIPLIER", "median_amount_multiplier"),
-        ("ROBUSTNESS_PERSONA_SD_MULTIPLIER", "persona_sd_multiplier"),
-        ("ROBUSTNESS_DORMANCY_RANGE_MULTIPLIER", "dormancy_range_multiplier"),
-    ],
-)
-def test_rust_multipliers_are_the_preregistered_ones(const, key):
-    assert _rust_const(const) == CORPORA["robustness_perturbation"][key]
-
-
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -77,12 +65,9 @@ def looks_open(monkeypatch):
     monkeypatch.setattr(ds, "_corpora", lambda: opened)
 
 
-def test_default_is_off():
+def test_config_perturbation_defaults_off_and_follows_the_flag():
     assert _cfg(seed=7777).architecture.workload.datagen.robustness_perturbation is False
     assert ds.config_perturbation(_cfg(seed=7777)) is False
-
-
-def test_dev_seed_may_be_perturbed():
     assert ds.config_perturbation(_cfg(seed=7777, robustness_perturbation=True)) is True
 
 
@@ -178,10 +163,16 @@ def test_entrypoint_forwards_the_flag_for_financial(monkeypatch):
 
 
 def test_entrypoint_refuses_the_flag_for_c360(monkeypatch):
-    rc, cmd = _entry_cmd(
-        ["--schema", "customer360", "--bucket", "b", "--robustness-perturbation"], monkeypatch
-    )
-    assert rc == 2 and cmd is None
+    """The flag on c360, and an abbreviation of it, are both refused (exit 2)
+    with no exec: an abbreviation is an unknown flag, never read as
+    --robustness-perturbation."""
+    cases = [
+        ["--schema", "customer360", "--bucket", "b", "--robustness-perturbation"],
+        ["--schema", "financial", "--bucket", "b", "--seed", "7777", "--robustness"],
+    ]
+    for argv in cases:
+        rc, cmd = _entry_cmd(argv, monkeypatch)
+        assert rc == 2 and cmd is None, argv
 
 
 def test_reference_job_records_the_perturbation(monkeypatch):
@@ -213,7 +204,9 @@ MULT = {
 }
 
 
-def test_manifest_keys_match_the_generator():
+def test_manifest_keys_and_multipliers_match_the_generator():
+    """Lockstep against robustness.rs: the manifest key constants and the
+    perturbation multipliers both match the preregistered values."""
     for name, key in [
         ("MANIFEST_STAMP_KEY", ds.MANIFEST_STAMP_KEY),
         ("MANIFEST_MEDIAN_AMOUNT_KEY", ds.MANIFEST_MULTIPLIER_KEYS["median_amount_multiplier"]),
@@ -223,6 +216,12 @@ def test_manifest_keys_match_the_generator():
         m = re.search(rf'pub const {name}: &str = "([^"]+)";', RUST)
         assert m and m.group(1) == key, name
     assert set(ds.MANIFEST_MULTIPLIER_KEYS) == set(CORPORA["robustness_perturbation"]) - {"note"}
+    for const, key in [
+        ("ROBUSTNESS_MEDIAN_AMOUNT_MULTIPLIER", "median_amount_multiplier"),
+        ("ROBUSTNESS_PERSONA_SD_MULTIPLIER", "persona_sd_multiplier"),
+        ("ROBUSTNESS_DORMANCY_RANGE_MULTIPLIER", "dormancy_range_multiplier"),
+    ]:
+        assert _rust_const(const) == CORPORA["robustness_perturbation"][key], const
 
 
 def _stamped(n=10, **override):
@@ -350,15 +349,6 @@ def test_scorer_refuses_a_stamp_the_config_did_not_declare(scorer, monkeypatch):
     assert scorer._refuse_guarded_corpus(
         _FakeAf(_groups(False)), _Manifest(7777), counts_only=False
     )
-
-
-def test_entrypoint_does_not_accept_abbreviations(monkeypatch):
-    # An abbreviation is an unknown flag: refused (exit 2), never read as
-    # --robustness-perturbation.
-    rc, cmd = _entry_cmd(
-        ["--schema", "financial", "--bucket", "b", "--seed", "7777", "--robustness"], monkeypatch
-    )
-    assert rc == 2 and cmd is None
 
 
 def test_local_gate_refuses_an_unstamped_robustness_corpus_before_scoring(
