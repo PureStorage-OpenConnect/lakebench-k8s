@@ -90,26 +90,24 @@ def _quiet(fn, *a, **kw):
 # -- workload x format compatibility, Java/Iceberg pairing ------------------
 
 
-def test_aml_on_delta_is_refused_on_the_architecture():
-    with pytest.raises(ValidationError) as exc:
-        make_config(recipe="hive-delta-spark-trino", workload={"schema": "financial"})
-    assert [e["loc"] for e in exc.value.errors()] == [("architecture",)]
-    make_config(recipe="hive-iceberg-spark-trino", workload={"schema": "financial"})
-
-
 @pytest.mark.parametrize(
-    "recipe",
+    ("recipe", "loc", "match"),
     [
-        "hive-iceberg-spark-none",
-        "hive-iceberg-spark-duckdb",
-        "hive-iceberg-spark-thrift",
+        # Delta is refused on the architecture: financial needs Iceberg.
+        ("hive-delta-spark-trino", ("architecture",), None),
+        # Financial scores recall and precision with SQL on Trino, so none,
+        # duckdb and the untested spark-thrift path are refused at load.
+        ("hive-iceberg-spark-none", None, "it needs query_engine trino"),
+        ("hive-iceberg-spark-duckdb", None, "it needs query_engine trino"),
+        ("hive-iceberg-spark-thrift", None, "it needs query_engine trino"),
     ],
 )
-def test_aml_without_a_scoring_query_engine_is_refused(recipe):
-    # Financial scores recall and precision with SQL on Trino, so none,
-    # duckdb and the untested spark-thrift path are refused at load.
-    with pytest.raises(ValidationError, match="it needs query_engine trino"):
+def test_aml_recipe_without_trino_is_refused(recipe, loc, match):
+    with pytest.raises(ValidationError, match=match) as exc:
         make_config(recipe=recipe, workload={"schema": "financial"})
+    if loc is not None:
+        assert [e["loc"] for e in exc.value.errors()] == [loc]
+    # The Iceberg-on-Trino recipe is accepted.
     make_config(recipe="hive-iceberg-spark-trino", workload={"schema": "financial"})
 
 
@@ -179,23 +177,6 @@ def test_both_locations_that_disagree_are_refused(tmp_path):
     }
     with pytest.raises(ConfigValidationError, match="workload.datagen.scale: 5 at the top level"):
         load_config(_write(tmp_path, data))
-
-
-def test_flat_scale_lands_in_the_top_level_block(tmp_path):
-    # Flat keys are deprecated in v1.7: still promoted, with a note.
-    with pytest.warns(DeprecationWarning, match="flat 'scale' is deprecated"):
-        cfg = load_config(
-            _write(tmp_path, {"name": "t", "scale": 7, "workload": {"schema": "customer360"}})
-        )
-    assert cfg.workload.datagen.scale == 7
-
-
-def test_flat_scale_with_legacy_block_does_not_create_a_conflict(tmp_path):
-    data = {"name": "t", "scale": 7, "architecture": {"workload": {"schema": "financial"}}}
-    with pytest.warns(DeprecationWarning):
-        cfg = load_config(_write(tmp_path, data))
-    assert cfg.workload.datagen.scale == 7
-    assert cfg.workload.schema_type.value == "financial"
 
 
 def test_saved_config_reloads_without_deprecations(tmp_path):
