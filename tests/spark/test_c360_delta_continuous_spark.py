@@ -26,18 +26,18 @@ def result(tmp_path_factory, spark_subprocess, spark_jars):
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-def test_bronze_ingest_names_bronze_in_spark_catalog(result):
+def test_bronze_names_and_lands_in_spark_catalog(result):
+    # bronze-ingest names bronze in spark_catalog, with the expected rows.
     assert result["bronze_name"] == "spark_catalog.default.bronze_raw"
     assert result["bronze_rows"] == 20
-
-
-def test_bronze_lands_at_its_bucket_path_not_the_metastore_warehouse(result):
-    """default exists in HMS with a pod-local warehouse; bronze must not go there."""
+    # default exists in HMS with a pod-local warehouse; bronze must not go
+    # there: it lands at its bucket path.
     assert result["bronze_location"] == result["bronze_expected_location"]
     assert result["bronze_location"].endswith("/bronze/warehouse/default.db/bronze_raw/")
 
 
-def test_reset_drops_all_three_tables_in_spark_catalog(result):
+def test_reset_drops_all_three_tables_and_clears_orphan_logs(result):
+    # The reset drops all three tables in spark_catalog and clears their files.
     assert result["targets"] == [
         "spark_catalog.default.bronze_raw",
         "spark_catalog.silver.customer_interactions_enriched",
@@ -46,23 +46,14 @@ def test_reset_drops_all_three_tables_in_spark_catalog(result):
     assert result["exists_after"] == dict.fromkeys(result["targets"], False)
     assert result["bronze_dir_files_after"] == 0
     assert result["raw_files_after"] == 1
-
-
-def test_a_fresh_stream_after_the_reset_recreates_bronze(result):
+    # A fresh stream after the reset recreates bronze.
     assert result["bronze_rows_after_restart"] == 10
-
-
-def test_reset_clears_an_unregistered_bronze_log(result):
-    """The reset also clears the _delta_log an unregistered EXTERNAL bronze
-    leaves behind, so a fresh bronze-ingest accepts the location."""
+    # The reset clears the _delta_log an unregistered EXTERNAL bronze leaves
+    # behind, so a fresh bronze-ingest accepts the location.
     assert result["orphan_log_left"] is True
     assert result["orphan_dir_files_after_reset"] == 0
     assert result["bronze_rows_after_orphan_reset"] == 10
-
-
-def test_reset_clears_an_unregistered_silver_log(result):
-    """A failed batch build can leave a Delta log at silver's managed path
-    with no catalog entry; the continuous reset clears it, or the stream's
-    first batch fails on its schema."""
+    # A failed batch build can leave a Delta log at silver's managed path with
+    # no catalog entry; the continuous reset clears it.
     assert result["silver_orphan_unregistered"] is True
     assert result["silver_orphan_files_after_reset"] == 0
