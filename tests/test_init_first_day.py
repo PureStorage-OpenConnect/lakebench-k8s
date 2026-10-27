@@ -112,11 +112,11 @@ def test_the_live_lines_stay_within_the_first_day_budget():
 def test_uncommenting_every_listed_key_loads_and_lists_the_tuned_keys(recipe, workload):
     """The file lists the keys a deployment tunes, each once, and the defaults it
     prints are values the schema accepts."""
-    from lakebench.cli._init import _is_tuned, _schema_leaves, config_problem
+    from lakebench.cli._init import _is_tuned, _schema_leaves, _validate_text
 
     text = first_day_config(name="all-t", recipe=recipe, workload=workload, endpoint="http://s3:80")
     full = _uncomment(text)
-    assert config_problem(full, "LAKEBENCH_S3") is None
+    assert _validate_text(full, "LAKEBENCH_S3")[1] is None
 
     leaves = [path for path, _ in _schema_leaves()]
     flat: list[str] = []
@@ -205,6 +205,14 @@ def test_scale_and_workload_flags_are_written(tmp_path, creds):
     assert cfg.architecture.workload.schema_type.value == "financial"
     # The autosizer scales datagen parallelism only when it is unset.
     assert "parallelism" not in cfg.architecture.workload.datagen.model_fields_set
+
+
+def test_local_financial_is_refused_before_the_template(tmp_path):
+    out = tmp_path / "l.yaml"
+    r = runner.invoke(app, ["init", "-o", str(out), "--local", "-w", "financial"])
+    assert r.exit_code == 2
+    assert "--local runs DuckDB" in " ".join(r.output.split())
+    assert not out.exists()
 
 
 def test_existing_file_needs_overwrite(tmp_path):

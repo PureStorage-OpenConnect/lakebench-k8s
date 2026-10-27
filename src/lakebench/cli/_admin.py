@@ -10,15 +10,14 @@ Every mutating admin command acquires the cluster-wide
 different workstations cannot race the same Helm upgrade or the same
 cluster-scoped resource rename. Non-mutating commands (``status``,
 ``doctor``) do not take the lease.
-
-See ``docs/internal/namespace-isolation.md`` for the design
-rationale.
 """
 
 from __future__ import annotations
 
 import logging
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
@@ -61,17 +60,6 @@ admin_app = typer.Typer(
 # ---------------------------------------------------------------------------
 
 
-def _current_kube_context() -> str | None:
-    """The kubeconfig's current context name, or None (in-cluster, no kubeconfig)."""
-    try:
-        from kubernetes import config as k8s_config
-
-        _contexts, active = k8s_config.list_kube_config_contexts()
-        return str(active["name"]) if active and active.get("name") else None
-    except Exception:  # noqa: BLE001
-        return None
-
-
 def _get_core_v1(context: str | None = None):
     """Return a kubernetes CoreV1Api, printing a clean refusal on failure.
 
@@ -99,6 +87,34 @@ def _get_core_v1(context: str | None = None):
     except Exception as e:  # noqa: BLE001
         print_error(f"cannot open Kubernetes client: {e}")
         raise typer.Exit(ExitCode.PREREQUISITE) from e
+
+
+@contextmanager
+def _admin_lease(core_v1, timeout: float) -> Iterator[None]:
+    """Hold the cluster lease for the body. A lease held by another holder
+    ends the command with exit 3; a lease that cannot be taken, or a
+    command inside it that ran out of its hold budget (the lease is then
+    released), ends it with exit 1."""
+    from lakebench.deploy.cluster_lock import (
+        ADMIN_MAX_HOLD_S,
+        ClusterLockError,
+        ClusterLockHeld,
+        LeaseHoldExceeded,
+        cluster_lock,
+    )
+
+    try:
+        with cluster_lock(core_v1, timeout=timeout, max_hold_s=ADMIN_MAX_HOLD_S):
+            yield
+    except ClusterLockHeld as e:
+        print_error(str(e))
+        raise typer.Exit(ExitCode.REFUSED) from e
+    except ClusterLockError as e:
+        print_error(f"could not acquire cluster lock: {e}")
+        raise typer.Exit(ExitCode.FAILED) from e
+    except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
+        print_error(str(e))
+        raise typer.Exit(ExitCode.FAILED) from e
 
 
 def _load_cfg(config_file: Path | None, file_option: Path | None):
@@ -181,7 +197,11 @@ def status(
 ) -> None:
     """Show installed operators, lease state, and lakebench-annotated namespaces."""
     from lakebench.deploy.cluster_lock import LOCK_NAMESPACE, read_cluster_lock
-    from lakebench.deploy.ownership import ANNOTATION_DEPLOYMENT_NAME
+    from lakebench.deploy.ownership import (
+        ANNOTATION_API_SERVER,
+        ANNOTATION_COMMITTED_SHA,
+        ANNOTATION_DEPLOYMENT_NAME,
+    )
 
     core_v1 = _get_core_v1()
 
@@ -227,8 +247,8 @@ def status(
         table.add_row(
             ns.metadata.name,
             name,
-            anns.get("lakebench.deployment/api-server", ""),
-            anns.get("lakebench.deployment/committed-sha", ""),
+            anns.get(ANNOTATION_API_SERVER, ""),
+            anns.get(ANNOTATION_COMMITTED_SHA, ""),
         )
     if found_any:
         console.print(table)
@@ -496,7 +516,12 @@ def _run_admin_install(
     if settings.kube_context is None:
         # No config context: pin the current one now, so a kubeconfig change
         # mid-run cannot split helm and the API client across two clusters.
-        current = _current_kube_context()
+        from lakebench.k8s.target import ClusterTarget
+
+        try:
+            current = ClusterTarget.current().context
+        except Exception:  # noqa: BLE001 -- no kubeconfig: _get_core_v1 refuses below
+            current = None
         if current:
             from dataclasses import replace
 
@@ -714,13 +739,6 @@ def migrate_deployment(
     from kubernetes import client as k8s_client
     from kubernetes.client.exceptions import ApiException
 
-    from lakebench.deploy.cluster_lock import (
-        ADMIN_MAX_HOLD_S,
-        ClusterLockError,
-        ClusterLockHeld,
-        LeaseHoldExceeded,
-        cluster_lock,
-    )
     from lakebench.deploy.ownership import (
         ANNOTATION_API_SERVER,
         ANNOTATION_COMMITTED_SHA,
@@ -779,44 +797,32 @@ def migrate_deployment(
 
     custom_api = k8s_client.CustomObjectsApi()
 
-    try:
-        with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
-            # Rename legacy SecretClasses. On a clean cluster where the
-            # legacy names never existed, both branches 404 cleanly.
-            _migrate_secretclass(
-                custom_api,
-                legacy_name="lakebench-s3-credentials-class",
-                new_name=f"lakebench-s3-credentials-{namespace}",
-            )
-            _migrate_secretclass(
-                custom_api,
-                legacy_name="lakebench-s3-ca-cert-class",
-                new_name=f"lakebench-s3-ca-cert-{namespace}",
-            )
+    with _admin_lease(core_v1, timeout=600):
+        # Rename legacy SecretClasses. On a clean cluster where the
+        # legacy names never existed, both branches 404 cleanly.
+        _migrate_secretclass(
+            custom_api,
+            legacy_name="lakebench-s3-credentials-class",
+            new_name=f"lakebench-s3-credentials-{namespace}",
+        )
+        _migrate_secretclass(
+            custom_api,
+            legacy_name="lakebench-s3-ca-cert-class",
+            new_name=f"lakebench-s3-ca-cert-{namespace}",
+        )
 
-            # Stamp annotations. force_legacy=True is the whole point of
-            # migrate-deployment: the namespace has no lakebench
-            # annotations yet, and we accept it because the operator has
-            # explicitly consented via this command.
-            report = stamp_namespace(
-                core_v1,
-                namespace,
-                deployment_name=expected_name,
-                api_server=expected_api,
-                committed_sha=committed,
-                force_legacy=True,
-            )
-    except ClusterLockHeld as e:
-        print_error(str(e))
-        raise typer.Exit(ExitCode.REFUSED) from e
-    except ClusterLockError as e:
-        print_error(f"could not acquire cluster lock: {e}")
-        raise typer.Exit(ExitCode.FAILED) from e
-    except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
-        # A command inside the lease ran out of its hold budget; the lease
-        # has been released.
-        print_error(str(e))
-        raise typer.Exit(ExitCode.FAILED) from e
+        # Stamp annotations. force_legacy=True is the whole point of
+        # migrate-deployment: the namespace has no lakebench
+        # annotations yet, and we accept it because the operator has
+        # explicitly consented via this command.
+        report = stamp_namespace(
+            core_v1,
+            namespace,
+            deployment_name=expected_name,
+            api_server=expected_api,
+            committed_sha=committed,
+            force_legacy=True,
+        )
 
     from lakebench.deploy.ownership import IdentityVerdict
 
@@ -858,7 +864,7 @@ def _migrate_secretclass(custom_api, legacy_name: str, new_name: str) -> None:
             return
         raise
 
-    # ADR-F4/F4b: if the new_name already exists we must confirm it
+    # If the new_name already exists we must confirm it
     # is functionally the same as the legacy before treating it as
     # "already migrated". A pre-existing new_name pointing at a
     # different backend (aborted earlier migration, a manual admin
@@ -976,14 +982,7 @@ def repair_operator(
     after an earlier read is kept. ``--dry-run`` reads without the lease and
     only prints.
     """
-    from lakebench.deploy.cluster_lock import (
-        ADMIN_MAX_HOLD_S,
-        LEASE_REQUEST_TIMEOUT,
-        ClusterLockError,
-        ClusterLockHeld,
-        LeaseHoldExceeded,
-        cluster_lock,
-    )
+    from lakebench.deploy.cluster_lock import LEASE_REQUEST_TIMEOUT
     from lakebench.modules.pipeline_engines.spark.operator import (
         _WATCH_LIST_LOCK_TIMEOUT_S,
         SparkOperatorManager,
@@ -1250,70 +1249,58 @@ def repair_operator(
             print_info("--dry-run set; not applying")
         return
 
-    try:
-        with cluster_lock(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S, max_hold_s=ADMIN_MAX_HOLD_S):
-            p = _plan(leased=True)
-            # A disagreement is refused before any rollback: the rollback's
-            # carried list would otherwise narrow a watch-all operator.
-            pending = p["state"].status in pending_states and not p["mixed"]
-            verdict = _rollback_verdict(p) if pending else None
-            _report(p, verdict)
+    with _admin_lease(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S):
+        p = _plan(leased=True)
+        # A disagreement is refused before any rollback: the rollback's
+        # carried list would otherwise narrow a watch-all operator.
+        pending = p["state"].status in pending_states and not p["mixed"]
+        verdict = _rollback_verdict(p) if pending else None
+        _report(p, verdict)
+        if p["mixed"]:
+            _refuse_mixed(p)
+        if _nothing_to_do(p):
+            return
+        if verdict is not None:
+            good, why = verdict
+            if why is not None or good is None:
+                _fail(
+                    f"Release {rel} is {p['state'].status}: {why}. Not rolling back; "
+                    f"'helm history {rel} -n {ns}' shows the revisions.",
+                    ExitCode.REFUSED,
+                )
+            if not mgr.rollback_to(good):
+                after = mgr.release_state()
+                if after is None or after.status != "deployed":
+                    _fail(f"helm rollback to revision {good} failed; see the log above")
+                # The rollback landed but its rollout did not finish in
+                # time: still set the carried list now, or a namespace
+                # only the pending revision listed is lost for good.
+                print_warning(
+                    f"rolled {rel} back to revision {good}, but its rollout did not "
+                    "finish; setting the watch list anyway"
+                )
+            else:
+                print_success(f"rolled {rel} back to revision {good}")
+            # The rolled-back revision may lack a namespace the pending
+            # one or a Deployment listed (a killed add): carry them into
+            # the set, filtered to what is still Active.
+            p = _plan(leased=True, carry=frozenset() if p["watch_all"] else p["union"])
             if p["mixed"]:
                 _refuse_mixed(p)
-            if _nothing_to_do(p):
-                return
-            if verdict is not None:
-                good, why = verdict
-                if why is not None or good is None:
-                    _fail(
-                        f"Release {rel} is {p['state'].status}: {why}. Not rolling back; "
-                        f"'helm history {rel} -n {ns}' shows the revisions.",
-                        ExitCode.REFUSED,
-                    )
-                if not mgr.rollback_to(good):
-                    after = mgr.release_state()
-                    if after is None or after.status != "deployed":
-                        _fail(f"helm rollback to revision {good} failed; see the log above")
-                    # The rollback landed but its rollout did not finish in
-                    # time: still set the carried list now, or a namespace
-                    # only the pending revision listed is lost for good.
-                    print_warning(
-                        f"rolled {rel} back to revision {good}, but its rollout did not "
-                        "finish; setting the watch list anyway"
-                    )
-                else:
-                    print_success(f"rolled {rel} back to revision {good}")
-                # The rolled-back revision may lack a namespace the pending
-                # one or a Deployment listed (a killed add): carry them into
-                # the set, filtered to what is still Active.
-                p = _plan(leased=True, carry=frozenset() if p["watch_all"] else p["union"])
-                if p["mixed"]:
-                    _refuse_mixed(p)
-            if p["needs_set"]:
-                if not mgr._set_watch_list_impl(p["target"]):  # noqa: SLF001
-                    _fail(
-                        "could not set the watch list; the operator may still be "
-                        "inconsistent. Retry after investigating the Helm state."
-                    )
-                print_success(f"reconciled Spark Operator watch list: {p['target']}")
-            if p["resize_from"] is not None:
-                if not mgr.apply_controller_tmp_size(controller_tmp_size):
-                    _fail(
-                        "could not resize the controller /tmp emptyDir; see the log above. "
-                        "The watch list repair (if any) was applied."
-                    )
-                print_success(f"controller /tmp emptyDir sizeLimit is now {controller_tmp_size}")
-    except ClusterLockHeld as e:
-        print_error(str(e))
-        raise typer.Exit(ExitCode.REFUSED) from e
-    except ClusterLockError as e:
-        print_error(f"could not acquire cluster lock: {e}")
-        raise typer.Exit(ExitCode.FAILED) from e
-    except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
-        # A command inside the lease ran out of its hold budget; the lease
-        # has been released.
-        print_error(str(e))
-        raise typer.Exit(ExitCode.FAILED) from e
+        if p["needs_set"]:
+            if not mgr._set_watch_list_impl(p["target"]):  # noqa: SLF001
+                _fail(
+                    "could not set the watch list; the operator may still be "
+                    "inconsistent. Retry after investigating the Helm state."
+                )
+            print_success(f"reconciled Spark Operator watch list: {p['target']}")
+        if p["resize_from"] is not None:
+            if not mgr.apply_controller_tmp_size(controller_tmp_size):
+                _fail(
+                    "could not resize the controller /tmp emptyDir; see the log above. "
+                    "The watch list repair (if any) was applied."
+                )
+            print_success(f"controller /tmp emptyDir sizeLimit is now {controller_tmp_size}")
 
 
 # ---------------------------------------------------------------------------
@@ -1352,13 +1339,6 @@ def reclaim_bucket(
     an operator taking over a live dataset must acknowledge with
     ``--force-nonempty``.
     """
-    from lakebench.deploy.cluster_lock import (
-        ADMIN_MAX_HOLD_S,
-        ClusterLockError,
-        ClusterLockHeld,
-        LeaseHoldExceeded,
-        cluster_lock,
-    )
     from lakebench.deploy.ownership import (
         BucketTaggingUnsupported,
         bucket_name_matches_deployment,
@@ -1379,7 +1359,7 @@ def reclaim_bucket(
         print_error(f"S3 client init failed: {s3._init_error}")
         raise typer.Exit(ExitCode.PREREQUISITE)
 
-    workload_schema = getattr(cfg, "workload_schema", None)
+    workload_schema = cfg.architecture.workload.schema_type.value
     # The claim names this cluster too, so the same deployment name on
     # another cluster sharing the object store reads it as foreign.
     from lakebench.deploy.ownership import api_server_fingerprint, cluster_stamp
@@ -1391,134 +1371,120 @@ def reclaim_bucket(
             "ownership cannot be stamped"
         )
         raise typer.Exit(ExitCode.PREREQUISITE)
-    try:
-        with cluster_lock(core_v1, timeout=600, max_hold_s=ADMIN_MAX_HOLD_S):
-            # ADR-F3: object-count check MUST run inside the lease.
-            # Two admins racing this command without --force-nonempty
-            # can each observe 0 keys before the first commits any
-            # data; if the check ran outside the lease the second
-            # would overwrite the first's tag, and a subsequent
-            # destroy by the second would empty the first's live
-            # bucket. Inside the lease every reclaim serialises.
-            if not force_nonempty:
-                try:
-                    holds = s3.has_user_objects(bucket)
-                except Exception as e:  # noqa: BLE001
-                    print_error(f"cannot list {bucket!r}: {e}")
-                    raise typer.Exit(ExitCode.FAILED) from e
-                if holds:
-                    print_error(
-                        f"bucket {bucket!r} has objects; refusing to rewrite "
-                        "ownership tag. Pass --force-nonempty to acknowledge that "
-                        "another team's data may be under this name."
-                    )
-                    raise typer.Exit(ExitCode.REFUSED)
+    with _admin_lease(core_v1, timeout=600):
+        # The object-count check must run inside the lease.
+        # Two admins racing this command without --force-nonempty
+        # can each observe 0 keys before the first commits any
+        # data; if the check ran outside the lease the second
+        # would overwrite the first's tag, and a subsequent
+        # destroy by the second would empty the first's live
+        # bucket. Inside the lease every reclaim serialises.
+        if not force_nonempty:
             try:
-                write_bucket_ownership_tag(
-                    s3.raw_client,
-                    bucket=bucket,
-                    deployment_name=cfg.name,
-                    workload_schema=workload_schema,
-                    cluster=my_cluster,
+                holds = s3.has_user_objects(bucket)
+            except Exception as e:  # noqa: BLE001
+                print_error(f"cannot list {bucket!r}: {e}")
+                raise typer.Exit(ExitCode.FAILED) from e
+            if holds:
+                print_error(
+                    f"bucket {bucket!r} has objects; refusing to rewrite "
+                    "ownership tag. Pass --force-nonempty to acknowledge that "
+                    "another team's data may be under this name."
                 )
-            except BucketTaggingUnsupported:
-                # Backend does not support bucket tagging (e.g.
-                # FlashBlade). There is no tag to write, so
-                # reclaim-bucket is a no-op on this backend. Report
-                # honestly and direct the operator to the name-prefix
-                # fallback rather than crash. F1 (round-3): pass the
-                # sibling list so the answer here matches what deploy /
-                # destroy will do on the same bucket. Without this the
-                # success message ("destroy will proceed on the
-                # name-prefix fallback") is a lie whenever a
-                # longer-prefix sibling deployment exists.
-                others = list_lakebench_deployment_names(core_v1, exclude=cfg.get_namespace())
-                if others is None:
-                    print_error(
-                        f"bucket {bucket!r}: backend does not support "
-                        "bucket tagging, and lakebench could not "
-                        "enumerate other deployments on the cluster "
-                        "to check for sibling-collision risk. Grant "
-                        "cluster-wide `list namespaces` to this token "
-                        "and try again."
-                    )
-                    raise typer.Exit(ExitCode.PREREQUISITE) from None
-                if bucket_name_matches_deployment(bucket, cfg.name, others):
-                    # On a tagless backend the claim is the owner
-                    # marker. reclaim is the owner's override, so it replaces
-                    # whatever marker is there, then reads it back.
-                    import json as _json
-
-                    from lakebench.deploy.ownership import (
-                        OWNER_MARKER_KEY,
-                        owner_marker_identity,
-                        read_owner_marker,
-                    )
-
-                    marker = owner_marker_identity(cfg.name, my_cluster, cfg.get_namespace())
-                    try:
-                        displaced = read_owner_marker(s3.raw_client, bucket)
-                    except Exception as e:  # noqa: BLE001 -- the override replaces it anyway
-                        print_info(
-                            f"bucket {bucket!r}: unreadable owner marker ({e}); replacing it"
-                        )
-                        displaced = None
-                    if displaced and (displaced.get("deployment"), displaced.get("cluster")) != (
-                        cfg.name,
-                        my_cluster,
-                    ):
-                        print_info(
-                            f"bucket {bucket!r}: replacing the owner marker of deployment "
-                            f"{displaced.get('deployment')!r} on cluster "
-                            f"{displaced.get('cluster')!r}"
-                        )
-                    s3.raw_client.put_object(
-                        Bucket=bucket,
-                        Key=OWNER_MARKER_KEY,
-                        Body=_json.dumps(marker, sort_keys=True).encode("utf-8"),
-                        ContentType="application/json",
-                    )
-                    got = read_owner_marker(s3.raw_client, bucket) or {}
-                    if (got.get("deployment"), got.get("cluster")) != (cfg.name, my_cluster):
-                        print_error(
-                            f"bucket {bucket!r}: the owner marker did not read back as "
-                            f"{cfg.name!r} on this cluster (read {got!r})"
-                        )
-                        raise typer.Exit(ExitCode.FAILED) from None
-                    print_success(
-                        f"bucket {bucket!r} on a backend that does not support tagging: "
-                        f"wrote its owner marker ({OWNER_MARKER_KEY}) for deployment "
-                        f"{cfg.name!r} on this cluster. The name also grants it a "
-                        "longest-prefix claim over any sibling deployment on the cluster, "
-                        "so deploy, destroy and clean treat the bucket as this "
-                        "deployment's; destroy deletes it only if this deployment "
-                        "created it."
-                    )
-                    raise typer.Exit(0) from None
+                raise typer.Exit(ExitCode.REFUSED)
+        try:
+            write_bucket_ownership_tag(
+                s3.raw_client,
+                bucket=bucket,
+                deployment_name=cfg.name,
+                workload_schema=workload_schema,
+                cluster=my_cluster,
+            )
+        except BucketTaggingUnsupported:
+            # Backend does not support bucket tagging (e.g.
+            # FlashBlade). There is no tag to write, so
+            # reclaim-bucket is a no-op on this backend. Report
+            # honestly and direct the operator to the name-prefix
+            # fallback rather than crash. Pass the
+            # sibling list so the answer here matches what deploy /
+            # destroy will do on the same bucket. Without this the
+            # success message ("destroy will proceed on the
+            # name-prefix fallback") is a lie whenever a
+            # longer-prefix sibling deployment exists.
+            others = list_lakebench_deployment_names(core_v1, exclude=cfg.get_namespace())
+            if others is None:
                 print_error(
                     f"bucket {bucket!r}: backend does not support "
-                    "bucket tagging, and the name does not grant "
-                    f"deployment {cfg.name!r} a longest-prefix claim "
-                    "(name mismatch, or a sibling deployment on the "
-                    "cluster has a longer prefix). Rename the bucket "
-                    f"to start with {cfg.name}- to get destroy safety. "
-                    "Only as a last resort, and only after verifying "
-                    "your cluster context with `oc whoami && kubectl "
-                    "config current-context`, pass --force-legacy on "
-                    "destroy (operator assertion)."
+                    "bucket tagging, and lakebench could not "
+                    "enumerate other deployments on the cluster "
+                    "to check for sibling-collision risk. Grant "
+                    "cluster-wide `list namespaces` to this token "
+                    "and try again."
                 )
-                raise typer.Exit(ExitCode.REFUSED) from None
-    except ClusterLockHeld as e:
-        print_error(str(e))
-        raise typer.Exit(ExitCode.REFUSED) from e
-    except ClusterLockError as e:
-        print_error(f"could not acquire cluster lock: {e}")
-        raise typer.Exit(ExitCode.FAILED) from e
-    except (subprocess.TimeoutExpired, LeaseHoldExceeded) as e:
-        # A command inside the lease ran out of its hold budget; the lease
-        # has been released.
-        print_error(str(e))
-        raise typer.Exit(ExitCode.FAILED) from e
+                raise typer.Exit(ExitCode.PREREQUISITE) from None
+            if bucket_name_matches_deployment(bucket, cfg.name, others):
+                # On a tagless backend the claim is the owner
+                # marker. reclaim is the owner's override, so it replaces
+                # whatever marker is there, then reads it back.
+                import json as _json
+
+                from lakebench.deploy.ownership import (
+                    OWNER_MARKER_KEY,
+                    owner_marker_identity,
+                    read_owner_marker,
+                )
+
+                marker = owner_marker_identity(cfg.name, my_cluster, cfg.get_namespace())
+                try:
+                    displaced = read_owner_marker(s3.raw_client, bucket)
+                except Exception as e:  # noqa: BLE001 -- the override replaces it anyway
+                    print_info(f"bucket {bucket!r}: unreadable owner marker ({e}); replacing it")
+                    displaced = None
+                if displaced and (displaced.get("deployment"), displaced.get("cluster")) != (
+                    cfg.name,
+                    my_cluster,
+                ):
+                    print_info(
+                        f"bucket {bucket!r}: replacing the owner marker of deployment "
+                        f"{displaced.get('deployment')!r} on cluster "
+                        f"{displaced.get('cluster')!r}"
+                    )
+                s3.raw_client.put_object(
+                    Bucket=bucket,
+                    Key=OWNER_MARKER_KEY,
+                    Body=_json.dumps(marker, sort_keys=True).encode("utf-8"),
+                    ContentType="application/json",
+                )
+                got = read_owner_marker(s3.raw_client, bucket) or {}
+                if (got.get("deployment"), got.get("cluster")) != (cfg.name, my_cluster):
+                    print_error(
+                        f"bucket {bucket!r}: the owner marker did not read back as "
+                        f"{cfg.name!r} on this cluster (read {got!r})"
+                    )
+                    raise typer.Exit(ExitCode.FAILED) from None
+                print_success(
+                    f"bucket {bucket!r} on a backend that does not support tagging: "
+                    f"wrote its owner marker ({OWNER_MARKER_KEY}) for deployment "
+                    f"{cfg.name!r} on this cluster. The name also grants it a "
+                    "longest-prefix claim over any sibling deployment on the cluster, "
+                    "so deploy, destroy and clean treat the bucket as this "
+                    "deployment's; destroy deletes it only if this deployment "
+                    "created it."
+                )
+                raise typer.Exit(0) from None
+            print_error(
+                f"bucket {bucket!r}: backend does not support "
+                "bucket tagging, and the name does not grant "
+                f"deployment {cfg.name!r} a longest-prefix claim "
+                "(name mismatch, or a sibling deployment on the "
+                "cluster has a longer prefix). Rename the bucket "
+                f"to start with {cfg.name}- to get destroy safety. "
+                "Only as a last resort, and only after verifying "
+                "your cluster context with `oc whoami && kubectl "
+                "config current-context`, pass --force-legacy on "
+                "destroy (operator assertion)."
+            )
+            raise typer.Exit(ExitCode.REFUSED) from None
 
     print_success(
         f"bucket {bucket!r} now owned by deployment {cfg.name!r} (workload={workload_schema})"
