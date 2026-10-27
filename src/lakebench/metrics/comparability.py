@@ -180,9 +180,8 @@ def _investigator_sessions(exp: Mapping[str, Any], record: Mapping[str, Any] | N
     return inv.get("run") if isinstance(inv, Mapping) else None
 
 
-#: Only-when-non-default identity keys. Other chapters add rows here and
-#: never edit ``experiment._identity_v1``. The v1.8 rows (``evaluation
-#: profile`` and ``ml loop``) are not built in v1.7.
+#: Identity keys added to the hash only when they differ from the default, so
+#: ``experiment._identity_v1`` and the ids recorded under it do not move.
 OPTIONAL_IDENTITY_KEYS: dict[str, OptionalKey] = {
     "cycles": OptionalKey(CORPUS, 1, _cycles, "multi-cycle generate"),
     "spark executor overrides": OptionalKey(
@@ -295,8 +294,9 @@ def compaction_operation(exp: Mapping[str, Any]) -> str | None:
     the block records it; otherwise derived from the query engine
     and table format when the stored effective-maintenance id says
     ``compaction=ran``. The engine that ran the maintenance is the query
-    engine (``cli/_sustained.py`` and ``deploy/iceberg.py`` build the
-    statements per engine): Trino runs ``optimize`` with a 128MB file size
+    engine (``cli/_sustained.py`` and
+    ``modules/table_formats/iceberg/maintenance.py`` build the statements per
+    engine): Trino runs ``optimize`` with a 128MB file size
     threshold, Spark Thrift runs Iceberg ``rewrite_data_files`` with its
     defaults. The maintenance policy marks Delta compaction not supported,
     so the Delta labels apply only to a record that says it ran. The label
@@ -305,11 +305,11 @@ def compaction_operation(exp: Mapping[str, Any]) -> str | None:
     em = exp.get("effective_maintenance") or {}
     if not isinstance(em, Mapping):
         return None
-    detail = ((em.get("detail") or {}).get("operations") or {}).get("compaction")
-    if isinstance(detail, Mapping) and detail.get("operation"):
-        from lakebench.metrics.maintenance_policy import operation_label
+    from lakebench.metrics.maintenance_policy import compaction_label
 
-        return operation_label(detail)
+    named = compaction_label(em)
+    if named is not None:
+        return named
     if not _compaction_ran(em):
         return None
     arch = exp.get("architecture") or {}
@@ -530,14 +530,8 @@ def seeds_equal(a: Any, b: Any) -> bool | None:
     """Whether two recorded seeds name one seed; None when it cannot be told.
 
     Plain integers compare exactly. A recorded form ``{seed_ref, role}``
-    (a protected seed) compares by ``seed_ref`` through ``datagen_seed.seeds_equal``
-    when this tree has it; a form whose ``seed_ref`` is None (withheld) is
-    never equal to anything."""
-    from lakebench.config import datagen_seed
-
-    rule = getattr(datagen_seed, "seeds_equal", None)
-    if rule is not None:
-        return rule(a, b)
+    (a protected seed) compares by ``seed_ref``; a form whose ``seed_ref`` is
+    None (withheld) is never equal to anything."""
     if a is None or b is None:
         return None
     if isinstance(a, Mapping) or isinstance(b, Mapping):
@@ -593,8 +587,8 @@ def _both_skipped(ka: Mapping[str, Any], kb: Mapping[str, Any]) -> bool:
 
 
 def maintenance_equal(a: Any, b: Any) -> bool:
-    """Whether two effective-maintenance ids are the same maintenance
-    (owner decision 10-03 (b)): the same id, or both runs skipped every
+    """Whether two effective-maintenance ids are the same maintenance:
+    the same id, or both runs skipped every
     operation by the user's choice (``--skip-maintenance``, or
     ``pre_benchmark_maintenance`` off) under one maintenance policy. No
     maintenance ran on either side, so an Iceberg run and a Delta run, whose
