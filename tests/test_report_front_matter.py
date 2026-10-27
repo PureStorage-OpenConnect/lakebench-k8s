@@ -343,7 +343,7 @@ def test_interrupted_run_keeps_its_verdict_word(monkeypatch):
     from lakebench.reports import front_matter
 
     reason = "Run interrupted (SIGINT during gold-finalize)"
-    monkeypatch.setattr(front_matter, "page_verdict", lambda m: ("INTERRUPTED", [reason], ""))
+    monkeypatch.setattr(front_matter, "page_verdict", lambda m, _v: ("INTERRUPTED", [reason], ""))
     record = load_record("5105a0")
     record["success"] = False
     text = _plain(_render_dict(record))
@@ -410,3 +410,34 @@ def test_continuous_qph_rounds_are_not_runs():
     text = _text("1d17f4")
     assert f"n={runs} run, {len(rounds)} rounds" in text
     assert f"n={len(rounds)}" not in text
+
+
+_SCRIPT = "<script>alert(1)</script>"
+
+
+def test_record_and_config_values_are_escaped():
+    """A value from the record or its config is page text, never markup."""
+    record = load_record("5105a0")
+    record["config_snapshot"]["name"] = _SCRIPT
+    record["config_snapshot"]["catalog"] = _SCRIPT
+    record["pipeline_benchmark"]["stages"][1]["engine"] = _SCRIPT
+    record["platform_metrics"] = {
+        "pods": [{"pod_name": _SCRIPT, "component": _SCRIPT, "cpu_avg_cores": 1.0}],
+        "collection_error": _SCRIPT,
+    }
+    html = _render_dict(record)
+    assert _SCRIPT not in html
+    assert html.count("&lt;script&gt;alert(1)&lt;/script&gt;") >= 6
+
+
+def test_duckdb_pods_have_their_own_platform_row():
+    record = load_record("5105a0")
+    record["platform_metrics"] = {
+        "pods": [
+            {"pod_name": "lakebench-duckdb-0", "component": "duckdb", "cpu_avg_cores": 1.0},
+            {"pod_name": "lakebench-trino-worker-0", "component": "trino", "cpu_avg_cores": 2.0},
+        ]
+    }
+    html = _render_dict(record)
+    assert "<td><strong>duckdb</strong></td>" in html
+    assert "<td><strong>trino</strong></td>" in html

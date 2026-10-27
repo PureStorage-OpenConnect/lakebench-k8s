@@ -13,8 +13,8 @@ the HTML from saved metrics writes a fresh file at::
 
 To rewrite the delivered ``report.html`` (or any other pre-existing path),
 the caller must both name the target explicitly via ``output_path`` and pass
-``force=True``. The ``output_dir`` constructor argument is accepted for
-backward compatibility and only shifts the default scratch directory.
+``force=True``. The ``output_dir`` constructor argument moves the default
+scratch directory.
 """
 
 from __future__ import annotations
@@ -33,6 +33,8 @@ from lakebench.metrics.maintenance_policy import LEGACY_MAINTENANCE_POLICY_ID
 from lakebench.metrics.metric_registry import direction_hint
 from lakebench.metrics.seed_record import seed_label as _seed_label
 from lakebench.reports import copy as _words
+from lakebench.reports.formatter import n_runs_of
+from lakebench.reports.front_matter import headline_reason, safe_experiment
 
 logger = logging.getLogger(__name__)
 
@@ -99,11 +101,7 @@ def _query_engine_title(metrics) -> str:
     # experiment block's architecture, then the config snapshot.
     engine = getattr(getattr(metrics, "benchmark", None), "engine", None)
     if not engine:
-        try:
-            exp = metrics.experiment_block() or {}
-        except Exception:  # noqa: BLE001 -- a bad block must not break the render
-            exp = {}
-        qe = (exp.get("architecture") or {}).get("query_engine")
+        qe = (safe_experiment(metrics).get("architecture") or {}).get("query_engine")
         if isinstance(qe, dict):
             engine = qe.get("type")
     if not engine:
@@ -123,11 +121,7 @@ def _samples_per_query(bench) -> int | None:
 def _recorded_samples(metrics) -> int | None:
     """Samples per query the record states (``repetitions.
     benchmark_samples_per_query``, the fewest any successful query had)."""
-    try:
-        exp = metrics.experiment_block() or {}
-    except Exception:  # noqa: BLE001 -- a bad block must not break the render
-        return None
-    n = (exp.get("repetitions") or {}).get("benchmark_samples_per_query")
+    n = (safe_experiment(metrics).get("repetitions") or {}).get("benchmark_samples_per_query")
     return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else None
 
 
@@ -268,12 +262,12 @@ def _stage_inputs_note(metrics) -> str:
     return f"{pb.total_data_processed_gb:.1f} GiB of stage inputs; {_corpus_note(metrics)}"
 
 
-def _limits_interpretation_html(metrics) -> str:
+def _limits_interpretation_html(metrics, look: tuple | None) -> str:
     from lakebench.reports import derived as dv
     from lakebench.reports.front_matter import limits_interpretation
 
     items = limits_interpretation(
-        metrics, count=lambda n, path: dv.count(n, path=path), esc=_html_escape
+        metrics, count=lambda n, path: dv.count(n, path=path), esc=_html_escape, look=look
     )
     if not items:
         return ""
@@ -282,29 +276,6 @@ def _limits_interpretation_html(metrics) -> str:
         '<div class="limits-interpretation" style="margin-top: 1rem;">'
         f'<strong>Limits</strong><ul style="margin: 0.25rem 0 0 1.25rem;">{lis}</ul></div>'
     )
-
-
-def _page_verdict(metrics) -> tuple[str, list[str]]:
-    """(status, reasons) the page reads: the strictest of the stored and the
-    recomputed verdict (reports/front_matter.py)."""
-    from lakebench.reports.front_matter import page_verdict
-
-    status, reasons, _note = page_verdict(metrics)
-    return status, reasons
-
-
-def _headline_reason(status: str, reasons: list[str]) -> str:
-    from lakebench.reports.front_matter import headline_reason
-
-    return headline_reason(status, reasons)
-
-
-def _runs_of(metrics) -> int:
-    """Independent runs behind the record (``repetitions.runs``), 1 when the
-    record does not say."""
-    from lakebench.reports.formatter import n_runs_of
-
-    return n_runs_of(metrics) or 1
 
 
 def _passed_of(passed: int, total: int, list_key: str) -> str:
@@ -317,9 +288,9 @@ def _passed_of(passed: int, total: int, list_key: str) -> str:
     )
 
 
-# Owner decision D-6 (AML-GOALS #46): continuous Delta ships with no effective
-# table maintenance in v1.6 (VACUUM keeps the 7 d default while streams are
-# live and OPTIMIZE is skipped), and the report says so.
+# Continuous Delta runs no effective table maintenance (VACUUM keeps the
+# 7 d default while streams are live and OPTIMIZE is skipped); the report
+# says so.
 DELTA_CONTINUOUS_NO_MAINTENANCE = "no effective table maintenance in continuous mode (v1.6)"
 
 
@@ -341,6 +312,24 @@ def _post_qph_caveat(pb) -> str:
             + "); the benchmark ran with writers active"
         )
     return "; ".join(parts)
+
+
+def _ingest_ratio_state(pb: Any) -> str:
+    """How a continuous run's ingest ratio reads: unmeasured, trickle_held
+    (below 0.95 because the trickle held intake and silver kept pace),
+    trickle_unmeasured (the same with silver's pace unmeasured), saturated
+    (below 0.95 otherwise), above (over 1.05: past the released-rows
+    estimate) or healthy."""
+    ratio = pb.ingest_ratio
+    if ratio is None:
+        return "unmeasured"
+    if ratio < 0.95:
+        if pb.intake_limit == "trickle_rate" and pb.pipeline_saturated is False:
+            return "trickle_held"
+        if pb.intake_limit == "trickle_rate" and pb.pipeline_saturated is None:
+            return "trickle_unmeasured"
+        return "saturated"
+    return "above" if ratio > 1.05 else "healthy"
 
 
 _STAGE_TO_JOB_TYPES = {
@@ -392,12 +381,10 @@ def _qph_stop_warning(metrics) -> str:
     caveat = _post_qph_caveat(getattr(metrics, "pipeline_benchmark", None))
     if not caveat:
         return ""
-    from html import escape
-
     return (
         ' <span class="qph-stop-warning" style="color: var(--danger); font-size: 0.5em;" '
-        f'title="{escape(caveat)}">'
-        f"WARNING: {escape(caveat)}, so this is not a clean measurement</span>"
+        f'title="{_html_escape(caveat)}">'
+        f"WARNING: {_html_escape(caveat)}, so this is not a clean measurement</span>"
     )
 
 
@@ -482,9 +469,8 @@ class ReportGenerator:
         Args:
             metrics_dir: Directory containing metrics (runs parent).
                          Defaults to MetricsStorage default.
-            output_dir:  Fallback output directory when the per-run
-                         directory is not available.  Accepted for
-                         backward compatibility.
+            output_dir:  Directory for timestamped renders, in place of
+                         ``<metrics_dir>/../reports/``.
         """
         if metrics_dir is not None:
             self.storage = MetricsStorage(metrics_dir)
@@ -495,8 +481,8 @@ class ReportGenerator:
     def _default_reports_dir(self) -> Path:
         """Directory where timestamped scratch renders land by default.
 
-        Prefers the ``output_dir`` passed to the constructor (legacy) and
-        falls back to ``<metrics_dir>/../reports/``.
+        The ``output_dir`` passed to the constructor, else
+        ``<metrics_dir>/../reports/``.
         """
         if self._fallback_output_dir is not None:
             return self._fallback_output_dir
@@ -538,8 +524,7 @@ class ReportGenerator:
             deployment_name: When ``run_id`` is not supplied, scope the
                 "latest run" lookup to this deployment so a parallel
                 deployment's newer run is not rendered by mistake. ``None``
-                keeps the unscoped behaviour for callers that do not know
-                the deployment (SP-2 owns the deployment_id follow-up).
+                takes the latest run of any deployment.
 
         Returns:
             Path to the written HTML file.
@@ -582,50 +567,10 @@ class ReportGenerator:
 
         return target
 
-    def _compute_overall_status(
-        self, metrics: PipelineMetrics
-    ) -> tuple[bool, list[str], list[str]]:
-        """Compute whether the run should be considered a pass.
-
-        Returns (passed, fail_reasons, warnings) where:
-        - passed: True if the run's verdict is PASSED (v1.6) or the record
-          has no verdict block and ``success`` is True (legacy v1.5)
-        - fail_reasons: list of failure messages
-        - warnings: list of anomaly messages (run passed but has caveats)
-
-        The badge share the fail-reason and warning rules with
-        ``metrics.verdict.compute_verdict`` via ``compute_badge_status``.
-        The pass/fail bit itself is taken from the run's verdict when one
-        was computed (OD-6: ``success == (verdict.status == "PASSED")``),
-        so the badge and the wired readers agree on the same outcome.
-        """
-        from lakebench.metrics.verdict import compute_badge_status, compute_verdict
-
-        _, reasons, warnings = compute_badge_status(metrics)
-
-        # Take the pass/fail bit from the run's verdict so the badge
-        # agrees with every other reader wired in A2b (CLI list, perf
-        # gate all read verdict.status). Reasons stay from the
-        # badge helper so the tooltip still names what went wrong.
-        # Warnings are amber-badge only and never flip the pass/fail bit.
-        verdict = compute_verdict(metrics)
-        passed = verdict.status == "PASSED"
-
-        # If the verdict is FAILED but the badge helper found no reason,
-        # surface the verdict reasons so the tooltip is not empty. This
-        # only happens when a gate outside the badge rules (for example
-        # ``c360``) failed the verdict.
-        if not passed and not reasons:
-            reasons = list(verdict.reasons) or ["Verdict FAILED"]
-
-        return (passed, reasons, warnings)
-
     def _is_sustained(self, metrics: PipelineMetrics) -> bool:
-        """Return True if this run used the sustained/streaming pipeline.
-
-        Accepts both ``"sustained"`` (current) and ``"continuous"`` (legacy
-        metrics.json files) for backward compatibility.
-        """
+        """Whether this run used the continuous pipeline (records store
+        ``pipeline_mode: sustained``); without a pipeline benchmark, whether it
+        recorded streaming jobs."""
         if metrics.pipeline_benchmark:
             return is_continuous_mode(metrics.pipeline_benchmark.pipeline_mode)
         return bool(metrics.streaming)
@@ -647,18 +592,12 @@ class ReportGenerator:
         self,
         metrics: PipelineMetrics,
         *,
-        passed: bool | None = None,
-        warnings: list[str] | None = None,
-        fail_reasons: list[str] | None = None,
-        n_runs: int | None = None,
         fm=None,
     ) -> str:
         """The front matter (reports/front_matter.py), before any metric:
         verdict and headline, evidence class, support state with its
         meaning, binding caps, n, provenance, digest; then the verdict's
-        qualifiers and what limits interpretation. The keyword arguments
-        other than *fm* are accepted for older callers and not used: every
-        field is read from the record."""
+        qualifiers and what limits interpretation."""
         from lakebench.reports.front_matter import front_matter
 
         e = _html_escape
@@ -704,7 +643,7 @@ class ReportGenerator:
                 {"".join(rows)}
             </div>
             {extra}
-            {_limits_interpretation_html(metrics)}
+            {_limits_interpretation_html(metrics, fm.look)}
         </section>
         """
 
@@ -723,7 +662,8 @@ class ReportGenerator:
         duration_m = int(metrics.total_elapsed_seconds // 60)
         duration_s = int(metrics.total_elapsed_seconds % 60)
 
-        storage_segment = f" | {storage}" if storage else ""
+        e = _html_escape
+        storage_segment = f" | {e(str(storage))}" if storage else ""
         domain_label = get_scorecard_block(cs.get("workload_schema")).domain_label
         kind_note = ""
         if getattr(metrics, "record_kind", "run") == "benchmark":
@@ -737,8 +677,8 @@ class ReportGenerator:
         return f"""
         <div style="margin-bottom: 1.5rem; color: var(--text-muted); font-size: 0.875rem;">
             {kind_note}<strong>{mode}</strong> pipeline |
-            {domain_label} at scale {scale} |
-            {catalog}-{table_fmt}-{pipe_engine}-{engine}{storage_segment} |
+            {domain_label} at scale {e(str(scale))} |
+            {e(str(catalog))}-{e(str(table_fmt))}-{e(str(pipe_engine))}-{e(str(engine))}{storage_segment} |
             {duration_m}m {duration_s}s
         </div>
         """
@@ -749,48 +689,31 @@ class ReportGenerator:
         Shows Ingest Ratio below the stage table.  Compute Efficiency and
         Total CPU-hours are now in the Layer 1 summary cards.
         """
-        # Ingest ratio badge -- None means the denominator (datagen row count)
-        # was not measured. Report as N/A rather than fabricating a status.
-        if pb.ingest_ratio is None:
-            ratio_badge = '<span style="color: var(--text-muted);">N/A</span>'
-            ratio_value = "N/A"
-        elif (
-            pb.ingest_ratio < 0.95
-            and pb.intake_limit == "trickle_rate"
-            and pb.pipeline_saturated is False
-        ):
-            note = _html_escape(pb.trickle_note() or "", quote=True)
-            ratio_badge = (
-                f'<span style="color: var(--warning);" title="{note}">'
+        # An unmeasured ratio (no datagen row count) reads N/A, never a status.
+        state = _ingest_ratio_state(pb)
+        ratio_value = "N/A" if state == "unmeasured" else f"{pb.ingest_ratio:.2f}"
+        ratio_badge = {
+            "unmeasured": '<span style="color: var(--text-muted);">N/A</span>',
+            "trickle_held": (
+                '<span style="color: var(--warning);" '
+                f'title="{_html_escape(pb.trickle_note() or "", quote=True)}">'
                 "Held to trickle rate (not saturated)</span>"
-            )
-            ratio_value = f"{pb.ingest_ratio:.2f}"
-        elif (
-            pb.ingest_ratio < 0.95
-            and pb.intake_limit == "trickle_rate"
-            and pb.pipeline_saturated is None
-        ):
-            ratio_badge = (
+            ),
+            "trickle_unmeasured": (
                 '<span style="color: var(--warning);">Held to trickle rate '
                 "(silver pace unmeasured)</span>"
-            )
-            ratio_value = f"{pb.ingest_ratio:.2f}"
-        elif pb.ingest_ratio < 0.95:
-            ratio_badge = '<span style="color: var(--danger);">SATURATED</span>'
-            ratio_value = f"{pb.ingest_ratio:.2f}"
-        elif pb.ingest_ratio > 1.05:
-            ratio_badge = (
-                f'<span style="color: var(--warning);"'
-                f' title="Bronze took more rows than the estimate of rows released by'
-                f" the window's end. The denominator is a mean-rate estimate (trickle"
-                f" files x mean rows per file, or continuous datagen's mean rate one"
-                f' bronze trigger before the window end), not a count.">'
-                f"{pb.ingest_ratio:.2f} (bronze above released-rows estimate)</span>"
-            )
-            ratio_value = f"{pb.ingest_ratio:.2f}"
-        else:
-            ratio_badge = '<span style="color: var(--success);">Healthy</span>'
-            ratio_value = f"{pb.ingest_ratio:.2f}"
+            ),
+            "saturated": '<span style="color: var(--danger);">SATURATED</span>',
+            "above": (
+                '<span style="color: var(--warning);"'
+                ' title="Bronze took more rows than the estimate of rows released by'
+                " the window's end. The denominator is a mean-rate estimate (trickle"
+                " files x mean rows per file, or continuous datagen's mean rate one"
+                ' bronze trigger before the window end), not a count.">'
+                f"{ratio_value} (bronze above released-rows estimate)</span>"
+            ),
+            "healthy": '<span style="color: var(--success);">Healthy</span>',
+        }[state]
 
         from lakebench.reports import derived as dv
 
@@ -936,7 +859,7 @@ class ReportGenerator:
 
         stage_data = []
         for i, s in enumerate(pb.stages):
-            if s.stage_name in ("datagen",) and is_sustained:
+            if s.stage_name == "datagen" and is_sustained:
                 continue
             cpu_sec: float | None
             if s.stage_name == "query":
@@ -1153,34 +1076,27 @@ class ReportGenerator:
         Always states the maintenance policy the run was measured under, and
         for a continuous Delta run that it had no effective maintenance.
         """
-        from html import escape as _pol_esc
-
         pb = metrics.pipeline_benchmark
         policy_rows = [
             "<tr><td>Maintenance policy</td>"
-            f'<td><code class="mono">{_pol_esc(metrics.maintenance_policy_id)}</code></td></tr>'
+            f'<td><code class="mono">{_html_escape(metrics.maintenance_policy_id)}</code></td></tr>'
         ]
         cs = metrics.config_snapshot or {}
-        # The statement describes this policy; earlier continuous Delta runs
-        # vacuumed at the requested retention (m1-legacy).
-        if (
-            self._is_sustained(metrics)
-            and cs.get("table_format") == "delta"
+        # Continuous Delta has no effective maintenance under every policy but
+        # the legacy one, which vacuumed at the requested retention.
+        delta_limitation = (
+            cs.get("table_format") == "delta"
             and metrics.maintenance_policy_id != LEGACY_MAINTENANCE_POLICY_ID
-        ):
-            policy_rows.append(
-                f"<tr><td>Continuous maintenance</td><td>{DELTA_CONTINUOUS_NO_MAINTENANCE}</td></tr>"
-            )
+        )
         if self._is_sustained(metrics):
             from lakebench.reports.scorecard import continuous_trend_rows
 
-            policy_rows.extend(
-                continuous_trend_rows(
-                    pb,
-                    delta_limitation=cs.get("table_format") == "delta"
-                    and metrics.maintenance_policy_id != LEGACY_MAINTENANCE_POLICY_ID,
+            if delta_limitation:
+                policy_rows.append(
+                    "<tr><td>Continuous maintenance</td>"
+                    f"<td>{DELTA_CONTINUOUS_NO_MAINTENANCE}</td></tr>"
                 )
-            )
+            policy_rows.extend(continuous_trend_rows(pb, delta_limitation=delta_limitation))
         if not pb:
             return self._maintenance_table(policy_rows)
 
@@ -1213,22 +1129,18 @@ class ReportGenerator:
         if maint_elapsed > 0:
             rows.append(f"<tr><td>Maintenance time</td><td>{maint_elapsed:.0f}s</td></tr>")
         if pb.maintenance_stopped:
-            from html import escape as _ms_esc
-
             # Holds for the headline QpH too: it was measured after this.
             rows.append(
                 "<tr><td>Maintenance outcome</td>"
                 '<td style="color: var(--danger); font-weight: 600">stopped before '
-                f"completion ({_ms_esc(pb.maintenance_stop_reason)}); QpH measured after "
+                f"completion ({_html_escape(pb.maintenance_stop_reason)}); QpH measured after "
                 "maintenance may include a statement still running</td></tr>"
             )
         if pb.maintenance_live_streams:
-            from html import escape as _ls_esc
-
             rows.append(
                 "<tr><td>Streams during maintenance</td>"
                 '<td style="color: var(--danger); font-weight: 600">live '
-                f"({_ls_esc(pb.maintenance_live_streams_reason)}); QpH measured after "
+                f"({_html_escape(pb.maintenance_live_streams_reason)}); QpH measured after "
                 "maintenance ran with writers active</td></tr>"
             )
         # Pre and post QpH are each over the queries that round ran, which can
@@ -1272,12 +1184,10 @@ class ReportGenerator:
             )
             caveat = _post_qph_caveat(pb)
             if caveat:
-                from html import escape as _stop_esc
-
                 rows.append(
                     f"<tr><td>{label}</td><td>{post_qph:.1f} "
                     '<span style="color: var(--danger); font-weight: 600">'
-                    f"(warning: {_stop_esc(caveat)}, so this is not a clean "
+                    f"(warning: {_html_escape(caveat)}, so this is not a clean "
                     "measurement)</span></td></tr>"
                 )
             else:
@@ -1311,16 +1221,12 @@ class ReportGenerator:
                 f'<td style="color: {color}; font-weight: 600">{value_html}</td></tr>'
             )
         elif pre_qph > 0 and pb.maintenance_value_reason:
-            from html import escape
-
             rows.append(
                 f"<tr><td>{paired_label}</td>"
-                f"<td>not reported ({escape(pb.maintenance_value_reason)})</td></tr>"
+                f"<td>not reported ({_html_escape(pb.maintenance_value_reason)})</td></tr>"
             )
         settle_s = pb.maintenance_settle_seconds
         if settle_s is not None:
-            from html import escape as _esc
-
             detail = pb.maintenance_settle or {}
             probes = detail.get("probes") or []
             times = ", ".join(
@@ -1339,12 +1245,12 @@ class ReportGenerator:
                 state = f"did not settle ({detail.get('reason') or 'unknown'})"
             rows.append(
                 "<tr><td>Storage settle wait</td>"
-                f"<td>{_esc(state)}; not counted in time to value</td></tr>"
+                f"<td>{_html_escape(state)}; not counted in time to value</td></tr>"
             )
             if probes:
                 rows.append(
-                    f"<tr><td>Settle probes ({_esc(str(detail.get('probe_query', '')))})</td>"
-                    f"<td>{_esc(times)}</td></tr>"
+                    f"<tr><td>Settle probes ({_html_escape(str(detail.get('probe_query', '')))})</td>"
+                    f"<td>{_html_escape(times)}</td></tr>"
                 )
 
         return self._maintenance_table(rows)
@@ -1381,37 +1287,28 @@ class ReportGenerator:
 
         # Scale Ratio / Ingest Ratio
         if is_sustained and pb:
-            ratio = pb.ingest_ratio
-            if ratio is None:
-                indicators.append(("Ingest Ratio", "status-warning", "N/A unmeasured"))
-            elif (
-                ratio < 0.95
-                and pb.intake_limit == "trickle_rate"
-                and pb.pipeline_saturated is False
-            ):
-                indicators.append(
-                    ("Ingest Ratio", "status-warning", f"{ratio:.2f} held to trickle rate")
-                )
-            elif (
-                ratio < 0.95 and pb.intake_limit == "trickle_rate" and pb.pipeline_saturated is None
-            ):
-                indicators.append(
-                    ("Ingest Ratio", "status-warning", f"{ratio:.2f} trickle, silver unmeasured")
-                )
-            elif ratio < 0.95:
-                indicators.append(("Ingest Ratio", "status-failed", f"{ratio:.2f} SATURATED"))
-            elif ratio > 1.05:
-                indicators.append(
-                    (
+            state = _ingest_ratio_state(pb)
+            r = "" if state == "unmeasured" else f"{pb.ingest_ratio:.2f}"
+            indicators.append(
+                {
+                    "unmeasured": ("Ingest Ratio", "status-warning", "N/A unmeasured"),
+                    "trickle_held": ("Ingest Ratio", "status-warning", f"{r} held to trickle rate"),
+                    "trickle_unmeasured": (
                         "Ingest Ratio",
                         "status-warning",
-                        f'{ratio:.2f} <span title="Bronze took more rows than the'
-                        f" estimate of rows released by the window's end (a mean-rate"
-                        f' estimate, not a count)">(above released-rows estimate)</span>',
-                    )
-                )
-            else:
-                indicators.append(("Ingest Ratio", "status-success", f"{ratio:.2f} Healthy"))
+                        f"{r} trickle, silver unmeasured",
+                    ),
+                    "saturated": ("Ingest Ratio", "status-failed", f"{r} SATURATED"),
+                    "above": (
+                        "Ingest Ratio",
+                        "status-warning",
+                        f'{r} <span title="Bronze took more rows than the'
+                        " estimate of rows released by the window's end (a mean-rate"
+                        ' estimate, not a count)">(above released-rows estimate)</span>',
+                    ),
+                    "healthy": ("Ingest Ratio", "status-success", f"{r} Healthy"),
+                }[state]
+            )
         elif pb:
             ratio = pb.scale_ratio
             if not ratio:
@@ -1518,124 +1415,59 @@ class ReportGenerator:
 
     def _render_line_chart_svg(
         self,
-        series1: list[float],
-        series2: list[float],
-        label1: str,
-        label2: str,
-        color1: str = "#2563eb",
-        color2: str = "#d97706",
+        values: list[float],
+        label: str,
+        color: str = "#2563eb",
         width: int = 700,
         height: int = 200,
     ) -> str:
-        """Render a dual-axis line chart as inline SVG.
-
-        Args:
-            series1: Values for left Y axis
-            series2: Values for right Y axis
-            label1: Label for series 1
-            label2: Label for series 2
-            color1: Color for series 1
-            color2: Color for series 2
-            width: SVG width in pixels
-            height: SVG height in pixels
-
-        Returns:
-            SVG string (no JS dependencies)
-        """
-        if len(series1) < 2:
+        """*values* as an inline SVG line chart with dots (no scripts), or ""
+        below two points."""
+        if len(values) < 2:
             return ""
 
         margin_l, margin_r, margin_t, margin_b = 60, 60, 20, 40
         plot_w = width - margin_l - margin_r
         plot_h = height - margin_t - margin_b
-        n = len(series1)
+        n = len(values)
+        lo, hi = min(values), max(values)
+        if lo == hi:
+            lo -= 1
+            hi += 1
+        span = hi - lo or 1
 
-        def _scale(values: list[float]) -> tuple[float, float]:
-            lo = min(values) if values else 0
-            hi = max(values) if values else 1
-            if lo == hi:
-                lo -= 1
-                hi += 1
-            return lo, hi
+        def xy(i: int, v: float) -> tuple[float, float]:
+            return (
+                margin_l + (i / max(n - 1, 1)) * plot_w,
+                margin_t + plot_h - ((v - lo) / span) * plot_h,
+            )
 
-        min1, max1 = _scale(series1)
-        min2, max2 = _scale(series2) if series2 else (0, 1)
-
-        def _points(values: list[float], vmin: float, vmax: float, x_off: int) -> str:
-            pts = []
-            span = vmax - vmin or 1
-            for i, v in enumerate(values):
-                x = x_off + (i / max(n - 1, 1)) * plot_w
-                y = margin_t + plot_h - ((v - vmin) / span) * plot_h
-                pts.append(f"{x:.1f},{y:.1f}")
-            return " ".join(pts)
-
-        pts1 = _points(series1, min1, max1, margin_l)
-        pts2 = _points(series2, min2, max2, margin_l) if series2 else ""
-
-        # Y-axis labels (3 ticks each side)
-        y_labels_1 = ""
-        y_labels_2 = ""
+        pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in (xy(i, v) for i, v in enumerate(values)))
+        dots = "".join(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{color}"/>'
+            for x, y in (xy(i, v) for i, v in enumerate(values))
+        )
+        y_labels = ""
         for i in range(3):
             frac = i / 2
-            y = margin_t + plot_h - frac * plot_h
-            v1 = min1 + frac * (max1 - min1)
-            y_labels_1 += (
-                f'<text x="{margin_l - 8}" y="{y + 4}" text-anchor="end" '
-                f'fill="{color1}" font-size="10">{v1:,.0f}</text>'
+            y_labels += (
+                f'<text x="{margin_l - 8}" y="{margin_t + plot_h - frac * plot_h + 4}" '
+                f'text-anchor="end" fill="{color}" font-size="10">{lo + frac * (hi - lo):,.0f}</text>'
             )
-            if series2:
-                v2 = min2 + frac * (max2 - min2)
-                y_labels_2 += (
-                    f'<text x="{margin_l + plot_w + 8}" y="{y + 4}" text-anchor="start" '
-                    f'fill="{color2}" font-size="10">{v2:.1f}</text>'
-                )
-
-        # X-axis labels
-        x_labels = ""
-        for i in range(n):
-            x = margin_l + (i / max(n - 1, 1)) * plot_w
-            x_labels += (
-                f'<text x="{x}" y="{margin_t + plot_h + 18}" '
-                f'text-anchor="middle" fill="#64748b" font-size="10">{i}</text>'
-            )
-
-        s2_line = ""
-        s2_dots = ""
-        if series2 and pts2:
-            s2_line = f'<polyline points="{pts2}" fill="none" stroke="{color2}" stroke-width="2"/>'
-            for i, v in enumerate(series2):
-                x = margin_l + (i / max(n - 1, 1)) * plot_w
-                span = max2 - min2 or 1
-                y = margin_t + plot_h - ((v - min2) / span) * plot_h
-                s2_dots += f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{color2}"/>'
-
-        s1_dots = ""
-        for i, v in enumerate(series1):
-            x = margin_l + (i / max(n - 1, 1)) * plot_w
-            span = max1 - min1 or 1
-            y = margin_t + plot_h - ((v - min1) / span) * plot_h
-            s1_dots += f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="{color1}"/>'
-
-        legend = (
-            f'<text x="{margin_l}" y="{height - 2}" fill="{color1}" font-size="11">{label1}</text>'
+        x_labels = "".join(
+            f'<text x="{margin_l + (i / max(n - 1, 1)) * plot_w}" y="{margin_t + plot_h + 18}" '
+            f'text-anchor="middle" fill="#64748b" font-size="10">{i}</text>'
+            for i in range(n)
         )
-        if series2:
-            legend += (
-                f'<text x="{margin_l + plot_w}" y="{height - 2}" fill="{color2}" '
-                f'font-size="11" text-anchor="end">{label2}</text>'
-            )
-
         return (
             f'<svg viewBox="0 0 {width} {height}" xmlns="http://www.w3.org/2000/svg" '
             f'style="width: 100%; max-width: {width}px; height: auto;">'
             f'<rect x="{margin_l}" y="{margin_t}" width="{plot_w}" height="{plot_h}" '
             f'fill="none" stroke="#e2e8f0"/>'
-            f"{y_labels_1}{y_labels_2}{x_labels}"
-            f'<polyline points="{pts1}" fill="none" stroke="{color1}" stroke-width="2"/>'
-            f"{s1_dots}"
-            f"{s2_line}{s2_dots}"
-            f"{legend}"
+            f"{y_labels}{x_labels}"
+            f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2"/>'
+            f"{dots}"
+            f'<text x="{margin_l}" y="{height - 2}" fill="{color}" font-size="11">{label}</text>'
             f"</svg>"
         )
 
@@ -1658,12 +1490,7 @@ class ReportGenerator:
         if len(qph_values) < 2:
             return ""
 
-        chart = self._render_line_chart_svg(
-            series1=qph_values,
-            series2=[],
-            label1="QpH",
-            label2="",
-        )
+        chart = self._render_line_chart_svg(qph_values, "QpH")
 
         if not chart:
             return ""
@@ -1693,8 +1520,6 @@ class ReportGenerator:
         trend_html = (
             f'<p style="color: var(--text-muted); font-style: italic; margin-top: 0.75rem;">'
             f"{trend}</p>"
-            if trend
-            else ""
         )
 
         return f"""
@@ -1750,7 +1575,7 @@ class ReportGenerator:
             meta = r.round_meta
             if not meta.q9_contention_observed:
                 continue
-            ts = meta.timestamp or "-"
+            ts = _html_escape(str(meta.timestamp or "-"))
             freshness = (
                 f"{meta.gold_event_age_seconds / 86400:.1f} d"
                 if (meta.gold_event_age_seconds or 0) > 0
@@ -1806,16 +1631,31 @@ class ReportGenerator:
         Returns:
             HTML string
         """
+        from lakebench.metrics.verdict import compute_verdict
+        from lakebench.reports.front_matter import front_matter
+
+        # Computed once and handed to every section that reads them. The
+        # badge says what the front matter says: the strictest of the stored
+        # and the recomputed verdict.
+        verdict = compute_verdict(metrics)
+        fm = front_matter(metrics, verdict)
+        try:
+            record = metrics.to_dict()
+        except Exception:  # noqa: BLE001 - the sections that read it are then left out
+            record = None
+        parts = self._generate_summary(metrics, fm.verdict, fm.reasons)
+        tiles = self._build_tiles(metrics, record, verdict, parts)
+
         run_context_html = self._generate_run_context(metrics)
         jobs_html = self._generate_jobs_table(metrics)
         streaming_html = self._generate_streaming_table(metrics)
         queries_html = self._generate_queries_table(metrics)
         benchmark_html = self._generate_benchmark_section(metrics)
         benchmark_rounds_html = self._generate_benchmark_rounds_section(metrics)
-        pipeline_bench_html = self._generate_pipeline_benchmark_section(metrics)
-        summary_html = self._generate_summary(metrics).html
+        pipeline_bench_html = self._generate_pipeline_benchmark_section(metrics, fm.verdict)
+        summary_html = parts.html
         config_html = (
-            self._generate_storage_io_section(metrics)
+            self._generate_storage_io_section(record)
             + self._generate_storage_multiple_section(metrics)
             + self._generate_resources_section(metrics)
             + self._generate_config_section(metrics)
@@ -1828,11 +1668,6 @@ class ReportGenerator:
         validity_html = self._generate_data_validity_section(metrics)
         stability_html = self._generate_stability_section(metrics)
         contention_html = self._generate_contention_section(metrics)
-        # The badge says what the front matter says: the strictest of the
-        # stored and the recomputed verdict.
-        from lakebench.reports.front_matter import front_matter
-
-        fm = front_matter(metrics)
         overall_passed = fm.verdict == "PASSED"
         warnings = fm.warnings
         fail_reasons = fm.reasons
@@ -1852,22 +1687,19 @@ class ReportGenerator:
 
         # Confidence chip next to the verdict badge: n=1 -> single_run,
         # n>=3 -> replicated_n=N, n>=5 with sub-10% spread -> high.
-        from lakebench.reports.formatter import (
-            confidence_chip_html,
-            n_runs_of,
-        )
+        from lakebench.reports.formatter import confidence_chip_html
 
-        # Confidence chip counts INDEPENDENT runs only (invariant 7). Do
-        # NOT fall back to qph_samples_of(metrics): that value includes
-        # in-stream benchmark rounds within one continuous run, so a
-        # sustained run with 5 rounds would render replicated_n=5 and
-        # claim replication from within-run variation.
+        # The chip counts independent runs only (invariant 7): in-stream
+        # rounds and samples inside one run are never replication.
         _n_runs = n_runs_of(metrics) or 1
-        _confidence_chip = confidence_chip_html(_n_runs, spread=None)
+        _confidence_chip = confidence_chip_html(_n_runs)
 
         _read_first_html = self._generate_read_first_panel(metrics, fm=fm)
-        _tabs_html, _replay_html, _score_open, _score_close = self._generate_view_shell(metrics)
-        _tiles_html = self._generate_tiles(metrics)
+        pace = next((t for t in tiles or () if t.label == "Pace"), None)
+        _tabs_html, _replay_html, _score_open, _score_close = self._generate_view_shell(
+            record, None if pace is None or pace.evidence == "nr" else pace
+        )
+        _tiles_html = self._render_tiles(tiles)
 
         html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -2138,66 +1970,49 @@ class ReportGenerator:
 
         return html
 
-    def _generate_tiles(self, metrics: PipelineMetrics) -> str:
-        """The scorecard's eight-tile grid (reports/tiles.py)."""
-        from lakebench.metrics.verdict import compute_verdict
-        from lakebench.reports.tiles import build_tiles, render_tiles
+    def _build_tiles(self, metrics: PipelineMetrics, record, verdict, parts) -> list | None:
+        """The scorecard's eight tiles (reports/tiles.py), or None when the
+        record cannot give them."""
+        from lakebench.reports.tiles import build_tiles
 
-        to_dict = getattr(metrics, "to_dict", None)
+        if not isinstance(record, dict):
+            return None
         try:
-            record = to_dict() if callable(to_dict) else None
-            if not isinstance(record, dict):
-                return ""
-            try:
-                gates = dict(compute_verdict(metrics).gates)
-            except Exception:  # noqa: BLE001 - the gates tile then says NR
-                gates = None
-            mode = "continuous" if self._is_sustained(metrics) else "batch"
-            parts = self._generate_summary(metrics)
-            return render_tiles(
-                build_tiles(
-                    record,
-                    mode=mode,
-                    gates=gates,
-                    metrics=metrics,
-                    guards=parts.guards,
-                    not_shown=parts.not_shown,
-                )
+            return build_tiles(
+                record,
+                mode="continuous" if self._is_sustained(metrics) else "batch",
+                gates=dict(verdict.gates),
+                metrics=metrics,
+                guards=parts.guards,
+                not_shown=parts.not_shown,
             )
+        except Exception:  # noqa: BLE001 - a tile grid must never break the page
+            return None
+
+    @staticmethod
+    def _render_tiles(tiles: list | None) -> str:
+        from lakebench.reports.tiles import render_tiles
+
+        if tiles is None:
+            return ""
+        try:
+            return render_tiles(tiles)
         except Exception:  # noqa: BLE001 - a tile grid must never break the page
             return ""
 
-    def _pace_tile(self, metrics: PipelineMetrics) -> Any:
-        """The scorecard's Pace tile, for the replay headline."""
-        from lakebench.reports.tiles import build_tiles
-
-        try:
-            record = metrics.to_dict()
-            mode = "continuous" if self._is_sustained(metrics) else "batch"
-            parts = self._generate_summary(metrics)
-            tiles = build_tiles(
-                record, mode=mode, gates=None, metrics=metrics, not_shown=parts.not_shown
-            )
-            tile = next((t for t in tiles if t.label == "Pace"), None)
-            return None if tile is None or tile.evidence == "nr" else tile
-        except Exception:  # noqa: BLE001 - the headline is optional
-            return None
-
-    def _generate_view_shell(self, metrics: PipelineMetrics) -> tuple[str, str, str, str]:
+    def _generate_view_shell(self, record, pace: Any) -> tuple[str, str, str, str]:
         """The Replay / Scorecard tab bar, the replay panel, and the opening
         and closing tags of the Scorecard panel. A record with no replay
         (reports/replay.py) gets none of it and the page is the scorecard
-        alone."""
+        alone. *pace* is the scorecard's Pace tile, for the replay headline."""
         from lakebench.reports.replay import build_replay, render_replay
 
-        to_dict = getattr(metrics, "to_dict", None)
         try:
-            data = build_replay(to_dict()) if callable(to_dict) else None
+            data = build_replay(record) if record is not None else None
         except Exception:  # noqa: BLE001 - a tab must never break the page
             data = None
         if data is None:
             return "", "", "", ""
-        pace = self._pace_tile(metrics)
         tabs = (
             '<nav class="lb-tabs" role="tablist">'
             '<button type="button" role="tab" data-view="replay">Workload replay</button>'
@@ -2225,17 +2040,15 @@ class ReportGenerator:
         )
 
     def _generate_summary(
-        self,
-        metrics: PipelineMetrics,
+        self, metrics: PipelineMetrics, status: str, reasons: list[str]
     ) -> _SummaryParts:
-        """Generate summary cards HTML.
+        """Generate summary cards HTML for the page verdict *status*.
 
         Sustained mode shows streaming-specific KPIs.
         Batch mode shows the original batch KPIs. A run whose verdict is not
         PASSED shows no headline number: its cards read "-" beside the
         verdict reason, and the failed jobs' errors lead.
         """
-        status, reasons = _page_verdict(metrics)
         if status != "PASSED":
             return self._generate_failed_summary(metrics, status, reasons)
         if self._is_sustained(metrics):
@@ -2254,7 +2067,7 @@ class ReportGenerator:
         reason, each failed job's error, and the score cards with no
         number, so a failed run's partial figures are not read as results."""
         e = _html_escape
-        first = _headline_reason(status, reasons)
+        first = headline_reason(status, reasons)
         errors = [
             (j.job_name, j.error_message or "failed, no error recorded")
             for j in metrics.jobs
@@ -2342,30 +2155,8 @@ class ReportGenerator:
         avg_throughput = pb.pipeline_throughput_gb_per_second if pb else 0.0
         duration_m = int(total_time // 60)
         duration_s = int(total_time % 60)
-        (
-            format_measurement(
-                f"{freshness_val:.1f}s",
-                "",
-                caps_bound=caps_bound + trigger_caps_from(metrics),
-                n_runs=1,
-                support_state=support_state,
-            )
-            if freshness_val is not None
-            else "N/A"
-        )
         if freshness_val is None:
             freshness_hint = "insufficient gold cycles to measure"
-        qph_raw = f"{qph:,.1f}" if qph is not None else "N/A"
-        format_measurement(
-            qph_raw,
-            "",
-            caps_bound=caps_bound if qph is not None else None,
-            n_runs=_runs_of(metrics) if qph is not None else None,
-            samples=qph_samples,
-            rounds=qph_rounds,
-            rounds_html=qph_rounds_html,
-            support_state=support_state if qph is not None else None,
-        )
         # Rounds ran but none over the composite's fixed query set (an AML
         # record from before every round ran the full set): not "none ran".
         _no_qph = (
@@ -2379,7 +2170,6 @@ class ReportGenerator:
         # No pipeline benchmark (it failed to build): nothing below was
         # measured, so no card shows a 0.
         _no_pb = "not measured (the pipeline benchmark was not built)"
-        throughput_raw = _no_pb if pb is None else f"{throughput:,.0f} rows/s"
         # The trickle bounds intake: the rows/s, GB/s and efficiency figures
         # are the offered load, not capacity (metrics/bounds.py).
         intake_caps = caps_bound + trickle_caps_from(metrics)
@@ -2388,15 +2178,6 @@ class ReportGenerator:
         # measured, never 0.
         bytes_unmeasured = pb is None or (data_gb == 0 and throughput > 0)
         _unmeasured = _no_pb if pb is None else "not measured (no datagen fleet record)"
-        (
-            _unmeasured
-            if bytes_unmeasured
-            else format_measurement(
-                f"{efficiency:.2f} GiB/core-hr",
-                "",
-                caps_bound=intake_caps if efficiency > 0 else None,
-            )
-        )
         stage_inputs_text = (
             _unmeasured
             if bytes_unmeasured
@@ -2411,13 +2192,6 @@ class ReportGenerator:
                 "",
                 caps_bound=intake_caps if avg_throughput > 0 else None,
             )
-        )
-        format_measurement(
-            throughput_raw,
-            "",
-            caps_bound=intake_caps if throughput > 0 else None,
-            n_runs=1 if throughput > 0 else None,
-            support_state=support_state if throughput > 0 else None,
         )
 
         # Derived context values for hint line 2
@@ -2509,7 +2283,7 @@ class ReportGenerator:
             "Query rate": (
                 qual(
                     caps_bound=caps_bound,
-                    n_runs=_runs_of(metrics),
+                    n_runs=n_runs_of(metrics) or 1,
                     samples=qph_samples,
                     rounds=qph_rounds,
                     rounds_html=qph_rounds_html,
@@ -2624,14 +2398,6 @@ class ReportGenerator:
         )
         throughput_hint2 = _direction_hint("pipeline_throughput_gb_per_second", "batch")
         efficiency_hint2 = _direction_hint("compute_efficiency_gb_per_core_hour", "batch")
-        format_measurement(
-            f"{qph:,.1f}" if qph > 0 else "N/A",
-            "",
-            caps_bound=caps_bound if qph > 0 else None,
-            n_runs=_runs_of(metrics) if qph > 0 else None,
-            samples=qph_samples if qph > 0 else None,
-            support_state=support_state if qph > 0 else None,
-        )
         pipeline_throughput_display = format_measurement(
             f"{pb.pipeline_throughput_gb_per_second:.3f} GiB/s",
             "",
@@ -2653,7 +2419,7 @@ class ReportGenerator:
             "Query rate": (
                 qual(
                     caps_bound=caps_bound,
-                    n_runs=_runs_of(metrics),
+                    n_runs=n_runs_of(metrics) or 1,
                     samples=qph_samples,
                     support_state=support_state,
                 )
@@ -2776,16 +2542,15 @@ class ReportGenerator:
         if not metrics.streaming:
             return ""
 
-        # Build stage lookup from pipeline_benchmark for compute columns
-        _JOB_TYPE_TO_STAGE = {
-            "bronze-ingest": "bronze",
-            "silver-stream": "silver",
-            "gold-refresh": "gold",
+        from lakebench.reports.replay import STREAM_STAGE
+
+        # Each stage's index and metrics, for the compute columns.
+        stage_at = {
+            st.stage_name: (i, st)
+            for i, st in enumerate(
+                metrics.pipeline_benchmark.stages if metrics.pipeline_benchmark else []
+            )
         }
-        stage_map: dict[str, object] = {}
-        if metrics.pipeline_benchmark and metrics.pipeline_benchmark.stages:
-            for st in metrics.pipeline_benchmark.stages:
-                stage_map[st.stage_name] = st
 
         caps_bound = caps_bound_from(metrics)
         from lakebench.reports.formatter import trickle_caps_from
@@ -2802,18 +2567,12 @@ class ReportGenerator:
         exec_paths: list[str] = []
         cpu_terms: list[str] = []
         mem_terms: list[str] = []
-        stage_index = {
-            st.stage_name: i
-            for i, st in enumerate(
-                metrics.pipeline_benchmark.stages if metrics.pipeline_benchmark else []
-            )
-        }
         for si, s in enumerate(metrics.streaming):
             status_class = "status-success" if s.success else "status-failed"
             status_text = "Pass" if s.success else "Fail"
+            stage_name = STREAM_STAGE.get(s.job_type, "")
 
             if s.throughput_rps > 0:
-                stage_name = _JOB_TYPE_TO_STAGE.get(s.job_type, "")
                 stage_bound = caps_bound if _stage_matches_cap(stage_name, caps_bound) else []
                 if s.job_type == "bronze-ingest":
                     stage_bound = [*stage_bound, *trickle_caps]
@@ -2830,8 +2589,7 @@ class ReportGenerator:
             freshness = f"{s.freshness_seconds:.0f}s" if s.freshness_seconds else "-"
 
             # Compute columns from stage metrics
-            stage_name = _JOB_TYPE_TO_STAGE.get(s.job_type, "")
-            stage = stage_map.get(stage_name)
+            stage_i, stage = stage_at.get(stage_name, (0, None))
             if stage:
                 execs = str(stage.executor_count) if stage.executor_count > 0 else "-"
                 cores_mem = (
@@ -2840,7 +2598,7 @@ class ReportGenerator:
                     else "-"
                 )
                 cpu_sec = stage.executor_count * stage.executor_cores * s.elapsed_seconds
-                sp = dv.path("pipeline_benchmark", "stages", stage_index[stage_name])
+                sp = dv.path("pipeline_benchmark", "stages", stage_i)
                 cpu_sec_str = dv.total(
                     cpu_sec,
                     paths=dv.product(
@@ -3017,7 +2775,7 @@ class ReportGenerator:
             f"{b.qph:.1f}",
             "",
             caps_bound=caps_bound_from(metrics),
-            n_runs=_runs_of(metrics),
+            n_runs=n_runs_of(metrics) or 1,
             samples=_samples_per_query(b),
             support_state=support_state_of(metrics),
         )
@@ -3315,7 +3073,9 @@ class ReportGenerator:
         </section>
         """
 
-    def _generate_pipeline_benchmark_section(self, metrics: PipelineMetrics) -> str:
+    def _generate_pipeline_benchmark_section(
+        self, metrics: PipelineMetrics, verdict_status: str
+    ) -> str:
         """Generate the pipeline benchmark stage matrix section."""
         from lakebench.reports.formatter import caps_bound_from, format_measurement
 
@@ -3420,7 +3180,7 @@ class ReportGenerator:
                 rows.append(f"""
                 <tr>
                     <td><strong>{_html_escape(str(stage.stage_name))}</strong></td>
-                    <td>{stage.engine}</td>
+                    <td>{_html_escape(str(stage.engine))}</td>
                     <td>{elapsed}</td>
                     <td>{in_rows}</td>
                     <td>{rows_s}</td>
@@ -3437,7 +3197,7 @@ class ReportGenerator:
                 rows.append(f"""
                 <tr>
                     <td><strong>{_html_escape(str(stage.stage_name))}</strong></td>
-                    <td>{stage.engine}</td>
+                    <td>{_html_escape(str(stage.engine))}</td>
                     <td>{stage.elapsed_seconds:.1f}s</td>
                     <td>{in_gb}</td>
                     <td>{out_gb}</td>
@@ -3453,7 +3213,6 @@ class ReportGenerator:
                 </tr>
                 """)
 
-        verdict_status, _reasons = _page_verdict(metrics)
         passed = verdict_status == "PASSED"
         if is_sustained:
             section_title = "Pipeline Stages"
@@ -3546,7 +3305,7 @@ class ReportGenerator:
         </section>
         """
 
-    def _generate_storage_io_section(self, metrics: PipelineMetrics) -> str:
+    def _generate_storage_io_section(self, record) -> str:
         """Storage I/O (metrics/io.py): the bytes the engines reported reading
         from and writing to storage, per source and round, a rate over time,
         and what was not measured. Pod network traffic and storage-array
@@ -3554,11 +3313,7 @@ class ReportGenerator:
         from lakebench.metrics.io import bucket_series
         from lakebench.reports import derived as dv
 
-        to_dict = getattr(metrics, "to_dict", None)
-        try:
-            io = to_dict().get("io") if callable(to_dict) else None
-        except Exception:  # noqa: BLE001 - a section must never break the page
-            io = None
+        io = record.get("io") if isinstance(record, dict) else None
         if not isinstance(io, dict):
             return ""
         intervals = [i for i in io.get("intervals") or [] if isinstance(i, dict)]
@@ -3842,9 +3597,7 @@ class ReportGenerator:
                 )
             notes.append(note)
         # One entry per bucket, the name a value (never a key: the fixture
-        # scrubber refuses a record keyed by bucket name). Development builds
-        # of 1.7.0 keyed these by bucket name; that shape was never released
-        # and is not read.
+        # scrubber refuses a record keyed by bucket name).
         bucket_rows = sm.get("buckets")
         listing_notes = []
         for b in bucket_rows if isinstance(bucket_rows, list) else []:
@@ -3929,17 +3682,14 @@ class ReportGenerator:
                     f"<td>{e(_scratch(j.job_type))}</td></tr>"
                 )
         else:
-            stage_of = {
-                "bronze-ingest": "bronze",
-                "silver-stream": "silver",
-                "gold-refresh": "gold",
-            }
+            from lakebench.reports.replay import STREAM_STAGE
+
             stages = {
                 st.stage_name: st
                 for st in (metrics.pipeline_benchmark.stages if metrics.pipeline_benchmark else [])
             }
             for sm in metrics.streaming:
-                st = stages.get(stage_of.get(sm.job_type, ""))
+                st = stages.get(STREAM_STAGE.get(sm.job_type, ""))
                 if st is None:
                     continue
                 rows.append(
@@ -4017,7 +3767,7 @@ class ReportGenerator:
                 items.append(f"""
                 <div class="config-item">
                     <span class="config-key">{label}</span>
-                    <span class="mono">{value}</span>
+                    <span class="mono">{_html_escape(str(value))}</span>
                 </div>
                 """)
 
@@ -4221,7 +3971,7 @@ class ReportGenerator:
         if "trino" in component or "trino" in name:
             return "trino"
         if "duckdb" in component or "duckdb" in name:
-            return "trino"
+            return "duckdb"
         if any(c in component for c in ("hive", "polaris", "postgres")):
             return "catalog"
         if "datagen" in component or "datagen" in name:
@@ -4311,6 +4061,7 @@ class ReportGenerator:
             "silver",
             "gold",
             "trino",
+            "duckdb",
             "catalog",
             "datagen",
             "spark-other",
@@ -4373,7 +4124,7 @@ class ReportGenerator:
         error_note = ""
         collection_error = platform_metrics.get("collection_error")
         if collection_error:
-            error_note = f'<p style="color: var(--warning); font-size: 0.875rem;">Not collected or partial: {collection_error}</p>'
+            error_note = f'<p style="color: var(--warning); font-size: 0.875rem;">Not collected or partial: {_html_escape(str(collection_error))}</p>'
 
         # Tier 2 status indicator
         engine = platform_metrics.get("engine")
@@ -4422,8 +4173,8 @@ class ReportGenerator:
 
         for pod in active_pods:
             detail_rows.append(
-                f'<tr><td class="mono">{pod.get("pod_name", "unknown")}</td>'
-                f"<td>{pod.get('component', 'unknown')}</td>"
+                f'<tr><td class="mono">{_html_escape(str(pod.get("pod_name", "unknown")))}</td>'
+                f"<td>{_html_escape(str(pod.get('component', 'unknown')))}</td>"
                 f"<td>{_cores(pod.get('cpu_avg_cores'))}</td>"
                 f"<td>{_cores(pod.get('cpu_max_cores'))}</td>"
                 f"<td>{_gib(pod.get('memory_avg_bytes'))}</td>"

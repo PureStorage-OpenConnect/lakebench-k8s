@@ -352,32 +352,29 @@ def _metrics(pb):
     return pm
 
 
-def test_report_does_not_fail_a_trickle_bound_run(tmp_path):
-    from lakebench.reports.generator import ReportGenerator
+def test_report_does_not_fail_a_trickle_bound_run():
+    from lakebench.metrics.verdict import compute_badge_status
 
-    gen = ReportGenerator(metrics_dir=tmp_path)
-    _, reasons, _ = gen._compute_overall_status(_metrics(_live_s100()))
+    _, reasons, _ = compute_badge_status(_metrics(_live_s100()))
     assert not any("Ingest ratio" in r for r in reasons), reasons
 
 
-def test_report_still_fails_a_stalled_run(tmp_path):
-    from lakebench.reports.generator import ReportGenerator
+def test_report_still_fails_a_stalled_run():
+    from lakebench.metrics.verdict import compute_badge_status
 
-    gen = ReportGenerator(metrics_dir=tmp_path)
     stalled = _live_s100(bronze_rows=40 * 774_550, bronze_batches=40)
-    _, reasons, _ = gen._compute_overall_status(_metrics(stalled))
+    _, reasons, _ = compute_badge_status(_metrics(stalled))
     # A stall leaves bronze idle: named as such, not as saturation.
     assert any("Ingest ratio" in r and "without being at capacity" in r for r in reasons), reasons
     silver_behind = _live_s100(silver_committed=40_000_000)
-    _, reasons, _ = gen._compute_overall_status(_metrics(silver_behind))
+    _, reasons, _ = compute_badge_status(_metrics(silver_behind))
     assert any("silver did not keep pace" in r for r in reasons)
 
 
-def test_report_does_not_fail_a_run_whose_silver_is_unmeasured(tmp_path):
-    from lakebench.reports.generator import ReportGenerator
+def test_report_does_not_fail_a_run_whose_silver_is_unmeasured():
+    from lakebench.metrics.verdict import compute_badge_status
 
-    gen = ReportGenerator(metrics_dir=tmp_path)
-    _, reasons, _ = gen._compute_overall_status(_metrics(_silver_unmeasured()))
+    _, reasons, _ = compute_badge_status(_metrics(_silver_unmeasured()))
     assert not any("Ingest ratio" in r for r in reasons), reasons
 
 
