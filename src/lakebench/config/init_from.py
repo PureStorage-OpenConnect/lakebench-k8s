@@ -40,6 +40,7 @@ import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -173,22 +174,26 @@ def dump(data: dict[str, Any]) -> str:
 # -- dict helpers -------------------------------------------------------------
 
 
-def _get(data: Any, path: tuple[str, ...]) -> Any:
+_MISSING_PATH = object()
+
+
+def _walk(data: Any, path: tuple[str, ...]) -> Any:
+    """The value at *path*, or ``_MISSING_PATH`` when a step is absent."""
     node = data
     for part in path:
         if not isinstance(node, dict) or part not in node:
-            return None
+            return _MISSING_PATH
         node = node[part]
     return node
 
 
+def _get(data: Any, path: tuple[str, ...]) -> Any:
+    node = _walk(data, path)
+    return None if node is _MISSING_PATH else node
+
+
 def _has(data: Any, path: tuple[str, ...]) -> bool:
-    node = data
-    for part in path:
-        if not isinstance(node, dict) or part not in node:
-            return False
-        node = node[part]
-    return True
+    return _walk(data, path) is not _MISSING_PATH
 
 
 def _pop(data: dict[str, Any], path: tuple[str, ...]) -> Any:
@@ -261,6 +266,7 @@ def _quiet() -> Iterator[Any]:
         schema_log.setLevel(level)
 
 
+@lru_cache(maxsize=1)
 def _block_models() -> dict[type, dict[str, type]]:
     """For each config model, its sub-blocks: written key -> model."""
     import typing
