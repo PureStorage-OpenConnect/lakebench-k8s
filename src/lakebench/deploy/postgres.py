@@ -193,18 +193,3 @@ class PostgresDeployer:
             k8s_client.RbacAuthorizationV1Api(), namespace, "lakebench-postgres", "anyuid"
         )
         logger.info("Granted anyuid SCC to lakebench-postgres in %s", namespace)
-
-    def get_connection_info(self) -> dict[str, str]:
-        """Get PostgreSQL connection information.
-
-        Returns:
-            Dict with host, port, database, user
-        """
-        namespace = self.config.get_namespace()
-        return {
-            "host": f"lakebench-postgres.{namespace}.svc.cluster.local",
-            "port": "5432",
-            "database": "hive",
-            "user": "hive",
-            "jdbc_url": f"jdbc:postgresql://lakebench-postgres.{namespace}.svc.cluster.local:5432/hive",
-        }

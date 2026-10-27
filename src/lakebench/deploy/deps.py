@@ -279,7 +279,7 @@ class DependencyServerDeployer:
         )
 
     def _warn_active_applications(self) -> None:
-        """s2.11: the set changes under running SparkApplications."""
+        """Warn when the dependency set changes under running SparkApplications."""
         from kubernetes import client as k8s_client
 
         try:

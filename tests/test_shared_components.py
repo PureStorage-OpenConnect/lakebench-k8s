@@ -376,6 +376,22 @@ def test_readiness_waits_run_after_the_lease_is_released():
     assert order.index("lease taken") < order.index("lease released") < order.index("wait")
 
 
+def test_confirm_prompt_states_the_watch_list_lease_wait():
+    """The prompt gives the wait a deploy or destroy really has behind an
+    install: three holders at the watch-list hold budget."""
+    from lakebench.deploy import cluster_lock as cl
+    from lakebench.modules.pipeline_engines.spark import operator as op
+
+    prompts: list[str] = []
+    fake = _Fake("spark-operator", [ABSENT])
+    report, _ = _run(
+        {"spark-operator": fake}, ["spark-operator"], confirm=lambda p: prompts.append(p) or False
+    )
+    assert report.code == sc.EXIT_FAILED and fake.installs == []
+    assert cl.WATCH_LIST_LOCK_TIMEOUT_S == 3 * cl.LEASE_MAX_HOLD_S == op._WATCH_LIST_LOCK_TIMEOUT_S
+    assert "up to 37.5 minutes each" in prompts[0]
+
+
 def test_prepare_runs_before_the_lease_and_a_failure_changes_nothing():
     order: list[str] = []
 

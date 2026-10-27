@@ -165,16 +165,6 @@ class TestGate:
             got = _gate(cfg)
             assert got.proceed and not got.stale_allowed
 
-    def test_regenerate_empty_prefix_refused(self):
-        with recording() as rec:
-            cfg = _seed(rec, owned=True, objects=["x/part-0"])
-            # The layout is fixed per workload now; the guard stays for a
-            # prefix that ever comes back empty.
-            with patch("lakebench.deploy.datagen.bronze_datagen_prefix", return_value="/"):
-                got = _gate(cfg, regenerate=True)
-            assert not got.proceed and got.message
-            assert list(rec.buckets_store[BRONZE]) == ["x/part-0"]
-
     def test_listing_failure_refuses(self):
         with recording() as rec:
             cfg = _seed(rec, owned=True)

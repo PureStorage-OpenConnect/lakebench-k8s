@@ -38,7 +38,7 @@ import re
 import subprocess
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from lakebench.exit_codes import ExitCode
@@ -71,7 +71,7 @@ EXIT_USAGE = ExitCode.USAGE
 EXIT_REFUSED = ExitCode.REFUSED
 
 #: How long ``admin install`` waits for the cluster lease. Deploys and destroys
-#: hold it for a watch-list change (a few minutes at most).
+#: hold it for a watch-list change, up to ``cluster_lock.LEASE_MAX_HOLD_S``.
 LEASE_WAIT_S = 600
 
 #: ``--version`` takes an exact chart version, never a range.
@@ -157,13 +157,9 @@ class Settings:
                 controller_tmp_size=controller_tmp_size,
             )
         if spark_operator_namespace and spark_operator_namespace != spark.namespace:
-            settings = cls(
-                kube_context=settings.kube_context,
-                scratch=settings.scratch,
+            settings = replace(
+                settings,
                 spark_operator=spark.model_copy(update={"namespace": spark_operator_namespace}),
-                hive=settings.hive,
-                observability=settings.observability,
-                controller_tmp_size=controller_tmp_size,
             )
         return settings
 
@@ -194,7 +190,6 @@ class ReleaseInfo:
     namespace: str
     status: str
     chart_version: str | None
-    chart: str = ""
 
 
 def _chart_version(chart: str) -> str | None:
@@ -245,7 +240,6 @@ def _list_releases(context: str | None, pattern: str | None) -> list[ReleaseInfo
             namespace=str(r["namespace"]),
             status=str(r.get("status") or ""),
             chart_version=_chart_version(str(r.get("chart") or "")),
-            chart=str(r.get("chart") or ""),
         )
         for r in rows
         if r.get("name") and r.get("namespace")
@@ -1071,6 +1065,7 @@ def run_install(
     """
     from lakebench.deploy.cluster_lock import (
         ADMIN_MAX_HOLD_S,
+        WATCH_LIST_LOCK_TIMEOUT_S,
         ClusterLockError,
         LeaseHoldExceeded,
         cluster_lock,
@@ -1114,8 +1109,8 @@ def run_install(
         return Report(0, plans, {p.component: p.status for p in plans}, False)
     prompt = (
         "admin install holds the cluster lease while it installs; deploys and destroys on this "
-        f"cluster wait for it, up to {LEASE_WAIT_S // 60} minutes each, and one that waits "
-        "longer fails without changing anything shared. Continue?"
+        f"cluster wait for it, up to {WATCH_LIST_LOCK_TIMEOUT_S / 60:g} minutes each, and one "
+        "that waits longer fails without changing anything shared. Continue?"
     )
     if confirm is not None and not confirm(prompt):
         say("error", "aborted; nothing was changed")
@@ -1123,7 +1118,7 @@ def run_install(
 
     for p in todo:
         prepare = getattr(REGISTRY[p.component], "prepare", None)
-        problem = prepare(s) if p.action == INSTALL and prepare is not None else None
+        problem = prepare(s) if prepare is not None else None
         if problem:
             say("error", f"{p.component}: {problem}; nothing was changed")
             return Report(EXIT_FAILED, plans, {}, False)

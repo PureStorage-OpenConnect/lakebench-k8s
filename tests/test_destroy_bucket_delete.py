@@ -210,7 +210,8 @@ class TestDestroyAllBuckets(DestroyAllBucketsHarness):
         assert boto.buckets == {"a-bronze": ["user data"]}
         assert "a-bronze" not in boto.delete_bucket_calls
         assert r.status is DeploymentStatus.FAILED
-        assert "lists neither as created nor as adopted while empty" in r.message
+        assert "is not on this deployment's created-buckets record" in r.message
+        assert "adopted" not in r.message
         assert "a-bronze" in r.message
 
     def test_tagless_bucket_in_a_16_adopted_empty_record_is_kept(self):

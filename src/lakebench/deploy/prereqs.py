@@ -67,9 +67,7 @@ class ClusterReader(Protocol):
         there is no such PVC."""
         ...
 
-    def deployments(
-        self, label_selector: str, namespace: str | None = None
-    ) -> list[DeploymentView]: ...
+    def deployments(self, label_selector: str, namespace: str) -> list[DeploymentView]: ...
 
     def running_pod_exists(self, label_selector: str) -> bool: ...
 
@@ -249,7 +247,7 @@ STACKABLE_CRDS: dict[str, str] = {
     "hiveclusters.hive.stackable.tech": "hive-operator",
     "secretclasses.secrets.stackable.tech": "secret-operator",
 }
-# Installed with them (hive deployer _INSTALL_ORDER); a missing one is a
+# Installed alongside the Stackable CRD operators; a missing one is a
 # warning, because their pod labels are not checked on every SDP release.
 STACKABLE_SUPPORT_OPERATORS = ("listener-operator", "commons-operator")
 
@@ -637,18 +635,11 @@ class KubeClusterReader:
             raise
         return str(pvc.spec.storage_class_name or "")
 
-    def deployments(
-        self, label_selector: str, namespace: str | None = None
-    ) -> list[DeploymentView]:
+    def deployments(self, label_selector: str, namespace: str) -> list[DeploymentView]:
         api = self._client.AppsV1Api()
-        if namespace:
-            items = api.list_namespaced_deployment(
-                namespace, label_selector=label_selector, _request_timeout=self.TIMEOUT_S
-            ).items
-        else:
-            items = api.list_deployment_for_all_namespaces(
-                label_selector=label_selector, _request_timeout=self.TIMEOUT_S
-            ).items
+        items = api.list_namespaced_deployment(
+            namespace, label_selector=label_selector, _request_timeout=self.TIMEOUT_S
+        ).items
         return [
             DeploymentView(
                 namespace=d.metadata.namespace,

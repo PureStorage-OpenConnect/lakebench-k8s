@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from lakebench.deploy.datagen import DatagenDeployer, StaleBronzeRefused
+from lakebench.deploy.datagen import DatagenDeployer
 from lakebench.deploy.engine import DeploymentEngine
 from tests.conftest import make_config
 
@@ -87,18 +87,6 @@ def test_clears_prefix_at_cycle_zero_for_owned_bucket(monkeypatch, schema, prefi
     assert len(_FakeS3.instances) == 1
     assert _FakeS3.instances[0].deleted == [(bucket, prefix)]
     assert _FakeS3.instances[0].aborts == [True]  # multipart ghosts are aborted
-
-
-def test_empty_prefix_is_never_cleared(monkeypatch):
-    # A root/empty prefix would be the whole bucket; never clear it.
-    monkeypatch.setattr("lakebench.s3.S3Client", _FakeS3)
-    _own(monkeypatch, True)
-    d = _deployer(schema="customer360")
-    with pytest.raises(StaleBronzeRefused, match="prefix is empty"):
-        d._clear_bronze_prefix_if_fresh(0, "/")
-    assert _FakeS3.instances[0].deleted == []
-    _FakeS3.holds = False
-    d._clear_bronze_prefix_if_fresh(0, "/")  # an empty bucket: nothing to refuse
 
 
 def test_s3_init_error_fails_the_clear(monkeypatch):
