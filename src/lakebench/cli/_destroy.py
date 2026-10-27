@@ -1,7 +1,4 @@
-"""Destroy command for Lakebench CLI.
-
-Extracted from cli/__init__.py -- tears down lakehouse infrastructure.
-"""
+"""The ``destroy`` command: tears down lakehouse infrastructure."""
 
 from __future__ import annotations
 
@@ -288,12 +285,6 @@ def _destroy_impl(
     whatever ``force`` says.
     """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
-
-    if expected_incarnation is not None and local:
-        raise UsageError(
-            "--expect-incarnation does not apply to --local: a local stack has no "
-            "namespace to check"
-        )
 
     # Load configuration
     # A namespace too long to finish deploying still has to be
