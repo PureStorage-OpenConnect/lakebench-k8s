@@ -8,7 +8,7 @@ This is the continuous-pipeline equivalent of bronze_verify.py for Delta Lake.
 Where bronze_verify reads all data in a single batch pass, bronze_ingest
 consumes files incrementally as they arrive.
 
-Replay idempotency (E3): each micro-batch is one Delta commit written with
+Replay idempotency: each micro-batch is one Delta commit written with
 Delta's idempotent-write options (txnAppId = stream + query id, txnVersion =
 batch id), so a batch replayed after a driver restart commits nothing the
 second time instead of appending a duplicate copy to bronze_raw. Only the

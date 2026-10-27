@@ -3622,7 +3622,7 @@ def silver_strategy_override(spark):
     if not override or override.lower() == "auto":
         return None
     if override.lower() == "salted":
-        raise SilverAbort("SALTED strategy is deferred to v1.7; see plan Block J")
+        raise SilverAbort("the salted silver strategy is not available")
     if override.lower() in SILVER_STRATEGIES:
         return override.lower()
     log(f"Warning: Invalid strategy override '{override}', using auto")
