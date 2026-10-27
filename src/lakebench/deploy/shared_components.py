@@ -38,7 +38,7 @@ import re
 import subprocess
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
 from lakebench.exit_codes import ExitCode
@@ -157,13 +157,9 @@ class Settings:
                 controller_tmp_size=controller_tmp_size,
             )
         if spark_operator_namespace and spark_operator_namespace != spark.namespace:
-            settings = cls(
-                kube_context=settings.kube_context,
-                scratch=settings.scratch,
+            settings = replace(
+                settings,
                 spark_operator=spark.model_copy(update={"namespace": spark_operator_namespace}),
-                hive=settings.hive,
-                observability=settings.observability,
-                controller_tmp_size=controller_tmp_size,
             )
         return settings
 
@@ -194,7 +190,6 @@ class ReleaseInfo:
     namespace: str
     status: str
     chart_version: str | None
-    chart: str = ""
 
 
 def _chart_version(chart: str) -> str | None:
@@ -245,7 +240,6 @@ def _list_releases(context: str | None, pattern: str | None) -> list[ReleaseInfo
             namespace=str(r["namespace"]),
             status=str(r.get("status") or ""),
             chart_version=_chart_version(str(r.get("chart") or "")),
-            chart=str(r.get("chart") or ""),
         )
         for r in rows
         if r.get("name") and r.get("namespace")
@@ -1124,7 +1118,7 @@ def run_install(
 
     for p in todo:
         prepare = getattr(REGISTRY[p.component], "prepare", None)
-        problem = prepare(s) if p.action == INSTALL and prepare is not None else None
+        problem = prepare(s) if prepare is not None else None
         if problem:
             say("error", f"{p.component}: {problem}; nothing was changed")
             return Report(EXIT_FAILED, plans, {}, False)

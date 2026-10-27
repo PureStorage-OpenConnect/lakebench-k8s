@@ -26,7 +26,7 @@ The lease is NOT a distributed lock in the CAP sense: a partitioned
 holder that cannot reach the API server can still complete its
 mutation locally. What it does prevent is two ``lakebench`` processes
 racing the same Helm upgrade or the same SCC install through the
-apiserver -- which is what actually broke under parallel UAT.
+apiserver.
 
 While the lease is held:
 
@@ -124,8 +124,7 @@ _POLL_MAX_SEC = 4.0
 # (admin install, repair-operator's per-namespace
 # restarts, migrate-deployment, reclaim-bucket) get ADMIN_MAX_HOLD_S. Both
 # stay under the TTL so a crashed holder is still reclaimed. Subprocesses
-# under the lease are bounded by the budget today (lakebench.k8s._pinned);
-# the remaining waits and sleeps are to move onto lease_clamp.
+# under the lease are bounded by the budget (lakebench.k8s._pinned).
 LEASE_MAX_HOLD_S = 750
 ADMIN_MAX_HOLD_S = 1800
 
@@ -159,8 +158,10 @@ class ClusterLockHeld(ClusterLockError):
         )
 
 
-class ClusterLockNotHeld(ClusterLockError):
-    """Release was called but the lease is not held by this handle."""
+class _LeaseVanished(ClusterLockError):
+    """Internal: the lease was released or stolen between our conflict and
+    our re-read. Benign contention; the acquire loop retries within budget.
+    """
 
 
 @dataclass(frozen=True)
@@ -229,7 +230,7 @@ def build_holder_id() -> str:
     The first three components are best-effort so the holder line is never
     empty. The suffix names the process for ``admin status`` and
     makes the id unique to one acquire: two runs from the same tree on the
-    same host, in the same second, no longer write the same holder, and
+    same host, in the same second, write different holders, and
     ``cluster_lock`` can tell its own lease from anyone else's after an
     interrupt inside the acquire. A diagnostic string, not a security
     identifier.
@@ -289,7 +290,6 @@ def _ensure_lock_namespace(core_v1: Any) -> None:
 def _parse_iso8601(s: str) -> float:
     """Return epoch seconds. Robust to a bad string (returns 0 -> expired)."""
     try:
-        # Python 3.11 handles both "Z" and "+00:00" via fromisoformat.
         return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
     except Exception:  # noqa: BLE001
         logger.warning("cluster_lock: unparseable acquired-at %r; treating as expired", s)
@@ -474,7 +474,7 @@ def _try_acquire_once(
                 s2 = read_cluster_lock(core_v1)
                 if s2 is None:
                     # Deleted again in the gap. Signal caller to retry.
-                    raise ClusterLockError("lease vanished mid-create; retry") from e
+                    raise _LeaseVanished("lease vanished mid-create; retry") from e
                 return _as_own(s2) if own(s2) else s2
             raise ClusterLockError(f"cannot create lease: {e}") from e
         except Exception as e:  # noqa: BLE001 -- transport: the write may have landed
@@ -504,7 +504,7 @@ def _try_acquire_once(
         if e.status == 409:
             s2 = read_cluster_lock(core_v1)
             if s2 is None:
-                raise ClusterLockError("lease vanished mid-steal; retry") from e
+                raise _LeaseVanished("lease vanished mid-steal; retry") from e
             return _as_own(s2) if own(s2) else s2
         raise ClusterLockError(f"cannot steal expired lease: {e}") from e
     except Exception as e:  # noqa: BLE001 -- transport: the write may have landed
@@ -556,20 +556,15 @@ def acquire_cluster_lock(
     while True:
         try:
             outcome = _try_acquire_once(core_v1, holder_id, ttl_seconds, adopt_own=adopt_own)
-        except ClusterLockError as e:
-            # ADR-F7: the internal "lease vanished mid-{create,steal}"
-            # signals are benign contention: the winning holder released
-            # (or the lease was force-released) between our conflict and
-            # our re-read. Retry within the timeout budget rather than
-            # bubbling a scary error to the CLI.
-            msg = str(e).lower()
-            if "vanished" in msg:
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    raise
-                time.sleep(min(_POLL_INITIAL_SEC, remaining))
-                continue
-            raise
+        except _LeaseVanished:
+            # Benign contention: the winning holder released (or the lease
+            # was force-released) between our conflict and our re-read. Retry
+            # within the timeout budget.
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise
+            time.sleep(min(_POLL_INITIAL_SEC, remaining))
+            continue
         if isinstance(outcome, LeaseHandle):
             return outcome
         last_state = outcome
@@ -590,15 +585,7 @@ def acquire_cluster_lock(
         delay = min(delay * 1.5, _POLL_MAX_SEC)
 
     assert last_state is not None
-    expires_at_iso = datetime.fromtimestamp(last_state.expires_at_epoch, tz=timezone.utc).isoformat(
-        timespec="seconds"
-    )
-    raise ClusterLockHeld(
-        holder=last_state.holder,
-        acquired_at=last_state.acquired_at,
-        ttl_seconds=last_state.ttl_seconds,
-        expires_at=expires_at_iso,
-    )
+    raise _held_error(last_state)
 
 
 _DELETE_ATTEMPTS = 3
