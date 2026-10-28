@@ -676,11 +676,13 @@ SCRATCH_OVERRIDE_KEYS = (
 )
 
 
-#: The largest per-job executor override: the proven executor ceiling (32
-#: and more cause Kubernetes API polling storms). Held equal to the job
-#: module's ``_MAX_EXECUTORS_SAFE`` by a test.
+#: The most executors Lakebench sizes a job with on its own. A config may set
+#: more; it is kept with a note (polling storms were seen at 32 before the
+#: 1.7.1 polling settings). Held equal to the job module's
+#: ``_MAX_EXECUTORS_SAFE`` by a test.
 MAX_EXECUTOR_OVERRIDE = 28
-#: The largest driver_cores override.
+#: The most driver cores a Lakebench driver has run with; more is kept with
+#: a note.
 MAX_DRIVER_CORES = 16
 
 
@@ -731,17 +733,17 @@ class SparkComputeConfig(ConfigModel):
     bronze_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override the bronze stage's executor count (1--28): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = auto (from scale in batch, from the offered load in continuous).",
+        description="Override the bronze stage's executor count (1 or more; above 28 is kept with a note on API server load): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = auto (from scale in batch, from the offered load in continuous).",
     )
     silver_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override the silver stage's executor count (1--28): silver-build in batch mode, silver-stream in continuous mode. Null = auto (from scale in batch, from the offered load in continuous).",
+        description="Override the silver stage's executor count (1 or more; above 28 is kept with a note on API server load): silver-build in batch mode, silver-stream in continuous mode. Null = auto (from scale in batch, from the offered load in continuous).",
     )
     gold_executors: int | None = Field(
         default=None,
         ge=1,
-        description="Override the gold stage's executor count (1--28): gold-finalize in batch mode, gold-refresh in continuous mode. Null = auto from scale.",
+        description="Override the gold stage's executor count (1 or more; above 28 is kept with a note on API server load): gold-finalize in batch mode, gold-refresh in continuous mode. Null = auto from scale.",
     )
     # Continuous-mode executor size overrides (None = the profile's, grown to 8
     # or 16 cores when the offered load needs more cores than the executor cap).
@@ -750,33 +752,33 @@ class SparkComputeConfig(ConfigModel):
         default=None,
         ge=1,
         le=16,
-        description="Continuous mode: override bronze-ingest cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_executors` is set.",
+        description="Override the bronze stage's cores per executor (1--16): bronze-verify in batch mode, bronze-ingest in continuous mode. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's; in continuous mode, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_executors` is set.",
     )
     silver_executor_cores: int | None = Field(
         default=None,
         ge=1,
         le=16,
-        description="Continuous mode: override silver-stream cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_executors` is set.",
+        description="Override the silver stage's cores per executor (1--16): silver-build in batch mode, silver-stream in continuous mode. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's; in continuous mode, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_executors` is set.",
     )
     gold_executor_cores: int | None = Field(
         default=None,
         ge=1,
         le=16,
-        description="Continuous mode: override gold-refresh cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically.",
+        description="Override the gold stage's cores per executor (1--16): gold-finalize in batch mode, gold-refresh in continuous mode. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically.",
     )
     # Continuous-mode executor heap overrides (None = the profile's per-core
     # share of the executor size). Batch jobs keep their profile's memory.
     bronze_executor_memory: str | None = Field(
         default=None,
-        description="Continuous mode: override bronze-ingest heap per executor (a Spark size, for example `32g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size.",
+        description="Override the bronze stage's heap per executor (a Spark size, for example `32g`): bronze-verify in batch mode, bronze-ingest in continuous mode. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size.",
     )
     silver_executor_memory: str | None = Field(
         default=None,
-        description="Continuous mode: override silver-stream heap per executor (a Spark size, for example `96g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. For a financial run that leaves `silver_max_rows_per_trigger` unset, a larger heap raises the derived cap up to its measured bound. Null = the profile's per-core share of the executor size.",
+        description="Override the silver stage's heap per executor (a Spark size, for example `96g`): silver-build in batch mode, silver-stream in continuous mode. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. For a financial run that leaves `silver_max_rows_per_trigger` unset, a larger heap raises the derived cap up to its measured bound. Null = the profile's per-core share of the executor size.",
     )
     gold_executor_memory: str | None = Field(
         default=None,
-        description="Continuous mode: override gold-refresh heap per executor (a Spark size, for example `96g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size.",
+        description="Override the gold stage's heap per executor (a Spark size, for example `96g`): gold-finalize in batch mode, gold-refresh in continuous mode. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size.",
     )
 
     # Executor scratch PVC overrides (None = the job profile's size). A set
@@ -863,21 +865,29 @@ class SparkComputeConfig(ConfigModel):
     )
     @classmethod
     def _override_within_bounds(cls, value: int | None, info: ValidationInfo) -> int | None:
-        """An executor count above the proven ceiling (``MAX_EXECUTOR_OVERRIDE``,
-        the job module's 28) or a driver above 16 cores is refused by the
-        commands that change data; teardown and read commands drop it with a
-        note, so an old config can still be destroyed."""
+        """An executor count above ``MAX_EXECUTOR_OVERRIDE`` (the most Lakebench
+        sizes on its own) or a driver above ``MAX_DRIVER_CORES`` is kept, with
+        a note on the risk: Lakebench advises, it does not cap what the
+        config asks for."""
         limit = MAX_DRIVER_CORES if info.field_name == "driver_cores" else MAX_EXECUTOR_OVERRIDE
         if value is None or value <= limit:
             return value
-        what = "driver cores" if info.field_name == "driver_cores" else "executors"
-        text = (
-            f"platform.compute.spark.{info.field_name}: {value} {what} is above the "
-            f"proven ceiling of {limit}; set {limit} or less, or leave it unset for "
-            "the scale-derived count"
-        )
-        _refuse_or_note(text, info, ". Ignored; commands that change data refuse it.")
-        return None
+        if info.field_name == "driver_cores":
+            text = (
+                f"platform.compute.spark.driver_cores: {value} is above {limit}, the most "
+                "a Lakebench driver has run with; kept as set"
+            )
+        else:
+            text = (
+                f"platform.compute.spark.{info.field_name}: {value} executors is above "
+                f"{limit}, the most Lakebench sizes on its own; kept as set. Each driver "
+                "polls the Kubernetes API about its executors: 32 overloaded the API "
+                "server before 1.7.1 added cached, slower, batched polling, and no run "
+                f"above {limit} has been measured since. Watch API server latency on "
+                "the first run."
+            )
+        emit_note(text, kind="advice", category=None)
+        return value
 
 
 class PostgresConfig(ConfigModel):

@@ -28,17 +28,6 @@ from tests.fixtures.experiment_helpers import _cfg, _metrics
 # -- 1. bounds -----------------------------------------------------------------
 
 
-def test_executor_and_driver_ceilings():
-    """Every executor override is capped at 28 (29 refused, 28 loads); driver
-    cores are capped at 16 (17 refused)."""
-    for field in [f for f, _ in EXECUTOR_OVERRIDE_FIELDS.values()]:
-        with pytest.raises(ValueError, match="proven ceiling of 28"):
-            make_config(platform={"compute": {"spark": {field: 29}}})
-    assert make_config(platform={"compute": {"spark": {"silver_executors": 28}}})
-    with pytest.raises(ValueError, match="proven ceiling of 16"):
-        make_config(platform={"compute": {"spark": {"driver_cores": 17}}})
-
-
 def test_override_ceiling_is_the_job_modules_executor_cap():
     from lakebench.config.schema import MAX_EXECUTOR_OVERRIDE
 
@@ -53,13 +42,12 @@ def _write(tmp_path: Path, spark: dict) -> Path:
     return path
 
 
-@pytest.mark.parametrize("purpose", [LoadPurpose.TEARDOWN, LoadPurpose.READ])
-def test_a_v16_config_with_40_can_still_be_destroyed(tmp_path, purpose):
-    path = _write(tmp_path, {"silver_executors": 40})
-    cfg = load_config(path, purpose=purpose, print_notes=False)
-    assert cfg.platform.compute.spark.silver_executors is None
-    with pytest.raises(Exception, match="proven ceiling of 28"):
-        load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
+def test_counts_above_the_auto_ceiling_are_kept_for_a_deploy(tmp_path):
+    """Lakebench advises above 28 executors and 16 driver cores; it does not
+    refuse or drop what the config sets."""
+    path = _write(tmp_path, {"silver_executors": 40, "driver_cores": 17})
+    spark = load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False).platform.compute.spark
+    assert (spark.silver_executors, spark.driver_cores) == (40, 17)
 
 
 # -- 2. the peak counts overrides ------------------------------------------------
@@ -94,6 +82,33 @@ def test_a_continuous_override_is_counted_in_the_capacity_plan():
     gr = next(r for r in plan.spark.per_job if r.job_type == "gold-refresh")
     assert gr.executors == 10
     assert plan.spark.cpu_cores > base.spark.cpu_cores
+
+
+@pytest.mark.parametrize(
+    ("mode", "job", "cores"),
+    [
+        # batch takes the stage's size keys, as continuous does
+        ("batch", JobType.SILVER_BUILD, "8"),
+        # a continuous run's bronze-verify preflight keeps its profile
+        ("continuous", JobType.BRONZE_VERIFY, None),
+    ],
+)
+def test_stage_size_keys_size_the_job_of_the_runs_mode(mode, job, cores):
+    from lakebench.spark.job import SparkJobManager
+    from tests.fixtures.spark_helpers import _mock_k8s
+
+    spark = {"silver_executor_cores": 8, "silver_executor_memory": "100g"}
+    spark |= {"bronze_executor_cores": 8}
+    cfg = make_config(
+        workload={"schema": "financial"},
+        architecture={"pipeline": {"mode": mode}},
+        platform={"compute": {"spark": spark}},
+    )
+    executor = SparkJobManager(cfg, _mock_k8s())._build_manifest(job)["spec"]["executor"]
+    profile = job_mod._resolve_job_profile(job.value, "financial")
+    assert str(executor["cores"]) == (cores or str(profile["executor_cores"]))
+    if cores:
+        assert executor["memory"] == "100g"
 
 
 def test_one_override_rule():

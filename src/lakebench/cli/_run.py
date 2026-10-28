@@ -2947,7 +2947,11 @@ def _run_once(
                 # are reflected -- otherwise the scorecard under-reports the
                 # deployed resources.
                 _schema = cfg.architecture.workload.schema_type.value
-                _profile = get_job_profile(stage_name, _schema)
+                from lakebench.modules.pipeline_engines.spark.job import stage_profile
+
+                # The size the manifest built: the profile with any stage
+                # override (executor cores or memory) the config sets.
+                _profile = stage_profile(stage_name, cfg) or get_job_profile(stage_name, _schema)
                 if _profile:
                     _scale = cfg.architecture.workload.datagen.get_effective_scale()
                     _expected_executors = get_executor_count(stage_name, _scale, _schema)
