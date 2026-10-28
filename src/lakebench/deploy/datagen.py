@@ -1132,13 +1132,15 @@ class DatagenDeployer:
     def wait_for_completion(
         self,
         timeout_seconds: int = 7200,
-        poll_interval: int = 30,
+        poll_interval: int = 5,
     ) -> DeploymentResult:
         """Wait for datagen job to complete.
 
         Args:
             timeout_seconds: Maximum wait time (default 2 hours)
-            poll_interval: Seconds between status checks
+            poll_interval: Seconds between status checks. Callers time this
+                wait as datagen's elapsed time, so the poll bounds how far
+                that time can run past the Job's finish.
 
         Returns:
             DeploymentResult with completion status

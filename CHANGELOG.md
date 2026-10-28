@@ -4,6 +4,18 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.15] - 2026-10-27
+
+### Breaking
+
+- **Recorded times measure only the work they name, so several move against 1.7.14 runs; compare new runs with new runs.**
+  - Batch time to value no longer includes a full bucket listing after each stage. A stage's output size comes from the run-end listing, so in a multi-cycle batch run every cycle's stage reads the final layer size.
+  - Batch stage throughput is computed over the stage's recorded (cluster) elapsed time, not the driver's own.
+  - A continuous AML run whose rounds never ran the full query set records no aggregate QpH, as its composite QpH already did, instead of the median of its 8-query rounds.
+  - Datagen elapsed time polls the Job every 5 s, not 30 s, so it runs at most 5 s past the Job's finish.
+  - Local DuckDB query times are taken inside the container, without podman startup or the package check.
+  - A continuous run lists the bronze bucket once at the window close; datagen's output size is that listing's bronze size.
+
 ## [1.7.14] - 2026-10-27
 
 ### Breaking
