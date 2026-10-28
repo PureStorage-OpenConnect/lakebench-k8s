@@ -3477,7 +3477,6 @@ def _run_sustained(
         collector.current_run.maintenance_policy_id = skipped_policy_id()
 
     pipeline_success = True
-    _datagen_output_gb = 0.0
     _datagen_output_rows = 0
     _datagen_output_files = 0
     # The fleet record of this run's own datagen pods (None with --skip-generate).
@@ -4236,20 +4235,10 @@ def _run_sustained(
             job_manager, [n for _, n in submitted], opened_identity
         )
 
-        # Measure bronze bucket for datagen stats (datagen runs concurrently,
-        # so we measure after the monitoring window to capture all output)
-        try:
-            from lakebench.s3 import s3_client_from_config
-
-            s3_cfg = cfg.platform.storage.s3
-            _s3_dg = s3_client_from_config(s3_cfg)
-            dg_info = _s3_dg.get_bucket_size(s3_cfg.buckets.bronze)
-            if dg_info.size_bytes:
-                _datagen_output_gb = dg_info.size_bytes / (1024**3)
-            # S3 metadata gives no row count; _datagen_output_rows stays 0 so
-            # ingest_ratio and pipeline_saturated read as unmeasured (None).
-        except Exception as e:
-            logger.warning("Could not measure streaming bronze bucket size: %s", e)
+        # Datagen's output size is the bronze bucket size the window-close
+        # listing records (_measure_bucket_sizes); bronze is not listed twice.
+        # S3 metadata gives no row count; _datagen_output_rows stays 0 so
+        # ingest_ratio and pipeline_saturated read as unmeasured (None).
 
         # When every datagen pod has finished and reported, their
         # summed rows_written IS the produced-row count, for either workload
@@ -4654,10 +4643,14 @@ def _run_sustained(
                 pipeline_success = False
             try:
                 from lakebench.metrics import aggregate_benchmark_rounds
+                from lakebench.metrics.collector import composite_query_set
 
-                rounds = collector.current_run.benchmark_rounds if collector.current_run else []
-                if rounds:
-                    aggregated = aggregate_benchmark_rounds(rounds)
+                run = collector.current_run
+                rounds = run.benchmark_rounds if run else []
+                if run is not None and rounds:
+                    aggregated = aggregate_benchmark_rounds(
+                        rounds, composite_query_set(run.config_snapshot)
+                    )
                     collector.record_benchmark(aggregated)
                     console.print()
                     console.print(
@@ -4990,7 +4983,7 @@ def _run_sustained(
 
                 pb = build_pipeline_benchmark(
                     run_metrics,
-                    datagen_output_gb=_datagen_output_gb,
+                    datagen_output_gb=run_metrics.bronze_size_gb or 0.0,
                     datagen_output_rows=_datagen_output_rows,
                     datagen_output_files=_datagen_output_files,
                 )

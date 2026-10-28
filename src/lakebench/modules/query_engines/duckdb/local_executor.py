@@ -114,7 +114,7 @@ class LocalDuckDBExecutor(DuckDBExecutor):
         host = self.s3_endpoint.replace("http://", "").replace("https://", "")
         return "\n".join(
             [
-                "import duckdb, json",
+                "import duckdb, json, time",
                 "sql = open('/duckdb/query.sql').read()",
                 "conn = duckdb.connect()",
                 "conn.execute('INSTALL iceberg'); conn.load_extension('iceberg')",
@@ -127,12 +127,16 @@ class LocalDuckDBExecutor(DuckDBExecutor):
                 f"conn.execute(\"SET s3_secret_access_key='{self.secret_key}'\")",
                 "conn.execute('SET unsafe_enable_version_guessing = true')",
                 SESSION_SETTINGS,
+                # The query is timed here, inside the container, so podman
+                # startup and the pip check stay out of its duration.
+                "t0 = time.perf_counter()",
                 "rel = conn.sql(sql)",
                 FETCH_ROWS,
+                "secs = time.perf_counter() - t0",
                 # Report the engine version alongside every result. The pin is
                 # only a request; this is what proves the container honoured it.
                 "ver = conn.execute('SELECT version()').fetchone()[0]",
-                "print(json.dumps({'rows': len(rows), 'version': ver, "
+                "print(json.dumps({'rows': len(rows), 'seconds': secs, 'version': ver, "
                 "'data': [str(r) for r in rows[:100]]}))",
             ]
         )
@@ -215,10 +219,13 @@ class LocalDuckDBExecutor(DuckDBExecutor):
                 error="Query produced no result (it did not run)",
             )
 
+        # The in-container query time; the wall time (container startup
+        # included) only when the script did not report one.
+        seconds = payload.get("seconds")
         return QueryExecutorResult(
             sql=sql,
             engine="duckdb",
-            duration_seconds=elapsed,
+            duration_seconds=float(seconds) if isinstance(seconds, (int, float)) else elapsed,
             rows_returned=payload["rows"],
             raw_output=output,
         )

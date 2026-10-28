@@ -2454,6 +2454,10 @@ def build_pipeline_benchmark(
                         )
             except Exception:
                 pass
+        # Throughput over the stage's final elapsed time: the job's figure
+        # was taken over the driver's own elapsed time, before the cluster
+        # time replaced it.
+        stage.compute_derived()
         stages.append(stage)
 
     for sj in run.streaming:
@@ -2770,7 +2774,9 @@ def tolerated_round_failure(name: str, timed_out: bool, passed_ever: set) -> boo
     )
 
 
-def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetrics:
+def aggregate_benchmark_rounds(
+    rounds: list[BenchmarkMetrics], fixed_set: str | None = None
+) -> BenchmarkMetrics:
     """Aggregate multiple in-stream benchmark rounds into a single result.
 
     Uses the median for QpH, total_seconds, and per-query elapsed times.
@@ -2779,6 +2785,10 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
 
     Args:
         rounds: List of per-round BenchmarkMetrics (must be non-empty).
+        fixed_set: The query set the composite is over
+            (``composite_query_set``; AML's fixed full set), or None. When
+            given and no round ran it, there is no composite (QpH 0.0), the
+            same rule as ``PipelineBenchmark.composite_rounds``.
 
     Returns:
         Aggregated BenchmarkMetrics with median values.
@@ -2799,6 +2809,10 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
     groups = rounds_by_query_set(timed)
     fixed = aml_fixed_query_set()
     set_id: str | None = None
+    if fixed_set is not None and fixed_set not in groups:
+        # AML rounds that never ran the fixed full set: no composite, as in
+        # composite_rounds.
+        timed = []
     if len(groups) > 1 and fixed in groups:
         timed, set_id = groups[fixed], fixed
     elif len(groups) > 1:

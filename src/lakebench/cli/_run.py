@@ -2982,24 +2982,9 @@ def _run_once(
                         _mem_gb + _overhead_gb
                     )
 
-                # Measure per-stage S3 output size
-                _stage_bucket_map = {
-                    "bronze-verify": cfg.platform.storage.s3.buckets.bronze,
-                    "silver-build": cfg.platform.storage.s3.buckets.silver,
-                    "gold-finalize": cfg.platform.storage.s3.buckets.gold,
-                }
-                if stage_name in _stage_bucket_map and job_metrics.output_size_gb == 0:
-                    try:
-                        from lakebench.s3 import s3_client_from_config
-
-                        s3_cfg = cfg.platform.storage.s3
-                        _s3 = s3_client_from_config(s3_cfg)
-                        _bucket_info = _s3.get_bucket_size(_stage_bucket_map[stage_name])
-                        if _bucket_info.size_bytes:
-                            job_metrics.output_size_gb = _bucket_info.size_bytes / (1024**3)
-                    except Exception as e:
-                        logger.warning("Could not measure %s bucket size: %s", stage_name, e)
-
+                # A stage's output size is not listed here: a listing between
+                # stages would count toward time to value. The run-end bucket
+                # listing fills it (build_pipeline_benchmark's fallback).
                 collector.record_job(job_metrics)
                 _cycle_jobs.append(job_metrics)
 
