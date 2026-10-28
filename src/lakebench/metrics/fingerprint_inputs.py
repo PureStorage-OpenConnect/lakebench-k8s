@@ -223,8 +223,9 @@ def scratch_size_per_job(cfg: Any, continuous: bool) -> dict[str, Any]:
     scale = float(cfg.architecture.workload.datagen.scale)
     out: dict[str, Any] = {}
     for jt in job_types_for(continuous):
-        # A continuous stage's executors may be grown, scratch with them.
-        profile = (stage_profile(jt, cfg) if continuous else None) or get_job_profile(jt, schema)
+        # A stage's executors may be widened (an override, or a continuous
+        # stage's balance need); scratch grows with them.
+        profile = stage_profile(jt, cfg) or get_job_profile(jt, schema)
         if not profile:
             out[jt] = None
             continue
@@ -305,6 +306,7 @@ def _build(cfg: Any, continuous: bool) -> dict[str, Any]:
         JobType,
         SparkJobManager,
         get_job_profile,
+        stage_profile,
     )
 
     offline = _redacted_copy(cfg)
@@ -333,7 +335,10 @@ def _build(cfg: Any, continuous: bool) -> dict[str, Any]:
             "executor_memory_overhead": executor["memoryOverhead"],
             "executor_instances": executor["instances"],
             "scratch_size": _scratch_of(
-                jt, get_job_profile(jt, schema), cfg, int(executor["instances"])
+                jt,
+                stage_profile(jt, cfg) or get_job_profile(jt, schema),
+                cfg,
+                int(executor["instances"]),
             ),
         }
         confs[jt] = owned_conf(spec["sparkConf"], user)

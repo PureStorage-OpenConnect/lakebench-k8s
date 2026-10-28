@@ -96,6 +96,33 @@ def test_a_continuous_override_is_counted_in_the_capacity_plan():
     assert plan.spark.cpu_cores > base.spark.cpu_cores
 
 
+@pytest.mark.parametrize(
+    ("mode", "job", "cores"),
+    [
+        # batch takes the stage's size keys, as continuous does
+        ("batch", JobType.SILVER_BUILD, "8"),
+        # a continuous run's bronze-verify preflight keeps its profile
+        ("continuous", JobType.BRONZE_VERIFY, None),
+    ],
+)
+def test_stage_size_keys_size_the_job_of_the_runs_mode(mode, job, cores):
+    from lakebench.spark.job import SparkJobManager
+    from tests.fixtures.spark_helpers import _mock_k8s
+
+    spark = {"silver_executor_cores": 8, "silver_executor_memory": "100g"}
+    spark |= {"bronze_executor_cores": 8}
+    cfg = make_config(
+        workload={"schema": "financial"},
+        architecture={"pipeline": {"mode": mode}},
+        platform={"compute": {"spark": spark}},
+    )
+    executor = SparkJobManager(cfg, _mock_k8s())._build_manifest(job)["spec"]["executor"]
+    profile = job_mod._resolve_job_profile(job.value, "financial")
+    assert str(executor["cores"]) == (cores or str(profile["executor_cores"]))
+    if cores:
+        assert executor["memory"] == "100g"
+
+
 def test_one_override_rule():
     """The manifest, the peak and the run record read one table."""
     cfg = make_config(platform={"compute": {"spark": {"gold_executors": 6}}})

@@ -27,8 +27,8 @@ Each setting is used as set. The balance line names the one to change (`continuo
 | Setting | Changes | Lever when |
 |---|---|---|
 | `platform.compute.spark.{bronze,silver,gold}_executors` | the stage's executors in this mode, up to 28 | the stage falls behind below what the load needs |
-| `platform.compute.spark.{bronze,silver,gold}_executor_cores` | cores per executor (continuous mode only) | the load needs more than 28 executors |
-| `platform.compute.spark.{bronze,silver,gold}_executor_memory` | heap per executor (continuous mode only) | a stage needs more memory per executor without more cores, such as a larger silver batch |
+| `platform.compute.spark.{bronze,silver,gold}_executor_cores` | cores per executor | the load needs more than 28 executors |
+| `platform.compute.spark.{bronze,silver,gold}_executor_memory` | heap per executor | a stage needs more memory per executor without more cores, such as a larger silver batch |
 | cluster capacity | the concurrent budget the streams share | the budget cut a stage below plan |
 | `workload.tm_operations.continuous_interval_seconds` | how often AML gold runs the TM pass | TM takes a quarter or more of gold's time |
 | `workload.datagen.parallelism`, `cpu` | the offered load | to offer more or less than the scale's load |

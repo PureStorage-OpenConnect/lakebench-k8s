@@ -505,27 +505,34 @@ def balance_executor_need(
 _EXECUTOR_CORE_STEPS = (8, 16)
 
 
-def _executor_cores_override(job_type: str, config: Any | None) -> int | None:
-    if config is None:
+#: The stage key (bronze, silver, gold) of each job a stage key sizes: the
+#: batch job and the continuous stream of the same stage.
+_STAGE_OF = {
+    "bronze-verify": "bronze",
+    "bronze-ingest": "bronze",
+    "silver-build": "silver",
+    "silver-stream": "silver",
+    "gold-finalize": "gold",
+    "gold-refresh": "gold",
+}
+
+
+def _stage_setting(job_type: str, config: Any | None, suffix: str) -> Any:
+    """The ``<stage>_<suffix>`` value *config* sets for *job_type*, or None:
+    one key per stage, sizing the job of the run's mode (``stage_key_applies``)."""
+    stage = _STAGE_OF.get(job_type)
+    if config is None or stage is None or not stage_key_applies(job_type, config):
         return None
-    spark = config.platform.compute.spark
-    value = {
-        "bronze-ingest": spark.bronze_executor_cores,
-        "silver-stream": spark.silver_executor_cores,
-        "gold-refresh": spark.gold_executor_cores,
-    }.get(job_type)
+    return getattr(config.platform.compute.spark, f"{stage}_{suffix}", None)
+
+
+def _executor_cores_override(job_type: str, config: Any | None) -> int | None:
+    value = _stage_setting(job_type, config, "executor_cores")
     return int(value) if value is not None else None
 
 
 def _executor_memory_override(job_type: str, config: Any | None) -> str | None:
-    if config is None:
-        return None
-    spark = config.platform.compute.spark
-    value = {
-        "bronze-ingest": spark.bronze_executor_memory,
-        "silver-stream": spark.silver_executor_memory,
-        "gold-refresh": spark.gold_executor_memory,
-    }.get(job_type)
+    value = _stage_setting(job_type, config, "executor_memory")
     return str(value).strip() if value is not None else None
 
 
@@ -993,11 +1000,7 @@ def _job_requirement(
     baseline. With *config*, the driver is the one the manifest builds
     (``effective_driver``).
     """
-    profile = (
-        stage_profile(job_type, config, scale=scale, schema=schema_type)
-        if job_type in STREAMING_JOB_TYPES
-        else _resolve_job_profile(job_type, schema_type)
-    )
+    profile = stage_profile(job_type, config, scale=scale, schema=schema_type)
     if not profile:
         return None
 
@@ -2282,11 +2285,7 @@ class SparkJobManager:
         # AML bronze-verify needs a bigger scratch PVC than c360 to survive
         # the CTAS fallback path.
         _schema = getattr(getattr(cfg.architecture.workload, "schema_type", None), "value", None)
-        profile = (
-            stage_profile(job_type.value, cfg)
-            if job_type in _STREAMING_JOB_TYPES
-            else _resolve_job_profile(job_type.value, _schema)
-        )
+        profile = stage_profile(job_type.value, cfg, schema=_schema)
         if profile is None:
             raise MissingSizingProfile(job_type.value)
         scale = cfg.architecture.workload.datagen.scale

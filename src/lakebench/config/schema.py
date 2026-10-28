@@ -750,33 +750,33 @@ class SparkComputeConfig(ConfigModel):
         default=None,
         ge=1,
         le=16,
-        description="Continuous mode: override bronze-ingest cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_executors` is set.",
+        description="Override the bronze stage's cores per executor (1--16): bronze-verify in batch mode, bronze-ingest in continuous mode. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's; in continuous mode, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `bronze_executors` is set.",
     )
     silver_executor_cores: int | None = Field(
         default=None,
         ge=1,
         le=16,
-        description="Continuous mode: override silver-stream cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_executors` is set.",
+        description="Override the silver stage's cores per executor (1--16): silver-build in batch mode, silver-stream in continuous mode. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = auto: the profile's; in continuous mode, grown to 8 or 16 cores when the offered load needs more executors than the cap, unless `silver_executors` is set.",
     )
     gold_executor_cores: int | None = Field(
         default=None,
         ge=1,
         le=16,
-        description="Continuous mode: override gold-refresh cores per executor (1--16); batch mode ignores it. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically.",
+        description="Override the gold stage's cores per executor (1--16): gold-finalize in batch mode, gold-refresh in continuous mode. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically.",
     )
     # Continuous-mode executor heap overrides (None = the profile's per-core
     # share of the executor size). Batch jobs keep their profile's memory.
     bronze_executor_memory: str | None = Field(
         default=None,
-        description="Continuous mode: override bronze-ingest heap per executor (a Spark size, for example `32g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size.",
+        description="Override the bronze stage's heap per executor (a Spark size, for example `32g`): bronze-verify in batch mode, bronze-ingest in continuous mode. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size.",
     )
     silver_executor_memory: str | None = Field(
         default=None,
-        description="Continuous mode: override silver-stream heap per executor (a Spark size, for example `96g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. For a financial run that leaves `silver_max_rows_per_trigger` unset, a larger heap raises the derived cap up to its measured bound. Null = the profile's per-core share of the executor size.",
+        description="Override the silver stage's heap per executor (a Spark size, for example `96g`): silver-build in batch mode, silver-stream in continuous mode. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. For a financial run that leaves `silver_max_rows_per_trigger` unset, a larger heap raises the derived cap up to its measured bound. Null = the profile's per-core share of the executor size.",
     )
     gold_executor_memory: str | None = Field(
         default=None,
-        description="Continuous mode: override gold-refresh heap per executor (a Spark size, for example `96g`); batch mode ignores it. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size.",
+        description="Override the gold stage's heap per executor (a Spark size, for example `96g`): gold-finalize in batch mode, gold-refresh in continuous mode. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size.",
     )
 
     # Executor scratch PVC overrides (None = the job profile's size). A set
