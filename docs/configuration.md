@@ -79,8 +79,8 @@ The removed keys, with what to do instead (generated from each model's
 | `observability.storage_class` | set observability.prometheus_storage_class to pick a StorageClass for the Prometheus PVC; empty uses the cluster default. |
 | `platform.compute.spark.bronze_ingest_executor_cores` | use bronze_executor_cores. |
 | `platform.compute.spark.bronze_ingest_executors` | use bronze_executors, which sizes bronze-ingest in continuous mode and bronze-verify in batch mode. |
-| `platform.compute.spark.driver` | per-executor sizing is fixed in the job profiles; use platform.compute.spark.<stage>_executors for counts and driver_memory/driver_cores for the driver. |
-| `platform.compute.spark.executor` | per-executor sizing is fixed in the job profiles; use platform.compute.spark.<stage>_executors for counts and driver_memory/driver_cores for the driver. |
+| `platform.compute.spark.driver` | use platform.compute.spark.<stage>_executors, <stage>_executor_cores and <stage>_executor_memory for the executors, and <stage>_driver_memory/<stage>_driver_cores or driver_memory/driver_cores for the driver. |
+| `platform.compute.spark.executor` | use platform.compute.spark.<stage>_executors, <stage>_executor_cores and <stage>_executor_memory for the executors, and <stage>_driver_memory/<stage>_driver_cores or driver_memory/driver_cores for the driver. |
 | `platform.compute.spark.gold_refresh_executor_cores` | use gold_executor_cores. |
 | `platform.compute.spark.gold_refresh_executors` | use gold_executors, which sizes gold-refresh in continuous mode and gold-finalize in batch mode. |
 | `platform.compute.spark.silver_stream_executor_cores` | use silver_executor_cores. |
@@ -211,9 +211,10 @@ What to tune first as you scale up:
 
 1. `datagen.scale` -- the data volume.
 2. `compute.spark.<stage>_executors` -- per-stage executor counts (one key each
-   for bronze, silver and gold, used by whichever job the mode runs). Batch
-   executor size is fixed in the job profiles; continuous streams also take
-   `<stage>_executor_cores`. See [Executor Override Guide](#executor-override-guide).
+   for bronze, silver and gold, used by whichever job the mode runs), with
+   `<stage>_executor_cores`, `<stage>_executor_memory`,
+   `<stage>_driver_memory` and `<stage>_driver_cores` for the pod sizes. See
+   [Executor Override Guide](#executor-override-guide).
 3. `query_engine.trino.worker` -- match replicas and memory to the cluster.
 4. `scratch` and `postgres` storage classes -- match them to the storage
    provider.
@@ -444,9 +445,12 @@ keys `bronze_ingest_executors`, `silver_stream_executors` and
 `gold_refresh_executors` (and their `_executor_cores`) are removed: the
 commands that change data refuse them and name the new key.
 
-- Each takes 1 to 28, the Lakebench cap. A larger value is
-  refused by the commands that change data; `destroy`, `status` and the
-  read-only commands drop it with a note.
+The other stage keys size the same job: `<stage>_executor_cores`,
+`<stage>_executor_memory`, `<stage>_executor_scratch`,
+`<stage>_driver_memory` and `<stage>_driver_cores`.
+
+- Each count takes 1 or more. Above 28, the most Lakebench sizes on its
+  own, the count is kept with a note on API server load.
 - The capacity check, `deploy`, `config show` and `info` count the
   override, so a config sized past the cluster is refused before it runs.
 
@@ -471,8 +475,10 @@ Driver memory:
   per-executor K8s API watches and aggregates serialized task results.
 - Profile driver defaults are 4g for bronze-verify, and 32g for
   silver-build and gold-finalize on Spark 4 (24g on Spark 3).
-- `driver_memory` overrides all jobs at once, so a value below 32g shrinks
-  the silver and gold drivers on Spark 4 (below 24g on Spark 3).
+- `<stage>_driver_memory` sizes one stage's driver; `driver_memory` sizes
+  every job's driver, so a value below 32g shrinks the silver and gold
+  drivers on Spark 4 (below 24g on Spark 3). A stage key wins over the
+  global key.
 - Lakebench logs a warning when a job has more than 24 executors and a
   driver below 24g. It does not warn about 24g to 31g on Spark 4.
 - The capacity check, `config show` and `info` count the driver each job
@@ -491,8 +497,8 @@ Tested boundaries (the 24g rows are Spark 3; see the Spark 4 note below):
 
 On Spark 4, `silver-build` and `gold-finalize` default to a 32g driver: 24g
 ran both out of memory there. Above 20 executors the 4g `bronze-verify`
-driver may also run out of memory. `driver_memory` applies to every job, so
-set it to 32g or more (for example `"32g"`).
+driver may also run out of memory: set `bronze_driver_memory` to 32g or
+more (for example `"32g"`).
 
 `spark.driver.maxResultSize` follows the effective executor count:
 `min(16, max(8, count // 2))` GiB on Spark 4 and
@@ -597,8 +603,14 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `platform.compute.spark.bronze_executor_scratch` | string or null | `null` | advanced | Scratch PVC per executor for the bronze stage (for example `200Gi`): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = `executor_scratch`, else the profile's size. |
 | `platform.compute.spark.silver_executor_scratch` | string or null | `null` | advanced | Scratch PVC per executor for the silver stage (for example `300Gi`): silver-build in batch mode, silver-stream in continuous mode. Null = `executor_scratch`, else the profile's size. |
 | `platform.compute.spark.gold_executor_scratch` | string or null | `null` | advanced | Scratch PVC per executor for the gold stage (for example `200Gi`): gold-finalize in batch mode, gold-refresh in continuous mode. Null = `executor_scratch`, else the profile's size. |
-| `platform.compute.spark.driver_memory` | string or null | `null` | advanced | Global driver memory override (e.g., `16g`). Null = profile default. |
-| `platform.compute.spark.driver_cores` | integer or null | `null` | advanced | Override driver cores (1--16). Null = profile default (typically 4). |
+| `platform.compute.spark.driver_memory` | string or null | `null` | advanced | Driver memory for every Spark job (a Spark size, for example `16g`). A stage's `*_driver_memory` wins for that stage's job. Null = each job profile's. |
+| `platform.compute.spark.driver_cores` | integer or null | `null` | advanced | Driver cores for every Spark job (1 or more; above 16 is kept with a note). A stage's `*_driver_cores` wins for that stage's job. Null = each job profile's. |
+| `platform.compute.spark.bronze_driver_memory` | string or null | `null` | advanced | Driver memory for the bronze stage (for example `16g`): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = `driver_memory`, else the profile's. |
+| `platform.compute.spark.silver_driver_memory` | string or null | `null` | advanced | Driver memory for the silver stage (for example `32g`): silver-build in batch mode, silver-stream in continuous mode. Null = `driver_memory`, else the profile's. |
+| `platform.compute.spark.gold_driver_memory` | string or null | `null` | advanced | Driver memory for the gold stage (for example `32g`): gold-finalize in batch mode, gold-refresh in continuous mode. Null = `driver_memory`, else the profile's. |
+| `platform.compute.spark.bronze_driver_cores` | integer or null | `null` | advanced | Driver cores for the bronze stage (1 or more; above 16 is kept with a note): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = `driver_cores`, else the profile's. |
+| `platform.compute.spark.silver_driver_cores` | integer or null | `null` | advanced | Driver cores for the silver stage (1 or more; above 16 is kept with a note): silver-build in batch mode, silver-stream in continuous mode. Null = `driver_cores`, else the profile's. |
+| `platform.compute.spark.gold_driver_cores` | integer or null | `null` | advanced | Driver cores for the gold stage (1 or more; above 16 is kept with a note): gold-finalize in batch mode, gold-refresh in continuous mode. Null = `driver_cores`, else the profile's. |
 
 ### Platform -- PostgreSQL
 

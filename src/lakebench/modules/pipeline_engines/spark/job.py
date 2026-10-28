@@ -970,23 +970,29 @@ def effective_driver(job_type: str, profile: dict, config: Any | None) -> tuple[
     """``(cores, memory)`` the manifest gives *job_type*'s driver: the
     profile values; for a Spark 3 silver-build or gold-finalize driver 24g
     (the profiles carry Spark 4's 32g, which the larger SDK v2 bundle and
-    the K8s API polling need; Spark 3 is fine with 24g); then the global
-    ``platform.compute.spark.driver_cores``/``driver_memory`` overrides.
-    Without a *config*, the profile values."""
+    the K8s API polling need; Spark 3 is fine with 24g); then the stage's
+    ``<stage>_driver_cores``/``<stage>_driver_memory``, else the global
+    ``driver_cores``/``driver_memory``. Without a *config*, the profile values."""
     cores, memory = profile["driver_cores"], profile["driver_memory"]
     if config is None:
         return cores, memory
     spark_cfg = config.platform.compute.spark
+    set_cores = _stage_setting(job_type, config, "driver_cores")
+    if set_cores is None:
+        set_cores = spark_cfg.driver_cores
+    set_memory = _stage_setting(job_type, config, "driver_memory")
+    if set_memory is None:
+        set_memory = spark_cfg.driver_memory
     if (
         _parse_spark_major(config.images.spark) < 4
-        and spark_cfg.driver_memory is None
+        and set_memory is None
         and job_type in (JobType.SILVER_BUILD.value, JobType.GOLD_FINALIZE.value)
     ):
         memory = "24g"
-    if spark_cfg.driver_cores is not None:
-        cores = spark_cfg.driver_cores
-    if spark_cfg.driver_memory is not None:
-        memory = spark_cfg.driver_memory
+    if set_cores is not None:
+        cores = set_cores
+    if set_memory is not None:
+        memory = set_memory
     return cores, memory
 
 
@@ -2345,11 +2351,19 @@ class SparkJobManager:
             profile["executor_cores"],
         )
 
-        # Driver resources: the Spark 3 driver size, then the global overrides
+        # Driver resources: the Spark 3 driver size, then the overrides
         # (one rule with compute_peak_requirements, so the capacity check
         # counts what this manifest requests).
         driver_cores, driver_memory = effective_driver(job_type.value, profile, cfg)
-        if spark_cfg.driver_cores is not None or spark_cfg.driver_memory is not None:
+        if any(
+            v is not None
+            for v in (
+                spark_cfg.driver_cores,
+                spark_cfg.driver_memory,
+                _stage_setting(job_type.value, cfg, "driver_cores"),
+                _stage_setting(job_type.value, cfg, "driver_memory"),
+            )
+        ):
             logger.info(
                 "Using driver overrides: %s cores, %s memory (profile default: %d, %s)",
                 driver_cores,

@@ -4,6 +4,16 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.7.17] - 2026-10-27
+
+### Added
+
+- **`bronze_driver_memory`, `silver_driver_memory`, `gold_driver_memory` and the matching `*_driver_cores` keys size one stage's Spark driver**, in batch and continuous mode, and win over `driver_memory` and `driver_cores` for that stage. Before, the driver could only be set for every job at once, so raising the bronze-verify driver for a wide batch run meant setting every driver to the same size.
+
+### Fixed
+
+- The hints for a refused `spark.conf` executor or driver key name the current per-stage keys; they named keys removed in 1.7.0 and said executor memory could not be changed. The docs no longer say that executor counts above 28 or driver cores above 16 are refused, or that batch stages take only a count and a scratch size.
+
 ## [1.7.16] - 2026-10-27
 
 ### Security
