@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [1.7.16] - 2026-10-27
 
+### Security
+
+- The datagen generator's TLS library, `rustls`, moves from 0.23.45 to 0.23.46, which fixes four advisories (one moderate, three low). Datagen runs from the prebuilt `lb-datagen` image, so the fix reaches a cluster when that image is rebuilt.
+
 ### Changed
 
 - **`bronze_executor_cores`, `silver_executor_cores`, `gold_executor_cores` and the matching `*_executor_memory` keys now size the batch stages too** (bronze-verify, silver-build, gold-finalize), as `*_executors` already did. Batch ignored them before, so a batch stage could never be larger than 28 executors of its profile size. A batch config that sets none of them is sized exactly as before; one that already set them (and had them ignored) now gets the size it asks for. A continuous run's bronze-verify preflight still keeps its profile.
