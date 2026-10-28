@@ -28,17 +28,6 @@ from tests.fixtures.experiment_helpers import _cfg, _metrics
 # -- 1. bounds -----------------------------------------------------------------
 
 
-def test_executor_and_driver_ceilings():
-    """Every executor override is capped at 28 (29 refused, 28 loads); driver
-    cores are capped at 16 (17 refused)."""
-    for field in [f for f, _ in EXECUTOR_OVERRIDE_FIELDS.values()]:
-        with pytest.raises(ValueError, match="proven ceiling of 28"):
-            make_config(platform={"compute": {"spark": {field: 29}}})
-    assert make_config(platform={"compute": {"spark": {"silver_executors": 28}}})
-    with pytest.raises(ValueError, match="proven ceiling of 16"):
-        make_config(platform={"compute": {"spark": {"driver_cores": 17}}})
-
-
 def test_override_ceiling_is_the_job_modules_executor_cap():
     from lakebench.config.schema import MAX_EXECUTOR_OVERRIDE
 
@@ -53,13 +42,12 @@ def _write(tmp_path: Path, spark: dict) -> Path:
     return path
 
 
-@pytest.mark.parametrize("purpose", [LoadPurpose.TEARDOWN, LoadPurpose.READ])
-def test_a_v16_config_with_40_can_still_be_destroyed(tmp_path, purpose):
-    path = _write(tmp_path, {"silver_executors": 40})
-    cfg = load_config(path, purpose=purpose, print_notes=False)
-    assert cfg.platform.compute.spark.silver_executors is None
-    with pytest.raises(Exception, match="proven ceiling of 28"):
-        load_config(path, purpose=LoadPurpose.RUN, print_notes=False)
+def test_counts_above_the_auto_ceiling_are_kept_for_a_deploy(tmp_path):
+    """Lakebench advises above 28 executors and 16 driver cores; it does not
+    refuse or drop what the config sets."""
+    path = _write(tmp_path, {"silver_executors": 40, "driver_cores": 17})
+    spark = load_config(path, purpose=LoadPurpose.MUTATE, print_notes=False).platform.compute.spark
+    assert (spark.silver_executors, spark.driver_cores) == (40, 17)
 
 
 # -- 2. the peak counts overrides ------------------------------------------------

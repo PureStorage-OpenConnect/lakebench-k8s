@@ -608,8 +608,9 @@ generated tables with the matching `scripts/gen_*.py`.
 
 - `job.py:executor_count` keeps the base count at scale 10 and below, adds a
   per-job rate above it, and caps at the profile's `max_executors`.
-- No cap is above `job.py:_MAX_EXECUTORS_SAFE`. At 32 or more executors the
-  fabric8 Kubernetes client in the driver causes API polling storms.
+- No automatic count is above `job.py:_MAX_EXECUTORS_SAFE` (28). Before
+  1.7.1, 32 executors caused API polling storms from the driver's Kubernetes
+  client. A config may set more; it is kept with a note, not refused.
 - Every job sets the client by executor count (`job.py:kubernetes_client_conf`):
   - list executor pods from the API server cache
     (`enablePollingWithResourceVersion`);

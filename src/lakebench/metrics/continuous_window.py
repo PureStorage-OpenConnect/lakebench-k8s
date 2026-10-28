@@ -963,7 +963,7 @@ def balance(
             advice = f"raise {lever}"
             sized = (
                 f" (the offered load needs ~{need} executors, above the "
-                f"{MAX_EXECUTOR_OVERRIDE} a stage takes)"
+                f"{MAX_EXECUTOR_OVERRIDE} Lakebench sizes a stage with)"
             )
         elif (
             stage == "gold-refresh"

@@ -26,8 +26,6 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from .schema import (
-    MAX_DRIVER_CORES,
-    MAX_EXECUTOR_OVERRIDE,
     OPERATOR_INSTALL_KEYS,
     operator_install_fix,
 )
@@ -59,18 +57,6 @@ class RefusedKey:
     def subject(self) -> str:
         """The breaking-changes list subject: ``<key> <when>``."""
         return f"{self.key} {self.when}"
-
-
-def _executor_row(field: str) -> RefusedKey:
-    limit = MAX_DRIVER_CORES if field == "driver_cores" else MAX_EXECUTOR_OVERRIDE
-    return RefusedKey(
-        key=f"platform.compute.spark.{field}",
-        when=f"above {limit}",
-        example=limit + 1,
-        refused_by="deploy and run",
-        fix=f"set {limit} or less, or leave it unset for the scale-derived count",
-        init_from="keep",
-    )
 
 
 REFUSED_KEYS: tuple[RefusedKey, ...] = (
@@ -111,15 +97,6 @@ REFUSED_KEYS: tuple[RefusedKey, ...] = (
         # 4 is the default: written explicitly (1.6 save_config) it is refused
         # by run and means the same as absent to benchmark.
         init_from="drop-default",
-    ),
-    *(
-        _executor_row(field)
-        for field in (
-            "bronze_executors",
-            "silver_executors",
-            "gold_executors",
-            "driver_cores",
-        )
     ),
     RefusedKey(
         key="platform.compute.spark.driver_memory",

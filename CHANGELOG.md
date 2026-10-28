@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - **`bronze_executor_cores`, `silver_executor_cores`, `gold_executor_cores` and the matching `*_executor_memory` keys now size the batch stages too** (bronze-verify, silver-build, gold-finalize), as `*_executors` already did. Batch ignored them before, so a batch stage could never be larger than 28 executors of its profile size. A batch config that sets none of them is sized exactly as before; one that already set them (and had them ignored) now gets the size it asks for. A continuous run's bronze-verify preflight still keeps its profile.
+- **An executor count above 28 or a driver above 16 cores is kept with a note, not refused.** Lakebench's own sizing still stops at 28 executors. A config that sets more now deploys with it, and the load notes say why to watch: each driver polls the Kubernetes API about its executors, 32 overloaded the API server before 1.7.1 added cached, slower and batched polling, and no run above 28 has been measured since. Before, deploy and run refused such a config and other commands dropped the value.
 
 ## [1.7.15] - 2026-10-27
 
