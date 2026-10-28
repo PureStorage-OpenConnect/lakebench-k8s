@@ -4,6 +4,12 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A batch stage's detection rule counts were lost when its driver wrote a large log**, so a gold stage at scale 50 or 100 recorded few or none of its rules and the AML rules gate failed a run for rules that ran, or passed with none checked. The driver is now followed from its start, as in continuous mode, and the stage keeps its whole log under `drivers/`.
+
 ## [1.7.17] - 2026-10-27
 
 ### Added

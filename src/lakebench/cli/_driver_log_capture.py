@@ -131,6 +131,22 @@ class DriverLogCapturer:
             return None
         return "".join(_STAMP.sub("", line, count=1) for line in raw.splitlines(keepends=True))
 
+    def drain(self, app: str, timeout: float) -> None:
+        """Wait up to *timeout* seconds for *app*'s newest tail to end.
+
+        ``kubectl logs -f`` exits by itself when the container does, after
+        streaming what was written; reading the file before that can miss the
+        driver's last lines. Returns at once when no tail was started.
+        """
+        with self._lock:
+            captures = list(self._captures.get(app, []))
+        if not captures:
+            return
+        try:
+            captures[-1][1].wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            pass
+
     def close(self) -> None:
         """Stop watching and terminate every kubectl log process.
 
@@ -467,4 +483,42 @@ class DriverLogCapturer:
             logger.debug("driver log capture: terminate error: %s", e)
 
 
-__all__ = ["DriverLogCapturer"]
+# How long a finished stage's tail may take to stream the driver's last lines.
+_DRAIN_S = 15.0
+
+
+def start_stage_capture(
+    namespace: str, run_dir: Path, app: str, *, context: Any = None
+) -> DriverLogCapturer | None:
+    """Start following *app*'s driver log into ``run_dir/drivers/``, for a
+    batch stage. Best-effort: None when the capture could not start, and the
+    stage then keeps the pod log alone."""
+    try:
+        capturer = DriverLogCapturer(namespace, run_dir, context=context)
+        capturer.watch([app])
+        return capturer
+    except Exception as e:  # noqa: BLE001 -- a missing capture never fails the stage
+        logger.warning("driver log capture: could not start for %s: %s", app, e)
+        return None
+
+
+def finish_stage_capture(
+    capturer: DriverLogCapturer | None, app: str, live: str | None
+) -> str | None:
+    """The stage's whole driver log: the capture kept since the pod started,
+    joined to *live* (the pod log read after the job ended, which kubelet
+    rotation trims at the front once the driver has written enough). Stops the
+    capture. Never raises; with no capture it returns *live*."""
+    if capturer is None:
+        return live
+    try:
+        capturer.drain(app, _DRAIN_S)
+        kept = capturer.text(app)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("driver log capture: could not read the kept log of %s: %s", app, e)
+        kept = None
+    capturer.close()
+    return merge_logs(kept, live)
+
+
+__all__ = ["DriverLogCapturer", "finish_stage_capture", "start_stage_capture"]

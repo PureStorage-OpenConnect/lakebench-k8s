@@ -17,6 +17,7 @@ from lakebench._clock import utc_now
 from lakebench.cli._aml_post import _not_scored_record
 from lakebench.cli._aml_post import score_financial_via_queries as _score_financial_via_queries
 from lakebench.cli._cluster_ops import DATAGEN_JOB
+from lakebench.cli._driver_log_capture import finish_stage_capture, start_stage_capture
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
@@ -2889,12 +2890,29 @@ def _run_once(
                             console.print(f"  Running... ({int(elapsed)}s elapsed)")
                             _last_heartbeat = utc_now()
 
-                result = monitor.wait_for_completion(
+                # The pod log read after the job ends is trimmed at the front
+                # once a driver has written enough (the gold stage's rule
+                # lines at scale), so the driver is followed from its start.
+                _stage_capture = start_stage_capture(
+                    cfg.get_namespace(),
+                    metrics_storage.run_dir(run_id),
                     f"lakebench-{stage_name}",
-                    timeout_seconds=timeout,
-                    poll_interval=_STAGE_POLL_S,
-                    progress_callback=on_progress,
-                    on_submission_failure=_submission_failure_reporter(stage_name, j),
+                    context=cfg.platform.kubernetes.context or None,
+                )
+                try:
+                    result = monitor.wait_for_completion(
+                        f"lakebench-{stage_name}",
+                        timeout_seconds=timeout,
+                        poll_interval=_STAGE_POLL_S,
+                        progress_callback=on_progress,
+                        on_submission_failure=_submission_failure_reporter(stage_name, j),
+                    )
+                except BaseException:
+                    if _stage_capture is not None:
+                        _stage_capture.close()
+                    raise
+                result.driver_logs = finish_stage_capture(
+                    _stage_capture, f"lakebench-{stage_name}", result.driver_logs
                 )
                 # The application ended: an interrupt from here on is not
                 # inside it, and a completed one keeps its driver logs.
