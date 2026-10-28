@@ -13,7 +13,16 @@ No kubectl, no Spark: fast pure-Python.
 
 from __future__ import annotations
 
-from lakebench.cli._driver_log_capture import DriverLogCapturer, merge_logs
+import pytest
+
+from lakebench.cli import _driver_log_capture as capture
+from lakebench.cli._driver_log_capture import (
+    DriverLogCapturer,
+    finish_stage_capture,
+    merge_logs,
+    start_stage_capture,
+)
+from lakebench.metrics.collector import MetricsCollector
 
 
 class TestLastStamp:
@@ -72,3 +81,79 @@ class TestMergeLogs:
         assert merge_logs("", "a\nb\n") == "a\nb\n", "kept empty"
         assert merge_logs("a\nb\n", None) == "a\nb\n", "live None"
         assert merge_logs("a\nb\n", "") == "a\nb\n", "live empty"
+
+
+_RULE_LINES = (
+    "[detection] W5_sanctions_match: alerts=83956 elapsed=238.7s\n"
+    "[detection] W2_structuring: alerts=140771 elapsed=22.6s\n"
+    "[detection] W7_cross_border_high_risk: alerts=25529667 elapsed=25.4s\n"
+    "[detection] W8_dormant_reactivation: alerts=2922445 elapsed=44.7s\n"
+)
+
+
+class _FakeCapturer:
+    def __init__(self, kept):
+        self._kept = kept
+        self.drained = None
+        self.closed = False
+
+    def drain(self, app, timeout):
+        self.drained = (app, timeout)
+
+    def text(self, app):
+        return self._kept
+
+    def close(self):
+        self.closed = True
+
+
+class TestStageCapture:
+    def test_rule_lines_the_pod_log_lost_are_kept(self):
+        # Kubelet rotation trims the front of a large driver log, so the pod
+        # log read after the stage ends starts after the first rules' lines.
+        # The capture kept since the pod started has them.
+        spark = "".join(f"INFO Executor task {i}\n" for i in range(50))
+        kept = _RULE_LINES.split("\n", 2)[0] + "\n" + _RULE_LINES.split("\n", 2)[1] + "\n" + spark
+        live = spark + _RULE_LINES.split("\n", 2)[2]
+        collector = MetricsCollector()
+        lost = collector.parse_driver_logs(live, "gold-finalize")
+        assert "W5_sanctions_match" not in lost.alerts_by_rule, "the trimmed log alone"
+        capturer = _FakeCapturer(kept)
+        whole = finish_stage_capture(capturer, "lakebench-gold-finalize", live)
+        found = collector.parse_driver_logs(whole, "gold-finalize")
+        assert found.alerts_by_rule == {
+            "W5_sanctions_match": 83956,
+            "W2_structuring": 140771,
+            "W7_cross_border_high_risk": 25529667,
+            "W8_dormant_reactivation": 2922445,
+        }
+        assert capturer.closed
+
+    def test_drains_the_tail_before_reading_it(self):
+        capturer = _FakeCapturer("a\n")
+        finish_stage_capture(capturer, "lakebench-gold-finalize", "a\n")
+        assert capturer.drained[0] == "lakebench-gold-finalize"
+
+    def test_without_a_capture_the_pod_log_is_returned(self):
+        assert finish_stage_capture(None, "lakebench-gold-finalize", "a\nb\n") == "a\nb\n"
+        assert finish_stage_capture(None, "lakebench-gold-finalize", None) is None
+
+    def test_an_unreadable_capture_still_returns_the_pod_log(self):
+        class Broken(_FakeCapturer):
+            def text(self, app):
+                raise OSError("gone")
+
+        capturer = Broken("")
+        assert finish_stage_capture(capturer, "lakebench-gold-finalize", "a\n") == "a\n"
+        assert capturer.closed
+
+    def test_a_capture_that_cannot_start_is_none(self, monkeypatch, tmp_path):
+        def refuse(self, apps):
+            raise RuntimeError("no kubectl")
+
+        monkeypatch.setattr(capture.DriverLogCapturer, "watch", refuse)
+        assert start_stage_capture("ns", tmp_path, "lakebench-gold-finalize") is None
+
+    @pytest.mark.parametrize("kept", [None, ""])
+    def test_empty_capture_returns_the_pod_log(self, kept):
+        assert finish_stage_capture(_FakeCapturer(kept), "app", "a\n") == "a\n"
