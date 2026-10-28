@@ -79,8 +79,9 @@ Spark settings live under `platform.compute.spark`, `platform.storage.scratch`, 
 
 | Key | Default | Effect |
 |---|---|---|
-| `platform.compute.spark.driver_cores` | `null` | Replaces the profile's driver cores for every job. At most 16. |
+| `platform.compute.spark.driver_cores` | `null` | Replaces the profile's driver cores for every job. Above 16 is kept with a note. |
 | `platform.compute.spark.driver_memory` | `null` | Replaces the profile's driver memory for every job (e.g. `16g`). Must be a whole number with unit k, m, g or t. Use on small nodes or at scale 500+, where the driver holds more Iceberg commit metadata. |
+| `bronze_driver_memory`, `silver_driver_memory`, `gold_driver_memory`, `bronze_driver_cores`, `silver_driver_cores`, `gold_driver_cores` | `null` | Driver size for the stage's job in either mode; wins over `driver_memory` and `driver_cores` for that stage. |
 | `bronze_executors`, `silver_executors`, `gold_executors` | `null` | Executor count of the stage's job in the run's mode (bronze-verify or bronze-ingest, silver-build or silver-stream, gold-finalize or gold-refresh). Set, it bypasses the scaling formula and, in continuous mode, the shared-cluster Lakebench cap. |
 | `bronze_executor_cores`, `silver_executor_cores`, `gold_executor_cores` | `null` | Executor size, 1-16 cores, for the stage's job in either mode. Memory and scratch per core follow the profile; the count is unchanged, so total cores grow. |
 | `bronze_executor_memory`, `silver_executor_memory`, `gold_executor_memory` | `null` | Heap per executor (e.g. `96g`) for the stage's job in either mode, applied after the cores. The overhead keeps the profile's ratio to the heap; the capacity check and the node fit count the larger pod. |
@@ -90,9 +91,9 @@ Spark settings live under `platform.compute.spark`, `platform.storage.scratch`, 
 | `platform.storage.scratch.storage_class` | `px-csi-scratch` | Scratch StorageClass. Must be `repl=1`. |
 | `spark.conf` | `{}` | Spark conf merged over the job defaults (below). |
 
-- Executor count overrides above 28 are refused by the commands that change data; `destroy` and read commands drop them with a note.
+- An executor count above 28, the most Lakebench sizes on its own, is kept with a note on API server load.
 - Unset `<stage>_executor_cores`: bronze-ingest and silver-stream grow to 8 or 16 cores when the offered load needs more executors than the cap (keeping total cores), unless the stage's `<stage>_executors` count is set. gold-refresh is never grown.
-- Batch jobs take a count and a scratch size override. The removed `platform.compute.spark.driver` and `.executor` blocks and `scratch.size` are listed under 1.7.0 in the [changelog](../CHANGELOG.md#170---2026-10-06).
+- Batch jobs take every stage key: count, cores, memory, scratch and driver. The removed `platform.compute.spark.driver` and `.executor` blocks and `scratch.size` are listed under 1.7.0 in the [changelog](../CHANGELOG.md#170---2026-10-06).
 
 ### Spark conf (S3A, shuffle, memory)
 

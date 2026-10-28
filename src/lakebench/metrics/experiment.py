@@ -279,11 +279,16 @@ def experiment_inputs(
     driver_overrides = (
         {
             k: v
-            for k, v in (
-                ("driver_cores", spark_compute.driver_cores),
-                ("driver_memory", spark_compute.driver_memory),
+            for k in (
+                "driver_cores",
+                "driver_memory",
+                *(
+                    f"{s}_driver_{r}"
+                    for s in ("bronze", "silver", "gold")
+                    for r in ("cores", "memory")
+                ),
             )
-            if v is not None
+            if (v := getattr(spark_compute, k)) is not None
         }
         if system != "local"
         else {}

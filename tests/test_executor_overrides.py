@@ -111,6 +111,22 @@ def test_stage_size_keys_size_the_job_of_the_runs_mode(mode, job, cores):
         assert executor["memory"] == "100g"
 
 
+def test_a_stage_driver_key_wins_over_the_global_key_for_its_stage():
+    from lakebench.spark.job import SparkJobManager
+    from tests.fixtures.spark_helpers import _mock_k8s
+
+    spark = {"driver_memory": "40g", "bronze_driver_memory": "48g", "gold_driver_cores": 6}
+    cfg = make_config(workload={"schema": "financial"}, platform={"compute": {"spark": spark}})
+    manager = SparkJobManager(cfg, _mock_k8s())
+    drivers = {
+        job: manager._build_manifest(job)["spec"]["driver"]
+        for job in (JobType.BRONZE_VERIFY, JobType.SILVER_BUILD, JobType.GOLD_FINALIZE)
+    }
+    assert drivers[JobType.BRONZE_VERIFY]["memory"] == "48g"
+    assert drivers[JobType.SILVER_BUILD]["memory"] == "40g"
+    assert drivers[JobType.GOLD_FINALIZE]["cores"] == 6
+
+
 def test_one_override_rule():
     """The manifest, the peak and the run record read one table."""
     cfg = make_config(platform={"compute": {"spark": {"gold_executors": 6}}})

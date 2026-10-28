@@ -225,18 +225,15 @@ LAKEBENCH_OWNED_SIZING_KEYS: frozenset[str] = frozenset(
 # What to change instead, for the owned keys a user is most likely to try.
 _INSTEAD: dict[str, str] = {
     "spark.sql.shuffle.partitions": (
-        "it is set per job from the executor count; change platform.compute.spark.<job>_executors"
+        "it is set per job from the executor count; change platform.compute.spark.<stage>_executors"
     ),
     "spark.default.parallelism": (
-        "it is set per job from the executor count; change platform.compute.spark.<job>_executors"
+        "it is set per job from the executor count; change platform.compute.spark.<stage>_executors"
     ),
-    "spark.executor.instances": "change platform.compute.spark.<job>_executors",
-    "spark.executor.cores": (
-        "change platform.compute.spark.<job>_executor_cores (bronze_ingest, "
-        "silver_stream, gold_refresh)"
-    ),
-    "spark.driver.memory": "change platform.compute.spark.driver_memory",
-    "spark.driver.cores": "change platform.compute.spark.driver_cores",
+    "spark.executor.instances": "change platform.compute.spark.<stage>_executors",
+    "spark.executor.cores": "change platform.compute.spark.<stage>_executor_cores",
+    "spark.driver.memory": "change platform.compute.spark.<stage>_driver_memory or driver_memory",
+    "spark.driver.cores": "change platform.compute.spark.<stage>_driver_cores or driver_cores",
     "spark.hadoop.fs.s3a.endpoint": "change platform.storage.s3.endpoint",
     "spark.hadoop.fs.s3a.endpoint.region": "change platform.storage.s3.region",
     "spark.hadoop.fs.s3a.path.style.access": "change platform.storage.s3.path_style",
@@ -280,8 +277,9 @@ def owned_key_reason(key: str, catalog: str = "lakehouse") -> str:
         or key.startswith(("spark.executor.memory", "spark.driver.memory", "spark.memory.offHeap."))
     ):
         instead = (
-            "pod sizing is fixed in the job profiles and counted by the capacity check; "
-            "use platform.compute.spark.<job>_executors, driver_memory or driver_cores"
+            "pod sizes are counted by the capacity check; use "
+            "platform.compute.spark.<stage>_executor_memory, <stage>_driver_memory or "
+            "driver_memory (stage: bronze, silver, gold)"
         )
     if instead is None and key in SCRIPT_SET_SPARK_KEYS:
         instead = "a job script sets it, so a value here would not hold"

@@ -689,19 +689,20 @@ MAX_DRIVER_CORES = 16
 class SparkComputeConfig(ConfigModel):
     """Spark compute configuration."""
 
-    # Per-executor and driver sizing come from the job profiles
-    # (_JOB_PROFILES in modules/pipeline_engines/spark/job.py). These blocks
-    # were recorded and graded but sized nothing.
+    # v1.6 blocks that were recorded and graded but sized nothing; the
+    # per-stage keys below size the executors and drivers.
     _removed_keys: ClassVar[dict[str, str]] = {
         "driver": (
-            "per-executor sizing is fixed in the job profiles; use "
-            "platform.compute.spark.<stage>_executors for counts and "
-            "driver_memory/driver_cores for the driver."
+            "use platform.compute.spark.<stage>_executors, <stage>_executor_cores "
+            "and <stage>_executor_memory for the executors, and "
+            "<stage>_driver_memory/<stage>_driver_cores or driver_memory/driver_cores "
+            "for the driver."
         ),
         "executor": (
-            "per-executor sizing is fixed in the job profiles; use "
-            "platform.compute.spark.<stage>_executors for counts and "
-            "driver_memory/driver_cores for the driver."
+            "use platform.compute.spark.<stage>_executors, <stage>_executor_cores "
+            "and <stage>_executor_memory for the executors, and "
+            "<stage>_driver_memory/<stage>_driver_cores or driver_memory/driver_cores "
+            "for the driver."
         ),
         # One key per medallion stage: it sizes the stage's job in the run's mode.
         "bronze_ingest_executors": "use bronze_executors, which sizes bronze-ingest in continuous mode and bronze-verify in batch mode.",
@@ -745,9 +746,9 @@ class SparkComputeConfig(ConfigModel):
         ge=1,
         description="Override the gold stage's executor count (1 or more; above 28 is kept with a note on API server load): gold-finalize in batch mode, gold-refresh in continuous mode. Null = auto from scale.",
     )
-    # Continuous-mode executor size overrides (None = the profile's, grown to 8
-    # or 16 cores when the offered load needs more cores than the executor cap).
-    # Batch jobs keep their profile's cores.
+    # Executor size overrides (None = the profile's; in continuous mode grown
+    # to 8 or 16 cores when the offered load needs more cores than the
+    # executor cap).
     bronze_executor_cores: int | None = Field(
         default=None,
         ge=1,
@@ -766,8 +767,8 @@ class SparkComputeConfig(ConfigModel):
         le=16,
         description="Override the gold stage's cores per executor (1--16): gold-finalize in batch mode, gold-refresh in continuous mode. Memory and scratch follow the profile's per-core share; the executor count is unchanged, so total cores grow with the size. Null = the profile's; gold-refresh is never grown automatically.",
     )
-    # Continuous-mode executor heap overrides (None = the profile's per-core
-    # share of the executor size). Batch jobs keep their profile's memory.
+    # Executor heap overrides (None = the profile's per-core share of the
+    # executor size).
     bronze_executor_memory: str | None = Field(
         default=None,
         description="Override the bronze stage's heap per executor (a Spark size, for example `32g`): bronze-verify in batch mode, bronze-ingest in continuous mode. The memory overhead keeps the profile's ratio to the heap, and the capacity check and the node fit count the larger pod. Null = the profile's per-core share of the executor size.",
@@ -800,21 +801,50 @@ class SparkComputeConfig(ConfigModel):
         description="Scratch PVC per executor for the gold stage (for example `200Gi`): gold-finalize in batch mode, gold-refresh in continuous mode. Null = `executor_scratch`, else the profile's size.",
     )
 
-    # Driver resource overrides (None = use profile defaults).
-    # These are global - they apply to all Spark jobs. Use when cluster nodes
-    # have limited memory or when running at extreme scales (500+).
+    # Driver overrides (None = the profile's). The global keys size every
+    # Spark job's driver; a stage's key wins for that stage's job.
     driver_memory: str | None = Field(
         default=None,
-        description=("Global driver memory override (e.g., `16g`). Null = profile default."),
+        description="Driver memory for every Spark job (a Spark size, for example `16g`). A stage's `*_driver_memory` wins for that stage's job. Null = each job profile's.",
     )
     driver_cores: int | None = Field(
         default=None,
         ge=1,
-        description="Override driver cores (1--16). Null = profile default (typically 4).",
+        description="Driver cores for every Spark job (1 or more; above 16 is kept with a note). A stage's `*_driver_cores` wins for that stage's job. Null = each job profile's.",
+    )
+    bronze_driver_memory: str | None = Field(
+        default=None,
+        description="Driver memory for the bronze stage (for example `16g`): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = `driver_memory`, else the profile's.",
+    )
+    silver_driver_memory: str | None = Field(
+        default=None,
+        description="Driver memory for the silver stage (for example `32g`): silver-build in batch mode, silver-stream in continuous mode. Null = `driver_memory`, else the profile's.",
+    )
+    gold_driver_memory: str | None = Field(
+        default=None,
+        description="Driver memory for the gold stage (for example `32g`): gold-finalize in batch mode, gold-refresh in continuous mode. Null = `driver_memory`, else the profile's.",
+    )
+    bronze_driver_cores: int | None = Field(
+        default=None,
+        ge=1,
+        description="Driver cores for the bronze stage (1 or more; above 16 is kept with a note): bronze-verify in batch mode, bronze-ingest in continuous mode. Null = `driver_cores`, else the profile's.",
+    )
+    silver_driver_cores: int | None = Field(
+        default=None,
+        ge=1,
+        description="Driver cores for the silver stage (1 or more; above 16 is kept with a note): silver-build in batch mode, silver-stream in continuous mode. Null = `driver_cores`, else the profile's.",
+    )
+    gold_driver_cores: int | None = Field(
+        default=None,
+        ge=1,
+        description="Driver cores for the gold stage (1 or more; above 16 is kept with a note): gold-finalize in batch mode, gold-refresh in continuous mode. Null = `driver_cores`, else the profile's.",
     )
 
     @field_validator(
         "driver_memory",
+        "bronze_driver_memory",
+        "silver_driver_memory",
+        "gold_driver_memory",
         "bronze_executor_memory",
         "silver_executor_memory",
         "gold_executor_memory",
@@ -861,6 +891,9 @@ class SparkComputeConfig(ConfigModel):
         "silver_executors",
         "gold_executors",
         "driver_cores",
+        "bronze_driver_cores",
+        "silver_driver_cores",
+        "gold_driver_cores",
         mode="after",
     )
     @classmethod
@@ -869,12 +902,13 @@ class SparkComputeConfig(ConfigModel):
         sizes on its own) or a driver above ``MAX_DRIVER_CORES`` is kept, with
         a note on the risk: Lakebench advises, it does not cap what the
         config asks for."""
-        limit = MAX_DRIVER_CORES if info.field_name == "driver_cores" else MAX_EXECUTOR_OVERRIDE
+        driver = str(info.field_name).endswith("driver_cores")
+        limit = MAX_DRIVER_CORES if driver else MAX_EXECUTOR_OVERRIDE
         if value is None or value <= limit:
             return value
-        if info.field_name == "driver_cores":
+        if driver:
             text = (
-                f"platform.compute.spark.driver_cores: {value} is above {limit}, the most "
+                f"platform.compute.spark.{info.field_name}: {value} is above {limit}, the most "
                 "a Lakebench driver has run with; kept as set"
             )
         else:
