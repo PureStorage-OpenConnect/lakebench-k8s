@@ -77,7 +77,7 @@ dev = [
     "lakebench-k8s[aml]",
     "pytest>=8.0.0",
     "pytest-cov==7.0.0",
-    "coverage==7.13.2",
+    "coverage==7.16.2",
     # Parallel unit tier (make check-fast, the CI unit legs). Pinned like
     # ruff: a new release can change how tests are scheduled.
     "pytest-xdist==3.8.0",
